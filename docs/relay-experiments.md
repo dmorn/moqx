@@ -1,5 +1,12 @@
 # MOQ Relay — Local Experiments
 
+> Historical exploration notes from 2026-03-19 while evaluating upstream relay
+> behavior. These notes are useful for background, but they are **not** the
+> authoritative `moqx` API or TLS guidance.
+>
+> For the current supported `moqx` surface, secure-by-default TLS behavior, and
+> the preferred local `mkcert` workflow, see the top-level `README.md`.
+
 Tests run on 2026-03-19, using [moq-dev/moq](https://github.com/moq-dev/moq) at HEAD.
 Platform: MNT Reform 2020 (aarch64, Rust 1.94.0).
 
@@ -23,11 +30,15 @@ The repo ships a ready-to-use local config at `dev/relay.toml`:
 ./target/release/moq-relay dev/relay.toml
 ```
 
-Key settings in `dev/relay.toml`:
+Key settings in `dev/relay.toml` at the time:
 - Listens on `[::]:4443` for both QUIC and HTTP/WebSocket
 - Self-signed TLS certificate generated for `localhost`
 - Anonymous access enabled (`auth.public = ""`)
 - Serves `GET /certificate.sha256` so clients can pin the cert fingerprint
+
+For current `moqx` development, treat that generated localhost certificate as
+untrusted by default unless you explicitly opt into insecure mode or replace it
+with a locally trusted certificate chain.
 
 ---
 
@@ -45,6 +56,10 @@ text track every second. Perfect for protocol validation.
   --tls-disable-verify \
   publish
 ```
+
+> Historical upstream experiment note: this used an insecure local-dev flow.
+> Current `moqx` guidance is to prefer trusted local certificates and keep
+> verification on by default.
 
 ### Subscriber (separate terminal)
 
@@ -128,7 +143,12 @@ The subscribe side has been removed from `moq-cli` and moved to the
   connects via QUIC using the pinned fingerprint
 - `https://` URL → standard TLS verification against system roots
 
-For local dev, `http://` + `--tls-disable-verify` is the fastest path.
+This section describes the upstream experiment setup at the time. In `moqx`, the
+intentional library posture is now:
+
+- verification on by default
+- explicit insecure mode only for local development
+- preferred local trusted-cert workflow via `mkcert`
 
 ### Connection negotiation
 
@@ -142,8 +162,12 @@ environments where UDP is blocked.
 ### moq-lite-03 vs moq-transport-14+
 
 - The relay negotiates the version automatically
-- moq-lite is a simplified subset — recommended for new implementations
+- moq-lite is a simplified subset
 - moq-transport (IETF draft) is supported by Cloudflare CDN and MOQtail
+
+Current `moqx` integration coverage is more specific than this historical note:
+raw QUIC and WebTransport support a broader version set than the relay-backed
+WebSocket path, which intentionally tracks the upstream-compatible subset.
 
 ### Broadcast addressing
 
@@ -155,6 +179,9 @@ environments where UDP is blocked.
 ---
 
 ## Public relay test
+
+> Historical TODO section. Validate current upstream/public relay behavior before
+> treating any version claims here as present-day `moqx` guidance.
 
 Cloudflare hosts a public MoQ relay:
 

@@ -1,6 +1,10 @@
 defmodule MOQX do
   @moduledoc """
-  Elixir bindings for Media over QUIC (MOQ) over WebTransport.
+  Elixir bindings for Media over QUIC (MOQ) via Rustler NIFs on top of
+  `moq-lite` / `moq-native`.
+
+  Today `moqx` intentionally supports Quinn-based connections over raw QUIC,
+  WebTransport, and WebSocket.
 
   `MOQX` exposes one clear, supported flow:
 
@@ -57,6 +61,10 @@ defmodule MOQX do
 
   Broadcast announcement is lazy: a broadcast becomes visible to subscribers
   on the first successful `write_frame/2` for any track in that broadcast.
+
+  TLS verification is enabled by default. For local development against a
+  self-signed relay, either configure a trusted local certificate chain or opt
+  into `tls: [verify: :insecure]` explicitly.
   """
 
   @typedoc "Publisher or subscriber session role."

@@ -69,6 +69,12 @@ If you need dynamic role selection or connect-time protocol controls, use:
   )
 
 :ok =
+  MOQX.connect_subscriber(
+    "https://relay.internal.example/anon",
+    tls: [cacertfile: "/path/to/rootCA.pem"]
+  )
+
+:ok =
   MOQX.connect_publisher(
     "http://localhost:4443/anon",
     transport: :websocket,
@@ -92,6 +98,7 @@ Notes:
 - local relay WebSocket connections use the relay's plain HTTP endpoint, so local examples use `http://.../anon`
 - the current relay-backed WebSocket path negotiates the upstream-compatible subset `moq-lite-01`, `moq-lite-02`, and `moq-transport-14`
 - transport parity coverage now includes relay-backed WebSocket round trips and an isolated WebSocket fallback harness
+- the `cacertfile` option is intended for private/local roots; default verification otherwise uses system/native roots
 
 You can inspect the compiled native support at runtime:
 
@@ -169,6 +176,15 @@ That means the upstream dev relay config under `.moq-dev/dev/relay.toml`, which 
   ```
 
 - or run the relay with a certificate chain trusted by your machine
+
+For example, if you already have a local CA PEM for your relay:
+
+```elixir
+MOQX.connect_publisher(
+  "https://localhost:4443",
+  tls: [cacertfile: "/absolute/path/to/rootCA.pem"]
+)
+```
 
 For the best local developer experience, use [`mkcert`](https://github.com/filosottile/mkcert)
 to install a local development CA and generate a trusted `localhost` certificate:
