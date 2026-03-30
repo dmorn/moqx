@@ -48,6 +48,7 @@ defmodule MOQXIntegrationTest do
     receive do
       {:moqx_subscribed, ^broadcast_path, ^track_name} -> :ok
       {:moqx_error, reason} -> flunk("subscribe failed: #{inspect(reason)}")
+      {port, _message} when is_port(port) -> await_subscribed!(broadcast_path, track_name)
     after
       @timeout -> flunk("subscribe timeout")
     end
@@ -57,6 +58,7 @@ defmodule MOQXIntegrationTest do
     receive do
       {:moqx_frame, ^expected_group_seq, ^expected_payload} -> :ok
       {:moqx_error, reason} -> flunk("frame receive failed: #{inspect(reason)}")
+      {port, _message} when is_port(port) -> await_frame!(expected_group_seq, expected_payload)
       other -> flunk("unexpected message while waiting for frame: #{inspect(other)}")
     after
       @timeout -> flunk("frame timeout")
@@ -67,6 +69,7 @@ defmodule MOQXIntegrationTest do
     receive do
       :moqx_track_ended -> :ok
       {:moqx_error, reason} -> flunk("track ended with error: #{inspect(reason)}")
+      {port, _message} when is_port(port) -> await_track_ended!()
       other -> flunk("unexpected message while waiting for track end: #{inspect(other)}")
     after
       @timeout -> flunk("track end timeout")
@@ -82,6 +85,25 @@ defmodule MOQXIntegrationTest do
     after
       :ok = MOQX.close(publisher)
       :ok = MOQX.close(subscriber)
+    end
+  end
+
+  defp with_isolated_fallback_relay(fun) do
+    relay = MOQX.Test.Relay.start_isolated(4544, 4545)
+    drain_port_messages(relay)
+
+    try do
+      fun.(MOQX.Test.Relay.websocket_fallback_url())
+    after
+      MOQX.Test.Relay.stop(relay)
+    end
+  end
+
+  defp drain_port_messages(port) do
+    receive do
+      {^port, _message} -> drain_port_messages(port)
+    after
+      0 -> :ok
     end
   end
 
@@ -244,6 +266,28 @@ defmodule MOQXIntegrationTest do
       end)
     end
 
+    test "broadcast_websocket", %{relay_websocket_url: url} do
+      with_sessions(url, [transport: :websocket], fn publisher, subscriber ->
+        assert MOQX.session_version(publisher) == "moq-lite-02"
+        assert MOQX.session_version(subscriber) == "moq-lite-02"
+
+        broadcast_path = "anon/broadcast-websocket"
+        track_name = "video"
+
+        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
+        :ok = MOQX.write_frame(track, "hello")
+        Process.sleep(300)
+        :ok = MOQX.finish_track(track)
+
+        await_subscribed!(broadcast_path, track_name)
+        await_frame!(0, "hello")
+        await_track_ended!()
+      end)
+    end
+
     for version <- [
           "moq-lite-01",
           "moq-lite-02",
@@ -284,6 +328,29 @@ defmodule MOQXIntegrationTest do
     end
   end
 
+  describe "websocket fallback parity" do
+    test "broadcast_websocket_fallback" do
+      with_isolated_fallback_relay(fn url ->
+        with_sessions(url, [], fn publisher, subscriber ->
+          broadcast_path = "anon/broadcast-websocket-fallback"
+          track_name = "video"
+
+          {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
+          {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+          :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
+          :ok = MOQX.write_frame(track, "hello")
+          Process.sleep(300)
+          :ok = MOQX.finish_track(track)
+
+          await_subscribed!(broadcast_path, track_name)
+          await_frame!(0, "hello")
+          await_track_ended!()
+        end)
+      end)
+    end
+  end
+
   describe "not planned upstream matrix cases" do
     for name <- [
           "quiche_raw_quic",
@@ -296,18 +363,6 @@ defmodule MOQXIntegrationTest do
       test name do
         :ok
       end
-    end
-
-    @tag skip:
-           "not planned yet: relay-backed direct WebSocket data-path parity is still incomplete"
-    test "broadcast_websocket" do
-      :ok
-    end
-
-    @tag skip:
-           "not planned yet: direct WebSocket fallback racing is not covered by the relay-backed test harness"
-    test "broadcast_websocket_fallback" do
-      :ok
     end
   end
 end

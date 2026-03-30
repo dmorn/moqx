@@ -1,6 +1,6 @@
 defmodule MOQX.Test.Relay do
   @moduledoc """
-  Manages a local moq-relay process for integration tests.
+  Manages local moq-relay processes for integration tests.
   """
 
   @relay_binary Path.expand("../../.moq-dev/target/release/moq-relay", __DIR__)
@@ -10,44 +10,40 @@ defmodule MOQX.Test.Relay do
 
   def url, do: @relay_url
   def websocket_url, do: @relay_websocket_url
+  def websocket_fallback_url(http_port \\ 4545), do: "http://localhost:#{http_port}/anon"
 
   def available? do
     File.exists?(@relay_binary) and File.exists?(@relay_config)
   end
 
   @doc """
-  Starts the relay and returns a reference to stop it later.
+  Starts the default relay and returns a reference to stop it later.
   Waits until the relay is accepting connections.
   """
   def start do
-    unless available?() do
-      raise """
-      moq-relay not found. Build it with:
-        cd .moq-dev && cargo build --release -p moq-relay
-      """
-    end
+    ensure_available!()
 
     # Ensure an old local test relay is not still running.
     System.cmd("pkill", ["-f", @relay_binary])
     Process.sleep(300)
 
-    port =
-      Port.open({:spawn_executable, @relay_binary}, [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        :hide,
-        args: [@relay_config],
-        cd: Path.dirname(@relay_config)
-      ])
+    start_from_config(@relay_config, [4443])
+  end
 
-    wait_for_port(5_000)
-    port
+  @doc """
+  Starts an isolated relay instance with distinct QUIC and HTTP/WebSocket ports.
+
+  This is useful for exercising WebSocket fallback: clients connect to the HTTP
+  port, QUIC to that port fails, and the WebSocket fallback succeeds.
+  """
+  def start_isolated(quic_port, http_port) when is_integer(quic_port) and is_integer(http_port) do
+    ensure_available!()
+    config_path = write_isolated_config(quic_port, http_port)
+    start_from_config(config_path, [quic_port, http_port])
   end
 
   @doc "Stops a previously started relay."
   def stop(port) when is_port(port) do
-    # Get the OS pid and kill it
     case Port.info(port, :os_pid) do
       {:os_pid, os_pid} ->
         System.cmd("kill", [to_string(os_pid)])
@@ -56,28 +52,81 @@ defmodule MOQX.Test.Relay do
         :ok
     end
 
-    # Drain any remaining messages
     Port.close(port)
   rescue
     _ -> :ok
   end
 
-  defp wait_for_port(timeout) when timeout <= 0 do
+  defp ensure_available! do
+    unless available?() do
+      raise """
+      moq-relay not found. Build it with:
+        cd .moq-dev && cargo build --release -p moq-relay
+      """
+    end
+  end
+
+  defp start_from_config(config_path, ports) do
+    port =
+      Port.open({:spawn_executable, @relay_binary}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        :hide,
+        args: [config_path],
+        cd: Path.dirname(config_path)
+      ])
+
+    wait_for_ports(ports, 5_000)
+    port
+  end
+
+  defp write_isolated_config(quic_port, http_port) do
+    path = Path.join(System.tmp_dir!(), "moqx-relay-#{quic_port}-#{http_port}.toml")
+
+    File.write!(
+      path,
+      """
+      [log]
+      level = \"error\"
+
+      [server]
+      listen = \"[::]:#{quic_port}\"
+      tls.generate = [\"localhost\"]
+
+      [web.http]
+      listen = \"[::]:#{http_port}\"
+
+      [auth]
+      public = \"\"
+
+      [iroh]
+      enabled = false
+      secret = \"./dev/relay-iroh-secret.key\"
+      """
+    )
+
+    path
+  end
+
+  defp wait_for_ports(_ports, timeout) when timeout <= 0 do
     raise "Timed out waiting for moq-relay to start"
   end
 
-  defp wait_for_port(timeout) do
-    case System.cmd("sh", [
-           "-c",
-           "lsof -nP -iTCP:4443 -sTCP:LISTEN -iUDP:4443 2>/dev/null | grep moq-relay >/dev/null"
-         ]) do
+  defp wait_for_ports(ports, timeout) do
+    probes =
+      Enum.map_join(ports, " && ", fn port ->
+        "lsof -nP -iTCP:#{port} -sTCP:LISTEN -iUDP:#{port} 2>/dev/null | grep moq-relay >/dev/null"
+      end)
+
+    case System.cmd("sh", ["-c", probes]) do
       {_, 0} ->
         Process.sleep(200)
         :ok
 
       _ ->
         Process.sleep(100)
-        wait_for_port(timeout - 100)
+        wait_for_ports(ports, timeout - 100)
     end
   end
 end

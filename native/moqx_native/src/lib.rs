@@ -38,6 +38,7 @@ pub struct SessionRes {
     session: tokio::sync::Mutex<Option<moq_lite::Session>>,
     origin: Arc<OriginRes>,
     role: ConnectRole,
+    root: String,
 }
 
 impl Drop for SessionRes {
@@ -170,12 +171,13 @@ fn connect(
 
         let mut msg_env = OwnedEnv::new();
         let _ = msg_env.send_and_clear(&caller_pid, |env| match result {
-            Ok((session, origin)) => {
+            Ok((session, origin, root)) => {
                 let origin_arc = Arc::new(origin);
                 let session_resource = ResourceArc::new(SessionRes {
                     session: tokio::sync::Mutex::new(Some(session)),
                     origin: origin_arc,
                     role,
+                    root,
                 });
                 (atoms::moqx_connected(), session_resource).encode(env)
             }
@@ -312,7 +314,7 @@ async fn do_connect(
     backend: Option<moq_native::QuicBackend>,
     transport: ConnectTransport,
     versions: Vec<moq_lite::Version>,
-) -> anyhow::Result<(moq_lite::Session, OriginRes)> {
+) -> anyhow::Result<(moq_lite::Session, OriginRes, String)> {
     let mut config = ClientConfig::default();
     // Matches the upstream local WebTransport tests against a relay/server that
     // generates a self-signed localhost certificate.
@@ -321,6 +323,7 @@ async fn do_connect(
     config.version = versions;
 
     let url = rewrite_url_for_transport(url, transport)?;
+    let root = url.path().trim_matches('/').to_string();
     let origin = Origin::produce();
     let client = config.init()?;
 
@@ -336,7 +339,23 @@ async fn do_connect(
         OriginRes {
             producer: Some(origin),
         },
+        root,
     ))
+}
+
+fn normalize_broadcast_path(root: &str, broadcast_path: &str) -> String {
+    let root = root.trim_matches('/');
+    let broadcast_path = broadcast_path.trim_matches('/');
+
+    if root.is_empty() {
+        broadcast_path.to_string()
+    } else if broadcast_path == root {
+        String::new()
+    } else if let Some(stripped) = broadcast_path.strip_prefix(&format!("{}/", root)) {
+        stripped.to_string()
+    } else {
+        broadcast_path.to_string()
+    }
 }
 
 #[rustler::nif]
@@ -417,7 +436,7 @@ fn publish(
         inner: Arc::new(std::sync::Mutex::new(Some(BroadcastState {
             broadcast: moq_lite::Broadcast::produce(),
             origin: session.origin.clone(),
-            path: broadcast_path,
+            path: normalize_broadcast_path(&session.root, &broadcast_path),
             announced: false,
         }))),
     });
@@ -558,9 +577,18 @@ fn subscribe(
 
     let caller_pid = env.pid();
     let origin = session.origin.clone();
+    let normalized_broadcast_path = normalize_broadcast_path(&session.root, &broadcast_path);
 
     runtime().spawn(async move {
-        if let Err(e) = do_subscribe(origin, &broadcast_path, &track_name, caller_pid).await {
+        if let Err(e) = do_subscribe(
+            origin,
+            &broadcast_path,
+            &normalized_broadcast_path,
+            &track_name,
+            caller_pid,
+        )
+        .await
+        {
             let mut msg_env = OwnedEnv::new();
             let _ = msg_env.send_and_clear(&caller_pid, |env| {
                 (atoms::moqx_error(), format!("{:#}", e)).encode(env)
@@ -574,6 +602,7 @@ fn subscribe(
 async fn do_subscribe(
     origin: Arc<OriginRes>,
     broadcast_path: &str,
+    normalized_broadcast_path: &str,
     track_name: &str,
     caller_pid: LocalPid,
 ) -> anyhow::Result<()> {
@@ -589,7 +618,7 @@ async fn do_subscribe(
         loop {
             match consumer.announced().await {
                 Some((path, Some(bc))) => {
-                    if path.as_str() == broadcast_path {
+                    if path.as_str() == normalized_broadcast_path {
                         break bc;
                     }
                 }
@@ -615,19 +644,39 @@ async fn do_subscribe(
         });
     }
 
-    // Read groups and frames, sending each frame to the caller
-    while let Some(mut group) = track_consumer
-        .next_group()
-        .await
-        .map_err(|e| anyhow::anyhow!("next_group: {:?}", e))?
-    {
+    // Read groups and frames, sending each frame to the caller.
+    // Some relay-backed WebSocket paths currently surface track completion as
+    // `Cancel` instead of a clean end-of-stream, so normalize that to the same
+    // `:moqx_track_ended` signal the Elixir side expects.
+    let mut cancelled = false;
+
+    loop {
+        let next_group = match track_consumer.next_group().await {
+            Ok(next_group) => next_group,
+            Err(moq_lite::Error::Cancel | moq_lite::Error::Transport) => break,
+            Err(e) => return Err(anyhow::anyhow!("next_group: {:?}", e)),
+        };
+
+        let Some(mut group) = next_group else {
+            break;
+        };
+
         let group_seq = group.info.sequence;
 
-        while let Some(data) = group
-            .read_frame()
-            .await
-            .map_err(|e| anyhow::anyhow!("read_frame: {:?}", e))?
-        {
+        loop {
+            let frame = match group.read_frame().await {
+                Ok(frame) => frame,
+                Err(moq_lite::Error::Cancel | moq_lite::Error::Transport) => {
+                    cancelled = true;
+                    break;
+                }
+                Err(e) => return Err(anyhow::anyhow!("read_frame: {:?}", e)),
+            };
+
+            let Some(data) = frame else {
+                break;
+            };
+
             let mut msg_env = OwnedEnv::new();
             let _ = msg_env.send_and_clear(&caller_pid, |env| {
                 let mut binary = NewBinary::new(env, data.len());
@@ -642,6 +691,10 @@ async fn do_subscribe(
                     ],
                 )
             });
+        }
+
+        if cancelled {
+            break;
         }
     }
 

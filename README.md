@@ -12,10 +12,10 @@ Today `moqx` supports:
   - publisher session for publish operations
   - subscriber session for subscribe operations
 - the Quinn backend
-- relay connections over WebTransport, raw QUIC, and WebSocket
+- connections over WebTransport, raw QUIC, and WebSocket
 - connect-time version pinning
 - broadcasts, tracks, and frame delivery
-- relay-backed integration tests against a local `moq-relay`
+- integration coverage for relay-backed Quinn transports, including WebSocket fallback
 
 Not planned:
 
@@ -88,6 +88,7 @@ Notes:
 
 - local relay WebSocket connections use the relay's plain HTTP endpoint, so local examples use `http://.../anon`
 - the current relay-backed WebSocket path negotiates the upstream-compatible subset `moq-lite-01`, `moq-lite-02`, and `moq-transport-14`
+- transport parity coverage now includes relay-backed WebSocket round trips and an isolated WebSocket fallback harness
 
 You can inspect the compiled native support at runtime:
 
@@ -147,8 +148,9 @@ mix deps.get
 mix test
 ```
 
-Integration tests are relay-backed and are skipped automatically when the local
-relay setup is unavailable.
+Most integration tests are relay-backed and are skipped automatically when the local
+relay setup is unavailable. The suite also includes an isolated relay configuration
+used to verify WebSocket fallback on a dedicated HTTP port.
 
 ## Notes
 
