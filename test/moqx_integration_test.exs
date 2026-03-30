@@ -10,8 +10,8 @@ defmodule MOQXIntegrationTest do
     %{relay_url: MOQX.Test.Relay.url()}
   end
 
-  defp connect_publisher!(url) do
-    :ok = MOQX.connect_publisher(url)
+  defp connect_publisher!(url, opts \\ []) do
+    :ok = MOQX.connect_publisher(url, opts)
 
     receive do
       {:moqx_connected, session} -> session
@@ -21,8 +21,8 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp connect_subscriber!(url) do
-    :ok = MOQX.connect_subscriber(url)
+  defp connect_subscriber!(url, opts \\ []) do
+    :ok = MOQX.connect_subscriber(url, opts)
 
     receive do
       {:moqx_connected, session} -> session
@@ -69,9 +69,9 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp with_sessions(url, fun) do
-    publisher = connect_publisher!(url)
-    subscriber = connect_subscriber!(url)
+  defp with_sessions(url, opts \\ [], fun) do
+    publisher = connect_publisher!(url, opts)
+    subscriber = connect_subscriber!(url, opts)
 
     try do
       fun.(publisher, subscriber)
@@ -204,30 +204,72 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  describe "out-of-scope upstream cases remain placeholders" do
+  describe "upstream parity: backend, transport, and version matrix" do
+    test "reports compiled native support" do
+      assert :quinn in MOQX.supported_backends()
+      assert :raw_quic in MOQX.supported_transports()
+      assert :webtransport in MOQX.supported_transports()
+    end
+
+    test "quinn_raw_quic", %{relay_url: url} do
+      with_sessions(url, [backend: :quinn, transport: :raw_quic], fn publisher, subscriber ->
+        assert MOQX.session_version(publisher) == "moq-lite-03"
+        assert MOQX.session_version(subscriber) == "moq-lite-03"
+
+        broadcast_path = "anon/quinn-raw-quic"
+        track_name = "video"
+
+        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
+        :ok = MOQX.write_frame(track, "hello")
+        :ok = MOQX.finish_track(track)
+
+        await_subscribed!(broadcast_path, track_name)
+        await_frame!(0, "hello")
+        await_track_ended!()
+      end)
+    end
+
+    for version <- [
+          "moq-lite-01",
+          "moq-lite-02",
+          "moq-lite-03",
+          "moq-transport-14",
+          "moq-transport-15",
+          "moq-transport-16"
+        ] do
+      @version version
+
+      test "version_#{version}", %{relay_url: url} do
+        with_sessions(url, [transport: :raw_quic, version: @version], fn publisher, subscriber ->
+          assert MOQX.session_version(publisher) == @version
+          assert MOQX.session_version(subscriber) == @version
+        end)
+      end
+
+      test "webtransport_#{version}", %{relay_url: url} do
+        with_sessions(url, [transport: :webtransport, version: @version], fn publisher,
+                                                                             subscriber ->
+          assert MOQX.session_version(publisher) == @version
+          assert MOQX.session_version(subscriber) == @version
+        end)
+      end
+    end
+  end
+
+  describe "still-blocked upstream placeholders" do
     for name <- [
-          "quinn_raw_quic",
           "quiche_raw_quic",
           "quiche_webtransport",
           "iroh_connect",
           "noq_raw_quic",
           "noq_webtransport",
           "broadcast_websocket",
-          "broadcast_websocket_fallback",
-          "version_moq_lite_01",
-          "version_moq_lite_02",
-          "version_moq_lite_03",
-          "version_moq_transport_14",
-          "version_moq_transport_15",
-          "version_moq_transport_16",
-          "webtransport_moq_lite_01",
-          "webtransport_moq_lite_02",
-          "webtransport_moq_lite_03",
-          "webtransport_moq_transport_14",
-          "webtransport_moq_transport_15",
-          "webtransport_moq_transport_16"
+          "broadcast_websocket_fallback"
         ] do
-      @tag skip: "placeholder for unsupported Bucket 2+ transport/backend/version work"
+      @tag skip: "placeholder for genuinely unsupported compiled backend or transport coverage"
       test name do
         :ok
       end

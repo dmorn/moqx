@@ -1,5 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
+use anyhow::Context;
 use moq_lite::Origin;
 use moq_native::ClientConfig;
 use rustler::{Atom, Binary, Encoder, Env, LocalPid, NewBinary, OwnedEnv, Resource, ResourceArc};
@@ -147,15 +148,25 @@ impl ConnectRole {
 }
 
 #[rustler::nif]
-fn connect(env: Env, url: String, role: String) -> rustler::NifResult<Atom> {
+fn connect(
+    env: Env,
+    url: String,
+    role: String,
+    backend: Option<String>,
+    transport: String,
+    versions: Vec<String>,
+) -> rustler::NifResult<Atom> {
     let caller_pid = env.pid();
 
     let parsed_url =
         url::Url::parse(&url).map_err(|e| rustler::Error::Term(Box::new(format!("{}", e))))?;
     let role = ConnectRole::from_str(&role)?;
+    let backend = parse_backend(backend)?;
+    let transport = ConnectTransport::from_str(&transport)?;
+    let versions = parse_versions(versions)?;
 
     runtime().spawn(async move {
-        let result = do_connect(parsed_url, role).await;
+        let result = do_connect(parsed_url, role, backend, transport, versions).await;
 
         let mut msg_env = OwnedEnv::new();
         let _ = msg_env.send_and_clear(&caller_pid, |env| match result {
@@ -175,15 +186,141 @@ fn connect(env: Env, url: String, role: String) -> rustler::NifResult<Atom> {
     Ok(atoms::ok())
 }
 
+#[derive(Clone, Copy)]
+enum ConnectTransport {
+    Auto,
+    RawQuic,
+    WebTransport,
+    WebSocket,
+}
+
+impl ConnectTransport {
+    fn from_str(transport: &str) -> rustler::NifResult<Self> {
+        match transport {
+            "auto" => Ok(Self::Auto),
+            "raw_quic" => Ok(Self::RawQuic),
+            "webtransport" => Ok(Self::WebTransport),
+            "websocket" => Ok(Self::WebSocket),
+            other => Err(rustler::Error::Term(Box::new(format!(
+                "invalid connect transport: {}",
+                other
+            )))),
+        }
+    }
+}
+
+fn parse_backend(backend: Option<String>) -> rustler::NifResult<Option<moq_native::QuicBackend>> {
+    match backend.as_deref() {
+        None => Ok(None),
+        Some("quinn") => {
+            #[cfg(feature = "quinn")]
+            {
+                Ok(Some(moq_native::QuicBackend::Quinn))
+            }
+            #[cfg(not(feature = "quinn"))]
+            {
+                Err(rustler::Error::Term(Box::new(
+                    "backend not compiled: quinn".to_string(),
+                )))
+            }
+        }
+        Some("quiche") => {
+            #[cfg(feature = "quiche")]
+            {
+                Ok(Some(moq_native::QuicBackend::Quiche))
+            }
+            #[cfg(not(feature = "quiche"))]
+            {
+                Err(rustler::Error::Term(Box::new(
+                    "backend not compiled: quiche".to_string(),
+                )))
+            }
+        }
+        Some("noq") => {
+            #[cfg(feature = "noq")]
+            {
+                Ok(Some(moq_native::QuicBackend::Noq))
+            }
+            #[cfg(not(feature = "noq"))]
+            {
+                Err(rustler::Error::Term(Box::new(
+                    "backend not compiled: noq".to_string(),
+                )))
+            }
+        }
+        Some(other) => Err(rustler::Error::Term(Box::new(format!(
+            "invalid connect backend: {}",
+            other
+        )))),
+    }
+}
+
+fn parse_versions(versions: Vec<String>) -> rustler::NifResult<Vec<moq_lite::Version>> {
+    versions
+        .into_iter()
+        .map(|version| {
+            version.parse::<moq_lite::Version>().map_err(|err| {
+                rustler::Error::Term(Box::new(format!(
+                    "invalid connect version {}: {}",
+                    version, err
+                )))
+            })
+        })
+        .collect()
+}
+
+fn rewrite_url_for_transport(
+    url: url::Url,
+    transport: ConnectTransport,
+) -> anyhow::Result<url::Url> {
+    let target_scheme = match transport {
+        ConnectTransport::Auto => return Ok(url),
+        ConnectTransport::RawQuic => "moqt",
+        ConnectTransport::WebTransport => "https",
+        ConnectTransport::WebSocket => match url.scheme() {
+            "http" | "ws" => "ws",
+            _ => "wss",
+        },
+    };
+
+    let host = url.host_str().context("missing hostname")?;
+    let mut rewritten = format!("{}://{}", target_scheme, host);
+
+    if let Some(port) = url.port() {
+        rewritten.push(':');
+        rewritten.push_str(&port.to_string());
+    }
+
+    rewritten.push_str(url.path());
+
+    if let Some(query) = url.query() {
+        rewritten.push('?');
+        rewritten.push_str(query);
+    }
+
+    if let Some(fragment) = url.fragment() {
+        rewritten.push('#');
+        rewritten.push_str(fragment);
+    }
+
+    Ok(url::Url::parse(&rewritten)?)
+}
+
 async fn do_connect(
     url: url::Url,
     role: ConnectRole,
+    backend: Option<moq_native::QuicBackend>,
+    transport: ConnectTransport,
+    versions: Vec<moq_lite::Version>,
 ) -> anyhow::Result<(moq_lite::Session, OriginRes)> {
     let mut config = ClientConfig::default();
     // Matches the upstream local WebTransport tests against a relay/server that
     // generates a self-signed localhost certificate.
     config.tls.disable_verify = Some(true);
+    config.backend = backend;
+    config.version = versions;
 
+    let url = rewrite_url_for_transport(url, transport)?;
     let origin = Origin::produce();
     let client = config.init()?;
 
@@ -203,10 +340,38 @@ async fn do_connect(
 }
 
 #[rustler::nif]
+fn supported_backends() -> Vec<String> {
+    let mut backends = Vec::new();
+
+    #[cfg(feature = "quinn")]
+    backends.push("quinn".to_string());
+    #[cfg(feature = "quiche")]
+    backends.push("quiche".to_string());
+    #[cfg(feature = "noq")]
+    backends.push("noq".to_string());
+
+    backends
+}
+
+#[rustler::nif]
+fn supported_transports() -> Vec<String> {
+    let mut transports = vec![
+        "auto".to_string(),
+        "raw_quic".to_string(),
+        "webtransport".to_string(),
+    ];
+
+    #[cfg(feature = "websocket")]
+    transports.push("websocket".to_string());
+
+    transports
+}
+
+#[rustler::nif]
 fn session_version(session: ResourceArc<SessionRes>) -> String {
     let guard = runtime().block_on(session.session.lock());
     match guard.as_ref() {
-        Some(s) => format!("{:?}", s.version()),
+        Some(s) => s.version().to_string(),
         None => "closed".to_string(),
     }
 }

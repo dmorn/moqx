@@ -7,9 +7,17 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+default = ["quinn", "websocket", "aws-lc-rs"]
+quinn = ["moq-native/quinn"]
+quiche = ["moq-native/quiche"]
+noq = ["moq-native/noq"]
+websocket = ["moq-native/websocket"]
+aws-lc-rs = ["moq-native/aws-lc-rs"]
+
 [dependencies]
 rustler = { version = "0.37.3", features = ["nif_version_2_16"] }
-moq-native = { version = "0.13", default-features = false, features = ["quinn", "aws-lc-rs"] }
+moq-native = { version = "0.13", default-features = false }
 moq-lite = "0.15"
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 url = "2"

@@ -62,6 +62,15 @@ defmodule MOQX do
   @typedoc "Publisher or subscriber session role."
   @type role :: :publisher | :subscriber
 
+  @typedoc "Compiled native QUIC backend."
+  @type backend :: :quinn | :quiche | :noq
+
+  @typedoc "Requested connection transport."
+  @type transport :: :auto | :raw_quic | :webtransport | :websocket
+
+  @typedoc "MOQ protocol version string, e.g. `\"moq-lite-03\"` or `\"moq-transport-14\"`."
+  @type version :: String.t()
+
   @typedoc "Opaque session resource returned in `{:moqx_connected, session}`."
   @opaque session :: reference()
 
@@ -81,15 +90,28 @@ defmodule MOQX do
           | {:moqx_track_ended}
           | {:moqx_error, String.t()}
 
+  @type connect_opt ::
+          {:role, role()}
+          | {:backend, backend()}
+          | {:transport, transport()}
+          | {:version, version() | [version()]}
+
   @doc """
   Connects to a relay with an explicit role.
 
-  Prefer `connect_publisher/1` and `connect_subscriber/1` unless you need to
+  Prefer `connect_publisher/2` and `connect_subscriber/2` unless you need to
   select the role dynamically.
+
+  Supported options:
+
+  - `:role` - required, `:publisher` or `:subscriber`
+  - `:backend` - optional compiled backend, such as `:quinn`
+  - `:transport` - optional `:auto`, `:raw_quic`, `:webtransport`, or `:websocket`
+  - `:version` - optional version string or list of version strings
 
   Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
   """
-  @spec connect(String.t(), role: role()) :: :ok | {:error, String.t()}
+  @spec connect(String.t(), [connect_opt()]) :: :ok | {:error, String.t()}
   def connect(url, opts) when is_binary(url) and is_list(opts) do
     role =
       case Keyword.fetch(opts, :role) do
@@ -97,27 +119,51 @@ defmodule MOQX do
         :error -> raise ArgumentError, "connect/2 requires :role (:publisher or :subscriber)"
       end
 
-    MOQX.Native.connect(url, role)
+    backend = opts |> Keyword.get(:backend) |> normalize_connect_backend()
+    transport = opts |> Keyword.get(:transport, :auto) |> normalize_connect_transport!()
+    versions = opts |> Keyword.get(:version, []) |> normalize_connect_versions!()
+
+    MOQX.Native.connect(url, role, backend, transport, versions)
   end
 
   @doc """
   Connects a publisher session.
 
+  Accepts the same options as `connect/2`, except `:role` is fixed to `:publisher`.
   Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
   """
-  @spec connect_publisher(String.t()) :: :ok | {:error, String.t()}
-  def connect_publisher(url) when is_binary(url) do
-    connect(url, role: :publisher)
+  @spec connect_publisher(String.t(), Keyword.t()) :: :ok | {:error, String.t()}
+  def connect_publisher(url, opts \\ []) when is_binary(url) and is_list(opts) do
+    connect(url, Keyword.put(opts, :role, :publisher))
   end
 
   @doc """
   Connects a subscriber session.
 
+  Accepts the same options as `connect/2`, except `:role` is fixed to `:subscriber`.
   Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
   """
-  @spec connect_subscriber(String.t()) :: :ok | {:error, String.t()}
-  def connect_subscriber(url) when is_binary(url) do
-    connect(url, role: :subscriber)
+  @spec connect_subscriber(String.t(), Keyword.t()) :: :ok | {:error, String.t()}
+  def connect_subscriber(url, opts \\ []) when is_binary(url) and is_list(opts) do
+    connect(url, Keyword.put(opts, :role, :subscriber))
+  end
+
+  @doc """
+  Returns the compiled native backends available to `connect/2`.
+  """
+  @spec supported_backends() :: [backend()]
+  def supported_backends do
+    MOQX.Native.supported_backends()
+    |> Enum.map(&normalize_session_backend!/1)
+  end
+
+  @doc """
+  Returns the compiled native transports available to `connect/2`.
+  """
+  @spec supported_transports() :: [transport()]
+  def supported_transports do
+    MOQX.Native.supported_transports()
+    |> Enum.map(&normalize_session_transport!/1)
   end
 
   @doc """
@@ -136,6 +182,12 @@ defmodule MOQX do
     |> normalize_session_role!()
   end
 
+  @doc false
+  @spec session_version(session()) :: version()
+  def session_version(session) do
+    MOQX.Native.session_version(session)
+  end
+
   defp normalize_connect_role!(:publisher), do: "publisher"
   defp normalize_connect_role!(:subscriber), do: "subscriber"
 
@@ -144,8 +196,55 @@ defmodule MOQX do
           "expected :role to be :publisher or :subscriber, got: #{inspect(role)}"
   end
 
+  defp normalize_connect_backend(nil), do: nil
+  defp normalize_connect_backend(:quinn), do: "quinn"
+  defp normalize_connect_backend(:quiche), do: "quiche"
+  defp normalize_connect_backend(:noq), do: "noq"
+
+  defp normalize_connect_backend(backend) do
+    raise ArgumentError,
+          "expected :backend to be :quinn, :quiche, or :noq, got: #{inspect(backend)}"
+  end
+
+  defp normalize_connect_transport!(:auto), do: "auto"
+  defp normalize_connect_transport!(:raw_quic), do: "raw_quic"
+  defp normalize_connect_transport!(:webtransport), do: "webtransport"
+  defp normalize_connect_transport!(:websocket), do: "websocket"
+
+  defp normalize_connect_transport!(transport) do
+    raise ArgumentError,
+          "expected :transport to be :auto, :raw_quic, :webtransport, or :websocket, got: #{inspect(transport)}"
+  end
+
+  defp normalize_connect_versions!([]), do: []
+  defp normalize_connect_versions!(version) when is_binary(version), do: [version]
+
+  defp normalize_connect_versions!(versions) when is_list(versions) do
+    Enum.map(versions, fn
+      version when is_binary(version) ->
+        version
+
+      other ->
+        raise ArgumentError, "expected :version entries to be strings, got: #{inspect(other)}"
+    end)
+  end
+
+  defp normalize_connect_versions!(other) do
+    raise ArgumentError,
+          "expected :version to be a string or list of strings, got: #{inspect(other)}"
+  end
+
   defp normalize_session_role!("publisher"), do: :publisher
   defp normalize_session_role!("subscriber"), do: :subscriber
+
+  defp normalize_session_backend!("quinn"), do: :quinn
+  defp normalize_session_backend!("quiche"), do: :quiche
+  defp normalize_session_backend!("noq"), do: :noq
+
+  defp normalize_session_transport!("auto"), do: :auto
+  defp normalize_session_transport!("raw_quic"), do: :raw_quic
+  defp normalize_session_transport!("webtransport"), do: :webtransport
+  defp normalize_session_transport!("websocket"), do: :websocket
 
   # ---------------------------------------------------------------------------
   # Publish
