@@ -28,7 +28,7 @@ defmodule MOQXTest do
 
   test "connect/2 validates backend before reaching the NIF" do
     assert_raise ArgumentError,
-                 "expected :backend to be :quinn, :quiche, or :noq, got: :bogus",
+                 "expected :backend to be :quinn, got: :bogus",
                  fn ->
                    MOQX.connect("https://example.com", role: :publisher, backend: :bogus)
                  end

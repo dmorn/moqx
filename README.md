@@ -2,7 +2,7 @@
 
 > Elixir bindings for [Media over QUIC (MOQ)](https://moq.dev) via Rustler NIFs on top of `moq-lite` / `moq-native`.
 
-**Status:** early library with explicit split roles and basic protocol-matrix controls.
+**Status:** early library with explicit split roles, Quinn-based transports, and upstream-aligned transport controls.
 
 ## Supported path
 
@@ -11,17 +11,22 @@ Today `moqx` supports:
 - explicit split roles
   - publisher session for publish operations
   - subscriber session for subscribe operations
-- relay connections over WebTransport and raw QUIC
+- the Quinn backend
+- relay connections over WebTransport, raw QUIC, and WebSocket
 - connect-time version pinning
-- compiled-backend selection
 - broadcasts, tracks, and frame delivery
 - relay-backed integration tests against a local `moq-relay`
+
+Not planned:
+
+- Quiche backend support
+- Noq backend support
+- Iroh transport support
 
 Still not in scope:
 
 - production TLS posture
 - broader production hardening
-- backends or transports not compiled into the native crate
 
 ## Public API
 
@@ -63,14 +68,26 @@ If you need dynamic role selection or connect-time protocol controls, use:
     transport: :raw_quic,
     version: "moq-transport-14"
   )
+
+:ok =
+  MOQX.connect_publisher(
+    "http://localhost:4443/anon",
+    transport: :websocket,
+    version: "moq-lite-02"
+  )
 ```
 
 Supported connect options:
 
 - `:role` - required, `:publisher` or `:subscriber`
-- `:backend` - optional compiled backend, such as `:quinn`
+- `:backend` - optional compiled backend, currently only `:quinn`
 - `:transport` - optional `:auto`, `:raw_quic`, `:webtransport`, or `:websocket`
 - `:version` - optional version string or list of version strings
+
+Notes:
+
+- local relay WebSocket connections use the relay's plain HTTP endpoint, so local examples use `http://.../anon`
+- the current relay-backed WebSocket path negotiates the upstream-compatible subset `moq-lite-01`, `moq-lite-02`, and `moq-transport-14`
 
 You can inspect the compiled native support at runtime:
 

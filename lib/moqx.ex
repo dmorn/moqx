@@ -62,8 +62,8 @@ defmodule MOQX do
   @typedoc "Publisher or subscriber session role."
   @type role :: :publisher | :subscriber
 
-  @typedoc "Compiled native QUIC backend."
-  @type backend :: :quinn | :quiche | :noq
+  @typedoc "Compiled native QUIC backend. Today `moqx` intentionally supports only Quinn."
+  @type backend :: :quinn
 
   @typedoc "Requested connection transport."
   @type transport :: :auto | :raw_quic | :webtransport | :websocket
@@ -105,7 +105,7 @@ defmodule MOQX do
   Supported options:
 
   - `:role` - required, `:publisher` or `:subscriber`
-  - `:backend` - optional compiled backend, such as `:quinn`
+  - `:backend` - optional compiled backend, currently only `:quinn`
   - `:transport` - optional `:auto`, `:raw_quic`, `:webtransport`, or `:websocket`
   - `:version` - optional version string or list of version strings
 
@@ -198,12 +198,10 @@ defmodule MOQX do
 
   defp normalize_connect_backend(nil), do: nil
   defp normalize_connect_backend(:quinn), do: "quinn"
-  defp normalize_connect_backend(:quiche), do: "quiche"
-  defp normalize_connect_backend(:noq), do: "noq"
 
   defp normalize_connect_backend(backend) do
     raise ArgumentError,
-          "expected :backend to be :quinn, :quiche, or :noq, got: #{inspect(backend)}"
+          "expected :backend to be :quinn, got: #{inspect(backend)}"
   end
 
   defp normalize_connect_transport!(:auto), do: "auto"
@@ -238,8 +236,6 @@ defmodule MOQX do
   defp normalize_session_role!("subscriber"), do: :subscriber
 
   defp normalize_session_backend!("quinn"), do: :quinn
-  defp normalize_session_backend!("quiche"), do: :quiche
-  defp normalize_session_backend!("noq"), do: :noq
 
   defp normalize_session_transport!("auto"), do: :auto
   defp normalize_session_transport!("raw_quic"), do: :raw_quic

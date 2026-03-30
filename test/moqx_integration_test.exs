@@ -7,7 +7,11 @@ defmodule MOQXIntegrationTest do
   setup_all do
     relay = MOQX.Test.Relay.start()
     on_exit(fn -> MOQX.Test.Relay.stop(relay) end)
-    %{relay_url: MOQX.Test.Relay.url()}
+
+    %{
+      relay_url: MOQX.Test.Relay.url(),
+      relay_websocket_url: MOQX.Test.Relay.websocket_url()
+    }
   end
 
   defp connect_publisher!(url, opts \\ []) do
@@ -206,9 +210,10 @@ defmodule MOQXIntegrationTest do
 
   describe "upstream parity: backend, transport, and version matrix" do
     test "reports compiled native support" do
-      assert :quinn in MOQX.supported_backends()
+      assert MOQX.supported_backends() == [:quinn]
       assert :raw_quic in MOQX.supported_transports()
       assert :webtransport in MOQX.supported_transports()
+      assert :websocket in MOQX.supported_transports()
     end
 
     test "quinn_raw_quic", %{relay_url: url} do
@@ -229,6 +234,13 @@ defmodule MOQXIntegrationTest do
         await_subscribed!(broadcast_path, track_name)
         await_frame!(0, "hello")
         await_track_ended!()
+      end)
+    end
+
+    test "websocket_connect", %{relay_websocket_url: url} do
+      with_sessions(url, [transport: :websocket], fn publisher, subscriber ->
+        assert MOQX.session_version(publisher) == "moq-lite-02"
+        assert MOQX.session_version(subscriber) == "moq-lite-02"
       end)
     end
 
@@ -259,20 +271,43 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  describe "still-blocked upstream placeholders" do
+  describe "websocket version support is relay-compatible where upstream allows it" do
+    for version <- ["moq-lite-01", "moq-lite-02", "moq-transport-14"] do
+      @version version
+
+      test "websocket_#{version}", %{relay_websocket_url: url} do
+        with_sessions(url, [transport: :websocket, version: @version], fn publisher, subscriber ->
+          assert MOQX.session_version(publisher) == @version
+          assert MOQX.session_version(subscriber) == @version
+        end)
+      end
+    end
+  end
+
+  describe "not planned upstream matrix cases" do
     for name <- [
           "quiche_raw_quic",
           "quiche_webtransport",
           "iroh_connect",
           "noq_raw_quic",
-          "noq_webtransport",
-          "broadcast_websocket",
-          "broadcast_websocket_fallback"
+          "noq_webtransport"
         ] do
-      @tag skip: "placeholder for genuinely unsupported compiled backend or transport coverage"
+      @tag skip: "not planned: moqx intentionally supports the quinn backend only"
       test name do
         :ok
       end
+    end
+
+    @tag skip:
+           "not planned yet: relay-backed direct WebSocket data-path parity is still incomplete"
+    test "broadcast_websocket" do
+      :ok
+    end
+
+    @tag skip:
+           "not planned yet: direct WebSocket fallback racing is not covered by the relay-backed test harness"
+    test "broadcast_websocket_fallback" do
+      :ok
     end
   end
 end

@@ -6,8 +6,10 @@ defmodule MOQX.Test.Relay do
   @relay_binary Path.expand("../../.moq-dev/target/release/moq-relay", __DIR__)
   @relay_config Path.expand("../../.moq-dev/dev/relay.toml", __DIR__)
   @relay_url "https://localhost:4443"
+  @relay_websocket_url "http://localhost:4443/anon"
 
   def url, do: @relay_url
+  def websocket_url, do: @relay_websocket_url
 
   def available? do
     File.exists?(@relay_binary) and File.exists?(@relay_config)
@@ -65,7 +67,10 @@ defmodule MOQX.Test.Relay do
   end
 
   defp wait_for_port(timeout) do
-    case System.cmd("sh", ["-c", "lsof -nP -iTCP:4443 -sTCP:LISTEN -iUDP:4443 2>/dev/null | grep moq-relay >/dev/null"]) do
+    case System.cmd("sh", [
+           "-c",
+           "lsof -nP -iTCP:4443 -sTCP:LISTEN -iUDP:4443 2>/dev/null | grep moq-relay >/dev/null"
+         ]) do
       {_, 0} ->
         Process.sleep(200)
         :ok
