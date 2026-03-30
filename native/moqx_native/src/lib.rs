@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
@@ -156,6 +157,8 @@ fn connect(
     backend: Option<String>,
     transport: String,
     versions: Vec<String>,
+    tls_verify: String,
+    tls_cacertfile: Option<String>,
 ) -> rustler::NifResult<Atom> {
     let caller_pid = env.pid();
 
@@ -165,9 +168,10 @@ fn connect(
     let backend = parse_backend(backend)?;
     let transport = ConnectTransport::from_str(&transport)?;
     let versions = parse_versions(versions)?;
+    let tls = ConnectTls::new(&tls_verify, tls_cacertfile)?;
 
     runtime().spawn(async move {
-        let result = do_connect(parsed_url, role, backend, transport, versions).await;
+        let result = do_connect(parsed_url, role, backend, transport, versions, tls).await;
 
         let mut msg_env = OwnedEnv::new();
         let _ = msg_env.send_and_clear(&caller_pid, |env| match result {
@@ -194,6 +198,34 @@ enum ConnectTransport {
     RawQuic,
     WebTransport,
     WebSocket,
+}
+
+#[derive(Clone)]
+struct ConnectTls {
+    disable_verify: bool,
+    root: Vec<PathBuf>,
+}
+
+impl ConnectTls {
+    fn new(verify: &str, cacertfile: Option<String>) -> rustler::NifResult<Self> {
+        let disable_verify = match verify {
+            "verify_peer" => false,
+            "insecure" => true,
+            other => {
+                return Err(rustler::Error::Term(Box::new(format!(
+                    "invalid tls verify mode: {}",
+                    other
+                ))))
+            }
+        };
+
+        let root = cacertfile.into_iter().map(PathBuf::from).collect();
+
+        Ok(Self {
+            disable_verify,
+            root,
+        })
+    }
 }
 
 impl ConnectTransport {
@@ -314,11 +346,13 @@ async fn do_connect(
     backend: Option<moq_native::QuicBackend>,
     transport: ConnectTransport,
     versions: Vec<moq_lite::Version>,
+    tls: ConnectTls,
 ) -> anyhow::Result<(moq_lite::Session, OriginRes, String)> {
     let mut config = ClientConfig::default();
-    // Matches the upstream local WebTransport tests against a relay/server that
-    // generates a self-signed localhost certificate.
-    config.tls.disable_verify = Some(true);
+    if tls.disable_verify {
+        config.tls.disable_verify = Some(true);
+    }
+    config.tls.root = tls.root;
     config.backend = backend;
     config.version = versions;
 

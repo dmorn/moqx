@@ -71,6 +71,12 @@ defmodule MOQX do
   @typedoc "MOQ protocol version string, e.g. `\"moq-lite-03\"` or `\"moq-transport-14\"`."
   @type version :: String.t()
 
+  @typedoc "TLS verification mode for relay connections."
+  @type tls_verify :: :verify_peer | :insecure
+
+  @typedoc "TLS connect options."
+  @type tls_opt :: {:verify, tls_verify()} | {:cacertfile, String.t()}
+
   @typedoc "Opaque session resource returned in `{:moqx_connected, session}`."
   @opaque session :: reference()
 
@@ -95,6 +101,7 @@ defmodule MOQX do
           | {:backend, backend()}
           | {:transport, transport()}
           | {:version, version() | [version()]}
+          | {:tls, [tls_opt()]}
 
   @doc """
   Connects to a relay with an explicit role.
@@ -108,6 +115,9 @@ defmodule MOQX do
   - `:backend` - optional compiled backend, currently only `:quinn`
   - `:transport` - optional `:auto`, `:raw_quic`, `:webtransport`, or `:websocket`
   - `:version` - optional version string or list of version strings
+  - `:tls` - optional TLS controls:
+    - `verify: :verify_peer | :insecure` (defaults to `:verify_peer`)
+    - `cacertfile: "/path/to/rootCA.pem"` to trust a custom root CA PEM
 
   Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
   """
@@ -122,8 +132,9 @@ defmodule MOQX do
     backend = opts |> Keyword.get(:backend) |> normalize_connect_backend()
     transport = opts |> Keyword.get(:transport, :auto) |> normalize_connect_transport!()
     versions = opts |> Keyword.get(:version, []) |> normalize_connect_versions!()
+    {tls_verify, tls_cacertfile} = opts |> Keyword.get(:tls, []) |> normalize_connect_tls!()
 
-    MOQX.Native.connect(url, role, backend, transport, versions)
+    MOQX.Native.connect(url, role, backend, transport, versions, tls_verify, tls_cacertfile)
   end
 
   @doc """
@@ -230,6 +241,39 @@ defmodule MOQX do
   defp normalize_connect_versions!(other) do
     raise ArgumentError,
           "expected :version to be a string or list of strings, got: #{inspect(other)}"
+  end
+
+  defp normalize_connect_tls!(opts) when is_list(opts) do
+    verify = opts |> Keyword.get(:verify, :verify_peer) |> normalize_connect_tls_verify!()
+    cacertfile = opts |> Keyword.get(:cacertfile) |> normalize_connect_tls_cacertfile()
+
+    allowed_keys = [:verify, :cacertfile]
+
+    case Keyword.keys(opts) -- allowed_keys do
+      [] -> {verify, cacertfile}
+      [key | _] -> raise ArgumentError, "unexpected :tls option #{inspect(key)}"
+    end
+  end
+
+  defp normalize_connect_tls!(other) do
+    raise ArgumentError,
+          "expected :tls to be a keyword list, got: #{inspect(other)}"
+  end
+
+  defp normalize_connect_tls_verify!(:verify_peer), do: "verify_peer"
+  defp normalize_connect_tls_verify!(:insecure), do: "insecure"
+
+  defp normalize_connect_tls_verify!(verify) do
+    raise ArgumentError,
+          "expected :tls :verify to be :verify_peer or :insecure, got: #{inspect(verify)}"
+  end
+
+  defp normalize_connect_tls_cacertfile(nil), do: nil
+  defp normalize_connect_tls_cacertfile(path) when is_binary(path), do: path
+
+  defp normalize_connect_tls_cacertfile(path) do
+    raise ArgumentError,
+          "expected :tls :cacertfile to be a string path, got: #{inspect(path)}"
   end
 
   defp normalize_session_role!("publisher"), do: :publisher

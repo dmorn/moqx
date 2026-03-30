@@ -25,8 +25,7 @@ Not planned:
 
 Still not in scope:
 
-- production TLS posture
-- broader production hardening
+- broader production hardening beyond minimal client TLS controls
 
 ## Public API
 
@@ -83,9 +82,13 @@ Supported connect options:
 - `:backend` - optional compiled backend, currently only `:quinn`
 - `:transport` - optional `:auto`, `:raw_quic`, `:webtransport`, or `:websocket`
 - `:version` - optional version string or list of version strings
+- `:tls` - optional TLS controls:
+  - `verify: :verify_peer | :insecure` - defaults to `:verify_peer`
+  - `cacertfile: "/path/to/rootCA.pem"` - trust a custom root CA PEM
 
 Notes:
 
+- TLS verification is enabled by default; `:tls, [verify: :insecure]` is a local-development escape hatch only
 - local relay WebSocket connections use the relay's plain HTTP endpoint, so local examples use `http://.../anon`
 - the current relay-backed WebSocket path negotiates the upstream-compatible subset `moq-lite-01`, `moq-lite-02`, and `moq-transport-14`
 - transport parity coverage now includes relay-backed WebSocket round trips and an isolated WebSocket fallback harness
@@ -149,14 +152,43 @@ mix test
 ```
 
 Most integration tests are relay-backed and are skipped automatically when the local
-relay setup is unavailable. The suite also includes an isolated relay configuration
-used to verify WebSocket fallback on a dedicated HTTP port.
+relay setup is unavailable. The suite also includes isolated relay configurations
+used to verify WebSocket fallback and TLS trust behavior.
 
-## Notes
+### Local relay TLS
 
-- local relay tests currently disable TLS verification in the Rust client to
-  support self-signed `localhost` certificates used for local development
-- that is acceptable for local tests only, not production configuration
+Secure verification is the default in `moqx`.
+
+That means the upstream dev relay config under `.moq-dev/dev/relay.toml`, which uses
+`tls.generate = ["localhost"]`, will not verify successfully unless you either:
+
+- opt into local-only insecure mode:
+
+  ```elixir
+  MOQX.connect_publisher("https://localhost:4443", tls: [verify: :insecure])
+  ```
+
+- or run the relay with a certificate chain trusted by your machine
+
+For the best local developer experience, use [`mkcert`](https://github.com/filosottile/mkcert)
+to install a local development CA and generate a trusted `localhost` certificate:
+
+```bash
+mkcert -install
+mkcert -cert-file localhost.pem -key-file localhost-key.pem localhost 127.0.0.1 ::1
+```
+
+Then configure the relay to use file-based TLS instead of `tls.generate`, for example:
+
+```toml
+[server]
+listen = "[::]:4443"
+tls.cert = ["/absolute/path/to/localhost.pem"]
+tls.key = ["/absolute/path/to/localhost-key.pem"]
+```
+
+With that setup, default `moqx` connections can verify the relay certificate without
+falling back to `verify: :insecure`.
 
 ## License
 

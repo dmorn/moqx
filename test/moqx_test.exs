@@ -50,6 +50,38 @@ defmodule MOQXTest do
                  end
   end
 
+  test "connect/2 validates tls shape before reaching the NIF" do
+    assert_raise ArgumentError,
+                 "expected :tls to be a keyword list, got: :bogus",
+                 fn ->
+                   MOQX.connect("https://example.com", role: :publisher, tls: :bogus)
+                 end
+  end
+
+  test "connect/2 validates tls verify mode before reaching the NIF" do
+    assert_raise ArgumentError,
+                 "expected :tls :verify to be :verify_peer or :insecure, got: :bogus",
+                 fn ->
+                   MOQX.connect("https://example.com", role: :publisher, tls: [verify: :bogus])
+                 end
+  end
+
+  test "connect/2 validates tls cacertfile type before reaching the NIF" do
+    assert_raise ArgumentError,
+                 "expected :tls :cacertfile to be a string path, got: 123",
+                 fn ->
+                   MOQX.connect("https://example.com", role: :publisher, tls: [cacertfile: 123])
+                 end
+  end
+
+  test "connect/2 rejects unexpected tls keys before reaching the NIF" do
+    assert_raise ArgumentError,
+                 "unexpected :tls option :unknown",
+                 fn ->
+                   MOQX.connect("https://example.com", role: :publisher, tls: [unknown: true])
+                 end
+  end
+
   test "invalid URLs return an error tuple" do
     assert {:error, reason} = MOQX.connect_publisher(":::invalid")
     assert is_binary(reason)

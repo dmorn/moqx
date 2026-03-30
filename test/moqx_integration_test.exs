@@ -10,29 +10,35 @@ defmodule MOQXIntegrationTest do
 
     %{
       relay_url: MOQX.Test.Relay.url(),
-      relay_websocket_url: MOQX.Test.Relay.websocket_url()
+      relay_websocket_url: MOQX.Test.Relay.websocket_url(),
+      local_dev_tls: [tls: [verify: :insecure]]
     }
   end
 
-  defp connect_publisher!(url, opts \\ []) do
-    :ok = MOQX.connect_publisher(url, opts)
-
+  defp await_connect_result! do
     receive do
-      {:moqx_connected, session} -> session
-      {:error, reason} -> raise "publisher connect failed: #{inspect(reason)}"
+      {:moqx_connected, session} -> {:ok, session}
+      {:error, reason} -> {:error, reason}
     after
-      @timeout -> raise "publisher connect timeout"
+      @timeout -> raise "connect timeout"
     end
   end
 
-  defp connect_subscriber!(url, opts \\ []) do
+  defp connect_publisher!(url, opts) do
+    :ok = MOQX.connect_publisher(url, opts)
+
+    case await_connect_result!() do
+      {:ok, session} -> session
+      {:error, reason} -> raise "publisher connect failed: #{inspect(reason)}"
+    end
+  end
+
+  defp connect_subscriber!(url, opts) do
     :ok = MOQX.connect_subscriber(url, opts)
 
-    receive do
-      {:moqx_connected, session} -> session
+    case await_connect_result!() do
+      {:ok, session} -> session
       {:error, reason} -> raise "subscriber connect failed: #{inspect(reason)}"
-    after
-      @timeout -> raise "subscriber connect timeout"
     end
   end
 
@@ -76,7 +82,7 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp with_sessions(url, opts \\ [], fun) do
+  defp with_sessions(url, opts, fun) do
     publisher = connect_publisher!(url, opts)
     subscriber = connect_subscriber!(url, opts)
 
@@ -99,6 +105,17 @@ defmodule MOQXIntegrationTest do
     end
   end
 
+  defp with_isolated_trusted_relay(fun) do
+    relay = MOQX.Test.Relay.start_isolated_trusted(4546, 4547)
+    drain_port_messages(relay)
+
+    try do
+      fun.("https://localhost:4546", MOQX.Test.Relay.trusted_root_ca())
+    after
+      MOQX.Test.Relay.stop(relay)
+    end
+  end
+
   defp drain_port_messages(port) do
     receive do
       {^port, _message} -> drain_port_messages(port)
@@ -108,8 +125,8 @@ defmodule MOQXIntegrationTest do
   end
 
   describe "current supported architecture" do
-    test "single-frame relay-backed round trip", %{relay_url: url} do
-      with_sessions(url, fn publisher, subscriber ->
+    test "single-frame relay-backed round trip", %{relay_url: url, local_dev_tls: tls_opts} do
+      with_sessions(url, tls_opts, fn publisher, subscriber ->
         broadcast_path = "anon/single-frame"
         track_name = "video"
 
@@ -126,8 +143,11 @@ defmodule MOQXIntegrationTest do
       end)
     end
 
-    test "multiple frames on one track increment group sequence", %{relay_url: url} do
-      with_sessions(url, fn publisher, subscriber ->
+    test "multiple frames on one track increment group sequence", %{
+      relay_url: url,
+      local_dev_tls: tls_opts
+    } do
+      with_sessions(url, tls_opts, fn publisher, subscriber ->
         broadcast_path = "anon/multi-frame"
         track_name = "video"
 
@@ -151,8 +171,11 @@ defmodule MOQXIntegrationTest do
       end)
     end
 
-    test "multiple tracks can be published within one broadcast", %{relay_url: url} do
-      with_sessions(url, fn publisher, subscriber ->
+    test "multiple tracks can be published within one broadcast", %{
+      relay_url: url,
+      local_dev_tls: tls_opts
+    } do
+      with_sessions(url, tls_opts, fn publisher, subscriber ->
         broadcast_path = "anon/multi-track"
 
         {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
@@ -179,8 +202,11 @@ defmodule MOQXIntegrationTest do
       end)
     end
 
-    test "subscriber can subscribe before publisher writes the first frame", %{relay_url: url} do
-      with_sessions(url, fn publisher, subscriber ->
+    test "subscriber can subscribe before publisher writes the first frame", %{
+      relay_url: url,
+      local_dev_tls: tls_opts
+    } do
+      with_sessions(url, tls_opts, fn publisher, subscriber ->
         broadcast_path = "anon/subscribe-first"
         track_name = "video"
 
@@ -200,9 +226,12 @@ defmodule MOQXIntegrationTest do
   end
 
   describe "public API guardrails" do
-    test "session roles are explicit and split by architecture", %{relay_url: url} do
-      publisher = connect_publisher!(url)
-      subscriber = connect_subscriber!(url)
+    test "session roles are explicit and split by architecture", %{
+      relay_url: url,
+      local_dev_tls: tls_opts
+    } do
+      publisher = connect_publisher!(url, tls_opts)
+      subscriber = connect_subscriber!(url, tls_opts)
 
       assert MOQX.session_role(publisher) == :publisher
       assert MOQX.session_role(subscriber) == :subscriber
@@ -211,8 +240,8 @@ defmodule MOQXIntegrationTest do
       :ok = MOQX.close(subscriber)
     end
 
-    test "publish rejects subscriber sessions", %{relay_url: url} do
-      subscriber = connect_subscriber!(url)
+    test "publish rejects subscriber sessions", %{relay_url: url, local_dev_tls: tls_opts} do
+      subscriber = connect_subscriber!(url, tls_opts)
 
       assert {:error, reason} = MOQX.publish(subscriber, "anon/wrong-role")
       assert reason =~ "publish requires a publisher session"
@@ -220,8 +249,8 @@ defmodule MOQXIntegrationTest do
       :ok = MOQX.close(subscriber)
     end
 
-    test "subscribe rejects publisher sessions", %{relay_url: url} do
-      publisher = connect_publisher!(url)
+    test "subscribe rejects publisher sessions", %{relay_url: url, local_dev_tls: tls_opts} do
+      publisher = connect_publisher!(url, tls_opts)
 
       assert {:error, reason} = MOQX.subscribe(publisher, "anon/wrong-role", "video")
       assert reason =~ "subscribe requires a subscriber session"
@@ -238,8 +267,9 @@ defmodule MOQXIntegrationTest do
       assert :websocket in MOQX.supported_transports()
     end
 
-    test "quinn_raw_quic", %{relay_url: url} do
-      with_sessions(url, [backend: :quinn, transport: :raw_quic], fn publisher, subscriber ->
+    test "quinn_raw_quic", %{relay_url: url, local_dev_tls: tls_opts} do
+      with_sessions(url, tls_opts ++ [backend: :quinn, transport: :raw_quic], fn publisher,
+                                                                                 subscriber ->
         assert MOQX.session_version(publisher) == "moq-lite-03"
         assert MOQX.session_version(subscriber) == "moq-lite-03"
 
@@ -259,15 +289,15 @@ defmodule MOQXIntegrationTest do
       end)
     end
 
-    test "websocket_connect", %{relay_websocket_url: url} do
-      with_sessions(url, [transport: :websocket], fn publisher, subscriber ->
+    test "websocket_connect", %{relay_websocket_url: url, local_dev_tls: tls_opts} do
+      with_sessions(url, tls_opts ++ [transport: :websocket], fn publisher, subscriber ->
         assert MOQX.session_version(publisher) == "moq-lite-02"
         assert MOQX.session_version(subscriber) == "moq-lite-02"
       end)
     end
 
-    test "broadcast_websocket", %{relay_websocket_url: url} do
-      with_sessions(url, [transport: :websocket], fn publisher, subscriber ->
+    test "broadcast_websocket", %{relay_websocket_url: url, local_dev_tls: tls_opts} do
+      with_sessions(url, tls_opts ++ [transport: :websocket], fn publisher, subscriber ->
         assert MOQX.session_version(publisher) == "moq-lite-02"
         assert MOQX.session_version(subscriber) == "moq-lite-02"
 
@@ -298,19 +328,23 @@ defmodule MOQXIntegrationTest do
         ] do
       @version version
 
-      test "version_#{version}", %{relay_url: url} do
-        with_sessions(url, [transport: :raw_quic, version: @version], fn publisher, subscriber ->
+      test "version_#{version}", %{relay_url: url, local_dev_tls: tls_opts} do
+        with_sessions(url, tls_opts ++ [transport: :raw_quic, version: @version], fn publisher,
+                                                                                     subscriber ->
           assert MOQX.session_version(publisher) == @version
           assert MOQX.session_version(subscriber) == @version
         end)
       end
 
-      test "webtransport_#{version}", %{relay_url: url} do
-        with_sessions(url, [transport: :webtransport, version: @version], fn publisher,
-                                                                             subscriber ->
-          assert MOQX.session_version(publisher) == @version
-          assert MOQX.session_version(subscriber) == @version
-        end)
+      test "webtransport_#{version}", %{relay_url: url, local_dev_tls: tls_opts} do
+        with_sessions(
+          url,
+          tls_opts ++ [transport: :webtransport, version: @version],
+          fn publisher, subscriber ->
+            assert MOQX.session_version(publisher) == @version
+            assert MOQX.session_version(subscriber) == @version
+          end
+        )
       end
     end
   end
@@ -319,8 +353,9 @@ defmodule MOQXIntegrationTest do
     for version <- ["moq-lite-01", "moq-lite-02", "moq-transport-14"] do
       @version version
 
-      test "websocket_#{version}", %{relay_websocket_url: url} do
-        with_sessions(url, [transport: :websocket, version: @version], fn publisher, subscriber ->
+      test "websocket_#{version}", %{relay_websocket_url: url, local_dev_tls: tls_opts} do
+        with_sessions(url, tls_opts ++ [transport: :websocket, version: @version], fn publisher,
+                                                                                      subscriber ->
           assert MOQX.session_version(publisher) == @version
           assert MOQX.session_version(subscriber) == @version
         end)
@@ -346,6 +381,33 @@ defmodule MOQXIntegrationTest do
           await_subscribed!(broadcast_path, track_name)
           await_frame!(0, "hello")
           await_track_ended!()
+        end)
+      end)
+    end
+  end
+
+  describe "tls hardening" do
+    test "verification is enabled by default against self-signed local relay", %{relay_url: url} do
+      :ok = MOQX.connect_publisher(url, [])
+
+      assert {:error, reason} = await_connect_result!()
+      assert is_binary(reason)
+      refute reason == ""
+    end
+
+    test "explicit insecure mode preserves local self-signed development flow", %{relay_url: url} do
+      publisher = connect_publisher!(url, tls: [verify: :insecure])
+      subscriber = connect_subscriber!(url, tls: [verify: :insecure])
+
+      :ok = MOQX.close(publisher)
+      :ok = MOQX.close(subscriber)
+    end
+
+    test "custom root verification succeeds with a trusted local relay" do
+      with_isolated_trusted_relay(fn url, root_ca ->
+        with_sessions(url, [tls: [cacertfile: root_ca]], fn publisher, subscriber ->
+          assert MOQX.session_version(publisher) == "moq-lite-03"
+          assert MOQX.session_version(subscriber) == "moq-lite-03"
         end)
       end)
     end

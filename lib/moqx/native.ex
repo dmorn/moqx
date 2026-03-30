@@ -2,7 +2,7 @@ defmodule MOQX.Native do
   use Rustler, otp_app: :moqx, crate: "moqx_native"
 
   # Connection
-  def connect(_url, _role, _backend, _transport, _versions),
+  def connect(_url, _role, _backend, _transport, _versions, _tls_verify, _tls_cacertfile),
     do: :erlang.nif_error(:nif_not_loaded)
 
   def supported_backends, do: :erlang.nif_error(:nif_not_loaded)

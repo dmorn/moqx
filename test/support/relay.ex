@@ -7,13 +7,22 @@ defmodule MOQX.Test.Relay do
   @relay_config Path.expand("../../.moq-dev/dev/relay.toml", __DIR__)
   @relay_url "https://localhost:4443"
   @relay_websocket_url "http://localhost:4443/anon"
+  @trusted_root_ca Path.expand("fixtures/tls/rootCA.pem", __DIR__)
+  @trusted_localhost_cert Path.expand("fixtures/tls/localhost.pem", __DIR__)
+  @trusted_localhost_key Path.expand("fixtures/tls/localhost-key.pem", __DIR__)
 
   def url, do: @relay_url
   def websocket_url, do: @relay_websocket_url
   def websocket_fallback_url(http_port \\ 4545), do: "http://localhost:#{http_port}/anon"
+  def trusted_root_ca, do: @trusted_root_ca
 
   def available? do
     File.exists?(@relay_binary) and File.exists?(@relay_config)
+  end
+
+  def trusted_tls_available? do
+    File.exists?(@trusted_root_ca) and File.exists?(@trusted_localhost_cert) and
+      File.exists?(@trusted_localhost_key)
   end
 
   @doc """
@@ -38,7 +47,21 @@ defmodule MOQX.Test.Relay do
   """
   def start_isolated(quic_port, http_port) when is_integer(quic_port) and is_integer(http_port) do
     ensure_available!()
-    config_path = write_isolated_config(quic_port, http_port)
+    config_path = write_generated_tls_config(quic_port, http_port)
+    start_from_config(config_path, [quic_port, http_port])
+  end
+
+  @doc """
+  Starts an isolated relay instance with explicit localhost certificate/key files.
+  """
+  def start_isolated_trusted(quic_port, http_port)
+      when is_integer(quic_port) and is_integer(http_port) do
+    ensure_available!()
+    ensure_trusted_tls_available!()
+
+    config_path =
+      write_file_tls_config(quic_port, http_port, @trusted_localhost_cert, @trusted_localhost_key)
+
     start_from_config(config_path, [quic_port, http_port])
   end
 
@@ -66,6 +89,12 @@ defmodule MOQX.Test.Relay do
     end
   end
 
+  defp ensure_trusted_tls_available! do
+    unless trusted_tls_available?() do
+      raise "missing trusted TLS fixtures under test/support/fixtures/tls"
+    end
+  end
+
   defp start_from_config(config_path, ports) do
     port =
       Port.open({:spawn_executable, @relay_binary}, [
@@ -81,7 +110,28 @@ defmodule MOQX.Test.Relay do
     port
   end
 
-  defp write_isolated_config(quic_port, http_port) do
+  defp write_generated_tls_config(quic_port, http_port) do
+    write_config(
+      quic_port,
+      http_port,
+      """
+      tls.generate = [\"localhost\"]
+      """
+    )
+  end
+
+  defp write_file_tls_config(quic_port, http_port, cert_path, key_path) do
+    write_config(
+      quic_port,
+      http_port,
+      """
+      tls.cert = [#{inspect(cert_path)}]
+      tls.key = [#{inspect(key_path)}]
+      """
+    )
+  end
+
+  defp write_config(quic_port, http_port, tls_config) do
     path = Path.join(System.tmp_dir!(), "moqx-relay-#{quic_port}-#{http_port}.toml")
 
     File.write!(
@@ -92,7 +142,7 @@ defmodule MOQX.Test.Relay do
 
       [server]
       listen = \"[::]:#{quic_port}\"
-      tls.generate = [\"localhost\"]
+      #{String.trim_trailing(tls_config)}
 
       [web.http]
       listen = \"[::]:#{http_port}\"
