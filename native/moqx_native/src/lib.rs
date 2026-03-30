@@ -114,33 +114,30 @@ impl Resource for TrackProducerRes {}
 
 #[derive(Clone, Copy)]
 enum ConnectRole {
-    Both,
-    Publish,
-    Consume,
+    Publisher,
+    Subscriber,
 }
 
 impl ConnectRole {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Both => "both",
-            Self::Publish => "publish",
-            Self::Consume => "consume",
+            Self::Publisher => "publisher",
+            Self::Subscriber => "subscriber",
         }
     }
 
     fn can_publish(self) -> bool {
-        matches!(self, Self::Both | Self::Publish)
+        matches!(self, Self::Publisher)
     }
 
     fn can_consume(self) -> bool {
-        matches!(self, Self::Both | Self::Consume)
+        matches!(self, Self::Subscriber)
     }
 
     fn from_str(role: &str) -> rustler::NifResult<Self> {
         match role {
-            "both" => Ok(Self::Both),
-            "publish" => Ok(Self::Publish),
-            "consume" => Ok(Self::Consume),
+            "publisher" => Ok(Self::Publisher),
+            "subscriber" => Ok(Self::Subscriber),
             other => Err(rustler::Error::Term(Box::new(format!(
                 "invalid connect role: {}",
                 other
@@ -191,11 +188,8 @@ async fn do_connect(
     let client = config.init()?;
 
     let client = match role {
-        ConnectRole::Both => client
-            .with_publish(origin.consume())
-            .with_consume(origin.clone()),
-        ConnectRole::Publish => client.with_publish(origin.consume()),
-        ConnectRole::Consume => client.with_consume(origin.clone()),
+        ConnectRole::Publisher => client.with_publish(origin.consume()),
+        ConnectRole::Subscriber => client.with_consume(origin.clone()),
     };
 
     let session = client.connect(url).await?;
@@ -246,8 +240,7 @@ fn publish(
 ) -> rustler::NifResult<(Atom, ResourceArc<BroadcastProducerRes>)> {
     if !session.role.can_publish() {
         return Err(rustler::Error::Term(Box::new(
-            "publish requires a publisher-capable session; use MOQX.connect_publisher/1 or connect(url, role: :publish)"
-                .to_string(),
+            "publish requires a publisher session; use MOQX.connect_publisher/1".to_string(),
         )));
     }
 
@@ -394,8 +387,7 @@ fn subscribe(
 ) -> rustler::NifResult<Atom> {
     if !session.role.can_consume() {
         return Err(rustler::Error::Term(Box::new(
-            "subscribe requires a subscriber-capable session; use MOQX.connect_subscriber/1 or connect(url, role: :consume)"
-                .to_string(),
+            "subscribe requires a subscriber session; use MOQX.connect_subscriber/1".to_string(),
         )));
     }
 

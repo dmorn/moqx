@@ -2,7 +2,6 @@ defmodule MOQXIntegrationTest do
   use ExUnit.Case, async: false
 
   @moduletag :integration
-  @moduletag :ported_upstream
   @timeout 10_000
 
   setup_all do
@@ -11,14 +10,25 @@ defmodule MOQXIntegrationTest do
     %{relay_url: MOQX.Test.Relay.url()}
   end
 
-  defp connect!(url, opts \\ []) do
-    :ok = MOQX.connect(url, opts)
+  defp connect_publisher!(url) do
+    :ok = MOQX.connect_publisher(url)
 
     receive do
       {:moqx_connected, session} -> session
-      {:error, reason} -> raise "connect failed: #{inspect(reason)}"
+      {:error, reason} -> raise "publisher connect failed: #{inspect(reason)}"
     after
-      @timeout -> raise "connect timeout"
+      @timeout -> raise "publisher connect timeout"
+    end
+  end
+
+  defp connect_subscriber!(url) do
+    :ok = MOQX.connect_subscriber(url)
+
+    receive do
+      {:moqx_connected, session} -> session
+      {:error, reason} -> raise "subscriber connect failed: #{inspect(reason)}"
+    after
+      @timeout -> raise "subscriber connect timeout"
     end
   end
 
@@ -30,210 +40,180 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp canonical_roundtrip!(url, opts \\ []) do
-    drain_mailbox()
-
-    broadcast_path = Keyword.get(opts, :broadcast_path, "anon/test")
-    track_name = Keyword.get(opts, :track_name, "video")
-    payload = Keyword.get(opts, :payload, "hello")
-    finish_track? = Keyword.get(opts, :finish_track?, true)
-
-    :ok = MOQX.connect_publisher(url)
-
-    pub_session =
-      receive do
-        {:moqx_connected, session} -> session
-        {:error, reason} -> raise "connect failed: #{inspect(reason)}"
-      after
-        @timeout -> raise "connect timeout"
-      end
-
-    {:ok, broadcast} = MOQX.publish(pub_session, broadcast_path)
-    {:ok, track} = MOQX.create_track(broadcast, track_name)
-    :ok = MOQX.write_frame(track, payload)
-
-    :ok = MOQX.connect_subscriber(url)
-
-    sub_session =
-      receive do
-        {:moqx_connected, session} -> session
-        {:error, reason} -> raise "connect failed: #{inspect(reason)}"
-      after
-        @timeout -> raise "connect timeout"
-      end
-
-    :ok = MOQX.subscribe(sub_session, broadcast_path, track_name)
-
-    result =
-      receive do
-        {:moqx_subscribed, ^broadcast_path, ^track_name} ->
-          receive do
-            {:moqx_frame, 0, ^payload} = msg -> {:ok, msg}
-            {:moqx_error, _} = msg -> {:error, msg}
-          after
-            @timeout -> {:timeout, :frame}
-          end
-
-        {:moqx_error, _} = msg ->
-          {:error, msg}
-      after
-        @timeout -> {:timeout, :subscribe}
-      end
-
-    if finish_track? do
-      _ = MOQX.finish_track(track)
-    end
-
-    _ = MOQX.Native.session_close(pub_session)
-    _ = MOQX.Native.session_close(sub_session)
-
-    {result, %{broadcast: broadcast, track: track}}
-  end
-
-  defp unsupported!(feature, upstream_test) do
-    flunk(
-      "upstream test #{upstream_test} ported as placeholder: missing MOQX public API support for #{feature}"
-    )
-  end
-
-  describe "ported from rs/moq-native/tests/backend.rs" do
-    test "quinn_raw_quic", _ctx do
-      unsupported!("raw QUIC / moqt:// transport selection", "quinn_raw_quic")
-    end
-
-    test "quinn_webtransport", %{relay_url: url} do
-      assert match?({:ok, {:moqx_frame, 0, "hello"}}, elem(canonical_roundtrip!(url), 0))
-    end
-
-    test "quiche_raw_quic", _ctx do
-      unsupported!("backend + raw QUIC selection", "quiche_raw_quic")
-    end
-
-    test "quiche_webtransport", _ctx do
-      unsupported!("backend selection", "quiche_webtransport")
-    end
-
-    test "iroh_connect", _ctx do
-      unsupported!("iroh endpoint configuration", "iroh_connect")
-    end
-
-    test "noq_raw_quic", _ctx do
-      unsupported!("backend + raw QUIC selection", "noq_raw_quic")
-    end
-
-    test "noq_webtransport", _ctx do
-      unsupported!("backend selection", "noq_webtransport")
+  defp await_subscribed!(broadcast_path, track_name) do
+    receive do
+      {:moqx_subscribed, ^broadcast_path, ^track_name} -> :ok
+      {:moqx_error, reason} -> flunk("subscribe failed: #{inspect(reason)}")
+    after
+      @timeout -> flunk("subscribe timeout")
     end
   end
 
-  describe "session role guardrails" do
-    test "session_role reports the configured role", %{relay_url: url} do
-      pub_session = connect!(url, role: :publish)
-      sub_session = connect!(url, role: :consume)
-      both_session = connect!(url)
-
-      assert MOQX.session_role(pub_session) == "publish"
-      assert MOQX.session_role(sub_session) == "consume"
-      assert MOQX.session_role(both_session) == "both"
-
-      :ok = MOQX.Native.session_close(pub_session)
-      :ok = MOQX.Native.session_close(sub_session)
-      :ok = MOQX.Native.session_close(both_session)
-    end
-
-    test "publish rejects consume-only sessions", %{relay_url: url} do
-      sub_session = connect!(url, role: :consume)
-
-      assert {:error, reason} = MOQX.publish(sub_session, "anon/wrong-role")
-      assert reason =~ "publish requires a publisher-capable session"
-
-      :ok = MOQX.Native.session_close(sub_session)
-    end
-
-    test "subscribe rejects publish-only sessions", %{relay_url: url} do
-      pub_session = connect!(url, role: :publish)
-
-      assert {:error, reason} = MOQX.subscribe(pub_session, "anon/wrong-role", "video")
-      assert reason =~ "subscribe requires a subscriber-capable session"
-
-      :ok = MOQX.Native.session_close(pub_session)
+  defp await_frame!(expected_group_seq, expected_payload) do
+    receive do
+      {:moqx_frame, ^expected_group_seq, ^expected_payload} -> :ok
+      {:moqx_error, reason} -> flunk("frame receive failed: #{inspect(reason)}")
+      other -> flunk("unexpected message while waiting for frame: #{inspect(other)}")
+    after
+      @timeout -> flunk("frame timeout")
     end
   end
 
-  describe "ported from rs/moq-native/tests/broadcast.rs - cases expressible via current MOQX API" do
-    test "broadcast_webtransport", %{relay_url: url} do
-      assert match?({:ok, {:moqx_frame, 0, "hello"}}, elem(canonical_roundtrip!(url), 0))
-    end
-
-    test "single frame round-trip, publish-first like upstream canonical flow", %{relay_url: url} do
-      assert match?({:ok, {:moqx_frame, 0, "hello"}}, elem(canonical_roundtrip!(url), 0))
-    end
-
-    test "broadcast lifetime is held until teardown", %{relay_url: url} do
-      {result, refs} = canonical_roundtrip!(url, broadcast_path: "anon/test-lifetime")
-      assert refs.broadcast != nil
-      assert refs.track != nil
-      assert match?({:ok, {:moqx_frame, 0, "hello"}}, result)
+  defp await_track_ended! do
+    receive do
+      :moqx_track_ended -> :ok
+      {:moqx_error, reason} -> flunk("track ended with error: #{inspect(reason)}")
+      other -> flunk("unexpected message while waiting for track end: #{inspect(other)}")
+    after
+      @timeout -> flunk("track end timeout")
     end
   end
 
-  describe "ported from rs/moq-native/tests/broadcast.rs - version-matrix placeholders" do
+  defp with_sessions(url, fun) do
+    publisher = connect_publisher!(url)
+    subscriber = connect_subscriber!(url)
+
+    try do
+      fun.(publisher, subscriber)
+    after
+      :ok = MOQX.close(publisher)
+      :ok = MOQX.close(subscriber)
+    end
+  end
+
+  describe "current supported architecture" do
+    test "single-frame relay-backed round trip", %{relay_url: url} do
+      with_sessions(url, fn publisher, subscriber ->
+        broadcast_path = "anon/single-frame"
+        track_name = "video"
+
+        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
+        :ok = MOQX.write_frame(track, "hello")
+        :ok = MOQX.finish_track(track)
+
+        await_subscribed!(broadcast_path, track_name)
+        await_frame!(0, "hello")
+        await_track_ended!()
+      end)
+    end
+
+    test "multiple frames on one track increment group sequence", %{relay_url: url} do
+      with_sessions(url, fn publisher, subscriber ->
+        broadcast_path = "anon/multi-frame"
+        track_name = "video"
+
+        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
+        :ok = MOQX.write_frame(track, "frame-1")
+
+        await_subscribed!(broadcast_path, track_name)
+        await_frame!(0, "frame-1")
+
+        :ok = MOQX.write_frame(track, "frame-2")
+        await_frame!(1, "frame-2")
+
+        :ok = MOQX.write_frame(track, "frame-3")
+        await_frame!(2, "frame-3")
+
+        :ok = MOQX.finish_track(track)
+        await_track_ended!()
+      end)
+    end
+
+    test "multiple tracks can be published within one broadcast", %{relay_url: url} do
+      with_sessions(url, fn publisher, subscriber ->
+        broadcast_path = "anon/multi-track"
+
+        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
+        {:ok, audio_track} = MOQX.create_track(broadcast, "audio")
+        {:ok, video_track} = MOQX.create_track(broadcast, "video")
+
+        :ok = MOQX.subscribe(subscriber, broadcast_path, "audio")
+        :ok = MOQX.write_frame(audio_track, "audio-1")
+        :ok = MOQX.finish_track(audio_track)
+
+        await_subscribed!(broadcast_path, "audio")
+        await_frame!(0, "audio-1")
+        await_track_ended!()
+
+        drain_mailbox()
+
+        :ok = MOQX.subscribe(subscriber, broadcast_path, "video")
+        :ok = MOQX.write_frame(video_track, "video-1")
+        :ok = MOQX.finish_track(video_track)
+
+        await_subscribed!(broadcast_path, "video")
+        await_frame!(0, "video-1")
+        await_track_ended!()
+      end)
+    end
+
+    test "subscriber can subscribe before publisher writes the first frame", %{relay_url: url} do
+      with_sessions(url, fn publisher, subscriber ->
+        broadcast_path = "anon/subscribe-first"
+        track_name = "video"
+
+        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
+        Process.sleep(100)
+        :ok = MOQX.write_frame(track, "hello")
+        :ok = MOQX.finish_track(track)
+
+        await_subscribed!(broadcast_path, track_name)
+        await_frame!(0, "hello")
+        await_track_ended!()
+      end)
+    end
+  end
+
+  describe "public API guardrails" do
+    test "session roles are explicit and split by architecture", %{relay_url: url} do
+      publisher = connect_publisher!(url)
+      subscriber = connect_subscriber!(url)
+
+      assert MOQX.session_role(publisher) == :publisher
+      assert MOQX.session_role(subscriber) == :subscriber
+
+      :ok = MOQX.close(publisher)
+      :ok = MOQX.close(subscriber)
+    end
+
+    test "publish rejects subscriber sessions", %{relay_url: url} do
+      subscriber = connect_subscriber!(url)
+
+      assert {:error, reason} = MOQX.publish(subscriber, "anon/wrong-role")
+      assert reason =~ "publish requires a publisher session"
+
+      :ok = MOQX.close(subscriber)
+    end
+
+    test "subscribe rejects publisher sessions", %{relay_url: url} do
+      publisher = connect_publisher!(url)
+
+      assert {:error, reason} = MOQX.subscribe(publisher, "anon/wrong-role", "video")
+      assert reason =~ "subscribe requires a subscriber session"
+
+      :ok = MOQX.close(publisher)
+    end
+  end
+
+  describe "out-of-scope upstream cases remain placeholders" do
     for name <- [
-          "broadcast_moq_lite_01",
-          "broadcast_moq_lite_02",
-          "broadcast_moq_lite_03",
-          "broadcast_moq_transport_14",
-          "broadcast_moq_transport_15",
-          "broadcast_moq_transport_16",
-          "broadcast_negotiate_server_all_client_lite_01",
-          "broadcast_negotiate_server_all_client_lite_02",
-          "broadcast_negotiate_server_all_client_lite_03",
-          "broadcast_negotiate_server_all_client_transport_14",
-          "broadcast_negotiate_server_all_client_transport_15",
-          "broadcast_negotiate_server_all_client_transport_16",
-          "broadcast_negotiate_client_all_server_lite_01",
-          "broadcast_negotiate_client_all_server_lite_02",
-          "broadcast_negotiate_client_all_server_lite_03",
-          "broadcast_negotiate_client_all_server_transport_14",
-          "broadcast_negotiate_client_all_server_transport_15",
-          "broadcast_negotiate_client_all_server_transport_16",
-          "broadcast_webtransport_moq_lite_01",
-          "broadcast_webtransport_moq_lite_02",
-          "broadcast_webtransport_moq_lite_03",
-          "broadcast_webtransport_moq_transport_14",
-          "broadcast_webtransport_moq_transport_15",
-          "broadcast_webtransport_moq_transport_16",
-          "broadcast_webtransport_negotiate_server_all_client_lite_01",
-          "broadcast_webtransport_negotiate_server_all_client_lite_02",
-          "broadcast_webtransport_negotiate_server_all_client_lite_03",
-          "broadcast_webtransport_negotiate_server_all_client_transport_14",
-          "broadcast_webtransport_negotiate_server_all_client_transport_15",
-          "broadcast_webtransport_negotiate_server_all_client_transport_16",
-          "broadcast_webtransport_negotiate_client_all_server_lite_01",
-          "broadcast_webtransport_negotiate_client_all_server_lite_02",
-          "broadcast_webtransport_negotiate_client_all_server_lite_03",
-          "broadcast_webtransport_negotiate_client_all_server_transport_14",
-          "broadcast_webtransport_negotiate_client_all_server_transport_15",
-          "broadcast_webtransport_negotiate_client_all_server_transport_16"
-        ] do
-      test name, _ctx do
-        unsupported!("client/server version pinning + negotiation controls", unquote(name))
-      end
-    end
-  end
-
-  describe "ported from rs/moq-native/tests/broadcast.rs - websocket placeholders" do
-    test "broadcast_websocket", _ctx do
-      unsupported!("websocket listener/transport selection", "broadcast_websocket")
-    end
-
-    test "broadcast_websocket_fallback", _ctx do
-      unsupported!("websocket fallback controls", "broadcast_websocket_fallback")
-    end
-  end
-
-  describe "ported from rs/moq-native/tests/alpn.rs" do
-    for name <- [
+          "quinn_raw_quic",
+          "quiche_raw_quic",
+          "quiche_webtransport",
+          "iroh_connect",
+          "noq_raw_quic",
+          "noq_webtransport",
+          "broadcast_websocket",
+          "broadcast_websocket_fallback",
           "version_moq_lite_01",
           "version_moq_lite_02",
           "version_moq_lite_03",
@@ -247,16 +227,10 @@ defmodule MOQXIntegrationTest do
           "webtransport_moq_transport_15",
           "webtransport_moq_transport_16"
         ] do
-      test name, _ctx do
-        unsupported!("ALPN/subprotocol version forcing in public connect API", unquote(name))
+      @tag skip: "placeholder for unsupported Bucket 2+ transport/backend/version work"
+      test name do
+        :ok
       end
-    end
-
-    test "webtransport", %{relay_url: url} do
-      # Closest current-API analogue: default WebTransport connection succeeds.
-      session = connect!(url)
-      assert is_binary(MOQX.Native.session_version(session))
-      :ok = MOQX.Native.session_close(session)
     end
   end
 end

@@ -1,17 +1,29 @@
 defmodule MOQXTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
 
-  test "NIF module loads" do
-    assert is_function(&MOQX.Native.connect/1)
-    assert is_function(&MOQX.Native.session_version/1)
-    assert is_function(&MOQX.Native.session_close/1)
+  test "public API exposes explicit role-based connect helpers" do
+    assert is_function(&MOQX.connect/2)
+    assert is_function(&MOQX.connect_publisher/1)
+    assert is_function(&MOQX.connect_subscriber/1)
+    assert is_function(&MOQX.close/1)
   end
 
-  test "connect returns error for invalid URL" do
-    assert {:error, _reason} = MOQX.Native.connect(":::invalid")
+  test "connect/2 requires an explicit role" do
+    assert_raise ArgumentError, "connect/2 requires :role (:publisher or :subscriber)", fn ->
+      MOQX.connect("https://example.com", [])
+    end
   end
 
-  test "connect returns ok for valid URL (async)" do
-    assert :ok = MOQX.Native.connect("https://localhost:4443")
+  test "connect/2 validates the role name before reaching the NIF" do
+    assert_raise ArgumentError,
+                 "expected :role to be :publisher or :subscriber, got: :both",
+                 fn ->
+                   MOQX.connect("https://example.com", role: :both)
+                 end
+  end
+
+  test "invalid URLs return an error tuple" do
+    assert {:error, reason} = MOQX.connect_publisher(":::invalid")
+    assert is_binary(reason)
   end
 end
