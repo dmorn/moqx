@@ -26,3 +26,4 @@ moqx-*.tar
 # Rust binary artifacts
 /target/
 priv/native
+.moq-dev/

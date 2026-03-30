@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 
 use moq_lite::Origin;
 use moq_native::ClientConfig;
-use rustler::{Atom, Encoder, Env, OwnedEnv, Resource, ResourceArc};
+use rustler::{Atom, Binary, Encoder, Env, LocalPid, NewBinary, OwnedEnv, Resource, ResourceArc};
 use tokio::runtime::Runtime;
 
 mod atoms {
@@ -11,6 +11,10 @@ mod atoms {
         error,
         moqx_connected,
         moqx_session_closed,
+        moqx_subscribed,
+        moqx_frame,
+        moqx_track_ended,
+        moqx_error,
     }
 }
 
@@ -32,36 +36,129 @@ fn runtime() -> &'static Runtime {
 pub struct SessionRes {
     session: tokio::sync::Mutex<Option<moq_lite::Session>>,
     origin: Arc<OriginRes>,
+    role: ConnectRole,
+}
+
+impl Drop for SessionRes {
+    fn drop(&mut self) {
+        let _enter = runtime().enter();
+        let mut guard = runtime().block_on(self.session.lock());
+        if let Some(mut s) = guard.take() {
+            s.close(moq_lite::Error::Cancel);
+        }
+    }
 }
 
 #[rustler::resource_impl]
 impl Resource for SessionRes {}
 
 pub struct OriginRes {
-    producer: moq_lite::OriginProducer,
+    producer: Option<moq_lite::OriginProducer>,
+}
+
+impl Drop for OriginRes {
+    fn drop(&mut self) {
+        let _enter = runtime().enter();
+        let _ = self.producer.take();
+    }
 }
 
 #[rustler::resource_impl]
 impl Resource for OriginRes {}
 
+struct BroadcastState {
+    broadcast: moq_lite::BroadcastProducer,
+    origin: Arc<OriginRes>,
+    path: String,
+    announced: bool,
+}
+
+type SharedBroadcastState = Arc<std::sync::Mutex<Option<BroadcastState>>>;
+
+pub struct BroadcastProducerRes {
+    inner: SharedBroadcastState,
+}
+
+impl Drop for BroadcastProducerRes {
+    fn drop(&mut self) {
+        let _guard = runtime().enter();
+        if let Ok(mut inner) = self.inner.lock() {
+            let _ = inner.take();
+        }
+    }
+}
+
+#[rustler::resource_impl]
+impl Resource for BroadcastProducerRes {}
+
+pub struct TrackProducerRes {
+    inner: std::sync::Mutex<Option<moq_lite::TrackProducer>>,
+    parent: SharedBroadcastState,
+}
+
+impl Drop for TrackProducerRes {
+    fn drop(&mut self) {
+        let _guard = runtime().enter();
+        if let Ok(mut inner) = self.inner.lock() {
+            let _ = inner.take();
+        }
+    }
+}
+
+#[rustler::resource_impl]
+impl Resource for TrackProducerRes {}
+
 // ---------------------------------------------------------------------------
-// NIF functions
+// Connection
 // ---------------------------------------------------------------------------
 
-/// Connects to a MOQ relay asynchronously.
-///
-/// Returns `{:ok, :ok}` immediately. When the connection is established,
-/// the calling process receives `{:moqx_connected, session_resource}`
-/// or `{:error, reason}`.
+#[derive(Clone, Copy)]
+enum ConnectRole {
+    Both,
+    Publish,
+    Consume,
+}
+
+impl ConnectRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::Publish => "publish",
+            Self::Consume => "consume",
+        }
+    }
+
+    fn can_publish(self) -> bool {
+        matches!(self, Self::Both | Self::Publish)
+    }
+
+    fn can_consume(self) -> bool {
+        matches!(self, Self::Both | Self::Consume)
+    }
+
+    fn from_str(role: &str) -> rustler::NifResult<Self> {
+        match role {
+            "both" => Ok(Self::Both),
+            "publish" => Ok(Self::Publish),
+            "consume" => Ok(Self::Consume),
+            other => Err(rustler::Error::Term(Box::new(format!(
+                "invalid connect role: {}",
+                other
+            )))),
+        }
+    }
+}
+
 #[rustler::nif]
-fn connect(env: Env, url: String) -> rustler::NifResult<Atom> {
+fn connect(env: Env, url: String, role: String) -> rustler::NifResult<Atom> {
     let caller_pid = env.pid();
 
-    let parsed_url = url::Url::parse(&url)
-        .map_err(|e| rustler::Error::Term(Box::new(format!("{}", e))))?;
+    let parsed_url =
+        url::Url::parse(&url).map_err(|e| rustler::Error::Term(Box::new(format!("{}", e))))?;
+    let role = ConnectRole::from_str(&role)?;
 
     runtime().spawn(async move {
-        let result = do_connect(parsed_url).await;
+        let result = do_connect(parsed_url, role).await;
 
         let mut msg_env = OwnedEnv::new();
         let _ = msg_env.send_and_clear(&caller_pid, |env| match result {
@@ -70,6 +167,7 @@ fn connect(env: Env, url: String) -> rustler::NifResult<Atom> {
                 let session_resource = ResourceArc::new(SessionRes {
                     session: tokio::sync::Mutex::new(Some(session)),
                     origin: origin_arc,
+                    role,
                 });
                 (atoms::moqx_connected(), session_resource).encode(env)
             }
@@ -80,24 +178,36 @@ fn connect(env: Env, url: String) -> rustler::NifResult<Atom> {
     Ok(atoms::ok())
 }
 
-async fn do_connect(url: url::Url) -> anyhow::Result<(moq_lite::Session, OriginRes)> {
+async fn do_connect(
+    url: url::Url,
+    role: ConnectRole,
+) -> anyhow::Result<(moq_lite::Session, OriginRes)> {
     let mut config = ClientConfig::default();
+    // Matches the upstream local WebTransport tests against a relay/server that
+    // generates a self-signed localhost certificate.
     config.tls.disable_verify = Some(true);
 
     let origin = Origin::produce();
-    let origin_consumer = origin.consume();
+    let client = config.init()?;
 
-    let client = config
-        .init()?
-        .with_publish(origin_consumer)
-        .with_consume(origin.clone());
+    let client = match role {
+        ConnectRole::Both => client
+            .with_publish(origin.consume())
+            .with_consume(origin.clone()),
+        ConnectRole::Publish => client.with_publish(origin.consume()),
+        ConnectRole::Consume => client.with_consume(origin.clone()),
+    };
 
     let session = client.connect(url).await?;
 
-    Ok((session, OriginRes { producer: origin }))
+    Ok((
+        session,
+        OriginRes {
+            producer: Some(origin),
+        },
+    ))
 }
 
-/// Returns the negotiated protocol version as a string.
 #[rustler::nif]
 fn session_version(session: ResourceArc<SessionRes>) -> String {
     let guard = runtime().block_on(session.session.lock());
@@ -107,14 +217,284 @@ fn session_version(session: ResourceArc<SessionRes>) -> String {
     }
 }
 
-/// Closes a session.
+#[rustler::nif]
+fn session_role(session: ResourceArc<SessionRes>) -> String {
+    session.role.as_str().to_string()
+}
+
 #[rustler::nif]
 fn session_close(session: ResourceArc<SessionRes>) -> Atom {
+    let _enter = runtime().enter();
     let mut guard = runtime().block_on(session.session.lock());
     if let Some(mut s) = guard.take() {
         s.close(moq_lite::Error::Cancel);
     }
     atoms::ok()
+}
+
+// ---------------------------------------------------------------------------
+// Publish
+// ---------------------------------------------------------------------------
+
+/// Creates and announces a broadcast on the session's origin.
+///
+/// Returns `{:ok, broadcast}` or raises `{:error, reason}`.
+#[rustler::nif]
+fn publish(
+    session: ResourceArc<SessionRes>,
+    broadcast_path: String,
+) -> rustler::NifResult<(Atom, ResourceArc<BroadcastProducerRes>)> {
+    if !session.role.can_publish() {
+        return Err(rustler::Error::Term(Box::new(
+            "publish requires a publisher-capable session; use MOQX.connect_publisher/1 or connect(url, role: :publish)"
+                .to_string(),
+        )));
+    }
+
+    // Enter the Tokio runtime context — needed because create_broadcast
+    // internally spawns a monitoring task via web_async::spawn.
+    let _guard = runtime().enter();
+
+    let res = ResourceArc::new(BroadcastProducerRes {
+        inner: Arc::new(std::sync::Mutex::new(Some(BroadcastState {
+            broadcast: moq_lite::Broadcast::produce(),
+            origin: session.origin.clone(),
+            path: broadcast_path,
+            announced: false,
+        }))),
+    });
+
+    Ok((atoms::ok(), res))
+}
+
+/// Creates a named track on a broadcast.
+///
+/// Returns `{:ok, track}` or raises `{:error, reason}`.
+#[rustler::nif]
+fn create_track(
+    broadcast: ResourceArc<BroadcastProducerRes>,
+    track_name: String,
+) -> rustler::NifResult<(Atom, ResourceArc<TrackProducerRes>)> {
+    let _guard = runtime().enter();
+
+    let mut guard = broadcast
+        .inner
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("lock poisoned".to_string())))?;
+
+    let state = guard
+        .as_mut()
+        .ok_or_else(|| rustler::Error::Term(Box::new("broadcast closed".to_string())))?;
+
+    let track = state
+        .broadcast
+        .create_track(moq_lite::Track::new(&track_name))
+        .map_err(|e| rustler::Error::Term(Box::new(format!("{:?}", e))))?;
+
+    let res = ResourceArc::new(TrackProducerRes {
+        inner: std::sync::Mutex::new(Some(track)),
+        parent: broadcast.inner.clone(),
+    });
+
+    Ok((atoms::ok(), res))
+}
+
+/// Writes a single frame as a new group on the track.
+///
+/// Each call creates a new group with a single frame containing `data`.
+/// Returns `:ok` or raises `{:error, reason}`.
+#[rustler::nif]
+fn write_frame(track: ResourceArc<TrackProducerRes>, data: Binary) -> rustler::NifResult<Atom> {
+    let _guard = runtime().enter();
+
+    let mut guard = track
+        .inner
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("lock poisoned".to_string())))?;
+
+    let track_inner = guard
+        .as_mut()
+        .ok_or_else(|| rustler::Error::Term(Box::new("track closed".to_string())))?;
+
+    track_inner
+        .write_frame(bytes::Bytes::copy_from_slice(data.as_slice()))
+        .map_err(|e| rustler::Error::Term(Box::new(format!("{:?}", e))))?;
+
+    // Announce lazily on the first successfully written frame so the relay
+    // only sees a broadcast once it already contains track data.
+    // This mirrors the upstream tests more closely, where the broadcast is
+    // fully populated before the session starts publishing it.
+    let mut parent = track
+        .parent
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("lock poisoned".to_string())))?;
+
+    if let Some(state) = parent.as_mut() {
+        if !state.announced {
+            let producer = state
+                .origin
+                .producer
+                .as_ref()
+                .ok_or_else(|| rustler::Error::Term(Box::new("origin closed".to_string())))?;
+
+            if !producer.publish_broadcast(&state.path, state.broadcast.consume()) {
+                return Err(rustler::Error::Term(Box::new(format!(
+                    "broadcast path not allowed: {}",
+                    state.path
+                ))));
+            }
+
+            state.announced = true;
+        }
+    }
+
+    Ok(atoms::ok())
+}
+
+/// Marks a track as finished. No more frames can be written after this.
+///
+/// Returns `:ok` or raises `{:error, reason}`.
+#[rustler::nif]
+fn finish_track(track: ResourceArc<TrackProducerRes>) -> rustler::NifResult<Atom> {
+    let _guard = runtime().enter();
+
+    let mut guard = track
+        .inner
+        .lock()
+        .map_err(|_| rustler::Error::Term(Box::new("lock poisoned".to_string())))?;
+
+    let track = guard
+        .as_mut()
+        .ok_or_else(|| rustler::Error::Term(Box::new("track closed".to_string())))?;
+
+    track
+        .finish()
+        .map_err(|e| rustler::Error::Term(Box::new(format!("{:?}", e))))?;
+
+    Ok(atoms::ok())
+}
+
+// ---------------------------------------------------------------------------
+// Subscribe / Consume
+// ---------------------------------------------------------------------------
+
+/// Subscribes to a track on a broadcast, receiving frames as messages.
+///
+/// Returns `:ok` immediately. The calling process will receive:
+/// - `{:moqx_subscribed, broadcast_path, track_name}` when subscribed
+/// - `{:moqx_frame, group_seq, binary_data}` for each frame
+/// - `{:moqx_track_ended}` when the track is finished
+/// - `{:moqx_error, reason}` on error
+#[rustler::nif]
+fn subscribe(
+    env: Env,
+    session: ResourceArc<SessionRes>,
+    broadcast_path: String,
+    track_name: String,
+) -> rustler::NifResult<Atom> {
+    if !session.role.can_consume() {
+        return Err(rustler::Error::Term(Box::new(
+            "subscribe requires a subscriber-capable session; use MOQX.connect_subscriber/1 or connect(url, role: :consume)"
+                .to_string(),
+        )));
+    }
+
+    let caller_pid = env.pid();
+    let origin = session.origin.clone();
+
+    runtime().spawn(async move {
+        if let Err(e) = do_subscribe(origin, &broadcast_path, &track_name, caller_pid).await {
+            let mut msg_env = OwnedEnv::new();
+            let _ = msg_env.send_and_clear(&caller_pid, |env| {
+                (atoms::moqx_error(), format!("{:#}", e)).encode(env)
+            });
+        }
+    });
+
+    Ok(atoms::ok())
+}
+
+async fn do_subscribe(
+    origin: Arc<OriginRes>,
+    broadcast_path: &str,
+    track_name: &str,
+    caller_pid: LocalPid,
+) -> anyhow::Result<()> {
+    // Create a consumer from the origin — this immediately replays all existing
+    // announcements and then yields new ones, avoiding the race between
+    // consume_broadcast() and a not-yet-announced broadcast.
+    let broadcast = {
+        let producer = origin
+            .producer
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("origin closed"))?;
+        let mut consumer = producer.consume();
+        loop {
+            match consumer.announced().await {
+                Some((path, Some(bc))) => {
+                    if path.as_str() == broadcast_path {
+                        break bc;
+                    }
+                }
+                Some(_) => continue, // unannounce or different path
+                None => anyhow::bail!("origin consumer closed while waiting for broadcast"),
+            }
+        }
+    };
+
+    // Subscribe to the specific track
+    let track_info = moq_lite::Track::new(track_name);
+    let mut track_consumer = broadcast
+        .subscribe_track(&track_info)
+        .map_err(|e| anyhow::anyhow!("subscribe_track failed: {:?}", e))?;
+
+    // Notify caller that subscription is active
+    {
+        let bp = broadcast_path.to_string();
+        let tn = track_name.to_string();
+        let mut msg_env = OwnedEnv::new();
+        let _ = msg_env.send_and_clear(&caller_pid, |env| {
+            (atoms::moqx_subscribed(), bp, tn).encode(env)
+        });
+    }
+
+    // Read groups and frames, sending each frame to the caller
+    while let Some(mut group) = track_consumer
+        .next_group()
+        .await
+        .map_err(|e| anyhow::anyhow!("next_group: {:?}", e))?
+    {
+        let group_seq = group.info.sequence;
+
+        while let Some(data) = group
+            .read_frame()
+            .await
+            .map_err(|e| anyhow::anyhow!("read_frame: {:?}", e))?
+        {
+            let mut msg_env = OwnedEnv::new();
+            let _ = msg_env.send_and_clear(&caller_pid, |env| {
+                let mut binary = NewBinary::new(env, data.len());
+                binary.as_mut_slice().copy_from_slice(&data);
+                let binary_term: rustler::Term = binary.into();
+                rustler::types::tuple::make_tuple(
+                    env,
+                    &[
+                        atoms::moqx_frame().encode(env),
+                        group_seq.encode(env),
+                        binary_term,
+                    ],
+                )
+            });
+        }
+    }
+
+    // Track ended cleanly
+    {
+        let mut msg_env = OwnedEnv::new();
+        let _ = msg_env.send_and_clear(&caller_pid, |env| atoms::moqx_track_ended().encode(env));
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
