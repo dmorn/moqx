@@ -19,7 +19,8 @@ defmodule MOQX.MixProject do
 
   defp deps do
     [
-      {:rustler, "~> 0.37.1", runtime: false}
+      {:rustler, "~> 0.37.1", runtime: false},
+      {:jose, "~> 1.11"}
     ]
   end
 end

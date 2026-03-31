@@ -55,6 +55,33 @@ subscriber =
   end
 ```
 
+For an auth-enabled relay, keep using the same connect APIs and pass the token in
+the URL query:
+
+```elixir
+jwt = "eyJhbGciOiJIUzI1NiIs..."
+
+:ok =
+  MOQX.connect_publisher(
+    "https://relay.example.com/room/123?jwt=#{jwt}",
+    tls: [cacertfile: "/path/to/rootCA.pem"]
+  )
+
+:ok =
+  MOQX.connect_subscriber(
+    "https://relay.example.com/room/123?jwt=#{jwt}",
+    tls: [cacertfile: "/path/to/rootCA.pem"]
+  )
+```
+
+When you connect to a rooted URL like `/room/123`, publish and subscribe paths can
+stay relative to that root:
+
+```elixir
+{:ok, broadcast} = MOQX.publish(publisher, "alice")
+:ok = MOQX.subscribe(subscriber, "alice", "video")
+```
+
 If you need dynamic role selection or connect-time protocol controls, use:
 
 ```elixir
@@ -94,10 +121,12 @@ Supported connect options:
 
 Notes:
 
+- relay authentication currently rides on the URL itself: pass the JWT as `?jwt=...`
+- relay authorization is path-rooted: the connect URL path must fall under the token's `root`
 - TLS verification is enabled by default; `:tls, [verify: :insecure]` is a local-development escape hatch only
 - local relay WebSocket connections use the relay's plain HTTP endpoint, so local examples use `http://.../anon`
 - the current relay-backed WebSocket path negotiates the upstream-compatible subset `moq-lite-01`, `moq-lite-02`, and `moq-transport-14`
-- transport parity coverage now includes relay-backed WebSocket round trips and an isolated WebSocket fallback harness
+- transport parity coverage now includes relay-backed WebSocket round trips, an isolated WebSocket fallback harness, and auth-enabled relay integration coverage
 - the `cacertfile` option is intended for private/local roots; default verification otherwise uses system/native roots
 
 You can inspect the compiled native support at runtime:
@@ -142,6 +171,73 @@ receive do
   {:moqx_error, reason} -> raise "subscription failed: #{inspect(reason)}"
 end
 ```
+
+## Relay authentication
+
+Upstream relay auth currently expects JWTs in the `jwt` query parameter, and the
+URL path must match the token root. Follow the implementation claim names, not
+older prose that still says `pub` / `sub`.
+
+Use these claims:
+
+- `root`
+- `put` for publish permissions
+- `get` for subscribe permissions
+- `cluster` when needed by relay clustering
+- `iat`
+- `exp`
+
+A typical authenticated URL looks like:
+
+```text
+https://localhost:4443/room/123?jwt=eyJhbGciOiJIUzI1NiIs...
+```
+
+### Minting relay-compatible tokens with JOSE
+
+Add JOSE to your project if you want to mint tokens from Elixir:
+
+```elixir
+# mix.exs
+{:jose, "~> 1.11"}
+```
+
+Example using a symmetric `oct` JWK:
+
+```elixir
+jwk =
+  JOSE.JWK.from(%{
+    "alg" => "HS256",
+    "key_ops" => ["sign", "verify"],
+    "kty" => "oct",
+    "k" => Base.url_encode64("replace-with-a-strong-shared-secret", padding: false),
+    "kid" => "relay-dev-root"
+  })
+
+now = System.system_time(:second)
+
+claims = %{
+  "root" => "room/123",
+  "put" => [""],
+  "get" => [""],
+  "iat" => now,
+  "exp" => now + 3600
+}
+
+{_jws, jwt} =
+  jwk
+  |> JOSE.JWT.sign(%{"alg" => "HS256", "kid" => "relay-dev-root", "typ" => "JWT"}, claims)
+  |> JOSE.JWS.compact()
+
+url = "https://localhost:4443/room/123?jwt=#{jwt}"
+```
+
+A few practical patterns:
+
+- publish-only token: `put: [""]`, `get: []`
+- subscribe-only token: `put: []`, `get: [""]`
+- full room access: `put: [""], get: [""]`
+- narrower access can use rooted suffixes like `put: ["alice"]`, `get: ["viewers"]`
 
 ## Local development
 

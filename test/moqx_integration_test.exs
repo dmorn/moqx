@@ -116,11 +116,38 @@ defmodule MOQXIntegrationTest do
     end
   end
 
+  defp with_isolated_trusted_auth_relay(fun) do
+    relay = MOQX.Test.Relay.start_isolated_trusted_auth(4548, 4549)
+    drain_port_messages(relay)
+
+    try do
+      fun.("https://localhost:4548", MOQX.Test.Relay.trusted_root_ca())
+    after
+      MOQX.Test.Relay.stop(relay)
+    end
+  end
+
   defp drain_port_messages(port) do
     receive do
       {^port, _message} -> drain_port_messages(port)
     after
       0 -> :ok
+    end
+  end
+
+  defp auth_url(base_url, root, claims) do
+    jwt = MOQX.Test.Auth.token(Keyword.put(claims, :root, root))
+    MOQX.Test.Auth.connect_url(base_url, root, jwt)
+  end
+
+  defp await_error!(timeout \\ @timeout) do
+    receive do
+      {:error, reason} -> reason
+      {:moqx_error, reason} -> reason
+      {port, _message} when is_port(port) -> await_error!(timeout)
+      other -> flunk("unexpected message while waiting for error: #{inspect(other)}")
+    after
+      timeout -> flunk("error timeout")
     end
   end
 
@@ -409,6 +436,186 @@ defmodule MOQXIntegrationTest do
           assert MOQX.session_version(publisher) == "moq-lite-03"
           assert MOQX.session_version(subscriber) == "moq-lite-03"
         end)
+      end)
+    end
+  end
+
+  describe "authenticated relay client flows" do
+    test "authenticated publisher succeeds" do
+      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
+        url = auth_url(base_url, "room/auth-publisher", put: [""], get: [])
+        publisher = connect_publisher!(url, tls: [cacertfile: root_ca])
+
+        assert MOQX.session_role(publisher) == :publisher
+        assert {:ok, broadcast} = MOQX.publish(publisher, "stream")
+        assert {:ok, track} = MOQX.create_track(broadcast, "video")
+        assert :ok = MOQX.write_frame(track, "hello")
+        assert :ok = MOQX.finish_track(track)
+
+        :ok = MOQX.close(publisher)
+      end)
+    end
+
+    test "authenticated subscriber succeeds" do
+      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
+        tls_opts = [tls: [cacertfile: root_ca]]
+        root = "room/auth-subscriber"
+        publisher_url = auth_url(base_url, root, put: [""], get: [])
+        subscriber_url = auth_url(base_url, root, put: [], get: [""])
+
+        publisher = connect_publisher!(publisher_url, tls_opts)
+        subscriber = connect_subscriber!(subscriber_url, tls_opts)
+
+        try do
+          assert MOQX.session_role(subscriber) == :subscriber
+
+          {:ok, broadcast} = MOQX.publish(publisher, "stream")
+          {:ok, track} = MOQX.create_track(broadcast, "video")
+
+          :ok = MOQX.subscribe(subscriber, "stream", "video")
+          :ok = MOQX.write_frame(track, "hello")
+          :ok = MOQX.finish_track(track)
+
+          await_subscribed!("stream", "video")
+          await_frame!(0, "hello")
+          await_track_ended!()
+        after
+          :ok = MOQX.close(publisher)
+          :ok = MOQX.close(subscriber)
+        end
+      end)
+    end
+
+    test "authenticated end-to-end pub/sub succeeds" do
+      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
+        tls_opts = [tls: [cacertfile: root_ca]]
+        root = "room/end-to-end"
+        publisher_url = auth_url(base_url, root, put: [""], get: [])
+        subscriber_url = auth_url(base_url, root, put: [], get: [""])
+
+        publisher = connect_publisher!(publisher_url, tls_opts)
+        subscriber = connect_subscriber!(subscriber_url, tls_opts)
+
+        try do
+          {:ok, broadcast} = MOQX.publish(publisher, "stream")
+          {:ok, track} = MOQX.create_track(broadcast, "video")
+
+          :ok = MOQX.subscribe(subscriber, "stream", "video")
+          :ok = MOQX.write_frame(track, "frame-1")
+          await_subscribed!("stream", "video")
+          await_frame!(0, "frame-1")
+
+          :ok = MOQX.write_frame(track, "frame-2")
+          await_frame!(1, "frame-2")
+
+          :ok = MOQX.finish_track(track)
+          await_track_ended!()
+        after
+          :ok = MOQX.close(publisher)
+          :ok = MOQX.close(subscriber)
+        end
+      end)
+    end
+
+    test "missing token fails" do
+      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
+        url = MOQX.Test.Auth.connect_url(base_url, "room/missing-token")
+
+        :ok = MOQX.connect_publisher(url, tls: [cacertfile: root_ca])
+        reason = await_error!()
+
+        assert is_binary(reason)
+        refute reason == ""
+      end)
+    end
+
+    test "publish-only token cannot subscribe" do
+      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
+        tls_opts = [tls: [cacertfile: root_ca]]
+        root = "room/publish-only"
+        publisher_url = auth_url(base_url, root, put: [""], get: [])
+        subscriber_url = auth_url(base_url, root, put: [""], get: [])
+
+        publisher = connect_publisher!(publisher_url, tls_opts)
+
+        try do
+          :ok = MOQX.connect_subscriber(subscriber_url, tls_opts)
+
+          case await_connect_result!() do
+            {:error, reason} ->
+              assert is_binary(reason)
+              refute reason == ""
+
+            {:ok, subscriber} ->
+              try do
+                {:ok, broadcast} = MOQX.publish(publisher, "stream")
+                {:ok, track} = MOQX.create_track(broadcast, "video")
+
+                :ok = MOQX.subscribe(subscriber, "stream", "video")
+                :ok = MOQX.write_frame(track, "hello")
+                :ok = MOQX.finish_track(track)
+
+                refute_receive {:moqx_subscribed, "stream", "video"}, 1_000
+                refute_receive {:moqx_frame, _, _}, 200
+                refute_receive :moqx_track_ended, 200
+              after
+                :ok = MOQX.close(subscriber)
+              end
+          end
+        after
+          :ok = MOQX.close(publisher)
+        end
+      end)
+    end
+
+    test "subscribe-only token cannot publish" do
+      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
+        tls_opts = [tls: [cacertfile: root_ca]]
+        root = "room/subscribe-only"
+        publisher_url = auth_url(base_url, root, put: [], get: [""])
+        subscriber_url = auth_url(base_url, root, put: [], get: [""])
+
+        subscriber = connect_subscriber!(subscriber_url, tls_opts)
+
+        try do
+          :ok = MOQX.subscribe(subscriber, "stream", "video")
+          :ok = MOQX.connect_publisher(publisher_url, tls_opts)
+
+          case await_connect_result!() do
+            {:error, reason} ->
+              assert is_binary(reason)
+              refute reason == ""
+
+            {:ok, publisher} ->
+              try do
+                {:ok, broadcast} = MOQX.publish(publisher, "stream")
+                {:ok, track} = MOQX.create_track(broadcast, "video")
+                :ok = MOQX.write_frame(track, "hello")
+                :ok = MOQX.finish_track(track)
+
+                refute_receive {:moqx_subscribed, "stream", "video"}, 1_000
+                refute_receive {:moqx_frame, _, _}, 200
+                refute_receive :moqx_track_ended, 200
+              after
+                :ok = MOQX.close(publisher)
+              end
+          end
+        after
+          :ok = MOQX.close(subscriber)
+        end
+      end)
+    end
+
+    test "wrong-root token fails" do
+      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
+        jwt = MOQX.Test.Auth.token(root: "room/correct-root", put: [""], get: [""])
+        url = MOQX.Test.Auth.connect_url(base_url, "room/wrong-root", jwt)
+
+        :ok = MOQX.connect_subscriber(url, tls: [cacertfile: root_ca])
+        reason = await_error!()
+
+        assert is_binary(reason)
+        refute reason == ""
       end)
     end
   end
