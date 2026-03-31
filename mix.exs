@@ -7,6 +7,7 @@ defmodule MOQX.MixProject do
       version: "0.1.0",
       description: description(),
       elixir: "~> 1.19",
+      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       source_url: "https://github.com/dmorn/moqx",
       homepage_url: "https://github.com/dmorn/moqx",
@@ -22,6 +23,9 @@ defmodule MOQX.MixProject do
       extra_applications: [:logger]
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
 
   def cli do
     [
