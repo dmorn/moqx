@@ -48,7 +48,10 @@ The intended API is the single `MOQX` module.
 
 Connections are asynchronous. `connect_publisher/1`, `connect_publisher/2`,
 `connect_subscriber/1`, and `connect_subscriber/2` return `:ok` immediately,
-then the caller receives `{:moqx_connected, session}` or `{:error, reason}`.
+then the caller receives exactly one connect result message:
+
+- `{:moqx_connected, session}` on success
+- `{:error, reason}` if the async connect attempt fails
 
 The stable, intended connect surface is:
 
@@ -151,6 +154,7 @@ Notes:
 - the current relay-backed WebSocket path negotiates the upstream-compatible subset `moq-lite-01`, `moq-lite-02`, and `moq-transport-14`
 - transport parity coverage includes relay-backed WebSocket round trips, an isolated WebSocket fallback harness, and auth-enabled relay integration coverage
 - the `cacertfile` option is intended for private/local roots; default verification otherwise uses system/native roots
+- synchronous option/usage problems raise or return immediately; network/runtime failures are delivered asynchronously as process messages
 
 You can inspect the compiled native support at runtime:
 
@@ -177,6 +181,21 @@ A broadcast is announced lazily on the first successful `write_frame/2`.
 Subscriptions are asynchronous. `subscribe/3` returns `:ok` immediately, then
 messages arrive in the caller process.
 
+The supported subscription message contract is:
+
+- `{:moqx_subscribed, broadcast_path, track_name}` when the subscription becomes active
+- `{:moqx_frame, group_seq, payload}` for each frame
+- `:moqx_track_ended` when the track finishes cleanly
+- `{:moqx_error, reason}` for asynchronous subscription/runtime failures
+
+Error expectations are intentionally split:
+
+- immediate misuse errors return `{:error, reason}` from the API call itself
+  - for example, `publish/2` on a subscriber session or `subscribe/3` on a publisher session
+- asynchronous connect/relay/runtime failures arrive later as mailbox messages
+  - `{:error, reason}` for connect failures
+  - `{:moqx_error, reason}` for subscription/runtime failures
+
 ```elixir
 :ok = MOQX.subscribe(subscriber, "anon/demo", "video")
 
@@ -190,7 +209,7 @@ receive do
 end
 
 receive do
-  {:moqx_track_ended} -> :ok
+  :moqx_track_ended -> :ok
   {:moqx_error, reason} -> raise "subscription failed: #{inspect(reason)}"
 end
 ```

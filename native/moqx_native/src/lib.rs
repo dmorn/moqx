@@ -594,7 +594,7 @@ fn finish_track(track: ResourceArc<TrackProducerRes>) -> rustler::NifResult<Atom
 /// Returns `:ok` immediately. The calling process will receive:
 /// - `{:moqx_subscribed, broadcast_path, track_name}` when subscribed
 /// - `{:moqx_frame, group_seq, binary_data}` for each frame
-/// - `{:moqx_track_ended}` when the track is finished
+/// - `:moqx_track_ended` when the track is finished
 /// - `{:moqx_error, reason}` on error
 #[rustler::nif]
 fn subscribe(

@@ -26,9 +26,11 @@ defmodule MOQX do
   Connection and subscription are asynchronous:
 
   - `connect_publisher/1`, `connect_subscriber/1`, and `connect/2` return `:ok` immediately
-  - the caller later receives `{:moqx_connected, session}` or `{:error, reason}`
+  - the caller later receives exactly one connect result: `{:moqx_connected, session}` or `{:error, reason}`
   - `subscribe/3` returns `:ok` immediately
   - the caller later receives subscription lifecycle messages
+  - immediate misuse errors are returned synchronously as `{:error, reason}`
+  - asynchronous relay/runtime failures arrive later as process messages
 
   ## Example
 
@@ -64,7 +66,7 @@ defmodule MOQX do
       end
 
       receive do
-        {:moqx_track_ended} -> :ok
+        :moqx_track_ended -> :ok
       end
 
   Broadcast announcement is lazy: a broadcast becomes visible to subscribers
@@ -110,7 +112,7 @@ defmodule MOQX do
   @type subscribe_message ::
           {:moqx_subscribed, String.t(), String.t()}
           | {:moqx_frame, non_neg_integer(), binary()}
-          | {:moqx_track_ended}
+          | :moqx_track_ended
           | {:moqx_error, String.t()}
 
   @type connect_opt ::
@@ -345,7 +347,7 @@ defmodule MOQX do
   @doc """
   Finishes a track.
 
-  Subscribers receive `{:moqx_track_ended}` after the track is fully consumed.
+  Subscribers receive `:moqx_track_ended` after the track is fully consumed.
   """
   @spec finish_track(track()) :: :ok | {:error, String.t()}
   def finish_track(track) do
@@ -364,7 +366,7 @@ defmodule MOQX do
 
   - `{:moqx_subscribed, broadcast_path, track_name}` when the subscription is active
   - `{:moqx_frame, group_seq, payload}` for each frame
-  - `{:moqx_track_ended}` when the track finishes cleanly
+  - `:moqx_track_ended` when the track finishes cleanly
   - `{:moqx_error, reason}` for asynchronous runtime failures
 
   Misuse errors, such as calling this with a publisher session, are returned as
