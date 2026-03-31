@@ -4,6 +4,19 @@
 
 **Status:** early client library with a deliberately narrow, documented support contract.
 
+## Installation
+
+```elixir
+# mix.exs
+{:moqx, "~> 0.1.0"}
+```
+
+Release metadata:
+
+- source: <https://github.com/dmorn/moqx>
+- changelog: <https://github.com/dmorn/moqx/blob/main/CHANGELOG.md>
+- license: MIT
+
 ## Stable supported client contract
 
 Today `moqx` supports a single client-side path:
