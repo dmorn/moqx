@@ -1,0 +1,1 @@
+- before committing, ensure you `mix format`, run the tests, and run `mix credo` (elixir's linter) and refactor accordingly
