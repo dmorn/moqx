@@ -2,30 +2,43 @@
 
 > Elixir bindings for [Media over QUIC (MOQ)](https://moq.dev) via Rustler NIFs on top of `moq-lite` / `moq-native`.
 
-**Status:** early library with explicit split roles, Quinn-based transports, and upstream-aligned transport controls.
+**Status:** early client library with a deliberately narrow, documented support contract.
 
-## Supported path
+## Stable supported client contract
 
-Today `moqx` supports:
+Today `moqx` supports a single client-side path:
 
-- explicit split roles
-  - publisher session for publish operations
-  - subscriber session for subscribe operations
-- the Quinn backend
-- connections over WebTransport, raw QUIC, and WebSocket
+- explicit split roles only
+  - publisher sessions publish only
+  - subscriber sessions subscribe only
+- Quinn-backed client connections only
+- these transports only:
+  - `:auto`
+  - `:raw_quic`
+  - `:webtransport`
+  - `:websocket`
 - connect-time version pinning
 - broadcasts, tracks, and frame delivery
-- integration coverage for relay-backed Quinn transports, including WebSocket fallback
+- relay authentication through the connect URL query, using `?jwt=...`
+- path-rooted relay authorization, where the connect URL path must match the token `root`
+- minimal client TLS controls:
+  - verification is on by default
+  - `tls: [verify: :insecure]` is an explicit local-development escape hatch
+  - `tls: [cacertfile: "/path/to/rootCA.pem"]` trusts a custom root CA
 
 Not planned:
 
 - Quiche backend support
 - Noq backend support
 - Iroh transport support
+- merged publisher/subscriber sessions
 
-Still not in scope:
+Out of scope for `v0.1`:
 
-- broader production hardening beyond minimal client TLS controls
+- relay/server listener APIs
+- embedding or managing a relay from Elixir
+- broader server-side feature surface beyond relay-backed client connections
+- broader production hardening beyond the current minimal client TLS controls
 
 ## Public API
 
@@ -36,6 +49,14 @@ The intended API is the single `MOQX` module.
 Connections are asynchronous. `connect_publisher/1`, `connect_publisher/2`,
 `connect_subscriber/1`, and `connect_subscriber/2` return `:ok` immediately,
 then the caller receives `{:moqx_connected, session}` or `{:error, reason}`.
+
+The stable, intended connect surface is:
+
+- `MOQX.connect_publisher/1,2`
+- `MOQX.connect_subscriber/1,2`
+- `MOQX.connect/2` with required `role: :publisher | :subscriber`
+
+There is no supported `:both` session mode.
 
 ```elixir
 :ok = MOQX.connect_publisher("https://localhost:4443")
@@ -56,7 +77,8 @@ subscriber =
 ```
 
 For an auth-enabled relay, keep using the same connect APIs and pass the token in
-the URL query:
+the URL query. `moqx` does not add a separate auth API; auth stays part of the
+connect URL:
 
 ```elixir
 jwt = "eyJhbGciOiJIUzI1NiIs..."
@@ -74,8 +96,8 @@ jwt = "eyJhbGciOiJIUzI1NiIs..."
   )
 ```
 
-When you connect to a rooted URL like `/room/123`, publish and subscribe paths can
-stay relative to that root:
+When you connect to a rooted URL like `/room/123`, relay authorization is rooted at
+that path. Publish and subscribe paths can stay relative to that root:
 
 ```elixir
 {:ok, broadcast} = MOQX.publish(publisher, "alice")
@@ -122,11 +144,12 @@ Supported connect options:
 Notes:
 
 - relay authentication currently rides on the URL itself: pass the JWT as `?jwt=...`
-- relay authorization is path-rooted: the connect URL path must fall under the token's `root`
-- TLS verification is enabled by default; `:tls, [verify: :insecure]` is a local-development escape hatch only
+- relay authorization is path-rooted: the connect URL path must match the token `root`
+- listener/server APIs remain out of scope
+- TLS verification is enabled by default; `tls: [verify: :insecure]` is a local-development escape hatch only
 - local relay WebSocket connections use the relay's plain HTTP endpoint, so local examples use `http://.../anon`
 - the current relay-backed WebSocket path negotiates the upstream-compatible subset `moq-lite-01`, `moq-lite-02`, and `moq-transport-14`
-- transport parity coverage now includes relay-backed WebSocket round trips, an isolated WebSocket fallback harness, and auth-enabled relay integration coverage
+- transport parity coverage includes relay-backed WebSocket round trips, an isolated WebSocket fallback harness, and auth-enabled relay integration coverage
 - the `cacertfile` option is intended for private/local roots; default verification otherwise uses system/native roots
 
 You can inspect the compiled native support at runtime:
@@ -175,8 +198,9 @@ end
 ## Relay authentication
 
 Upstream relay auth currently expects JWTs in the `jwt` query parameter, and the
-URL path must match the token root. Follow the implementation claim names, not
-older prose that still says `pub` / `sub`.
+URL path must match the token `root`. `moqx` intentionally keeps this model in
+the URL rather than introducing a separate public auth API. Follow the
+implementation claim names, not older prose that still says `pub` / `sub`.
 
 Use these claims:
 

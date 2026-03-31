@@ -3,8 +3,16 @@ defmodule MOQX do
   Elixir bindings for Media over QUIC (MOQ) via Rustler NIFs on top of
   `moq-lite` / `moq-native`.
 
-  Today `moqx` intentionally supports Quinn-based connections over raw QUIC,
-  WebTransport, and WebSocket.
+  `moqx` intentionally exposes a narrow client-only contract:
+
+  - split roles only: publisher sessions publish and subscriber sessions subscribe
+  - Quinn-backed connections only
+  - transports limited to `:auto`, `:raw_quic`, `:webtransport`, and `:websocket`
+  - minimal client TLS controls with verification on by default
+  - relay auth carried in the connect URL query as `?jwt=...`
+  - rooted relay URLs whose path must match the token `root`
+
+  Relay/server listener APIs remain out of scope.
 
   `MOQX` exposes one clear, supported flow:
 
@@ -64,7 +72,8 @@ defmodule MOQX do
 
   TLS verification is enabled by default. For local development against a
   self-signed relay, either configure a trusted local certificate chain or opt
-  into `tls: [verify: :insecure]` explicitly.
+  into `tls: [verify: :insecure]` explicitly. Custom trust roots can be passed
+  with `tls: [cacertfile: "/path/to/rootCA.pem"]`.
   """
 
   @typedoc "Publisher or subscriber session role."
@@ -126,6 +135,9 @@ defmodule MOQX do
   - `:tls` - optional TLS controls:
     - `verify: :verify_peer | :insecure` (defaults to `:verify_peer`)
     - `cacertfile: "/path/to/rootCA.pem"` to trust a custom root CA PEM
+
+  `connect/2` is the dynamic-role entrypoint only. There is no supported merged
+  publisher/subscriber session mode, and listener/server APIs remain out of scope.
 
   Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
   """
