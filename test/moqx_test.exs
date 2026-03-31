@@ -86,4 +86,28 @@ defmodule MOQXTest do
     assert {:error, reason} = MOQX.connect_publisher(":::invalid")
     assert is_binary(reason)
   end
+
+  test "auth connect_url normalizes rooted paths and preserves jwt query" do
+    url =
+      MOQX.Test.Auth.connect_url(
+        "https://relay.example.com/base?ignored=true",
+        "/room/demo/",
+        "token"
+      )
+
+    uri = URI.parse(url)
+
+    assert uri.scheme == "https"
+    assert uri.host == "relay.example.com"
+    assert uri.path == "/room/demo"
+    assert URI.decode_query(uri.query) == %{"jwt" => "token"}
+  end
+
+  test "auth connect_url without token normalizes rooted paths and drops query" do
+    url = MOQX.Test.Auth.connect_url("https://relay.example.com/base?ignored=true", "/room/demo/")
+    uri = URI.parse(url)
+
+    assert uri.path == "/room/demo"
+    assert uri.query == nil
+  end
 end

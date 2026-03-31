@@ -606,6 +606,62 @@ defmodule MOQXIntegrationTest do
       end)
     end
 
+    test "rooted auth normalizes publish paths that repeat the connect root" do
+      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
+        tls_opts = [tls: [cacertfile: root_ca]]
+        root = "room/rooted-publish"
+        publisher_url = auth_url(base_url, root, put: [""], get: [])
+        subscriber_url = auth_url(base_url, root, put: [], get: [""])
+
+        publisher = connect_publisher!(publisher_url, tls_opts)
+        subscriber = connect_subscriber!(subscriber_url, tls_opts)
+
+        try do
+          {:ok, broadcast} = MOQX.publish(publisher, "/room/rooted-publish/stream/")
+          {:ok, track} = MOQX.create_track(broadcast, "video")
+
+          :ok = MOQX.subscribe(subscriber, "stream", "video")
+          :ok = MOQX.write_frame(track, "hello")
+          :ok = MOQX.finish_track(track)
+
+          await_subscribed!("stream", "video")
+          await_frame!(0, "hello")
+          await_track_ended!()
+        after
+          :ok = MOQX.close(publisher)
+          :ok = MOQX.close(subscriber)
+        end
+      end)
+    end
+
+    test "rooted auth normalizes subscribe paths that repeat the connect root" do
+      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
+        tls_opts = [tls: [cacertfile: root_ca]]
+        root = "room/rooted-subscribe"
+        publisher_url = auth_url(base_url, root, put: [""], get: [])
+        subscriber_url = auth_url(base_url, root, put: [], get: [""])
+
+        publisher = connect_publisher!(publisher_url, tls_opts)
+        subscriber = connect_subscriber!(subscriber_url, tls_opts)
+
+        try do
+          {:ok, broadcast} = MOQX.publish(publisher, "stream")
+          {:ok, track} = MOQX.create_track(broadcast, "video")
+
+          :ok = MOQX.subscribe(subscriber, "/room/rooted-subscribe/stream/", "video")
+          :ok = MOQX.write_frame(track, "hello")
+          :ok = MOQX.finish_track(track)
+
+          await_subscribed!("/room/rooted-subscribe/stream/", "video")
+          await_frame!(0, "hello")
+          await_track_ended!()
+        after
+          :ok = MOQX.close(publisher)
+          :ok = MOQX.close(subscriber)
+        end
+      end)
+    end
+
     test "wrong-root token fails" do
       with_isolated_trusted_auth_relay(fn base_url, root_ca ->
         jwt = MOQX.Test.Auth.token(root: "room/correct-root", put: [""], get: [""])

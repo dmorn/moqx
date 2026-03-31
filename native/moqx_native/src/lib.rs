@@ -741,6 +741,41 @@ async fn do_subscribe(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::normalize_broadcast_path;
+
+    #[test]
+    fn normalize_broadcast_path_keeps_relative_paths_under_root() {
+        assert_eq!(normalize_broadcast_path("room/demo", "stream"), "stream");
+    }
+
+    #[test]
+    fn normalize_broadcast_path_strips_matching_root_prefix() {
+        assert_eq!(
+            normalize_broadcast_path("room/demo", "room/demo/stream"),
+            "stream"
+        );
+        assert_eq!(
+            normalize_broadcast_path("/room/demo/", "/room/demo/stream/"),
+            "stream"
+        );
+    }
+
+    #[test]
+    fn normalize_broadcast_path_maps_exact_root_to_empty_suffix() {
+        assert_eq!(normalize_broadcast_path("room/demo", "room/demo"), "");
+    }
+
+    #[test]
+    fn normalize_broadcast_path_does_not_strip_non_matching_prefixes() {
+        assert_eq!(
+            normalize_broadcast_path("room/demo", "room/demo-extra/stream"),
+            "room/demo-extra/stream"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
