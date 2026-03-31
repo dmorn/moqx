@@ -299,7 +299,31 @@ mix test
 
 Most integration tests are relay-backed and are skipped automatically when the local
 relay setup is unavailable. The suite also includes isolated relay configurations
-used to verify WebSocket fallback and TLS trust behavior.
+used to verify WebSocket fallback, TLS trust behavior, and authenticated rooted paths.
+
+For an explicit split between fast checks and relay-backed coverage:
+
+```bash
+mix ci
+mix test.integration
+```
+
+- `mix ci` runs formatting, Credo, and non-integration tests
+- `mix test.integration` runs only the relay-backed integration suite
+
+### CI strategy
+
+`moqx` treats relay-backed integration coverage as a first-class CI job, not as an
+optional best-effort step.
+
+The intended CI split is:
+
+- a fast job for formatting, Credo, and non-integration tests
+- a dedicated relay-backed integration job that builds `.moq-dev`'s `moq-relay`
+  binary and then runs `mix test.integration`
+
+That keeps the default job fast while ensuring auth, TLS, transport, and rooted-path
+coverage is exercised in CI without depending on any public relay.
 
 ### Local relay TLS
 

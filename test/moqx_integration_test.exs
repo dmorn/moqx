@@ -1,16 +1,18 @@
 defmodule MOQXIntegrationTest do
   use ExUnit.Case, async: false
 
+  alias MOQX.Test.{Auth, Relay}
+
   @moduletag :integration
   @timeout 10_000
 
   setup_all do
-    relay = MOQX.Test.Relay.start()
-    on_exit(fn -> MOQX.Test.Relay.stop(relay) end)
+    relay = Relay.start()
+    on_exit(fn -> Relay.stop(relay) end)
 
     %{
-      relay_url: MOQX.Test.Relay.url(),
-      relay_websocket_url: MOQX.Test.Relay.websocket_url(),
+      relay_url: Relay.url(),
+      relay_websocket_url: Relay.websocket_url(),
       local_dev_tls: [tls: [verify: :insecure]]
     }
   end
@@ -95,35 +97,35 @@ defmodule MOQXIntegrationTest do
   end
 
   defp with_isolated_fallback_relay(fun) do
-    relay = MOQX.Test.Relay.start_isolated(4544, 4545)
+    relay = Relay.start_isolated(4544, 4545)
     drain_port_messages(relay)
 
     try do
-      fun.(MOQX.Test.Relay.websocket_fallback_url())
+      fun.(Relay.websocket_fallback_url())
     after
-      MOQX.Test.Relay.stop(relay)
+      Relay.stop(relay)
     end
   end
 
   defp with_isolated_trusted_relay(fun) do
-    relay = MOQX.Test.Relay.start_isolated_trusted(4546, 4547)
+    relay = Relay.start_isolated_trusted(4546, 4547)
     drain_port_messages(relay)
 
     try do
-      fun.("https://localhost:4546", MOQX.Test.Relay.trusted_root_ca())
+      fun.("https://localhost:4546", Relay.trusted_root_ca())
     after
-      MOQX.Test.Relay.stop(relay)
+      Relay.stop(relay)
     end
   end
 
   defp with_isolated_trusted_auth_relay(fun) do
-    relay = MOQX.Test.Relay.start_isolated_trusted_auth(4548, 4549)
+    relay = Relay.start_isolated_trusted_auth(4548, 4549)
     drain_port_messages(relay)
 
     try do
-      fun.("https://localhost:4548", MOQX.Test.Relay.trusted_root_ca())
+      fun.("https://localhost:4548", Relay.trusted_root_ca())
     after
-      MOQX.Test.Relay.stop(relay)
+      Relay.stop(relay)
     end
   end
 
@@ -136,8 +138,8 @@ defmodule MOQXIntegrationTest do
   end
 
   defp auth_url(base_url, root, claims) do
-    jwt = MOQX.Test.Auth.token(Keyword.put(claims, :root, root))
-    MOQX.Test.Auth.connect_url(base_url, root, jwt)
+    jwt = Auth.token(Keyword.put(claims, :root, root))
+    Auth.connect_url(base_url, root, jwt)
   end
 
   defp await_error!(timeout \\ @timeout) do
@@ -519,7 +521,7 @@ defmodule MOQXIntegrationTest do
 
     test "missing token fails" do
       with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        url = MOQX.Test.Auth.connect_url(base_url, "room/missing-token")
+        url = Auth.connect_url(base_url, "room/missing-token")
 
         :ok = MOQX.connect_publisher(url, tls: [cacertfile: root_ca])
         reason = await_error!()
@@ -664,8 +666,8 @@ defmodule MOQXIntegrationTest do
 
     test "wrong-root token fails" do
       with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        jwt = MOQX.Test.Auth.token(root: "room/correct-root", put: [""], get: [""])
-        url = MOQX.Test.Auth.connect_url(base_url, "room/wrong-root", jwt)
+        jwt = Auth.token(root: "room/correct-root", put: [""], get: [""])
+        url = Auth.connect_url(base_url, "room/wrong-root", jwt)
 
         :ok = MOQX.connect_subscriber(url, tls: [cacertfile: root_ca])
         reason = await_error!()

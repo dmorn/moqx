@@ -1,6 +1,8 @@
 defmodule MOQXTest do
   use ExUnit.Case, async: true
 
+  alias MOQX.Test.Auth
+
   test "public API exposes explicit role-based connect helpers" do
     assert is_function(&MOQX.connect/2)
     assert is_function(&MOQX.connect_publisher/1)
@@ -89,7 +91,7 @@ defmodule MOQXTest do
 
   test "auth connect_url normalizes rooted paths and preserves jwt query" do
     url =
-      MOQX.Test.Auth.connect_url(
+      Auth.connect_url(
         "https://relay.example.com/base?ignored=true",
         "/room/demo/",
         "token"
@@ -104,7 +106,7 @@ defmodule MOQXTest do
   end
 
   test "auth connect_url without token normalizes rooted paths and drops query" do
-    url = MOQX.Test.Auth.connect_url("https://relay.example.com/base?ignored=true", "/room/demo/")
+    url = Auth.connect_url("https://relay.example.com/base?ignored=true", "/room/demo/")
     uri = URI.parse(url)
 
     assert uri.path == "/room/demo"

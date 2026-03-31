@@ -1,4 +1,6 @@
 defmodule MOQX.Native do
+  @moduledoc false
+
   use Rustler, otp_app: :moqx, crate: "moqx_native"
 
   # Connection

@@ -87,7 +87,7 @@ defmodule MOQX do
   @typedoc "Requested connection transport."
   @type transport :: :auto | :raw_quic | :webtransport | :websocket
 
-  @typedoc "MOQ protocol version string, e.g. `\"moq-lite-03\"` or `\"moq-transport-14\"`."
+  @typedoc ~S|MOQ protocol version string, e.g. `"moq-lite-03"` or `"moq-transport-14"`.|
   @type version :: String.t()
 
   @typedoc "TLS verification mode for relay connections."
