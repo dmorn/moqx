@@ -211,7 +211,7 @@ defmodule MOQX.Test.Relay do
   defp wait_for_ports(ports, timeout) do
     probes =
       Enum.map_join(ports, " && ", fn port ->
-        "lsof -nP -iTCP:#{port} -sTCP:LISTEN -iUDP:#{port} 2>/dev/null | grep moq-relay >/dev/null"
+        "((lsof -nP -iTCP:#{port} -sTCP:LISTEN 2>/dev/null || true); (lsof -nP -iUDP:#{port} 2>/dev/null || true)) | grep moq-relay >/dev/null"
       end)
 
     case System.cmd("sh", ["-c", probes]) do

@@ -59,6 +59,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out pinned moq-dev relay workspace
+        uses: actions/checkout@v4
+        with:
+          repository: moq-dev/moq
+          ref: aae43f824b9b8d93b68dd6a765f8bec691f60c0b
+          path: .moq-dev
+
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: '1.19.0'
