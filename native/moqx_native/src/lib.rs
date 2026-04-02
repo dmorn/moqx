@@ -1,12 +1,15 @@
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
+use bytes::{Buf, BufMut, BytesMut};
 use moq_lite::Origin;
 use moq_native::ClientConfig;
 use rustler::env::SavedTerm;
+use rustler::types::reference::Reference;
 use rustler::{Atom, Binary, Encoder, Env, LocalPid, NewBinary, OwnedEnv, Resource, ResourceArc};
 use tokio::runtime::Runtime;
 
@@ -49,6 +52,14 @@ struct PendingFetch {
     ref_term: SavedTerm,
     namespace: String,
     track_name: String,
+}
+
+#[derive(Clone)]
+struct FetchConnectConfig {
+    url: url::Url,
+    backend: Option<String>,
+    transport: ConnectTransport,
+    tls: ConnectTls,
 }
 
 #[allow(dead_code)]
@@ -95,8 +106,8 @@ pub struct SessionRes {
     origin: Arc<OriginRes>,
     role: ConnectRole,
     root: String,
-    #[allow(dead_code)]
     fetch: Option<FetchState>,
+    fetch_connect: Option<FetchConnectConfig>,
 }
 
 impl Drop for SessionRes {
@@ -228,6 +239,21 @@ fn connect(
     let tls = ConnectTls::new(&tls_verify, tls_cacertfile)?;
 
     runtime().spawn(async move {
+        let fetch_connect = FetchConnectConfig {
+            url: parsed_url.clone(),
+            backend: backend.as_ref().map(|backend| match backend {
+                moq_native::QuicBackend::Quinn => "quinn".to_string(),
+                #[cfg(feature = "quiche")]
+                moq_native::QuicBackend::Quiche => "quiche".to_string(),
+                #[cfg(feature = "noq")]
+                moq_native::QuicBackend::Noq => "noq".to_string(),
+                #[allow(unreachable_patterns)]
+                _ => "unknown".to_string(),
+            }),
+            transport,
+            tls: tls.clone(),
+        };
+
         let result = do_connect(parsed_url, role, backend, transport, versions, tls).await;
 
         let mut msg_env = OwnedEnv::new();
@@ -240,6 +266,7 @@ fn connect(
                     role,
                     root,
                     fetch: role.can_consume().then(FetchState::new),
+                    fetch_connect: role.can_consume().then_some(fetch_connect),
                 });
                 (atoms::moqx_connected(), session_resource).encode(env)
             }
@@ -813,6 +840,716 @@ async fn do_subscribe(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Fetch
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum FetchGroupOrder {
+    Original,
+    Ascending,
+    Descending,
+}
+
+impl FetchGroupOrder {
+    fn parse(group_order: &str) -> anyhow::Result<Self> {
+        match group_order {
+            "original" => Ok(Self::Original),
+            "ascending" => Ok(Self::Ascending),
+            "descending" => Ok(Self::Descending),
+            other => anyhow::bail!("invalid fetch group order: {other}"),
+        }
+    }
+
+    fn encode_v17(self) -> u8 {
+        match self {
+            Self::Original => 0,
+            Self::Ascending => 1,
+            Self::Descending => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FetchLocation {
+    group: u64,
+    object: u64,
+}
+
+#[rustler::nif]
+fn fetch(
+    env: Env,
+    session: ResourceArc<SessionRes>,
+    fetch_ref: Reference,
+    namespace: String,
+    track_name: String,
+    priority: u8,
+    group_order: String,
+    start: (u64, u64),
+    end: Option<(u64, u64)>,
+) -> rustler::NifResult<Atom> {
+    if !session.role.can_consume() {
+        return Err(rustler::Error::Term(Box::new(
+            "fetch requires a subscriber session; use MOQX.connect_subscriber/1".to_string(),
+        )));
+    }
+
+    let fetch_state = session
+        .fetch
+        .as_ref()
+        .ok_or_else(|| rustler::Error::Term(Box::new("fetch state unavailable".to_string())))?;
+
+    let connect = session.fetch_connect.clone().ok_or_else(|| {
+        rustler::Error::Term(Box::new("fetch transport configuration unavailable".to_string()))
+    })?;
+
+    let normalized_namespace = normalize_fetch_namespace(&session.root, &namespace);
+    let negotiated_version = {
+        let guard = runtime().block_on(session.session.lock());
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| rustler::Error::Term(Box::new("session closed".to_string())))?;
+        session.version().to_string()
+    };
+
+    let request_seq = fetch_state.allocate_request_id();
+    let wire_request_id = (request_seq - 1) * 2;
+
+    let ref_env = OwnedEnv::new();
+    let ref_term = ref_env.save(fetch_ref);
+
+    fetch_state
+        .insert_pending(
+            wire_request_id,
+            PendingFetch {
+                caller_pid: env.pid(),
+                ref_env,
+                ref_term,
+                namespace: namespace.clone(),
+                track_name: track_name.clone(),
+            },
+        )
+        .map_err(|err| rustler::Error::Term(Box::new(format!("{err:#}"))))?;
+
+    let group_order = FetchGroupOrder::parse(&group_order)
+        .map_err(|err| rustler::Error::Term(Box::new(format!("{err:#}"))))?;
+    let start = FetchLocation {
+        group: start.0,
+        object: start.1,
+    };
+    let end = end.map(|(group, object)| FetchLocation { group, object });
+    let session_ref = session.clone();
+
+    runtime().spawn(async move {
+        let result = do_fetch(
+            session_ref.clone(),
+            wire_request_id,
+            connect,
+            &negotiated_version,
+            &normalized_namespace,
+            &track_name,
+            priority,
+            group_order,
+            start,
+            end,
+        )
+        .await;
+
+        if let Err(err) = result {
+            let _ = send_fetch_error_and_cleanup(&session_ref, wire_request_id, &format!("{err:#}"));
+        }
+    });
+
+    Ok(atoms::ok())
+}
+
+async fn do_fetch(
+    session: ResourceArc<SessionRes>,
+    request_id: u64,
+    connect: FetchConnectConfig,
+    negotiated_version: &str,
+    namespace: &str,
+    track_name: &str,
+    priority: u8,
+    group_order: FetchGroupOrder,
+    start: FetchLocation,
+    end: Option<FetchLocation>,
+) -> anyhow::Result<()> {
+    if connect.backend.as_deref().unwrap_or("quinn") != "quinn" {
+        anyhow::bail!("fetch currently supports only the quinn backend")
+    }
+
+    let version = match negotiated_version {
+        "moq-transport-17" => 17u8,
+        other => anyhow::bail!("fetch currently supports only moq-transport-17, got {other}"),
+    };
+
+    let transport_session = connect_fetch_transport(&connect, version).await?;
+    perform_fetch_v17(
+        &session,
+        request_id,
+        transport_session,
+        namespace,
+        track_name,
+        priority,
+        group_order,
+        start,
+        end.unwrap_or(start),
+    )
+    .await
+}
+
+async fn connect_fetch_transport(
+    connect: &FetchConnectConfig,
+    version: u8,
+) -> anyhow::Result<web_transport_quinn::Session> {
+    let url = rewrite_url_for_transport(connect.url.clone(), connect.transport)?;
+    let host = url.host_str().context("invalid DNS name")?.to_string();
+    let port = url.port().unwrap_or(443);
+    let ip = tokio::net::lookup_host((host.clone(), port))
+        .await
+        .context("failed DNS lookup")?
+        .next()
+        .context("no DNS entries")?;
+
+    let socket = std::net::UdpSocket::bind("[::]:0").context("failed to bind UDP socket")?;
+    let runtime = quinn::default_runtime().context("no async runtime")?;
+    let endpoint = quinn::Endpoint::new(quinn::EndpointConfig::default(), None, socket, runtime)
+        .context("failed to create QUIC endpoint")?;
+
+    let mut tls = build_fetch_tls(&connect.tls)?;
+    let alpn = match version {
+        17 => moq_lite::ALPN_17,
+        _ => anyhow::bail!("unsupported fetch ALPN version"),
+    };
+
+    tls.alpn_protocols = match url.scheme() {
+        "https" => vec![web_transport_quinn::ALPN.as_bytes().to_vec()],
+        "moqt" | "moql" => vec![alpn.as_bytes().to_vec()],
+        other => anyhow::bail!("unsupported fetch url scheme: {other}"),
+    };
+    tls.key_log = Arc::new(rustls::KeyLogFile::new());
+
+    let client_crypto: quinn::crypto::rustls::QuicClientConfig = tls.try_into()?;
+    let mut client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(std::time::Duration::from_secs(10).try_into().unwrap()));
+    transport.keep_alive_interval(Some(std::time::Duration::from_secs(4)));
+    transport.mtu_discovery_config(None);
+    let max_streams = quinn::VarInt::from_u64(1024).unwrap_or(quinn::VarInt::MAX);
+    transport.max_concurrent_bidi_streams(max_streams);
+    transport.max_concurrent_uni_streams(max_streams);
+    client_config.transport_config(Arc::new(transport));
+
+    let connection = endpoint.connect_with(client_config, ip, &host)?.await?;
+
+    let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
+    request = request.with_protocol(alpn.to_string());
+
+    match url.scheme() {
+        "https" => Ok(web_transport_quinn::Session::connect(connection, request).await?),
+        "moqt" | "moql" => {
+            let handshake = connection
+                .handshake_data()
+                .context("missing handshake data")?
+                .downcast::<quinn::crypto::rustls::HandshakeData>()
+                .map_err(|_| anyhow::anyhow!("failed to decode handshake data"))?;
+            let alpn = handshake.protocol.context("missing ALPN")?;
+            let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
+            let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
+            Ok(web_transport_quinn::Session::raw(connection, request, response))
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn build_fetch_tls(tls: &ConnectTls) -> anyhow::Result<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+
+    if tls.root.is_empty() {
+        let native = rustls_native_certs::load_native_certs();
+        for cert in native.certs {
+            roots.add(cert).context("failed to add root cert")?;
+        }
+    } else {
+        for root in &tls.root {
+            let root = std::fs::File::open(root).context("failed to open root cert file")?;
+            let mut root = std::io::BufReader::new(root);
+            let cert = rustls_pemfile::certs(&mut root)
+                .next()
+                .context("no roots found")?
+                .context("failed to read root cert")?;
+            roots.add(cert).context("failed to add root cert")?;
+        }
+    }
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+
+    if tls.disable_verify {
+        anyhow::bail!("fetch does not support tls verify: :insecure yet")
+    }
+
+    Ok(config)
+}
+
+async fn perform_fetch_v17(
+    session: &ResourceArc<SessionRes>,
+    request_id: u64,
+    transport_session: web_transport_quinn::Session,
+    namespace: &str,
+    track_name: &str,
+    priority: u8,
+    group_order: FetchGroupOrder,
+    start: FetchLocation,
+    end: FetchLocation,
+) -> anyhow::Result<()> {
+    send_client_setup_v17(&transport_session).await?;
+    recv_server_setup_v17(&transport_session).await?;
+
+    let (send, recv) = web_transport_trait::Session::open_bi(&transport_session)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let mut writer = send;
+    let mut reader = recv;
+
+    let mut body = BytesMut::new();
+    encode_varint(&mut body, request_id);
+    encode_varint(&mut body, 0);
+    body.put_u8(1);
+    encode_namespace_v17(&mut body, namespace);
+    encode_string_v17(&mut body, track_name);
+    encode_varint(&mut body, start.group);
+    encode_varint(&mut body, start.object);
+    encode_varint(&mut body, end.group);
+    encode_varint(&mut body, end.object);
+    encode_varint(&mut body, 2);
+    encode_varint(&mut body, 0x20);
+    body.put_u8(priority);
+    encode_varint(&mut body, 0x02);
+    encode_varint(&mut body, 0x22);
+    body.put_u8(group_order.encode_v17());
+    encode_varint(&mut body, 0x01);
+
+    let mut request = BytesMut::new();
+    encode_varint(&mut request, 0x16);
+    request.put_u16(body.len() as u16);
+    request.extend_from_slice(&body);
+    write_all_send(&mut writer, request.freeze()).await?;
+    web_transport_trait::SendStream::finish(&mut writer).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let response_type = read_varint_recv(&mut reader).await?;
+    let response_size = read_u16_recv(&mut reader).await? as usize;
+    let response = read_exact_recv(&mut reader, response_size).await?;
+    match response_type {
+        0x07 => {}
+        0x05 => {
+            let mut cursor = Cursor::new(response.as_ref());
+            let error_code = read_varint_buf(&mut cursor)?;
+            let retry_interval = read_varint_buf(&mut cursor)?;
+            let reason = read_string_buf(&mut cursor)?;
+            anyhow::bail!("fetch request rejected: {error_code} {retry_interval} {reason}")
+        }
+        other => anyhow::bail!("unexpected fetch response type: {other}"),
+    }
+
+    send_fetch_started(session, request_id)?;
+
+    loop {
+        let mut reader = match web_transport_trait::Session::accept_uni(&transport_session).await {
+            Ok(recv) => recv,
+            Err(err) => return Err(anyhow::anyhow!(err.to_string())),
+        };
+
+        let header_type = read_varint_recv(&mut reader).await?;
+        if header_type != 0x5 {
+            continue;
+        }
+        let header_request_id = read_varint_recv(&mut reader).await?;
+        if header_request_id != request_id {
+            continue;
+        }
+
+        read_fetch_stream_objects(session, request_id, &mut reader).await?;
+        send_fetch_done_and_cleanup(session, request_id)?;
+        return Ok(());
+    }
+}
+
+async fn send_client_setup_v17(session: &web_transport_quinn::Session) -> anyhow::Result<()> {
+    let mut send = web_transport_trait::Session::open_uni(session)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let mut body = BytesMut::new();
+    encode_varint(&mut body, 7);
+    encode_bytes_v17(&mut body, b"moqx-native" );
+
+    let mut message = BytesMut::new();
+    encode_varint(&mut message, 0x2F00);
+    message.put_u16(body.len() as u16);
+    message.extend_from_slice(&body);
+    write_all_send(&mut send, message.freeze()).await?;
+    web_transport_trait::SendStream::finish(&mut send).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    Ok(())
+}
+
+async fn recv_server_setup_v17(session: &web_transport_quinn::Session) -> anyhow::Result<()> {
+    let mut recv = web_transport_trait::Session::accept_uni(session)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let kind = read_varint_recv(&mut recv).await?;
+    if kind != 0x2F00 {
+        anyhow::bail!("expected server setup stream, got type {kind}")
+    }
+    let size = read_u16_recv(&mut recv).await? as usize;
+    let _body = read_exact_recv(&mut recv, size).await?;
+    Ok(())
+}
+
+async fn read_fetch_stream_objects<R>(
+    session: &ResourceArc<SessionRes>,
+    request_id: u64,
+    recv: &mut R,
+) -> anyhow::Result<()>
+where
+    R: web_transport_trait::RecvStream + Unpin,
+{
+    let group_flags = read_varint_recv(recv).await?;
+    let flags = decode_group_flags(group_flags)?;
+    let _track_alias = read_varint_recv(recv).await?;
+    let group_id = read_varint_recv(recv).await?;
+    let _sub_group_id = if flags.has_subgroup {
+        read_varint_recv(recv).await?
+    } else {
+        0
+    };
+    if flags.has_priority {
+        let _publisher_priority = read_u8_recv(recv).await?;
+    }
+
+    let mut object_id = 0u64;
+    while let Some(id_delta) = read_varint_maybe_recv(recv).await? {
+        object_id = object_id.saturating_add(id_delta);
+
+        if flags.has_extensions {
+            let ext_len = read_varint_recv(recv).await? as usize;
+            skip_exact_recv(recv, ext_len).await?;
+        }
+
+        let size = read_varint_recv(recv).await? as usize;
+        let payload = if size == 0 {
+            let _status = read_varint_recv(recv).await?;
+            bytes::Bytes::new()
+        } else {
+            read_exact_recv(recv, size).await?
+        };
+
+        send_fetch_object(session, request_id, group_id, object_id, payload)?;
+    }
+
+    Ok(())
+}
+
+fn decode_group_flags(id: u64) -> anyhow::Result<GroupFlagsState> {
+    let (has_priority, base_id) = if (0x10..=0x1d).contains(&id) {
+        (true, id)
+    } else if (0x30..=0x3d).contains(&id) {
+        (false, id - 0x20)
+    } else {
+        anyhow::bail!("invalid group flags: {id}")
+    };
+
+    let has_extensions = (base_id & 0x01) != 0;
+    let has_subgroup_object = (base_id & 0x02) != 0;
+    let has_subgroup = (base_id & 0x04) != 0;
+    if has_subgroup && has_subgroup_object {
+        anyhow::bail!("unsupported group flags")
+    }
+
+    Ok(GroupFlagsState {
+        has_extensions,
+        has_subgroup,
+        has_priority,
+    })
+}
+
+struct GroupFlagsState {
+    has_extensions: bool,
+    has_subgroup: bool,
+    has_priority: bool,
+}
+
+fn send_fetch_started(session: &ResourceArc<SessionRes>, request_id: u64) -> anyhow::Result<()> {
+    let fetch_state = session
+        .fetch
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("fetch state unavailable"))?;
+    let guard = fetch_state
+        .pending
+        .lock()
+        .map_err(|_| anyhow::anyhow!("fetch state lock poisoned"))?;
+    let pending = guard
+        .get(&request_id)
+        .ok_or_else(|| anyhow::anyhow!("pending fetch not found for request_id {request_id}"))?;
+
+    pending.ref_env.run(|env| {
+        let _ = env.send(
+            &pending.caller_pid,
+            (
+                atoms::moqx_fetch_started(),
+                pending.ref_term.load(env),
+                pending.namespace.clone(),
+                pending.track_name.clone(),
+            ),
+        );
+    });
+
+    Ok(())
+}
+
+fn send_fetch_object(
+    session: &ResourceArc<SessionRes>,
+    request_id: u64,
+    group_id: u64,
+    object_id: u64,
+    payload: bytes::Bytes,
+) -> anyhow::Result<()> {
+    let fetch_state = session
+        .fetch
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("fetch state unavailable"))?;
+    let guard = fetch_state
+        .pending
+        .lock()
+        .map_err(|_| anyhow::anyhow!("fetch state lock poisoned"))?;
+    let pending = guard
+        .get(&request_id)
+        .ok_or_else(|| anyhow::anyhow!("pending fetch not found for request_id {request_id}"))?;
+
+    pending.ref_env.run(|env| {
+        let mut binary = NewBinary::new(env, payload.len());
+        binary.as_mut_slice().copy_from_slice(&payload);
+        let payload_term: rustler::Term = binary.into();
+        let message = rustler::types::tuple::make_tuple(
+            env,
+            &[
+                atoms::moqx_fetch_object().encode(env),
+                pending.ref_term.load(env),
+                group_id.encode(env),
+                object_id.encode(env),
+                payload_term,
+            ],
+        );
+        let _ = env.send(&pending.caller_pid, message);
+    });
+
+    Ok(())
+}
+
+fn send_fetch_done_and_cleanup(session: &ResourceArc<SessionRes>, request_id: u64) -> anyhow::Result<()> {
+    let pending = take_pending_fetch(session, request_id)?
+        .ok_or_else(|| anyhow::anyhow!("pending fetch not found for request_id {request_id}"))?;
+
+    pending.ref_env.run(|env| {
+        let _ = env.send(
+            &pending.caller_pid,
+            (atoms::moqx_fetch_done(), pending.ref_term.load(env)),
+        );
+    });
+
+    Ok(())
+}
+
+fn send_fetch_error_and_cleanup(
+    session: &ResourceArc<SessionRes>,
+    request_id: u64,
+    reason: &str,
+) -> anyhow::Result<()> {
+    if let Some(pending) = take_pending_fetch(session, request_id)? {
+        let reason = reason.to_string();
+        pending.ref_env.run(|env| {
+            let _ = env.send(
+                &pending.caller_pid,
+                (atoms::moqx_fetch_error(), pending.ref_term.load(env), reason).encode(env),
+            );
+        });
+    }
+
+    Ok(())
+}
+
+fn take_pending_fetch(
+    session: &ResourceArc<SessionRes>,
+    request_id: u64,
+) -> anyhow::Result<Option<PendingFetch>> {
+    session
+        .fetch
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("fetch state unavailable"))?
+        .remove_pending(request_id)
+}
+
+fn encode_varint(buf: &mut BytesMut, value: u64) {
+    if value < (1 << 6) {
+        buf.put_u8(value as u8);
+    } else if value < (1 << 14) {
+        buf.put_u16(((1 << 14) | value as u16) as u16);
+    } else if value < (1 << 30) {
+        buf.put_u32((2u32 << 30) | value as u32);
+    } else {
+        buf.put_u64((3u64 << 62) | value);
+    }
+}
+
+fn encode_string_v17(buf: &mut BytesMut, value: &str) {
+    encode_bytes_v17(buf, value.as_bytes())
+}
+
+fn encode_bytes_v17(buf: &mut BytesMut, value: &[u8]) {
+    encode_varint(buf, value.len() as u64);
+    buf.extend_from_slice(value);
+}
+
+fn encode_namespace_v17(buf: &mut BytesMut, namespace: &str) {
+    let parts: Vec<&str> = namespace.split('/').filter(|part| !part.is_empty()).collect();
+    encode_varint(buf, parts.len() as u64);
+    for part in parts {
+        encode_string_v17(buf, part);
+    }
+}
+
+fn read_varint_buf<B: Buf>(buf: &mut B) -> anyhow::Result<u64> {
+    if !buf.has_remaining() {
+        anyhow::bail!("short buffer")
+    }
+
+    let first = buf.chunk()[0];
+    let tag = first >> 6;
+    let bytes = 1usize << tag;
+    if buf.remaining() < bytes {
+        anyhow::bail!("short buffer")
+    }
+
+    let value = match bytes {
+        1 => buf.get_u8() as u64 & 0x3f,
+        2 => buf.get_u16() as u64 & 0x3fff,
+        4 => buf.get_u32() as u64 & 0x3fff_ffff,
+        8 => buf.get_u64() & 0x3fff_ffff_ffff_ffff,
+        _ => unreachable!(),
+    };
+
+    Ok(value)
+}
+
+fn read_string_buf<B: Buf>(buf: &mut B) -> anyhow::Result<String> {
+    let len = read_varint_buf(buf)? as usize;
+    if buf.remaining() < len {
+        anyhow::bail!("short buffer")
+    }
+    let bytes = buf.copy_to_bytes(len);
+    Ok(String::from_utf8(bytes.to_vec()).context("invalid utf-8")?)
+}
+
+async fn write_all_send<S>(send: &mut S, data: bytes::Bytes) -> anyhow::Result<()>
+where
+    S: web_transport_trait::SendStream + Unpin,
+{
+    let mut data = data;
+    while data.has_remaining() {
+        web_transport_trait::SendStream::write_buf(send, &mut data)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    }
+    Ok(())
+}
+
+async fn read_exact_recv<R>(recv: &mut R, len: usize) -> anyhow::Result<bytes::Bytes>
+where
+    R: web_transport_trait::RecvStream + Unpin,
+{
+    let mut out = BytesMut::with_capacity(len);
+    while out.len() < len {
+        match web_transport_trait::RecvStream::read_chunk(recv, len - out.len())
+            .await
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?
+        {
+            Some(chunk) => out.extend_from_slice(&chunk),
+            None => anyhow::bail!("stream closed"),
+        }
+    }
+    Ok(out.freeze())
+}
+
+async fn skip_exact_recv<R>(recv: &mut R, len: usize) -> anyhow::Result<()>
+where
+    R: web_transport_trait::RecvStream + Unpin,
+{
+    let _ = read_exact_recv(recv, len).await?;
+    Ok(())
+}
+
+async fn read_varint_recv<R>(recv: &mut R) -> anyhow::Result<u64>
+where
+    R: web_transport_trait::RecvStream + Unpin,
+{
+    let first = read_exact_recv(recv, 1).await?;
+    let tag = first[0] >> 6;
+    let bytes = 1usize << tag;
+    if bytes == 1 {
+        return Ok((first[0] & 0x3f) as u64);
+    }
+
+    let rest = read_exact_recv(recv, bytes - 1).await?;
+    let mut buf = BytesMut::with_capacity(bytes);
+    buf.extend_from_slice(&first);
+    buf.extend_from_slice(&rest);
+    let mut cursor = Cursor::new(buf.freeze());
+    read_varint_buf(&mut cursor)
+}
+
+async fn read_varint_maybe_recv<R>(recv: &mut R) -> anyhow::Result<Option<u64>>
+where
+    R: web_transport_trait::RecvStream + Unpin,
+{
+    match web_transport_trait::RecvStream::read_chunk(recv, 1)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?
+    {
+        None => Ok(None),
+        Some(first) => {
+            let tag = first[0] >> 6;
+            let bytes = 1usize << tag;
+            if bytes == 1 {
+                Ok(Some((first[0] & 0x3f) as u64))
+            } else {
+                let rest = read_exact_recv(recv, bytes - 1).await?;
+                let mut buf = BytesMut::with_capacity(bytes);
+                buf.extend_from_slice(&first);
+                buf.extend_from_slice(&rest);
+                let mut cursor = Cursor::new(buf.freeze());
+                Ok(Some(read_varint_buf(&mut cursor)?))
+            }
+        }
+    }
+}
+
+async fn read_u16_recv<R>(recv: &mut R) -> anyhow::Result<u16>
+where
+    R: web_transport_trait::RecvStream + Unpin,
+{
+    let bytes = read_exact_recv(recv, 2).await?;
+    let mut cursor = Cursor::new(bytes.as_ref());
+    Ok(cursor.get_u16())
+}
+
+async fn read_u8_recv<R>(recv: &mut R) -> anyhow::Result<u8>
+where
+    R: web_transport_trait::RecvStream + Unpin,
+{
+    Ok(read_exact_recv(recv, 1).await?[0])
 }
 
 #[cfg(test)]
