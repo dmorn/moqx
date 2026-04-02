@@ -137,36 +137,6 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp await_fetch_started!(ref) do
-    receive do
-      {:moqx_fetch_started, ^ref, namespace, track_name} -> {namespace, track_name}
-      {:moqx_fetch_error, ^ref, reason} -> flunk("fetch error: #{inspect(reason)}")
-      {port, _message} when is_port(port) -> await_fetch_started!(ref)
-    after
-      @timeout -> flunk("fetch started timeout")
-    end
-  end
-
-  defp await_fetch_object!(ref) do
-    receive do
-      {:moqx_fetch_object, ^ref, group_id, object_id, payload} -> {group_id, object_id, payload}
-      {:moqx_fetch_error, ^ref, reason} -> flunk("fetch error: #{inspect(reason)}")
-      {port, _message} when is_port(port) -> await_fetch_object!(ref)
-    after
-      @timeout -> flunk("fetch object timeout")
-    end
-  end
-
-  defp await_fetch_done!(ref) do
-    receive do
-      {:moqx_fetch_done, ^ref} -> :ok
-      {:moqx_fetch_error, ^ref, reason} -> flunk("fetch error: #{inspect(reason)}")
-      {port, _message} when is_port(port) -> await_fetch_done!(ref)
-    after
-      @timeout -> flunk("fetch done timeout")
-    end
-  end
-
   defp collect_fetch_objects(ref, acc \\ []) do
     receive do
       {:moqx_fetch_object, ^ref, group_id, object_id, payload} ->

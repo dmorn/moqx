@@ -23,6 +23,7 @@ defmodule MOQX do
   5. send frames with `write_frame/2`
   6. subscribe with `subscribe/3`
   7. fetch raw track objects with `fetch/4` or `fetch_catalog/2` (subscriber only)
+  8. decode a CMSF catalog with `MOQX.Catalog.decode/1` and discover tracks
 
   Connection and subscription are asynchronous:
 
@@ -70,21 +71,13 @@ defmodule MOQX do
         :moqx_track_ended -> :ok
       end
 
-      # Fetch raw catalog bytes from the relay
+      # Fetch and decode a remote catalog
       {:ok, ref} = MOQX.fetch_catalog(subscriber)
+      {:ok, catalog} = MOQX.await_catalog(ref)
 
-      receive do
-        {:moqx_fetch_started, ^ref, _ns, _track} -> :ok
-      end
-
-      catalog_bytes =
-        receive do
-          {:moqx_fetch_object, ^ref, _gid, _oid, payload} -> payload
-        end
-
-      receive do
-        {:moqx_fetch_done, ^ref} -> :ok
-      end
+      catalog
+      |> MOQX.Catalog.video_tracks()
+      |> Enum.map(& &1.name)
 
   Broadcast announcement is lazy: a broadcast becomes visible to subscribers
   on the first successful `write_frame/2` for any track in that broadcast.
@@ -491,6 +484,45 @@ defmodule MOQX do
       |> Keyword.put_new(:end, {0, 1})
 
     fetch(session, namespace, "catalog", fetch_opts)
+  end
+
+  @doc """
+  Collects fetch messages for `ref` and decodes the payload as a CMSF catalog.
+
+  Blocks the caller until all objects are received, then concatenates the
+  payloads and passes them to `MOQX.Catalog.decode/1`.
+
+  Returns `{:ok, catalog}` on success, `{:error, reason}` on fetch failure
+  or decode failure, and `{:error, "timeout"}` if no terminal message arrives
+  within `timeout` milliseconds.
+
+  ## Example
+
+      {:ok, ref} = MOQX.fetch_catalog(subscriber, namespace: "moqtail")
+      {:ok, catalog} = MOQX.await_catalog(ref)
+  """
+  @spec await_catalog(fetch_ref(), timeout()) ::
+          {:ok, MOQX.Catalog.t()} | {:error, String.t()}
+  def await_catalog(ref, timeout \\ 5_000) when is_reference(ref) do
+    await_catalog_loop(ref, [], timeout)
+  end
+
+  defp await_catalog_loop(ref, acc, timeout) do
+    receive do
+      {:moqx_fetch_started, ^ref, _ns, _track} ->
+        await_catalog_loop(ref, acc, timeout)
+
+      {:moqx_fetch_object, ^ref, _group, _object, payload} ->
+        await_catalog_loop(ref, [acc | [payload]], timeout)
+
+      {:moqx_fetch_done, ^ref} ->
+        MOQX.Catalog.decode(IO.iodata_to_binary(acc))
+
+      {:moqx_fetch_error, ^ref, reason} ->
+        {:error, reason}
+    after
+      timeout -> {:error, "timeout"}
+    end
   end
 
   defp validate_fetch_opts_keys!(opts) do

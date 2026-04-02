@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "generatedAt": 1775094299325,
+  "supportsDeltaUpdates": false,
+  "tracks": [
+    {
+      "name": "259",
+      "role": "video",
+      "codec": "avc1.42C01F",
+      "packaging": "cmaf",
+      "width": 960,
+      "height": 540,
+      "framerate": 30,
+      "bitrate": 1500000
+    },
+    {
+      "name": "260",
+      "role": "video",
+      "codec": "avc1.640028",
+      "packaging": "cmaf",
+      "width": 1280,
+      "height": 720,
+      "framerate": 30,
+      "bitrate": 3000000,
+      "initData": "AAAAGGZ0eXA="
+    },
+    {
+      "name": "261",
+      "role": "audio",
+      "codec": "mp4a.40.2",
+      "packaging": "cmaf",
+      "samplerate": 48000,
+      "channels": 2,
+      "bitrate": 128000
+    },
+    {
+      "name": "timeline",
+      "role": "timeline"
+    }
+  ]
+}

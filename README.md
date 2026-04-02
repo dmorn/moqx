@@ -33,7 +33,8 @@ Today `moqx` supports a single client-side path:
 - connect-time version pinning
 - broadcasts, tracks, and frame delivery
 - raw fetch for retrieving track objects by range (subscriber sessions only)
-- raw catalog retrieval via `fetch_catalog/2`
+- raw catalog retrieval via `fetch_catalog/2` and `await_catalog/2`
+- CMSF catalog parsing and track discovery via `MOQX.Catalog`
 - relay authentication through the connect URL query, using `?jwt=...`
 - path-rooted relay authorization, where the connect URL path must match the token `root`
 - minimal client TLS controls:
@@ -54,7 +55,7 @@ Out of scope for `v0.1`:
 - embedding or managing a relay from Elixir
 - broader server-side feature surface beyond relay-backed client connections
 - broader production hardening beyond the current minimal client TLS controls
-- CMSF catalog parsing and track discovery (planned for issue #8)
+- automatic subscription orchestration from a parsed catalog
 
 ## Public API
 
@@ -272,32 +273,42 @@ end
 
 `fetch_catalog/2` is a convenience wrapper that fetches the first catalog
 object with sensible defaults (namespace `"moqtail"`, track `"catalog"`,
-range `{0,0}..{0,1}`):
+range `{0,0}..{0,1}`).
+
+`await_catalog/2` collects the fetch messages and decodes the payload into
+an `MOQX.Catalog` struct in one call:
 
 ```elixir
 {:ok, ref} = MOQX.fetch_catalog(subscriber)
+{:ok, catalog} = MOQX.await_catalog(ref)
 
-receive do
-  {:moqx_fetch_started, ^ref, _ns, _track} -> :ok
-end
-
-payload =
-  receive do
-    {:moqx_fetch_object, ^ref, _gid, _oid, data} -> data
-  end
-
-receive do
-  {:moqx_fetch_done, ^ref} -> :ok
-end
-
-# payload is raw UTF-8 JSON CMSF bytes — parsing is left to your application
-# (CMSF parsing and track discovery are planned for issue #8)
-IO.puts(payload)
+catalog |> MOQX.Catalog.video_tracks() |> Enum.map(& &1.name)
+#=> ["259", "260"]
 ```
 
-> **Scope boundary:** `fetch/4` and `fetch_catalog/2` deliver raw bytes only
-> (issue #7). CMSF catalog parsing and track discovery are a separate concern
-> (issue #8).
+### Catalog parsing and track discovery
+
+`MOQX.Catalog` decodes raw CMSF catalog bytes (UTF-8 JSON) into an Elixir
+struct with track discovery helpers:
+
+```elixir
+{:ok, catalog} = MOQX.Catalog.decode(payload)
+
+MOQX.Catalog.tracks(catalog)           # all tracks
+MOQX.Catalog.video_tracks(catalog)     # video tracks only
+MOQX.Catalog.audio_tracks(catalog)     # audio tracks only
+MOQX.Catalog.get_track(catalog, "259") # by exact name
+
+# Track fields are accessed directly on the struct
+track = hd(MOQX.Catalog.video_tracks(catalog))
+track.name      #=> "259"
+track.codec     #=> "avc1.42C01F"
+track.packaging #=> "cmaf"
+track.role      #=> "video"
+```
+
+Each track also carries a `raw` map with all original JSON fields for
+forward compatibility with catalog properties not yet modeled as struct keys.
 
 ## Relay authentication
 
