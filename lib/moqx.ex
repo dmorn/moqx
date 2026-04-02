@@ -115,6 +115,29 @@ defmodule MOQX do
           | :moqx_track_ended
           | {:moqx_error, String.t()}
 
+  @typedoc "Opaque fetch correlation reference returned by `fetch/4`."
+  @type fetch_ref :: reference()
+
+  @typedoc "Requested group ordering for fetch delivery."
+  @type fetch_group_order :: :original | :ascending | :descending
+
+  @typedoc "Fetch start or end location as `{group_id, object_id}`."
+  @type fetch_location :: {non_neg_integer(), non_neg_integer()}
+
+  @typedoc "Fetch options accepted by `fetch/4`."
+  @type fetch_opt ::
+          {:priority, 0..255}
+          | {:group_order, fetch_group_order()}
+          | {:start, fetch_location()}
+          | {:end, fetch_location()}
+
+  @typedoc "Fetch lifecycle messages delivered to the caller process."
+  @type fetch_message ::
+          {:moqx_fetch_started, fetch_ref(), String.t(), String.t()}
+          | {:moqx_fetch_object, fetch_ref(), non_neg_integer(), non_neg_integer(), binary()}
+          | {:moqx_fetch_done, fetch_ref()}
+          | {:moqx_fetch_error, fetch_ref(), String.t()}
+
   @type connect_opt ::
           {:role, role()}
           | {:backend, backend()}
@@ -376,5 +399,138 @@ defmodule MOQX do
   def subscribe(session, broadcast_path, track_name)
       when is_binary(broadcast_path) and is_binary(track_name) do
     MOQX.Native.subscribe(session, broadcast_path, track_name)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Fetch
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Submits a raw fetch request on a subscriber session.
+
+  Returns `{:ok, ref}` immediately after the request is accepted for submission.
+  The caller later receives a `t:fetch_message/0` stream correlated by `ref`.
+
+  Misuse errors, such as calling this with a publisher session, are returned as
+  `{:error, reason}` immediately.
+  """
+  @spec fetch(session(), String.t(), String.t(), [fetch_opt()]) ::
+          {:ok, fetch_ref()} | {:error, String.t()}
+  def fetch(session, namespace, track_name, opts \\ [])
+      when is_binary(namespace) and is_binary(track_name) and is_list(opts) do
+    priority = opts |> Keyword.get(:priority, 0) |> normalize_fetch_priority!()
+    group_order = opts |> Keyword.get(:group_order, :original) |> normalize_fetch_group_order!()
+    start = opts |> Keyword.get(:start, {0, 0}) |> normalize_fetch_location!(:start)
+    end_location = opts |> Keyword.get(:end) |> normalize_fetch_end!()
+
+    validate_fetch_opts_keys!(opts)
+    validate_fetch_range!(start, end_location)
+
+    case session_role(session) do
+      :subscriber ->
+        ref = make_ref()
+
+        case MOQX.Native.fetch(
+               session,
+               ref,
+               namespace,
+               track_name,
+               priority,
+               group_order,
+               start,
+               end_location
+             ) do
+          :ok -> {:ok, ref}
+          {:error, _reason} = error -> error
+        end
+
+      :publisher ->
+        {:error, "fetch requires a subscriber session"}
+    end
+  end
+
+  @doc """
+  Fetches the raw catalog track bytes.
+
+  This is a thin wrapper over `fetch/4` with catalog defaults:
+
+  - namespace: `"moqtail"`
+  - track name: `"catalog"`
+  - priority: `0`
+  - group order: `:original`
+  - start: `{0, 0}`
+  - end: `{0, 1}`
+  """
+  @spec fetch_catalog(session(), Keyword.t()) :: {:ok, fetch_ref()} | {:error, String.t()}
+  def fetch_catalog(session, opts \\ []) when is_list(opts) do
+    namespace = opts |> Keyword.get(:namespace, "moqtail") |> normalize_fetch_namespace!()
+
+    fetch_opts =
+      opts
+      |> Keyword.delete(:namespace)
+      |> Keyword.put_new(:priority, 0)
+      |> Keyword.put_new(:group_order, :original)
+      |> Keyword.put_new(:start, {0, 0})
+      |> Keyword.put_new(:end, {0, 1})
+
+    fetch(session, namespace, "catalog", fetch_opts)
+  end
+
+  defp validate_fetch_opts_keys!(opts) do
+    allowed_keys = [:priority, :group_order, :start, :end]
+
+    case Keyword.keys(opts) -- allowed_keys do
+      [] -> :ok
+      [key | _] -> raise ArgumentError, "unexpected fetch option #{inspect(key)}"
+    end
+  end
+
+  defp normalize_fetch_namespace!(namespace) when is_binary(namespace), do: namespace
+
+  defp normalize_fetch_namespace!(namespace) do
+    raise ArgumentError,
+          "expected catalog :namespace to be a string, got: #{inspect(namespace)}"
+  end
+
+  defp normalize_fetch_priority!(priority) when is_integer(priority) and priority in 0..255,
+    do: priority
+
+  defp normalize_fetch_priority!(priority) do
+    raise ArgumentError,
+          "expected :priority to be an integer in 0..255, got: #{inspect(priority)}"
+  end
+
+  defp normalize_fetch_group_order!(:original), do: "original"
+  defp normalize_fetch_group_order!(:ascending), do: "ascending"
+  defp normalize_fetch_group_order!(:descending), do: "descending"
+
+  defp normalize_fetch_group_order!(group_order) do
+    raise ArgumentError,
+          "expected :group_order to be :original, :ascending, or :descending, got: #{inspect(group_order)}"
+  end
+
+  defp normalize_fetch_location!({group_id, object_id}, _name)
+       when is_integer(group_id) and group_id >= 0 and is_integer(object_id) and object_id >= 0 do
+    {group_id, object_id}
+  end
+
+  defp normalize_fetch_location!(location, name) do
+    raise ArgumentError,
+          "expected #{inspect(name)} to be {group_id, object_id} with non-negative integers, got: #{inspect(location)}"
+  end
+
+  defp normalize_fetch_end!(nil), do: nil
+  defp normalize_fetch_end!(location), do: normalize_fetch_location!(location, :end)
+
+  defp validate_fetch_range!(_start, nil), do: :ok
+
+  defp validate_fetch_range!({start_group, start_object}, {end_group, end_object})
+       when end_group > start_group or
+              (end_group == start_group and end_object >= start_object),
+       do: :ok
+
+  defp validate_fetch_range!(start, end_location) do
+    raise ArgumentError,
+          "expected :end to be greater than or equal to :start, got: start=#{inspect(start)}, end=#{inspect(end_location)}"
   end
 end

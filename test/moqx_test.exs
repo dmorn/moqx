@@ -14,6 +14,12 @@ defmodule MOQXTest do
     assert is_function(&MOQX.close/1)
   end
 
+  test "public API exposes fetch helpers" do
+    assert is_function(&MOQX.fetch/4)
+    assert is_function(&MOQX.fetch_catalog/1)
+    assert is_function(&MOQX.fetch_catalog/2)
+  end
+
   test "connect/2 requires an explicit role" do
     assert_raise ArgumentError, "connect/2 requires :role (:publisher or :subscriber)", fn ->
       MOQX.connect("https://example.com", [])
@@ -81,6 +87,46 @@ defmodule MOQXTest do
                  "unexpected :tls option :unknown",
                  fn ->
                    MOQX.connect("https://example.com", role: :publisher, tls: [unknown: true])
+                 end
+  end
+
+  test "fetch/4 validates priority before session inspection" do
+    assert_raise ArgumentError,
+                 "expected :priority to be an integer in 0..255, got: -1",
+                 fn ->
+                   MOQX.fetch(:not_a_session, "ns", "track", priority: -1)
+                 end
+  end
+
+  test "fetch/4 validates group_order before session inspection" do
+    assert_raise ArgumentError,
+                 "expected :group_order to be :original, :ascending, or :descending, got: :sideways",
+                 fn ->
+                   MOQX.fetch(:not_a_session, "ns", "track", group_order: :sideways)
+                 end
+  end
+
+  test "fetch/4 validates start before session inspection" do
+    assert_raise ArgumentError,
+                 "expected :start to be {group_id, object_id} with non-negative integers, got: :invalid",
+                 fn ->
+                   MOQX.fetch(:not_a_session, "ns", "track", start: :invalid)
+                 end
+  end
+
+  test "fetch/4 validates end before session inspection" do
+    assert_raise ArgumentError,
+                 "expected :end to be {group_id, object_id} with non-negative integers, got: {-1, 0}",
+                 fn ->
+                   MOQX.fetch(:not_a_session, "ns", "track", end: {-1, 0})
+                 end
+  end
+
+  test "fetch/4 validates end is not before start" do
+    assert_raise ArgumentError,
+                 "expected :end to be greater than or equal to :start, got: start={1, 2}, end={1, 1}",
+                 fn ->
+                   MOQX.fetch(:not_a_session, "ns", "track", start: {1, 2}, end: {1, 1})
                  end
   end
 

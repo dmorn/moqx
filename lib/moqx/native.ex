@@ -21,4 +21,8 @@ defmodule MOQX.Native do
 
   # Subscribe
   def subscribe(_session, _broadcast_path, _track_name), do: :erlang.nif_error(:nif_not_loaded)
+
+  # Fetch
+  def fetch(_session, _ref, _namespace, _track_name, _priority, _group_order, _start, _end),
+    do: :erlang.nif_error(:nif_not_loaded)
 end
