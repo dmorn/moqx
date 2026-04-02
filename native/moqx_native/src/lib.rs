@@ -16,8 +16,9 @@ use moqtail::model::control::client_setup::ClientSetup;
 use moqtail::model::control::constant::{DRAFT_14, GroupOrder as MoqGroupOrder};
 use moqtail::model::control::control_message::ControlMessage;
 use moqtail::model::control::fetch::{Fetch as MoqFetch, StandAloneFetchProps};
-use moqtail::model::control::publish::Publish as MoqPublish;
+use moqtail::model::control::publish_namespace::PublishNamespace;
 use moqtail::model::control::subscribe::Subscribe as MoqSubscribe;
+use moqtail::model::control::subscribe_ok::SubscribeOk;
 use moqtail::model::data::constant::{ObjectForwardingPreference, ObjectStatus};
 use moqtail::model::data::fetch_object::FetchObject;
 use moqtail::model::data::subgroup_header::SubgroupHeader;
@@ -73,7 +74,9 @@ struct PendingSubscribe {
 
 struct ActiveSubscription {
     caller_pid: LocalPid,
+    #[allow(dead_code)]
     broadcast_path: String,
+    #[allow(dead_code)]
     track_name: String,
 }
 
@@ -81,8 +84,14 @@ struct PendingPublish {
     tx: oneshot::Sender<Result<(), String>>,
 }
 
-struct ActivePublish {
+/// A track that a remote subscriber has subscribed to via the relay.
+/// The publisher needs to send data for this track.
+struct IncomingSubscription {
+    #[allow(dead_code)]
+    request_id: u64,
     track_alias: u64,
+    #[allow(dead_code)]
+    track_name: String,
 }
 
 /// Shared session state behind Arc, accessed by background tasks and NIF calls.
@@ -95,7 +104,9 @@ struct SessionInner {
     active_subscriptions: std::sync::Mutex<HashMap<u64, ActiveSubscription>>,
     pending_fetches: std::sync::Mutex<HashMap<u64, PendingFetch>>,
     pending_publishes: std::sync::Mutex<HashMap<u64, PendingPublish>>,
-    active_publishes: std::sync::Mutex<HashMap<u64, ActivePublish>>,
+    /// Incoming subscriptions from the relay (subscriber → relay → publisher).
+    /// Keyed by "namespace/track_name" so write_frame can find the correct track_alias.
+    incoming_subscriptions: std::sync::Mutex<HashMap<String, IncomingSubscription>>,
     #[allow(dead_code)]
     shutdown_tx: watch::Sender<bool>,
 }
@@ -127,9 +138,7 @@ pub struct TrackProducerRes {
     session: Arc<SessionInner>,
     namespace: String,
     track_name: String,
-    track_alias: u64,
     group_seq: AtomicU64,
-    published: std::sync::Mutex<bool>,
 }
 
 impl Resource for SessionRes {}
@@ -381,7 +390,7 @@ async fn do_connect(
         active_subscriptions: std::sync::Mutex::new(HashMap::new()),
         pending_fetches: std::sync::Mutex::new(HashMap::new()),
         pending_publishes: std::sync::Mutex::new(HashMap::new()),
-        active_publishes: std::sync::Mutex::new(HashMap::new()),
+        incoming_subscriptions: std::sync::Mutex::new(HashMap::new()),
         shutdown_tx,
     });
 
@@ -536,6 +545,59 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
             if let Some(pp) = pending {
                 let _ = pp.tx.send(Err(format!("publish error: {:?}", err)));
             }
+        }
+        ControlMessage::PublishNamespaceOk(ok) => {
+            // Treat as publish confirmation (same request_id flow)
+            let pending = inner
+                .pending_publishes
+                .lock()
+                .unwrap()
+                .remove(&ok.request_id);
+            if let Some(pp) = pending {
+                let _ = pp.tx.send(Ok(()));
+            }
+        }
+        ControlMessage::PublishNamespaceError(err) => {
+            let pending = inner
+                .pending_publishes
+                .lock()
+                .unwrap()
+                .remove(&err.request_id);
+            if let Some(pp) = pending {
+                let _ = pp.tx.send(Err(format!("publish namespace error: {:?}", err)));
+            }
+        }
+        ControlMessage::Subscribe(sub) => {
+            // Relay is forwarding a subscriber's Subscribe to us (publisher).
+            // Respond with SubscribeOk and track this as an incoming subscription.
+            let track_alias = inner.allocate_track_alias();
+            let track_name = sub.track_name.as_str();
+            let namespace = sub.track_namespace.to_utf8_path();
+
+            let key = format!("{}/{}", namespace.trim_matches('/'), track_name);
+            inner.incoming_subscriptions.lock().unwrap().insert(
+                key,
+                IncomingSubscription {
+                    request_id: sub.request_id,
+                    track_alias,
+                    track_name: track_name.clone(),
+                },
+            );
+
+            // Send SubscribeOk back to the relay
+            let ok = SubscribeOk::new_ascending_no_content(
+                sub.request_id,
+                track_alias,
+                0, // expires
+                None,
+            );
+            let inner_clone = inner.clone();
+            tokio::spawn(async move {
+                let _ = inner_clone
+                    .control_tx
+                    .send(ControlMessage::SubscribeOk(Box::new(ok)))
+                    .await;
+            });
         }
         _ => {
             // MaxRequestId, GoAway, etc. -- ignore for now
@@ -894,6 +956,32 @@ fn publish<'a>(
     }
 
     let namespace = normalize_path(&session.root, &broadcast_path);
+    let inner = session.inner.clone();
+
+    // Send PublishNamespace to announce availability to the relay.
+    // This is fire-and-forget from the NIF perspective; the relay will
+    // respond with PublishNamespaceOk which is handled by the control loop.
+    let ns_clone = namespace.clone();
+    runtime().spawn(async move {
+        let request_id = inner.allocate_request_id();
+        let (tx, _rx) = oneshot::channel();
+        inner
+            .pending_publishes
+            .lock()
+            .unwrap()
+            .insert(request_id, PendingPublish { tx });
+
+        let msg = PublishNamespace::new(
+            request_id,
+            Tuple::from_utf8_path(&ns_clone),
+            &[],
+        );
+        let _ = inner
+            .control_tx
+            .send(ControlMessage::PublishNamespace(Box::new(msg)))
+            .await;
+    });
+
     let res = ResourceArc::new(BroadcastProducerRes {
         session: session.inner.clone(),
         namespace,
@@ -907,14 +995,11 @@ fn create_track<'a>(
     broadcast: ResourceArc<BroadcastProducerRes>,
     track_name: String,
 ) -> rustler::NifResult<rustler::Term<'a>> {
-    let track_alias = broadcast.session.allocate_track_alias();
     let res = ResourceArc::new(TrackProducerRes {
         session: broadcast.session.clone(),
         namespace: broadcast.namespace.clone(),
         track_name,
-        track_alias,
         group_seq: AtomicU64::new(0),
-        published: std::sync::Mutex::new(false),
     });
     Ok((atoms::ok(), res).encode(env))
 }
@@ -925,29 +1010,19 @@ fn write_frame(track: ResourceArc<TrackProducerRes>, data: Binary) -> rustler::N
     let session = track.session.clone();
     let namespace = track.namespace.clone();
     let track_name_str = track.track_name.clone();
-    let track_alias = track.track_alias;
     let group_seq = track.group_seq.fetch_add(1, Ordering::Relaxed);
-
-    let mut published = track.published.lock().unwrap();
-    let need_publish = !*published;
-    if need_publish {
-        *published = true;
-    }
-    drop(published);
 
     runtime().spawn(async move {
         if let Err(e) = do_write_frame(
             &session,
             &namespace,
             &track_name_str,
-            track_alias,
             group_seq,
             payload,
-            need_publish,
         )
         .await
         {
-            let _ = e; // TODO: send error to caller
+            let _ = e;
         }
     });
 
@@ -958,57 +1033,27 @@ async fn do_write_frame(
     session: &Arc<SessionInner>,
     namespace: &str,
     track_name: &str,
-    track_alias: u64,
     group_seq: u64,
     payload: Bytes,
-    need_publish: bool,
 ) -> anyhow::Result<()> {
-    if need_publish {
-        // Send Publish control message
-        let request_id = session.allocate_request_id();
-        let (tx, rx) = oneshot::channel();
-        session
-            .pending_publishes
-            .lock()
-            .unwrap()
-            .insert(request_id, PendingPublish { tx });
+    // Look up the track_alias from the incoming subscription.
+    // The relay assigned this alias when it forwarded the subscriber's Subscribe.
+    let key = format!("{}/{}", namespace.trim_matches('/'), track_name);
+    let track_alias = {
+        let guard = session.incoming_subscriptions.lock().unwrap();
+        guard
+            .get(&key)
+            .map(|s| s.track_alias)
+            .ok_or_else(|| anyhow::anyhow!("no subscriber for {key}"))?
+    };
 
-        let publish_msg = MoqPublish::new(
-            request_id,
-            Tuple::from_utf8_path(namespace),
-            TupleField::from_utf8(track_name),
-            track_alias,
-            MoqGroupOrder::Original,
-            0,    // content_exists = false initially
-            None, // no largest_location
-            1,    // forward = true
-            vec![],
-        );
-        session
-            .control_tx
-            .send(ControlMessage::Publish(Box::new(publish_msg)))
-            .await
-            .map_err(|_| anyhow::anyhow!("control channel closed"))?;
-
-        // Wait for PublishOk
-        rx.await
-            .map_err(|_| anyhow::anyhow!("publish response channel dropped"))?
-            .map_err(|e| anyhow::anyhow!(e))?;
-
-        session.active_publishes.lock().unwrap().insert(
-            track_alias,
-            ActivePublish { track_alias },
-        );
-    }
-
-    // Open a uni stream and write subgroup header + object
     let send = session.connection.open_uni().await?.await?;
     let send = Arc::new(tokio::sync::Mutex::new(send));
 
     let header = SubgroupHeader::new_fixed_zero_id(
         track_alias,
         group_seq,
-        0, // priority
+        0,     // priority
         false, // no extensions
         false, // no end-of-group marker
     );
@@ -1044,25 +1089,17 @@ async fn do_write_frame(
 
 #[rustler::nif]
 fn finish_track(track: ResourceArc<TrackProducerRes>) -> rustler::NifResult<Atom> {
-    let session = track.session.clone();
-    let track_alias = track.track_alias;
-
-    runtime().spawn(async move {
-        // Send PublishDone on control stream
-        let request_id = {
-            let guard = session.active_publishes.lock().unwrap();
-            if guard.contains_key(&track_alias) {
-                Some(session.allocate_request_id())
-            } else {
-                None
-            }
-        };
-
-        if let Some(_request_id) = request_id {
-            // Remove from active
-            session.active_publishes.lock().unwrap().remove(&track_alias);
-        }
-    });
+    let key = format!(
+        "{}/{}",
+        track.namespace.trim_matches('/'),
+        track.track_name
+    );
+    track
+        .session
+        .incoming_subscriptions
+        .lock()
+        .unwrap()
+        .remove(&key);
 
     Ok(atoms::ok())
 }

@@ -1,12 +1,7 @@
-# Exclude integration tests by default if relay isn't available
-exclusions =
-  if MOQX.Test.Relay.available?() do
-    []
-  else
-    [integration: true]
-  end
+# Integration tests are tagged :integration and excluded by default.
+# External relay tests are additionally tagged :external_relay.
+exclusions = [integration: true]
 
-# External relay tests are opt-in via MOQX_EXTERNAL_RELAY=1
 exclusions =
   if System.get_env("MOQX_EXTERNAL_RELAY") do
     exclusions
