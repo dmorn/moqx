@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
 use moq_lite::Origin;
 use moq_native::ClientConfig;
+use rustler::env::SavedTerm;
 use rustler::{Atom, Binary, Encoder, Env, LocalPid, NewBinary, OwnedEnv, Resource, ResourceArc};
 use tokio::runtime::Runtime;
 
@@ -17,6 +20,10 @@ mod atoms {
         moqx_frame,
         moqx_track_ended,
         moqx_error,
+        moqx_fetch_started,
+        moqx_fetch_object,
+        moqx_fetch_done,
+        moqx_fetch_error,
     }
 }
 
@@ -35,11 +42,61 @@ fn runtime() -> &'static Runtime {
 // Resources
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
+struct PendingFetch {
+    caller_pid: LocalPid,
+    ref_env: OwnedEnv,
+    ref_term: SavedTerm,
+    namespace: String,
+    track_name: String,
+}
+
+#[allow(dead_code)]
+struct FetchState {
+    next_request_id: AtomicU64,
+    pending: std::sync::Mutex<HashMap<u64, PendingFetch>>,
+}
+
+#[allow(dead_code)]
+impl FetchState {
+    fn new() -> Self {
+        Self {
+            next_request_id: AtomicU64::new(1),
+            pending: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn allocate_request_id(&self) -> u64 {
+        self.next_request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn insert_pending(&self, request_id: u64, pending: PendingFetch) -> anyhow::Result<()> {
+        let mut guard = self
+            .pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fetch state lock poisoned"))?;
+
+        guard.insert(request_id, pending);
+        Ok(())
+    }
+
+    fn remove_pending(&self, request_id: u64) -> anyhow::Result<Option<PendingFetch>> {
+        let mut guard = self
+            .pending
+            .lock()
+            .map_err(|_| anyhow::anyhow!("fetch state lock poisoned"))?;
+
+        Ok(guard.remove(&request_id))
+    }
+}
+
 pub struct SessionRes {
     session: tokio::sync::Mutex<Option<moq_lite::Session>>,
     origin: Arc<OriginRes>,
     role: ConnectRole,
     root: String,
+    #[allow(dead_code)]
+    fetch: Option<FetchState>,
 }
 
 impl Drop for SessionRes {
@@ -182,6 +239,7 @@ fn connect(
                     origin: origin_arc,
                     role,
                     root,
+                    fetch: role.can_consume().then(FetchState::new),
                 });
                 (atoms::moqx_connected(), session_resource).encode(env)
             }
@@ -389,6 +447,22 @@ fn normalize_broadcast_path(root: &str, broadcast_path: &str) -> String {
         stripped.to_string()
     } else {
         broadcast_path.to_string()
+    }
+}
+
+#[allow(dead_code)]
+fn normalize_fetch_namespace(root: &str, namespace: &str) -> String {
+    let root = root.trim_matches('/');
+    let namespace = namespace.trim_matches('/');
+
+    if root.is_empty() {
+        namespace.to_string()
+    } else if namespace.is_empty() || namespace == root {
+        String::new()
+    } else if let Some(stripped) = namespace.strip_prefix(&format!("{}/", root)) {
+        stripped.to_string()
+    } else {
+        namespace.to_string()
     }
 }
 
@@ -743,7 +817,23 @@ async fn do_subscribe(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_broadcast_path;
+    use super::{normalize_broadcast_path, normalize_fetch_namespace, FetchState};
+
+    #[test]
+    fn fetch_state_allocates_monotonic_request_ids() {
+        let state = FetchState::new();
+
+        assert_eq!(state.allocate_request_id(), 1);
+        assert_eq!(state.allocate_request_id(), 2);
+        assert_eq!(state.allocate_request_id(), 3);
+    }
+
+    #[test]
+    fn fetch_state_remove_missing_request_is_none() {
+        let state = FetchState::new();
+
+        assert!(state.remove_pending(42).unwrap().is_none());
+    }
 
     #[test]
     fn normalize_broadcast_path_keeps_relative_paths_under_root() {
@@ -772,6 +862,37 @@ mod tests {
         assert_eq!(
             normalize_broadcast_path("room/demo", "room/demo-extra/stream"),
             "room/demo-extra/stream"
+        );
+    }
+
+    #[test]
+    fn normalize_fetch_namespace_keeps_relative_namespaces_under_root() {
+        assert_eq!(normalize_fetch_namespace("room/demo", "catalog"), "catalog");
+    }
+
+    #[test]
+    fn normalize_fetch_namespace_strips_matching_root_prefix() {
+        assert_eq!(
+            normalize_fetch_namespace("room/demo", "room/demo/catalog"),
+            "catalog"
+        );
+        assert_eq!(
+            normalize_fetch_namespace("/room/demo/", "/room/demo/catalog/"),
+            "catalog"
+        );
+    }
+
+    #[test]
+    fn normalize_fetch_namespace_maps_root_namespace_to_empty_suffix() {
+        assert_eq!(normalize_fetch_namespace("room/demo", "room/demo"), "");
+        assert_eq!(normalize_fetch_namespace("room/demo", "/room/demo/"), "");
+    }
+
+    #[test]
+    fn normalize_fetch_namespace_keeps_non_matching_prefixes() {
+        assert_eq!(
+            normalize_fetch_namespace("room/demo", "room/demo-extra/catalog"),
+            "room/demo-extra/catalog"
         );
     }
 }
