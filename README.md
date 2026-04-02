@@ -32,6 +32,8 @@ Today `moqx` supports a single client-side path:
   - `:websocket`
 - connect-time version pinning
 - broadcasts, tracks, and frame delivery
+- raw fetch for retrieving track objects by range (subscriber sessions only)
+- raw catalog retrieval via `fetch_catalog/2`
 - relay authentication through the connect URL query, using `?jwt=...`
 - path-rooted relay authorization, where the connect URL path must match the token `root`
 - minimal client TLS controls:
@@ -52,6 +54,7 @@ Out of scope for `v0.1`:
 - embedding or managing a relay from Elixir
 - broader server-side feature surface beyond relay-backed client connections
 - broader production hardening beyond the current minimal client TLS controls
+- CMSF catalog parsing and track discovery (planned for issue #8)
 
 ## Public API
 
@@ -226,6 +229,75 @@ receive do
   {:moqx_error, reason} -> raise "subscription failed: #{inspect(reason)}"
 end
 ```
+
+### Fetch
+
+Fetch retrieves raw track objects by range from a subscriber session.
+`fetch/4` returns `{:ok, ref}` immediately, then delivers messages to the
+caller's mailbox correlated by `ref`.
+
+The fetch message contract is:
+
+- `{:moqx_fetch_started, ref, namespace, track_name}` when the fetch begins
+- `{:moqx_fetch_object, ref, group_id, object_id, payload}` for each object
+- `{:moqx_fetch_done, ref}` when the fetch completes
+- `{:moqx_fetch_error, ref, reason}` on failure
+
+Options:
+
+- `priority` — integer `0..255` (default `0`)
+- `group_order` — `:original`, `:ascending`, or `:descending` (default `:original`)
+- `start` — `{group_id, object_id}` (default `{0, 0}`)
+- `end` — `{group_id, object_id}` (default: open-ended)
+
+```elixir
+{:ok, ref} = MOQX.fetch(subscriber, "my-namespace", "video", start: {0, 0}, end: {5, 0})
+
+receive do
+  {:moqx_fetch_started, ^ref, _ns, _track} -> :ok
+end
+
+# Collect all objects
+objects = collect_objects(ref, [])
+
+defp collect_objects(ref, acc) do
+  receive do
+    {:moqx_fetch_object, ^ref, _gid, _oid, payload} ->
+      collect_objects(ref, [payload | acc])
+    {:moqx_fetch_done, ^ref} ->
+      Enum.reverse(acc)
+  end
+end
+```
+
+`fetch_catalog/2` is a convenience wrapper that fetches the first catalog
+object with sensible defaults (namespace `"moqtail"`, track `"catalog"`,
+range `{0,0}..{0,1}`):
+
+```elixir
+{:ok, ref} = MOQX.fetch_catalog(subscriber)
+
+receive do
+  {:moqx_fetch_started, ^ref, _ns, _track} -> :ok
+end
+
+payload =
+  receive do
+    {:moqx_fetch_object, ^ref, _gid, _oid, data} -> data
+  end
+
+receive do
+  {:moqx_fetch_done, ^ref} -> :ok
+end
+
+# payload is raw UTF-8 JSON CMSF bytes — parsing is left to your application
+# (CMSF parsing and track discovery are planned for issue #8)
+IO.puts(payload)
+```
+
+> **Scope boundary:** `fetch/4` and `fetch_catalog/2` deliver raw bytes only
+> (issue #7). CMSF catalog parsing and track discovery are a separate concern
+> (issue #8).
 
 ## Relay authentication
 

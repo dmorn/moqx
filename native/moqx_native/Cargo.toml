@@ -26,6 +26,6 @@ bytes = "1"
 quinn = "0.11"
 web-transport-quinn = "0.11"
 web-transport-trait = "0.3"
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"

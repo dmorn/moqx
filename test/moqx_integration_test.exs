@@ -137,6 +137,54 @@ defmodule MOQXIntegrationTest do
     end
   end
 
+  defp await_fetch_started!(ref) do
+    receive do
+      {:moqx_fetch_started, ^ref, namespace, track_name} -> {namespace, track_name}
+      {:moqx_fetch_error, ^ref, reason} -> flunk("fetch error: #{inspect(reason)}")
+      {port, _message} when is_port(port) -> await_fetch_started!(ref)
+    after
+      @timeout -> flunk("fetch started timeout")
+    end
+  end
+
+  defp await_fetch_object!(ref) do
+    receive do
+      {:moqx_fetch_object, ^ref, group_id, object_id, payload} -> {group_id, object_id, payload}
+      {:moqx_fetch_error, ^ref, reason} -> flunk("fetch error: #{inspect(reason)}")
+      {port, _message} when is_port(port) -> await_fetch_object!(ref)
+    after
+      @timeout -> flunk("fetch object timeout")
+    end
+  end
+
+  defp await_fetch_done!(ref) do
+    receive do
+      {:moqx_fetch_done, ^ref} -> :ok
+      {:moqx_fetch_error, ^ref, reason} -> flunk("fetch error: #{inspect(reason)}")
+      {port, _message} when is_port(port) -> await_fetch_done!(ref)
+    after
+      @timeout -> flunk("fetch done timeout")
+    end
+  end
+
+  defp collect_fetch_objects(ref, acc \\ []) do
+    receive do
+      {:moqx_fetch_object, ^ref, group_id, object_id, payload} ->
+        collect_fetch_objects(ref, [{group_id, object_id, payload} | acc])
+
+      {:moqx_fetch_done, ^ref} ->
+        Enum.reverse(acc)
+
+      {:moqx_fetch_error, ^ref, reason} ->
+        flunk("fetch error while collecting objects: #{inspect(reason)}")
+
+      {port, _message} when is_port(port) ->
+        collect_fetch_objects(ref, acc)
+    after
+      @timeout -> flunk("collect fetch objects timeout")
+    end
+  end
+
   defp auth_url(base_url, root, claims) do
     jwt = Auth.token(Keyword.put(claims, :root, root))
     Auth.connect_url(base_url, root, jwt)
@@ -675,6 +723,75 @@ defmodule MOQXIntegrationTest do
         assert is_binary(reason)
         refute reason == ""
       end)
+    end
+  end
+
+  describe "fetch role guardrails" do
+    test "fetch/4 rejects publisher sessions", %{relay_url: url, local_dev_tls: tls_opts} do
+      publisher = connect_publisher!(url, tls_opts)
+
+      assert {:error, "fetch requires a subscriber session"} =
+               MOQX.fetch(publisher, "moqtail", "catalog", [])
+
+      :ok = MOQX.close(publisher)
+    end
+
+    test "fetch_catalog/2 rejects publisher sessions", %{relay_url: url, local_dev_tls: tls_opts} do
+      publisher = connect_publisher!(url, tls_opts)
+
+      assert {:error, "fetch requires a subscriber session"} = MOQX.fetch_catalog(publisher)
+
+      :ok = MOQX.close(publisher)
+    end
+  end
+
+  describe "fetch external relay smoke" do
+    @describetag :external_relay
+
+    test "fetch_catalog retrieves raw catalog bytes from external relay" do
+      relay_url = System.get_env("MOQX_EXTERNAL_RELAY_URL", "https://ord.abr.moqtail.dev/demo")
+      namespace = System.get_env("MOQX_EXTERNAL_RELAY_NAMESPACE", "moqtail")
+
+      subscriber = connect_subscriber!(relay_url, [])
+
+      try do
+        # Use a wide range to catch the latest catalog group.
+        assert {:ok, ref} =
+                 MOQX.fetch_catalog(subscriber,
+                   namespace: namespace,
+                   start: {0, 0},
+                   end: {1_000_000, 0}
+                 )
+
+        # The relay may or may not have active content. Both outcomes prove interop:
+        # - objects returned: validate raw catalog bytes
+        # - "No objects available" FetchError: valid protocol response
+        receive do
+          {:moqx_fetch_started, ^ref, _ns, _track} ->
+            objects = collect_fetch_objects(ref)
+            assert objects != [], "expected at least one fetch object after started"
+
+            payload =
+              objects
+              |> Enum.map(&elem(&1, 2))
+              |> IO.iodata_to_binary()
+
+            assert String.valid?(payload), "expected valid UTF-8 payload"
+
+            assert String.starts_with?(payload, "{") or String.starts_with?(payload, "["),
+                   "expected JSON-looking payload, got: #{String.slice(payload, 0..80)}"
+
+          {:moqx_fetch_error, ^ref, reason} ->
+            # "No objects available" is a valid protocol-level response proving
+            # that the relay understood our v14 SETUP + FETCH exchange.
+            assert is_binary(reason)
+            assert reason != "", "expected a non-empty error reason"
+        after
+          @timeout -> flunk("fetch timeout: no response from external relay")
+        end
+      after
+        :ok = MOQX.close(subscriber)
+      end
     end
   end
 

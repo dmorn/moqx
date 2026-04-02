@@ -22,6 +22,7 @@ defmodule MOQX do
   4. create one or more tracks with `create_track/2`
   5. send frames with `write_frame/2`
   6. subscribe with `subscribe/3`
+  7. fetch raw track objects with `fetch/4` or `fetch_catalog/2` (subscriber only)
 
   Connection and subscription are asynchronous:
 
@@ -67,6 +68,22 @@ defmodule MOQX do
 
       receive do
         :moqx_track_ended -> :ok
+      end
+
+      # Fetch raw catalog bytes from the relay
+      {:ok, ref} = MOQX.fetch_catalog(subscriber)
+
+      receive do
+        {:moqx_fetch_started, ^ref, _ns, _track} -> :ok
+      end
+
+      catalog_bytes =
+        receive do
+          {:moqx_fetch_object, ^ref, _gid, _oid, payload} -> payload
+        end
+
+      receive do
+        {:moqx_fetch_done, ^ref} -> :ok
       end
 
   Broadcast announcement is lazy: a broadcast becomes visible to subscribers

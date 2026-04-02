@@ -863,6 +863,15 @@ impl FetchGroupOrder {
         }
     }
 
+    /// v14 group order: 0=any/original, 1=ascending, 2=descending
+    fn encode_v14(self) -> u8 {
+        match self {
+            Self::Original => 0,
+            Self::Ascending => 1,
+            Self::Descending => 2,
+        }
+    }
+
     fn encode_v17(self) -> u8 {
         match self {
             Self::Original => 0,
@@ -969,7 +978,7 @@ async fn do_fetch(
     session: ResourceArc<SessionRes>,
     request_id: u64,
     connect: FetchConnectConfig,
-    negotiated_version: &str,
+    _negotiated_version: &str,
     namespace: &str,
     track_name: &str,
     priority: u8,
@@ -981,24 +990,28 @@ async fn do_fetch(
         anyhow::bail!("fetch currently supports only the quinn backend")
     }
 
-    let version = match negotiated_version {
-        "moq-transport-17" => 17u8,
-        other => anyhow::bail!("fetch currently supports only moq-transport-17, got {other}"),
-    };
+    let url = rewrite_url_for_transport(connect.url.clone(), connect.transport)?;
+    let end = end.unwrap_or(start);
 
-    let transport_session = connect_fetch_transport(&connect, version).await?;
-    perform_fetch_v17(
-        &session,
-        request_id,
-        transport_session,
-        namespace,
-        track_name,
-        priority,
-        group_order,
-        start,
-        end.unwrap_or(start),
-    )
-    .await
+    match url.scheme() {
+        "https" => {
+            // WebTransport: connect with h3 ALPN, negotiate version via SETUP (v14-style)
+            let transport_session = connect_fetch_transport(&connect, 14).await?;
+            perform_fetch_v14(
+                &session, request_id, transport_session,
+                namespace, track_name, priority, group_order, start, end,
+            ).await
+        }
+        "moqt" | "moql" => {
+            // Raw QUIC: connect with version-specific ALPN, v17 setup
+            let transport_session = connect_fetch_transport(&connect, 17).await?;
+            perform_fetch_v17(
+                &session, request_id, transport_session,
+                namespace, track_name, priority, group_order, start, end,
+            ).await
+        }
+        other => anyhow::bail!("unsupported fetch URL scheme: {other}"),
+    }
 }
 
 async fn connect_fetch_transport(
@@ -1020,14 +1033,16 @@ async fn connect_fetch_transport(
         .context("failed to create QUIC endpoint")?;
 
     let mut tls = build_fetch_tls(&connect.tls)?;
-    let alpn = match version {
-        17 => moq_lite::ALPN_17,
-        _ => anyhow::bail!("unsupported fetch ALPN version"),
-    };
 
     tls.alpn_protocols = match url.scheme() {
         "https" => vec![web_transport_quinn::ALPN.as_bytes().to_vec()],
-        "moqt" | "moql" => vec![alpn.as_bytes().to_vec()],
+        "moqt" | "moql" => {
+            let alpn = match version {
+                17 => moq_lite::ALPN_17,
+                _ => anyhow::bail!("unsupported raw QUIC fetch ALPN for version {version}"),
+            };
+            vec![alpn.as_bytes().to_vec()]
+        }
         other => anyhow::bail!("unsupported fetch url scheme: {other}"),
     };
     tls.key_log = Arc::new(rustls::KeyLogFile::new());
@@ -1046,19 +1061,22 @@ async fn connect_fetch_transport(
     let connection = endpoint.connect_with(client_config, ip, &host)?.await?;
 
     let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
-    request = request.with_protocol(alpn.to_string());
 
     match url.scheme() {
-        "https" => Ok(web_transport_quinn::Session::connect(connection, request).await?),
+        "https" => {
+            request = request.with_protocol(web_transport_quinn::ALPN.to_string());
+            Ok(web_transport_quinn::Session::connect(connection, request).await?)
+        }
         "moqt" | "moql" => {
             let handshake = connection
                 .handshake_data()
                 .context("missing handshake data")?
                 .downcast::<quinn::crypto::rustls::HandshakeData>()
                 .map_err(|_| anyhow::anyhow!("failed to decode handshake data"))?;
-            let alpn = handshake.protocol.context("missing ALPN")?;
-            let alpn = String::from_utf8(alpn).context("failed to decode ALPN")?;
-            let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(alpn);
+            let negotiated_alpn = handshake.protocol.context("missing ALPN")?;
+            let negotiated_alpn = String::from_utf8(negotiated_alpn).context("failed to decode ALPN")?;
+            request = request.with_protocol(negotiated_alpn.clone());
+            let response = web_transport_quinn::proto::ConnectResponse::OK.with_protocol(negotiated_alpn);
             Ok(web_transport_quinn::Session::raw(connection, request, response))
         }
         _ => unreachable!(),
@@ -1066,6 +1084,9 @@ async fn connect_fetch_transport(
 }
 
 fn build_fetch_tls(tls: &ConnectTls) -> anyhow::Result<rustls::ClientConfig> {
+    // Ensure a CryptoProvider is available for rustls when building our own TLS config.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let mut roots = rustls::RootCertStore::empty();
 
     if tls.root.is_empty() {
@@ -1094,6 +1115,130 @@ fn build_fetch_tls(tls: &ConnectTls) -> anyhow::Result<rustls::ClientConfig> {
     }
 
     Ok(config)
+}
+
+/// Perform a fetch over WebTransport using v14-style SETUP negotiation.
+///
+/// In v14, the first bidi stream is the control stream. CLIENT_SETUP and
+/// SERVER_SETUP are exchanged, then FETCH is written as a control message
+/// on the same stream. FetchOk/FetchError arrive on the same stream.
+/// Object data arrives on a uni stream prefixed with FetchHeader.
+async fn perform_fetch_v14(
+    session: &ResourceArc<SessionRes>,
+    request_id: u64,
+    transport_session: web_transport_quinn::Session,
+    namespace: &str,
+    track_name: &str,
+    priority: u8,
+    group_order: FetchGroupOrder,
+    start: FetchLocation,
+    end: FetchLocation,
+) -> anyhow::Result<()> {
+    // Open the control bidi stream
+    let (send, recv) = web_transport_trait::Session::open_bi(&transport_session)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let mut writer = send;
+    let mut reader = recv;
+
+    // --- CLIENT_SETUP (v14) ---
+    // type 0x20, u16 length, body = versions + params
+    let mut setup_body = BytesMut::new();
+    // 1 supported version
+    encode_varint(&mut setup_body, 1);
+    // Draft14 version code: 0xff00000e
+    encode_varint(&mut setup_body, 0xff00000e);
+    // 2 parameters (v14 encoding: <count> (<key> <value>)...)
+    encode_varint(&mut setup_body, 2);
+    // Param: MaxRequestId (key=2, varint param) = u32::MAX
+    encode_varint(&mut setup_body, 2);
+    encode_varint(&mut setup_body, 0xFFFF_FFFF_u64);
+    // Param: Implementation (key=7, bytes param) = "moqx-native"
+    encode_varint(&mut setup_body, 7);
+    encode_string_v17(&mut setup_body, "moqx-native"); // len-prefixed bytes
+
+    let mut setup_msg = BytesMut::new();
+    setup_msg.put_u8(0x20); // CLIENT_SETUP type
+    setup_msg.put_u16(setup_body.len() as u16);
+    setup_msg.extend_from_slice(&setup_body);
+    write_all_send(&mut writer, setup_msg.freeze()).await?;
+
+    // --- SERVER_SETUP (v14) ---
+    let server_type = read_u8_recv(&mut reader).await?;
+    if server_type != 0x21 {
+        anyhow::bail!("expected SERVER_SETUP (0x21), got 0x{server_type:02x}");
+    }
+    let server_size = read_u16_recv(&mut reader).await? as usize;
+    let server_body = read_exact_recv(&mut reader, server_size).await?;
+    let mut cursor = Cursor::new(server_body.as_ref());
+    let _server_version = read_varint_buf(&mut cursor)?; // selected version code
+    // Remaining bytes are server parameters, skip them.
+
+    // --- FETCH (v14) ---
+    // Body: request_id, priority, group_order, fetch_type=1(standalone),
+    //       namespace, track, start, end, 0 params
+    let mut fetch_body = BytesMut::new();
+    encode_varint(&mut fetch_body, request_id);
+    fetch_body.put_u8(priority);
+    fetch_body.put_u8(group_order.encode_v14());
+    fetch_body.put_u8(1); // FetchType::Standalone
+    encode_namespace_v17(&mut fetch_body, namespace); // same tuple encoding
+    encode_string_v17(&mut fetch_body, track_name);   // same string encoding
+    encode_varint(&mut fetch_body, start.group);
+    encode_varint(&mut fetch_body, start.object);
+    encode_varint(&mut fetch_body, end.group);
+    encode_varint(&mut fetch_body, end.object);
+    encode_varint(&mut fetch_body, 0); // 0 parameters
+
+    let mut fetch_msg = BytesMut::new();
+    encode_varint(&mut fetch_msg, 0x16); // FETCH type
+    fetch_msg.put_u16(fetch_body.len() as u16);
+    fetch_msg.extend_from_slice(&fetch_body);
+    write_all_send(&mut writer, fetch_msg.freeze()).await?;
+
+    // --- Read response (FetchOk 0x18 or FetchError 0x19) ---
+    let response_type = read_varint_recv(&mut reader).await?;
+    let response_size = read_u16_recv(&mut reader).await? as usize;
+    let response = read_exact_recv(&mut reader, response_size).await?;
+    match response_type {
+        0x18 => {
+            // FetchOk v14: request_id, group_order, end_of_track, end_location, params
+            // We don't need the details, just confirm success.
+        }
+        0x19 => {
+            // FetchError v14: request_id, error_code, reason_phrase
+            let mut cursor = Cursor::new(response.as_ref());
+            let _rid = read_varint_buf(&mut cursor)?;
+            let error_code = read_varint_buf(&mut cursor)?;
+            let reason = read_string_buf(&mut cursor)?;
+            anyhow::bail!("fetch rejected: error={error_code} reason={reason}");
+        }
+        other => anyhow::bail!("unexpected fetch response type: 0x{other:x}"),
+    }
+
+    send_fetch_started(session, request_id)?;
+
+    // --- Accept uni stream for FetchHeader + objects ---
+    loop {
+        let mut uni_reader = match web_transport_trait::Session::accept_uni(&transport_session).await {
+            Ok(recv) => recv,
+            Err(err) => return Err(anyhow::anyhow!(err.to_string())),
+        };
+
+        let header_type = read_varint_recv(&mut uni_reader).await?;
+        if header_type != 0x5 { // FetchHeader type
+            continue;
+        }
+        let header_request_id = read_varint_recv(&mut uni_reader).await?;
+        if header_request_id != request_id {
+            continue;
+        }
+
+        send_fetch_started(session, request_id)?;
+        read_fetch_v14_objects(session, request_id, &mut uni_reader).await?;
+        send_fetch_done_and_cleanup(session, request_id)?;
+        return Ok(());
+    }
 }
 
 async fn perform_fetch_v17(
@@ -1209,6 +1354,47 @@ async fn recv_server_setup_v17(session: &web_transport_quinn::Session) -> anyhow
     Ok(())
 }
 
+/// Read objects from a v14 FETCH uni stream after FetchHeader.
+///
+/// The v14 format repeats per-object entries until the stream ends:
+///   group_id (varint)
+///   sub_group_id (varint)
+///   object_id (varint)
+///   publisher_priority (u8)
+///   object_status (varint) — 0 = normal payload
+///   payload_length (varint)
+///   payload (bytes)
+async fn read_fetch_v14_objects<R>(
+    session: &ResourceArc<SessionRes>,
+    request_id: u64,
+    recv: &mut R,
+) -> anyhow::Result<()>
+where
+    R: web_transport_trait::RecvStream + Unpin,
+{
+    loop {
+        // Try to read the next object's group_id; if the stream ends, we're done.
+        let group_id = match read_varint_maybe_recv(recv).await? {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        let _sub_group_id = read_varint_recv(recv).await?;
+        let object_id = read_varint_recv(recv).await?;
+        let _publisher_priority = read_u8_recv(recv).await?;
+        let object_status = read_varint_recv(recv).await?;
+
+        if object_status != 0 {
+            // Non-zero status means end-of-group/track or error; no payload follows.
+            continue;
+        }
+
+        let payload_length = read_varint_recv(recv).await? as usize;
+        let payload = read_exact_recv(recv, payload_length).await?;
+        send_fetch_object(session, request_id, group_id, object_id, payload)?;
+    }
+}
+
+/// Read objects from a v17 FETCH uni stream using GroupFlags framing.
 async fn read_fetch_stream_objects<R>(
     session: &ResourceArc<SessionRes>,
     request_id: u64,
