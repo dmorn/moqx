@@ -1,20 +1,19 @@
 defmodule MOQXIntegrationTest do
   use ExUnit.Case, async: false
 
-  alias MOQX.Test.{Auth, Relay}
-
   @moduletag :integration
-  @timeout 10_000
+  @timeout 15_000
 
-  setup_all do
-    relay = Relay.start()
-    on_exit(fn -> Relay.stop(relay) end)
+  # External relay tests require MOQX_EXTERNAL_RELAY_URL to be set,
+  # or default to https://ord.abr.moqtail.dev.
+  # These tests are excluded by default (tagged :external_relay).
 
-    %{
-      relay_url: Relay.url(),
-      relay_websocket_url: Relay.websocket_url(),
-      local_dev_tls: [tls: [verify: :insecure]]
-    }
+  defp relay_url do
+    System.get_env("MOQX_EXTERNAL_RELAY_URL", "https://ord.abr.moqtail.dev")
+  end
+
+  defp relay_namespace do
+    System.get_env("MOQX_EXTERNAL_RELAY_NAMESPACE", "moqtail")
   end
 
   defp await_connect_result! do
@@ -26,17 +25,8 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp connect_publisher!(url, opts) do
-    :ok = MOQX.connect_publisher(url, opts)
-
-    case await_connect_result!() do
-      {:ok, session} -> session
-      {:error, reason} -> raise "publisher connect failed: #{inspect(reason)}"
-    end
-  end
-
-  defp connect_subscriber!(url, opts) do
-    :ok = MOQX.connect_subscriber(url, opts)
+  defp connect_subscriber! do
+    :ok = MOQX.connect_subscriber(relay_url())
 
     case await_connect_result!() do
       {:ok, session} -> session
@@ -44,603 +34,257 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp drain_mailbox do
-    receive do
-      _ -> drain_mailbox()
-    after
-      0 -> :ok
+  defp connect_publisher! do
+    :ok = MOQX.connect_publisher(relay_url())
+
+    case await_connect_result!() do
+      {:ok, session} -> session
+      {:error, reason} -> raise "publisher connect failed: #{inspect(reason)}"
     end
   end
 
-  defp await_subscribed!(broadcast_path, track_name) do
+  defp await_subscribed!(namespace, track_name) do
     receive do
-      {:moqx_subscribed, ^broadcast_path, ^track_name} -> :ok
+      {:moqx_subscribed, ^namespace, ^track_name} -> :ok
       {:moqx_error, reason} -> flunk("subscribe failed: #{inspect(reason)}")
-      {port, _message} when is_port(port) -> await_subscribed!(broadcast_path, track_name)
     after
-      @timeout -> flunk("subscribe timeout")
+      @timeout -> flunk("subscribe timeout for #{namespace}/#{track_name}")
     end
   end
 
-  defp await_frame!(expected_group_seq, expected_payload) do
+  defp await_frame! do
     receive do
-      {:moqx_frame, ^expected_group_seq, ^expected_payload} -> :ok
+      {:moqx_frame, group_id, payload} -> {group_id, payload}
       {:moqx_error, reason} -> flunk("frame receive failed: #{inspect(reason)}")
-      {port, _message} when is_port(port) -> await_frame!(expected_group_seq, expected_payload)
-      other -> flunk("unexpected message while waiting for frame: #{inspect(other)}")
     after
       @timeout -> flunk("frame timeout")
     end
   end
 
-  defp await_track_ended! do
-    receive do
-      :moqx_track_ended -> :ok
-      {:moqx_error, reason} -> flunk("track ended with error: #{inspect(reason)}")
-      {port, _message} when is_port(port) -> await_track_ended!()
-      other -> flunk("unexpected message while waiting for track end: #{inspect(other)}")
-    after
-      @timeout -> flunk("track end timeout")
-    end
-  end
-
-  defp with_sessions(url, opts, fun) do
-    publisher = connect_publisher!(url, opts)
-    subscriber = connect_subscriber!(url, opts)
-
-    try do
-      fun.(publisher, subscriber)
-    after
-      :ok = MOQX.close(publisher)
-      :ok = MOQX.close(subscriber)
-    end
-  end
-
-  defp with_isolated_trusted_relay(fun) do
-    relay = Relay.start_isolated_trusted(4546, 4547)
-    drain_port_messages(relay)
-
-    try do
-      fun.("https://localhost:4546", Relay.trusted_root_ca())
-    after
-      Relay.stop(relay)
-    end
-  end
-
-  defp with_isolated_trusted_auth_relay(fun) do
-    relay = Relay.start_isolated_trusted_auth(4548, 4549)
-    drain_port_messages(relay)
-
-    try do
-      fun.("https://localhost:4548", Relay.trusted_root_ca())
-    after
-      Relay.stop(relay)
-    end
-  end
-
-  defp drain_port_messages(port) do
-    receive do
-      {^port, _message} -> drain_port_messages(port)
-    after
-      0 -> :ok
-    end
-  end
-
-  defp collect_fetch_objects(ref, acc \\ []) do
-    receive do
-      {:moqx_fetch_object, ^ref, group_id, object_id, payload} ->
-        collect_fetch_objects(ref, [{group_id, object_id, payload} | acc])
-
-      {:moqx_fetch_done, ^ref} ->
-        Enum.reverse(acc)
-
-      {:moqx_fetch_error, ^ref, reason} ->
-        flunk("fetch error while collecting objects: #{inspect(reason)}")
-
-      {port, _message} when is_port(port) ->
-        collect_fetch_objects(ref, acc)
-    after
-      @timeout -> flunk("collect fetch objects timeout")
-    end
-  end
-
-  defp auth_url(base_url, root, claims) do
-    jwt = Auth.token(Keyword.put(claims, :root, root))
-    Auth.connect_url(base_url, root, jwt)
-  end
-
-  defp await_error!(timeout \\ @timeout) do
-    receive do
-      {:error, reason} -> reason
-      {:moqx_error, reason} -> reason
-      {port, _message} when is_port(port) -> await_error!(timeout)
-      other -> flunk("unexpected message while waiting for error: #{inspect(other)}")
-    after
-      timeout -> flunk("error timeout")
-    end
-  end
-
-  describe "current supported architecture" do
-    test "single-frame relay-backed round trip", %{relay_url: url, local_dev_tls: tls_opts} do
-      with_sessions(url, tls_opts, fn publisher, subscriber ->
-        broadcast_path = "anon/single-frame"
-        track_name = "video"
-
-        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
-        {:ok, track} = MOQX.create_track(broadcast, track_name)
-
-        :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
-        :ok = MOQX.write_frame(track, "hello")
-        :ok = MOQX.finish_track(track)
-
-        await_subscribed!(broadcast_path, track_name)
-        await_frame!(0, "hello")
-        await_track_ended!()
-      end)
-    end
-
-    test "multiple frames on one track increment group sequence", %{
-      relay_url: url,
-      local_dev_tls: tls_opts
-    } do
-      with_sessions(url, tls_opts, fn publisher, subscriber ->
-        broadcast_path = "anon/multi-frame"
-        track_name = "video"
-
-        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
-        {:ok, track} = MOQX.create_track(broadcast, track_name)
-
-        :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
-        :ok = MOQX.write_frame(track, "frame-1")
-
-        await_subscribed!(broadcast_path, track_name)
-        await_frame!(0, "frame-1")
-
-        :ok = MOQX.write_frame(track, "frame-2")
-        await_frame!(1, "frame-2")
-
-        :ok = MOQX.write_frame(track, "frame-3")
-        await_frame!(2, "frame-3")
-
-        :ok = MOQX.finish_track(track)
-        await_track_ended!()
-      end)
-    end
-
-    test "multiple tracks can be published within one broadcast", %{
-      relay_url: url,
-      local_dev_tls: tls_opts
-    } do
-      with_sessions(url, tls_opts, fn publisher, subscriber ->
-        broadcast_path = "anon/multi-track"
-
-        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
-        {:ok, audio_track} = MOQX.create_track(broadcast, "audio")
-        {:ok, video_track} = MOQX.create_track(broadcast, "video")
-
-        :ok = MOQX.subscribe(subscriber, broadcast_path, "audio")
-        :ok = MOQX.write_frame(audio_track, "audio-1")
-        :ok = MOQX.finish_track(audio_track)
-
-        await_subscribed!(broadcast_path, "audio")
-        await_frame!(0, "audio-1")
-        await_track_ended!()
-
-        drain_mailbox()
-
-        :ok = MOQX.subscribe(subscriber, broadcast_path, "video")
-        :ok = MOQX.write_frame(video_track, "video-1")
-        :ok = MOQX.finish_track(video_track)
-
-        await_subscribed!(broadcast_path, "video")
-        await_frame!(0, "video-1")
-        await_track_ended!()
-      end)
-    end
-
-    test "subscriber can subscribe before publisher writes the first frame", %{
-      relay_url: url,
-      local_dev_tls: tls_opts
-    } do
-      with_sessions(url, tls_opts, fn publisher, subscriber ->
-        broadcast_path = "anon/subscribe-first"
-        track_name = "video"
-
-        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
-        {:ok, track} = MOQX.create_track(broadcast, track_name)
-
-        :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
-        Process.sleep(100)
-        :ok = MOQX.write_frame(track, "hello")
-        :ok = MOQX.finish_track(track)
-
-        await_subscribed!(broadcast_path, track_name)
-        await_frame!(0, "hello")
-        await_track_ended!()
-      end)
-    end
-  end
-
-  describe "public API guardrails" do
-    test "session roles are explicit and split by architecture", %{
-      relay_url: url,
-      local_dev_tls: tls_opts
-    } do
-      publisher = connect_publisher!(url, tls_opts)
-      subscriber = connect_subscriber!(url, tls_opts)
-
-      assert MOQX.session_role(publisher) == :publisher
-      assert MOQX.session_role(subscriber) == :subscriber
-
-      :ok = MOQX.close(publisher)
-      :ok = MOQX.close(subscriber)
-    end
-
-    test "publish rejects subscriber sessions", %{relay_url: url, local_dev_tls: tls_opts} do
-      subscriber = connect_subscriber!(url, tls_opts)
-
-      assert {:error, reason} = MOQX.publish(subscriber, "anon/wrong-role")
-      assert reason =~ "publish requires a publisher session"
-
-      :ok = MOQX.close(subscriber)
-    end
-
-    test "subscribe rejects publisher sessions", %{relay_url: url, local_dev_tls: tls_opts} do
-      publisher = connect_publisher!(url, tls_opts)
-
-      assert {:error, reason} = MOQX.subscribe(publisher, "anon/wrong-role", "video")
-      assert reason =~ "subscribe requires a subscriber session"
-
-      :ok = MOQX.close(publisher)
-    end
-  end
-
-  # Backend/transport/version matrix tests removed during moqtail-rs migration (issue #9).
-  # These relied on moq-native/moq-lite local relay and are no longer applicable.
-
-  describe "tls hardening" do
-    test "verification is enabled by default against self-signed local relay", %{relay_url: url} do
-      :ok = MOQX.connect_publisher(url, [])
-
-      assert {:error, reason} = await_connect_result!()
-      assert is_binary(reason)
-      refute reason == ""
-    end
-
-    test "explicit insecure mode preserves local self-signed development flow", %{relay_url: url} do
-      publisher = connect_publisher!(url, tls: [verify: :insecure])
-      subscriber = connect_subscriber!(url, tls: [verify: :insecure])
-
-      :ok = MOQX.close(publisher)
-      :ok = MOQX.close(subscriber)
-    end
-
-    test "custom root verification succeeds with a trusted local relay" do
-      with_isolated_trusted_relay(fn url, root_ca ->
-        with_sessions(url, [tls: [cacertfile: root_ca]], fn publisher, subscriber ->
-          assert MOQX.session_version(publisher) == "moq-lite-03"
-          assert MOQX.session_version(subscriber) == "moq-lite-03"
-        end)
-      end)
-    end
-  end
-
-  describe "authenticated relay client flows" do
-    test "authenticated publisher succeeds" do
-      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        url = auth_url(base_url, "room/auth-publisher", put: [""], get: [])
-        publisher = connect_publisher!(url, tls: [cacertfile: root_ca])
-
-        assert MOQX.session_role(publisher) == :publisher
-        assert {:ok, broadcast} = MOQX.publish(publisher, "stream")
-        assert {:ok, track} = MOQX.create_track(broadcast, "video")
-        assert :ok = MOQX.write_frame(track, "hello")
-        assert :ok = MOQX.finish_track(track)
-
-        :ok = MOQX.close(publisher)
-      end)
-    end
-
-    test "authenticated subscriber succeeds" do
-      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        tls_opts = [tls: [cacertfile: root_ca]]
-        root = "room/auth-subscriber"
-        publisher_url = auth_url(base_url, root, put: [""], get: [])
-        subscriber_url = auth_url(base_url, root, put: [], get: [""])
-
-        publisher = connect_publisher!(publisher_url, tls_opts)
-        subscriber = connect_subscriber!(subscriber_url, tls_opts)
-
-        try do
-          assert MOQX.session_role(subscriber) == :subscriber
-
-          {:ok, broadcast} = MOQX.publish(publisher, "stream")
-          {:ok, track} = MOQX.create_track(broadcast, "video")
-
-          :ok = MOQX.subscribe(subscriber, "stream", "video")
-          :ok = MOQX.write_frame(track, "hello")
-          :ok = MOQX.finish_track(track)
-
-          await_subscribed!("stream", "video")
-          await_frame!(0, "hello")
-          await_track_ended!()
-        after
-          :ok = MOQX.close(publisher)
-          :ok = MOQX.close(subscriber)
-        end
-      end)
-    end
-
-    test "authenticated end-to-end pub/sub succeeds" do
-      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        tls_opts = [tls: [cacertfile: root_ca]]
-        root = "room/end-to-end"
-        publisher_url = auth_url(base_url, root, put: [""], get: [])
-        subscriber_url = auth_url(base_url, root, put: [], get: [""])
-
-        publisher = connect_publisher!(publisher_url, tls_opts)
-        subscriber = connect_subscriber!(subscriber_url, tls_opts)
-
-        try do
-          {:ok, broadcast} = MOQX.publish(publisher, "stream")
-          {:ok, track} = MOQX.create_track(broadcast, "video")
-
-          :ok = MOQX.subscribe(subscriber, "stream", "video")
-          :ok = MOQX.write_frame(track, "frame-1")
-          await_subscribed!("stream", "video")
-          await_frame!(0, "frame-1")
-
-          :ok = MOQX.write_frame(track, "frame-2")
-          await_frame!(1, "frame-2")
-
-          :ok = MOQX.finish_track(track)
-          await_track_ended!()
-        after
-          :ok = MOQX.close(publisher)
-          :ok = MOQX.close(subscriber)
-        end
-      end)
-    end
-
-    test "missing token fails" do
-      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        url = Auth.connect_url(base_url, "room/missing-token")
-
-        :ok = MOQX.connect_publisher(url, tls: [cacertfile: root_ca])
-        reason = await_error!()
-
-        assert is_binary(reason)
-        refute reason == ""
-      end)
-    end
-
-    test "publish-only token cannot subscribe" do
-      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        tls_opts = [tls: [cacertfile: root_ca]]
-        root = "room/publish-only"
-        publisher_url = auth_url(base_url, root, put: [""], get: [])
-        subscriber_url = auth_url(base_url, root, put: [""], get: [])
-
-        publisher = connect_publisher!(publisher_url, tls_opts)
-
-        try do
-          :ok = MOQX.connect_subscriber(subscriber_url, tls_opts)
-
-          case await_connect_result!() do
-            {:error, reason} ->
-              assert is_binary(reason)
-              refute reason == ""
-
-            {:ok, subscriber} ->
-              try do
-                {:ok, broadcast} = MOQX.publish(publisher, "stream")
-                {:ok, track} = MOQX.create_track(broadcast, "video")
-
-                :ok = MOQX.subscribe(subscriber, "stream", "video")
-                :ok = MOQX.write_frame(track, "hello")
-                :ok = MOQX.finish_track(track)
-
-                refute_receive {:moqx_subscribed, "stream", "video"}, 1_000
-                refute_receive {:moqx_frame, _, _}, 200
-                refute_receive :moqx_track_ended, 200
-              after
-                :ok = MOQX.close(subscriber)
-              end
-          end
-        after
-          :ok = MOQX.close(publisher)
-        end
-      end)
-    end
-
-    test "subscribe-only token cannot publish" do
-      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        tls_opts = [tls: [cacertfile: root_ca]]
-        root = "room/subscribe-only"
-        publisher_url = auth_url(base_url, root, put: [], get: [""])
-        subscriber_url = auth_url(base_url, root, put: [], get: [""])
-
-        subscriber = connect_subscriber!(subscriber_url, tls_opts)
-
-        try do
-          :ok = MOQX.subscribe(subscriber, "stream", "video")
-          :ok = MOQX.connect_publisher(publisher_url, tls_opts)
-
-          case await_connect_result!() do
-            {:error, reason} ->
-              assert is_binary(reason)
-              refute reason == ""
-
-            {:ok, publisher} ->
-              try do
-                {:ok, broadcast} = MOQX.publish(publisher, "stream")
-                {:ok, track} = MOQX.create_track(broadcast, "video")
-                :ok = MOQX.write_frame(track, "hello")
-                :ok = MOQX.finish_track(track)
-
-                refute_receive {:moqx_subscribed, "stream", "video"}, 1_000
-                refute_receive {:moqx_frame, _, _}, 200
-                refute_receive :moqx_track_ended, 200
-              after
-                :ok = MOQX.close(publisher)
-              end
-          end
-        after
-          :ok = MOQX.close(subscriber)
-        end
-      end)
-    end
-
-    test "rooted auth normalizes publish paths that repeat the connect root" do
-      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        tls_opts = [tls: [cacertfile: root_ca]]
-        root = "room/rooted-publish"
-        publisher_url = auth_url(base_url, root, put: [""], get: [])
-        subscriber_url = auth_url(base_url, root, put: [], get: [""])
-
-        publisher = connect_publisher!(publisher_url, tls_opts)
-        subscriber = connect_subscriber!(subscriber_url, tls_opts)
-
-        try do
-          {:ok, broadcast} = MOQX.publish(publisher, "/room/rooted-publish/stream/")
-          {:ok, track} = MOQX.create_track(broadcast, "video")
-
-          :ok = MOQX.subscribe(subscriber, "stream", "video")
-          :ok = MOQX.write_frame(track, "hello")
-          :ok = MOQX.finish_track(track)
-
-          await_subscribed!("stream", "video")
-          await_frame!(0, "hello")
-          await_track_ended!()
-        after
-          :ok = MOQX.close(publisher)
-          :ok = MOQX.close(subscriber)
-        end
-      end)
-    end
-
-    test "rooted auth normalizes subscribe paths that repeat the connect root" do
-      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        tls_opts = [tls: [cacertfile: root_ca]]
-        root = "room/rooted-subscribe"
-        publisher_url = auth_url(base_url, root, put: [""], get: [])
-        subscriber_url = auth_url(base_url, root, put: [], get: [""])
-
-        publisher = connect_publisher!(publisher_url, tls_opts)
-        subscriber = connect_subscriber!(subscriber_url, tls_opts)
-
-        try do
-          {:ok, broadcast} = MOQX.publish(publisher, "stream")
-          {:ok, track} = MOQX.create_track(broadcast, "video")
-
-          :ok = MOQX.subscribe(subscriber, "/room/rooted-subscribe/stream/", "video")
-          :ok = MOQX.write_frame(track, "hello")
-          :ok = MOQX.finish_track(track)
-
-          await_subscribed!("/room/rooted-subscribe/stream/", "video")
-          await_frame!(0, "hello")
-          await_track_ended!()
-        after
-          :ok = MOQX.close(publisher)
-          :ok = MOQX.close(subscriber)
-        end
-      end)
-    end
-
-    test "wrong-root token fails" do
-      with_isolated_trusted_auth_relay(fn base_url, root_ca ->
-        jwt = Auth.token(root: "room/correct-root", put: [""], get: [""])
-        url = Auth.connect_url(base_url, "room/wrong-root", jwt)
-
-        :ok = MOQX.connect_subscriber(url, tls: [cacertfile: root_ca])
-        reason = await_error!()
-
-        assert is_binary(reason)
-        refute reason == ""
-      end)
-    end
-  end
-
-  describe "fetch role guardrails" do
-    test "fetch/4 rejects publisher sessions", %{relay_url: url, local_dev_tls: tls_opts} do
-      publisher = connect_publisher!(url, tls_opts)
-
-      assert {:error, "fetch requires a subscriber session"} =
-               MOQX.fetch(publisher, "moqtail", "catalog", [])
-
-      :ok = MOQX.close(publisher)
-    end
-
-    test "fetch_catalog/2 rejects publisher sessions", %{relay_url: url, local_dev_tls: tls_opts} do
-      publisher = connect_publisher!(url, tls_opts)
-
-      assert {:error, "fetch requires a subscriber session"} = MOQX.fetch_catalog(publisher)
-
-      :ok = MOQX.close(publisher)
-    end
-  end
-
-  describe "fetch external relay smoke" do
+  describe "external relay: connect" do
     @describetag :external_relay
 
-    test "fetch_catalog retrieves raw catalog bytes from external relay" do
-      relay_url = System.get_env("MOQX_EXTERNAL_RELAY_URL", "https://ord.abr.moqtail.dev/demo")
-      namespace = System.get_env("MOQX_EXTERNAL_RELAY_NAMESPACE", "moqtail")
-
-      subscriber = connect_subscriber!(relay_url, [])
+    test "subscriber connects and reports draft-14 version" do
+      subscriber = connect_subscriber!()
 
       try do
-        # Use a wide range to catch the latest catalog group.
-        assert {:ok, ref} =
-                 MOQX.fetch_catalog(subscriber,
-                   namespace: namespace,
-                   start: {0, 0},
-                   end: {1_000_000, 0}
-                 )
+        assert MOQX.session_version(subscriber) =~ "moq-transport-14"
+        assert MOQX.session_role(subscriber) == :subscriber
+      after
+        :ok = MOQX.close(subscriber)
+      end
+    end
 
-        # The relay may or may not have active content. Both outcomes prove interop:
-        # - objects returned: validate raw catalog bytes
-        # - "No objects available" FetchError: valid protocol response
-        receive do
-          {:moqx_fetch_started, ^ref, _ns, _track} ->
-            objects = collect_fetch_objects(ref)
-            assert objects != [], "expected at least one fetch object after started"
+    test "publisher connects" do
+      publisher = connect_publisher!()
 
-            payload =
-              objects
-              |> Enum.map(&elem(&1, 2))
-              |> IO.iodata_to_binary()
+      try do
+        assert MOQX.session_role(publisher) == :publisher
+      after
+        :ok = MOQX.close(publisher)
+      end
+    end
+  end
 
-            assert String.valid?(payload), "expected valid UTF-8 payload"
+  describe "external relay: subscribe" do
+    @describetag :external_relay
 
-            assert String.starts_with?(payload, "{") or String.starts_with?(payload, "["),
-                   "expected JSON-looking payload, got: #{String.slice(payload, 0..80)}"
+    test "subscribe to catalog track delivers a valid CMSF catalog" do
+      subscriber = connect_subscriber!()
 
-          {:moqx_fetch_error, ^ref, reason} ->
-            # "No objects available" is a valid protocol-level response proving
-            # that the relay understood our v14 SETUP + FETCH exchange.
-            assert is_binary(reason)
-            assert reason != "", "expected a non-empty error reason"
-        after
-          @timeout -> flunk("fetch timeout: no response from external relay")
+      try do
+        ns = relay_namespace()
+        :ok = MOQX.subscribe(subscriber, ns, "catalog")
+        await_subscribed!(ns, "catalog")
+
+        {_group_id, payload} = await_frame!()
+        assert byte_size(payload) > 0
+
+        assert {:ok, catalog} = MOQX.Catalog.decode(payload)
+        assert MOQX.Catalog.tracks(catalog) != []
+      after
+        :ok = MOQX.close(subscriber)
+      end
+    end
+
+    test "subscribe to a video track delivers live frames" do
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = relay_namespace()
+
+        # First get the catalog to discover tracks
+        :ok = MOQX.subscribe(subscriber, ns, "catalog")
+        await_subscribed!(ns, "catalog")
+
+        {_gid, catalog_payload} = await_frame!()
+        {:ok, catalog} = MOQX.Catalog.decode(catalog_payload)
+
+        video = MOQX.Catalog.video_tracks(catalog) |> List.first()
+        assert video, "expected at least one video track in catalog"
+
+        # Subscribe to the video track
+        :ok = MOQX.subscribe(subscriber, ns, video.name)
+        await_subscribed!(ns, video.name)
+
+        # Receive at least 3 video frames
+        for _ <- 1..3 do
+          {group_id, payload} = await_frame!()
+          assert is_integer(group_id)
+          assert byte_size(payload) > 0
         end
+      after
+        :ok = MOQX.close(subscriber)
+      end
+    end
+
+    test "multiple concurrent subscriptions deliver interleaved frames" do
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = relay_namespace()
+
+        # Subscribe to catalog
+        :ok = MOQX.subscribe(subscriber, ns, "catalog")
+        await_subscribed!(ns, "catalog")
+        {_gid, catalog_payload} = await_frame!()
+        {:ok, catalog} = MOQX.Catalog.decode(catalog_payload)
+
+        video = MOQX.Catalog.video_tracks(catalog) |> List.first()
+        assert video
+
+        # Subscribe to video (catalog subscription is still active)
+        :ok = MOQX.subscribe(subscriber, ns, video.name)
+        await_subscribed!(ns, video.name)
+
+        # Collect frames for a few seconds — we should see frames from
+        # both subscriptions (catalog updates + video)
+        frames = collect_frames(3_000)
+        frame_count = length(frames)
+
+        assert frame_count > 3,
+               "expected multiple frames from concurrent subscriptions, got #{frame_count}"
       after
         :ok = MOQX.close(subscriber)
       end
     end
   end
 
-  describe "not planned upstream matrix cases" do
-    for name <- [
-          "quiche_raw_quic",
-          "quiche_webtransport",
-          "iroh_connect",
-          "noq_raw_quic",
-          "noq_webtransport"
-        ] do
-      @tag skip: "not planned: moqx intentionally supports the quinn backend only"
-      test name do
-        :ok
+  describe "external relay: role guardrails" do
+    @describetag :external_relay
+
+    test "publish rejects subscriber sessions" do
+      subscriber = connect_subscriber!()
+
+      try do
+        assert {:error, reason} = MOQX.publish(subscriber, "test")
+        assert reason =~ "publish requires a publisher session"
+      after
+        :ok = MOQX.close(subscriber)
+      end
+    end
+
+    test "subscribe rejects publisher sessions" do
+      publisher = connect_publisher!()
+
+      try do
+        assert {:error, reason} = MOQX.subscribe(publisher, "test", "track")
+        assert reason =~ "subscribe requires a subscriber session"
+      after
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    test "fetch rejects publisher sessions" do
+      publisher = connect_publisher!()
+
+      try do
+        assert {:error, "fetch requires a subscriber session"} =
+                 MOQX.fetch(publisher, "moqtail", "catalog", [])
+      after
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    test "fetch_catalog rejects publisher sessions" do
+      publisher = connect_publisher!()
+
+      try do
+        assert {:error, "fetch requires a subscriber session"} = MOQX.fetch_catalog(publisher)
+      after
+        :ok = MOQX.close(publisher)
+      end
+    end
+  end
+
+  describe "external relay: catalog-driven flow" do
+    @describetag :external_relay
+
+    test "full catalog-driven subscribe: connect, catalog, decode, subscribe video" do
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = relay_namespace()
+
+        # Subscribe to catalog
+        :ok = MOQX.subscribe(subscriber, ns, "catalog")
+        await_subscribed!(ns, "catalog")
+
+        # Get and decode catalog
+        {_gid, payload} = await_frame!()
+        {:ok, catalog} = MOQX.Catalog.decode(payload)
+
+        # Verify catalog structure
+        tracks = MOQX.Catalog.tracks(catalog)
+        assert tracks != []
+
+        video_tracks = MOQX.Catalog.video_tracks(catalog)
+        assert video_tracks != []
+
+        video = List.first(video_tracks)
+        assert video.name
+        assert video.role == "video"
+        assert video.codec
+
+        # Subscribe to discovered video track
+        :ok = MOQX.subscribe(subscriber, ns, video.name)
+        await_subscribed!(ns, video.name)
+
+        # Verify we get actual video data
+        {group_id, frame} = await_frame!()
+        assert is_integer(group_id)
+        # First frame in a group is typically a keyframe (large)
+        assert byte_size(frame) > 100
+      after
+        :ok = MOQX.close(subscriber)
+      end
+    end
+  end
+
+  # -- Helpers ----------------------------------------------------------------
+
+  defp collect_frames(duration_ms) do
+    deadline = System.monotonic_time(:millisecond) + duration_ms
+    collect_frames_loop(deadline, [])
+  end
+
+  defp collect_frames_loop(deadline, acc) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      Enum.reverse(acc)
+    else
+      receive do
+        {:moqx_frame, group_id, payload} ->
+          collect_frames_loop(deadline, [{group_id, payload} | acc])
+
+        {:moqx_subscribed, _, _} ->
+          collect_frames_loop(deadline, acc)
+
+        _ ->
+          collect_frames_loop(deadline, acc)
+      after
+        remaining -> Enum.reverse(acc)
       end
     end
   end

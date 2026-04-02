@@ -1,6 +1,6 @@
 # moqx
 
-> Elixir bindings for [Media over QUIC (MOQ)](https://moq.dev) via Rustler NIFs on top of `moq-lite` / `moq-native`.
+> Elixir bindings for [Media over QUIC (MOQ)](https://moq.dev) via Rustler NIFs on top of [`moqtail-rs`](https://github.com/moqtail/moqtail).
 
 **Status:** early client library with a deliberately narrow, documented support contract.
 
@@ -24,14 +24,9 @@ Today `moqx` supports a single client-side path:
 - explicit split roles only
   - publisher sessions publish only
   - subscriber sessions subscribe only
-- Quinn-backed client connections only
-- these transports only:
-  - `:auto`
-  - `:raw_quic`
-  - `:webtransport`
-  - `:websocket`
-- connect-time version pinning
+- WebTransport over QUIC (Draft 14)
 - broadcasts, tracks, and frame delivery
+- live subscription via SUBSCRIBE with `FilterType::LatestObject`
 - raw fetch for retrieving track objects by range (subscriber sessions only)
 - raw catalog retrieval via `fetch_catalog/2` and `await_catalog/2`
 - CMSF catalog parsing and track discovery via `MOQX.Catalog`
@@ -44,17 +39,12 @@ Today `moqx` supports a single client-side path:
 
 Not planned:
 
-- Quiche backend support
-- Noq backend support
-- Iroh transport support
 - merged publisher/subscriber sessions
 
 Out of scope for `v0.1`:
 
 - relay/server listener APIs
 - embedding or managing a relay from Elixir
-- broader server-side feature surface beyond relay-backed client connections
-- broader production hardening beyond the current minimal client TLS controls
 - automatic subscription orchestration from a parsed catalog
 
 ## Public API
@@ -79,7 +69,7 @@ The stable, intended connect surface is:
 There is no supported `:both` session mode.
 
 ```elixir
-:ok = MOQX.connect_publisher("https://localhost:4443")
+:ok = MOQX.connect_publisher("https://relay.example.com")
 
 publisher =
   receive do
@@ -87,7 +77,7 @@ publisher =
     {:error, reason} -> raise "publisher connect failed: #{inspect(reason)}"
   end
 
-:ok = MOQX.connect_subscriber("https://localhost:4443")
+:ok = MOQX.connect_subscriber("https://relay.example.com")
 
 subscriber =
   receive do
@@ -96,21 +86,13 @@ subscriber =
   end
 ```
 
-For an auth-enabled relay, keep using the same connect APIs and pass the token in
-the URL query. `moqx` does not add a separate auth API; auth stays part of the
-connect URL:
+For an auth-enabled relay, pass the token in the URL query:
 
 ```elixir
 jwt = "eyJhbGciOiJIUzI1NiIs..."
 
 :ok =
   MOQX.connect_publisher(
-    "https://relay.example.com/room/123?jwt=#{jwt}",
-    tls: [cacertfile: "/path/to/rootCA.pem"]
-  )
-
-:ok =
-  MOQX.connect_subscriber(
     "https://relay.example.com/room/123?jwt=#{jwt}",
     tls: [cacertfile: "/path/to/rootCA.pem"]
   )
@@ -124,39 +106,21 @@ that path. Publish and subscribe paths can stay relative to that root:
 :ok = MOQX.subscribe(subscriber, "alice", "video")
 ```
 
-If you need dynamic role selection or connect-time protocol controls, use:
+If you need dynamic role selection:
 
 ```elixir
 :ok = MOQX.connect(url, role: :publisher)
-
-:ok =
-  MOQX.connect(url,
-    role: :subscriber,
-    backend: :quinn,
-    transport: :raw_quic,
-    version: "moq-transport-14"
-  )
 
 :ok =
   MOQX.connect_subscriber(
     "https://relay.internal.example/anon",
     tls: [cacertfile: "/path/to/rootCA.pem"]
   )
-
-:ok =
-  MOQX.connect_publisher(
-    "http://localhost:4443/anon",
-    transport: :websocket,
-    version: "moq-lite-02"
-  )
 ```
 
 Supported connect options:
 
 - `:role` - required, `:publisher` or `:subscriber`
-- `:backend` - optional compiled backend, currently only `:quinn`
-- `:transport` - optional `:auto`, `:raw_quic`, `:webtransport`, or `:websocket`
-- `:version` - optional version string or list of version strings
 - `:tls` - optional TLS controls:
   - `verify: :verify_peer | :insecure` - defaults to `:verify_peer`
   - `cacertfile: "/path/to/rootCA.pem"` - trust a custom root CA PEM
@@ -167,18 +131,8 @@ Notes:
 - relay authorization is path-rooted: the connect URL path must match the token `root`
 - listener/server APIs remain out of scope
 - TLS verification is enabled by default; `tls: [verify: :insecure]` is a local-development escape hatch only
-- local relay WebSocket connections use the relay's plain HTTP endpoint, so local examples use `http://.../anon`
-- the current relay-backed WebSocket path negotiates the upstream-compatible subset `moq-lite-01`, `moq-lite-02`, and `moq-transport-14`
-- transport parity coverage includes relay-backed WebSocket round trips, an isolated WebSocket fallback harness, and auth-enabled relay integration coverage
 - the `cacertfile` option is intended for private/local roots; default verification otherwise uses system/native roots
 - synchronous option/usage problems raise or return immediately; network/runtime failures are delivered asynchronously as process messages
-
-You can inspect the compiled native support at runtime:
-
-```elixir
-MOQX.supported_backends()
-MOQX.supported_transports()
-```
 
 ### Publish
 
@@ -191,43 +145,76 @@ MOQX.supported_transports()
 :ok = MOQX.finish_track(track)
 ```
 
-A broadcast is announced lazily on the first successful `write_frame/2`.
-
 ### Subscribe
 
-Subscriptions are asynchronous. `subscribe/3` returns `:ok` immediately, then
-messages arrive in the caller process.
+Subscriptions are asynchronous and use `FilterType::LatestObject` with
+`forward=true`, which means the relay delivers the most recent object and
+then forwards new objects as they arrive. This is the standard pattern for
+live media consumption from moqtail-style relays.
+
+`subscribe/3` returns `:ok` immediately, then messages arrive in the caller
+process.
 
 The supported subscription message contract is:
 
-- `{:moqx_subscribed, broadcast_path, track_name}` when the subscription becomes active
-- `{:moqx_frame, group_seq, payload}` for each frame
+- `{:moqx_subscribed, namespace, track_name}` when the subscription becomes active
+- `{:moqx_frame, group_id, payload}` for each object
 - `:moqx_track_ended` when the track finishes cleanly
 - `{:moqx_error, reason}` for asynchronous subscription/runtime failures
 
-Error expectations are intentionally split:
+```elixir
+:ok = MOQX.subscribe(subscriber, "moqtail", "catalog")
 
-- immediate misuse errors return `{:error, reason}` from the API call itself
-  - for example, `publish/2` on a subscriber session or `subscribe/3` on a publisher session
-- asynchronous connect/relay/runtime failures arrive later as mailbox messages
-  - `{:error, reason}` for connect failures
-  - `{:moqx_error, reason}` for subscription/runtime failures
+receive do
+  {:moqx_subscribed, "moqtail", "catalog"} -> :ok
+end
+
+receive do
+  {:moqx_frame, group_id, payload} ->
+    IO.inspect({group_id, byte_size(payload)}, label: "catalog object")
+end
+```
+
+### Catalog-driven subscription
+
+The typical flow for consuming live media from a moqtail relay:
 
 ```elixir
-:ok = MOQX.subscribe(subscriber, "anon/demo", "video")
+# Connect
+:ok = MOQX.connect_subscriber("https://ord.abr.moqtail.dev")
+
+subscriber =
+  receive do
+    {:moqx_connected, session} -> session
+  end
+
+# Subscribe to the catalog track to discover available media
+:ok = MOQX.subscribe(subscriber, "moqtail", "catalog")
 
 receive do
-  {:moqx_subscribed, "anon/demo", "video"} -> :ok
+  {:moqx_subscribed, _, _} -> :ok
 end
 
-receive do
-  {:moqx_frame, group_seq, payload} ->
-    IO.inspect({group_seq, payload}, label: "frame")
-end
+catalog =
+  receive do
+    {:moqx_frame, _group, payload} ->
+      {:ok, cat} = MOQX.Catalog.decode(payload)
+      cat
+  end
+
+# Pick a video track and subscribe
+video = MOQX.Catalog.video_tracks(catalog) |> List.first()
+
+:ok = MOQX.subscribe(subscriber, "moqtail", video.name)
 
 receive do
-  :moqx_track_ended -> :ok
-  {:moqx_error, reason} -> raise "subscription failed: #{inspect(reason)}"
+  {:moqx_subscribed, _, _} -> :ok
+end
+
+# Receive live video frames
+receive do
+  {:moqx_frame, group_id, payload} ->
+    IO.puts("video frame: group=#{group_id} size=#{byte_size(payload)}")
 end
 ```
 
@@ -246,30 +233,10 @@ The fetch message contract is:
 
 Options:
 
-- `priority` — integer `0..255` (default `0`)
-- `group_order` — `:original`, `:ascending`, or `:descending` (default `:original`)
-- `start` — `{group_id, object_id}` (default `{0, 0}`)
-- `end` — `{group_id, object_id}` (default: open-ended)
-
-```elixir
-{:ok, ref} = MOQX.fetch(subscriber, "my-namespace", "video", start: {0, 0}, end: {5, 0})
-
-receive do
-  {:moqx_fetch_started, ^ref, _ns, _track} -> :ok
-end
-
-# Collect all objects
-objects = collect_objects(ref, [])
-
-defp collect_objects(ref, acc) do
-  receive do
-    {:moqx_fetch_object, ^ref, _gid, _oid, payload} ->
-      collect_objects(ref, [payload | acc])
-    {:moqx_fetch_done, ^ref} ->
-      Enum.reverse(acc)
-  end
-end
-```
+- `priority` -- integer `0..255` (default `0`)
+- `group_order` -- `:original`, `:ascending`, or `:descending` (default `:original`)
+- `start` -- `{group_id, object_id}` (default `{0, 0}`)
+- `end` -- `{group_id, object_id}` (default: open-ended)
 
 `fetch_catalog/2` is a convenience wrapper that fetches the first catalog
 object with sensible defaults (namespace `"moqtail"`, track `"catalog"`,
@@ -384,7 +351,6 @@ A few practical patterns:
 
 - Rust toolchain (`rustup`)
 - Elixir / Erlang
-- local relay artifacts under `.moq-dev`
 
 ### Run tests
 
@@ -393,11 +359,7 @@ mix deps.get
 mix test
 ```
 
-Most integration tests are relay-backed and are skipped automatically when the local
-relay setup is unavailable. The suite also includes isolated relay configurations
-used to verify WebSocket fallback, TLS trust behavior, and authenticated rooted paths.
-
-For an explicit split between fast checks and relay-backed coverage:
+For an explicit split between fast checks and integration coverage:
 
 ```bash
 mix ci
@@ -405,36 +367,15 @@ mix test.integration
 ```
 
 - `mix ci` runs formatting, Credo, and non-integration tests
-- `mix test.integration` runs only the relay-backed integration suite
-
-### CI strategy
-
-`moqx` treats relay-backed integration coverage as a first-class CI job, not as an
-optional best-effort step.
-
-The intended CI split is:
-
-- a fast job for formatting, Credo, and non-integration tests
-- a dedicated relay-backed integration job that builds `.moq-dev`'s `moq-relay`
-  binary and then runs `mix test.integration`
-
-That keeps the default job fast while ensuring auth, TLS, transport, and rooted-path
-coverage is exercised in CI without depending on any public relay.
+- `mix test.integration` runs the integration suite
 
 ### Local relay TLS
 
 Secure verification is the default in `moqx`.
 
-That means the upstream dev relay config under `.moq-dev/dev/relay.toml`, which uses
-`tls.generate = ["localhost"]`, will not verify successfully unless you either:
-
-- opt into local-only insecure mode:
-
-  ```elixir
-  MOQX.connect_publisher("https://localhost:4443", tls: [verify: :insecure])
-  ```
-
-- or run the relay with a certificate chain trusted by your machine
+For local development against a relay with self-signed certificates, either
+configure a trusted local certificate chain or opt into `tls: [verify: :insecure]`
+explicitly.
 
 For example, if you already have a local CA PEM for your relay:
 
@@ -453,7 +394,7 @@ mkcert -install
 mkcert -cert-file localhost.pem -key-file localhost-key.pem localhost 127.0.0.1 ::1
 ```
 
-Then configure the relay to use file-based TLS instead of `tls.generate`, for example:
+Then configure the relay to use file-based TLS, for example:
 
 ```toml
 [server]
