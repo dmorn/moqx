@@ -1,13 +1,12 @@
 defmodule MOQX do
   @moduledoc """
   Elixir bindings for Media over QUIC (MOQ) via Rustler NIFs on top of
-  `moq-lite` / `moq-native`.
+  `moqtail-rs`.
 
   `moqx` intentionally exposes a narrow client-only contract:
 
   - split roles only: publisher sessions publish and subscriber sessions subscribe
-  - Quinn-backed connections only
-  - transports limited to `:auto`, `:raw_quic`, `:webtransport`, and `:websocket`
+  - WebTransport (Draft 14) only
   - minimal client TLS controls with verification on by default
   - relay auth carried in the connect URL query as `?jwt=...`
   - rooted relay URLs whose path must match the token `root`
@@ -91,13 +90,7 @@ defmodule MOQX do
   @typedoc "Publisher or subscriber session role."
   @type role :: :publisher | :subscriber
 
-  @typedoc "Compiled native QUIC backend. Today `moqx` intentionally supports only Quinn."
-  @type backend :: :quinn
-
-  @typedoc "Requested connection transport."
-  @type transport :: :auto | :raw_quic | :webtransport | :websocket
-
-  @typedoc ~S|MOQ protocol version string, e.g. `"moq-lite-03"` or `"moq-transport-14"`.|
+  @typedoc ~S|MOQ protocol version string, e.g. `"moq-transport-14"`.|
   @type version :: String.t()
 
   @typedoc "TLS verification mode for relay connections."
@@ -150,9 +143,6 @@ defmodule MOQX do
 
   @type connect_opt ::
           {:role, role()}
-          | {:backend, backend()}
-          | {:transport, transport()}
-          | {:version, version() | [version()]}
           | {:tls, [tls_opt()]}
 
   @doc """
@@ -164,9 +154,6 @@ defmodule MOQX do
   Supported options:
 
   - `:role` - required, `:publisher` or `:subscriber`
-  - `:backend` - optional compiled backend, currently only `:quinn`
-  - `:transport` - optional `:auto`, `:raw_quic`, `:webtransport`, or `:websocket`
-  - `:version` - optional version string or list of version strings
   - `:tls` - optional TLS controls:
     - `verify: :verify_peer | :insecure` (defaults to `:verify_peer`)
     - `cacertfile: "/path/to/rootCA.pem"` to trust a custom root CA PEM
@@ -184,12 +171,9 @@ defmodule MOQX do
         :error -> raise ArgumentError, "connect/2 requires :role (:publisher or :subscriber)"
       end
 
-    backend = opts |> Keyword.get(:backend) |> normalize_connect_backend()
-    transport = opts |> Keyword.get(:transport, :auto) |> normalize_connect_transport!()
-    versions = opts |> Keyword.get(:version, []) |> normalize_connect_versions!()
     {tls_verify, tls_cacertfile} = opts |> Keyword.get(:tls, []) |> normalize_connect_tls!()
 
-    MOQX.Native.connect(url, role, backend, transport, versions, tls_verify, tls_cacertfile)
+    MOQX.Native.connect(url, role, tls_verify, tls_cacertfile)
   end
 
   @doc """
@@ -212,24 +196,6 @@ defmodule MOQX do
   @spec connect_subscriber(String.t(), Keyword.t()) :: :ok | {:error, String.t()}
   def connect_subscriber(url, opts \\ []) when is_binary(url) and is_list(opts) do
     connect(url, Keyword.put(opts, :role, :subscriber))
-  end
-
-  @doc """
-  Returns the compiled native backends available to `connect/2`.
-  """
-  @spec supported_backends() :: [backend()]
-  def supported_backends do
-    MOQX.Native.supported_backends()
-    |> Enum.map(&normalize_session_backend!/1)
-  end
-
-  @doc """
-  Returns the compiled native transports available to `connect/2`.
-  """
-  @spec supported_transports() :: [transport()]
-  def supported_transports do
-    MOQX.Native.supported_transports()
-    |> Enum.map(&normalize_session_transport!/1)
   end
 
   @doc """
@@ -260,42 +226,6 @@ defmodule MOQX do
   defp normalize_connect_role!(role) do
     raise ArgumentError,
           "expected :role to be :publisher or :subscriber, got: #{inspect(role)}"
-  end
-
-  defp normalize_connect_backend(nil), do: nil
-  defp normalize_connect_backend(:quinn), do: "quinn"
-
-  defp normalize_connect_backend(backend) do
-    raise ArgumentError,
-          "expected :backend to be :quinn, got: #{inspect(backend)}"
-  end
-
-  defp normalize_connect_transport!(:auto), do: "auto"
-  defp normalize_connect_transport!(:raw_quic), do: "raw_quic"
-  defp normalize_connect_transport!(:webtransport), do: "webtransport"
-  defp normalize_connect_transport!(:websocket), do: "websocket"
-
-  defp normalize_connect_transport!(transport) do
-    raise ArgumentError,
-          "expected :transport to be :auto, :raw_quic, :webtransport, or :websocket, got: #{inspect(transport)}"
-  end
-
-  defp normalize_connect_versions!([]), do: []
-  defp normalize_connect_versions!(version) when is_binary(version), do: [version]
-
-  defp normalize_connect_versions!(versions) when is_list(versions) do
-    Enum.map(versions, fn
-      version when is_binary(version) ->
-        version
-
-      other ->
-        raise ArgumentError, "expected :version entries to be strings, got: #{inspect(other)}"
-    end)
-  end
-
-  defp normalize_connect_versions!(other) do
-    raise ArgumentError,
-          "expected :version to be a string or list of strings, got: #{inspect(other)}"
   end
 
   defp normalize_connect_tls!(opts) when is_list(opts) do
@@ -333,13 +263,6 @@ defmodule MOQX do
 
   defp normalize_session_role!("publisher"), do: :publisher
   defp normalize_session_role!("subscriber"), do: :subscriber
-
-  defp normalize_session_backend!("quinn"), do: :quinn
-
-  defp normalize_session_transport!("auto"), do: :auto
-  defp normalize_session_transport!("raw_quic"), do: :raw_quic
-  defp normalize_session_transport!("webtransport"), do: :webtransport
-  defp normalize_session_transport!("websocket"), do: :websocket
 
   # ---------------------------------------------------------------------------
   # Publish

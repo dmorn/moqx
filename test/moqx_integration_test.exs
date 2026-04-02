@@ -96,17 +96,6 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp with_isolated_fallback_relay(fun) do
-    relay = Relay.start_isolated(4544, 4545)
-    drain_port_messages(relay)
-
-    try do
-      fun.(Relay.websocket_fallback_url())
-    after
-      Relay.stop(relay)
-    end
-  end
-
   defp with_isolated_trusted_relay(fun) do
     relay = Relay.start_isolated_trusted(4546, 4547)
     drain_port_messages(relay)
@@ -306,132 +295,8 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  describe "upstream parity: backend, transport, and version matrix" do
-    test "reports compiled native support" do
-      assert MOQX.supported_backends() == [:quinn]
-      assert :raw_quic in MOQX.supported_transports()
-      assert :webtransport in MOQX.supported_transports()
-      assert :websocket in MOQX.supported_transports()
-    end
-
-    test "quinn_raw_quic", %{relay_url: url, local_dev_tls: tls_opts} do
-      with_sessions(url, tls_opts ++ [backend: :quinn, transport: :raw_quic], fn publisher,
-                                                                                 subscriber ->
-        assert MOQX.session_version(publisher) == "moq-lite-03"
-        assert MOQX.session_version(subscriber) == "moq-lite-03"
-
-        broadcast_path = "anon/quinn-raw-quic"
-        track_name = "video"
-
-        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
-        {:ok, track} = MOQX.create_track(broadcast, track_name)
-
-        :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
-        :ok = MOQX.write_frame(track, "hello")
-        :ok = MOQX.finish_track(track)
-
-        await_subscribed!(broadcast_path, track_name)
-        await_frame!(0, "hello")
-        await_track_ended!()
-      end)
-    end
-
-    test "websocket_connect", %{relay_websocket_url: url, local_dev_tls: tls_opts} do
-      with_sessions(url, tls_opts ++ [transport: :websocket], fn publisher, subscriber ->
-        assert MOQX.session_version(publisher) == "moq-lite-02"
-        assert MOQX.session_version(subscriber) == "moq-lite-02"
-      end)
-    end
-
-    test "broadcast_websocket", %{relay_websocket_url: url, local_dev_tls: tls_opts} do
-      with_sessions(url, tls_opts ++ [transport: :websocket], fn publisher, subscriber ->
-        assert MOQX.session_version(publisher) == "moq-lite-02"
-        assert MOQX.session_version(subscriber) == "moq-lite-02"
-
-        broadcast_path = "anon/broadcast-websocket"
-        track_name = "video"
-
-        {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
-        {:ok, track} = MOQX.create_track(broadcast, track_name)
-
-        :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
-        :ok = MOQX.write_frame(track, "hello")
-        Process.sleep(300)
-        :ok = MOQX.finish_track(track)
-
-        await_subscribed!(broadcast_path, track_name)
-        await_frame!(0, "hello")
-        await_track_ended!()
-      end)
-    end
-
-    for version <- [
-          "moq-lite-01",
-          "moq-lite-02",
-          "moq-lite-03",
-          "moq-transport-14",
-          "moq-transport-15",
-          "moq-transport-16"
-        ] do
-      @version version
-
-      test "version_#{version}", %{relay_url: url, local_dev_tls: tls_opts} do
-        with_sessions(url, tls_opts ++ [transport: :raw_quic, version: @version], fn publisher,
-                                                                                     subscriber ->
-          assert MOQX.session_version(publisher) == @version
-          assert MOQX.session_version(subscriber) == @version
-        end)
-      end
-
-      test "webtransport_#{version}", %{relay_url: url, local_dev_tls: tls_opts} do
-        with_sessions(
-          url,
-          tls_opts ++ [transport: :webtransport, version: @version],
-          fn publisher, subscriber ->
-            assert MOQX.session_version(publisher) == @version
-            assert MOQX.session_version(subscriber) == @version
-          end
-        )
-      end
-    end
-  end
-
-  describe "websocket version support is relay-compatible where upstream allows it" do
-    for version <- ["moq-lite-01", "moq-lite-02", "moq-transport-14"] do
-      @version version
-
-      test "websocket_#{version}", %{relay_websocket_url: url, local_dev_tls: tls_opts} do
-        with_sessions(url, tls_opts ++ [transport: :websocket, version: @version], fn publisher,
-                                                                                      subscriber ->
-          assert MOQX.session_version(publisher) == @version
-          assert MOQX.session_version(subscriber) == @version
-        end)
-      end
-    end
-  end
-
-  describe "websocket fallback parity" do
-    test "broadcast_websocket_fallback" do
-      with_isolated_fallback_relay(fn url ->
-        with_sessions(url, [], fn publisher, subscriber ->
-          broadcast_path = "anon/broadcast-websocket-fallback"
-          track_name = "video"
-
-          {:ok, broadcast} = MOQX.publish(publisher, broadcast_path)
-          {:ok, track} = MOQX.create_track(broadcast, track_name)
-
-          :ok = MOQX.subscribe(subscriber, broadcast_path, track_name)
-          :ok = MOQX.write_frame(track, "hello")
-          Process.sleep(300)
-          :ok = MOQX.finish_track(track)
-
-          await_subscribed!(broadcast_path, track_name)
-          await_frame!(0, "hello")
-          await_track_ended!()
-        end)
-      end)
-    end
-  end
+  # Backend/transport/version matrix tests removed during moqtail-rs migration (issue #9).
+  # These relied on moq-native/moq-lite local relay and are no longer applicable.
 
   describe "tls hardening" do
     test "verification is enabled by default against self-signed local relay", %{relay_url: url} do
