@@ -12,7 +12,9 @@ defmodule MOQXTest do
     assert is_function(&MOQX.close/1)
   end
 
-  test "public API exposes fetch helpers" do
+  test "public API exposes subscribe and fetch helpers" do
+    assert is_function(&MOQX.subscribe/3)
+    assert is_function(&MOQX.subscribe/4)
     assert is_function(&MOQX.fetch/4)
     assert is_function(&MOQX.fetch_catalog/1)
     assert is_function(&MOQX.fetch_catalog/2)
@@ -61,6 +63,22 @@ defmodule MOQXTest do
                  "unexpected :tls option :unknown",
                  fn ->
                    MOQX.connect("https://example.com", role: :publisher, tls: [unknown: true])
+                 end
+  end
+
+  test "subscribe/4 validates delivery_timeout_ms before session inspection" do
+    assert_raise ArgumentError,
+                 "expected :delivery_timeout_ms to be a non-negative integer, got: -1",
+                 fn ->
+                   MOQX.subscribe(:not_a_session, "ns", "track", delivery_timeout_ms: -1)
+                 end
+  end
+
+  test "subscribe/4 rejects unexpected opts before session inspection" do
+    assert_raise ArgumentError,
+                 "unexpected subscribe option :unknown",
+                 fn ->
+                   MOQX.subscribe(:not_a_session, "ns", "track", unknown: true)
                  end
   end
 

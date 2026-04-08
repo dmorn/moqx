@@ -171,6 +171,10 @@ live media consumption from moqtail-style relays.
 `subscribe/3` returns `:ok` immediately, then messages arrive in the caller
 process.
 
+`subscribe/4` accepts subscription options. Currently supported:
+
+- `delivery_timeout_ms` -- MOQT DELIVERY TIMEOUT parameter (`0x02`) in milliseconds.
+
 The supported subscription message contract is:
 
 - `{:moqx_subscribed, namespace, track_name}` when the subscription becomes active
@@ -179,7 +183,13 @@ The supported subscription message contract is:
 - `{:moqx_error, reason}` for asynchronous subscription/runtime failures
 
 ```elixir
-:ok = MOQX.subscribe(subscriber, "moqtail", "catalog")
+:ok =
+  MOQX.subscribe(
+    subscriber,
+    "moqtail",
+    "catalog",
+    delivery_timeout_ms: 1_500
+  )
 
 receive do
   {:moqx_subscribed, "moqtail", "catalog"} -> :ok

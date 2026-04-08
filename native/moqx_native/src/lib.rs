@@ -1114,6 +1114,7 @@ fn subscribe(
     session: ResourceArc<SessionRes>,
     broadcast_path: String,
     track_name: String,
+    delivery_timeout_ms: Option<u64>,
 ) -> rustler::NifResult<Atom> {
     if !session.role.can_consume() {
         return Err(rustler::Error::Term(Box::new(
@@ -1125,6 +1126,18 @@ fn subscribe(
     let inner = session.inner.clone();
     let namespace = normalize_path(&session.root, &broadcast_path);
 
+    let subscribe_parameters = match delivery_timeout_ms {
+        Some(timeout_ms) => {
+            vec![KeyValuePair::try_new_varint(0x02, timeout_ms).map_err(|e| {
+                rustler::Error::Term(Box::new(format!(
+                    "invalid delivery_timeout_ms parameter: {:?}",
+                    e
+                )))
+            })?]
+        }
+        None => vec![],
+    };
+
     runtime().spawn(async move {
         let request_id = inner.allocate_request_id();
         let subscribe_msg = MoqSubscribe::new_latest_object(
@@ -1134,7 +1147,7 @@ fn subscribe(
             0, // subscriber_priority
             MoqGroupOrder::Ascending,
             true, // forward
-            vec![],
+            subscribe_parameters,
         );
 
         inner.pending_subscribes.lock().unwrap().insert(

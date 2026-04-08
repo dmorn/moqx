@@ -118,6 +118,9 @@ defmodule MOQX do
           | :moqx_track_ended
           | {:moqx_error, String.t()}
 
+  @typedoc "Subscribe options accepted by `subscribe/4`."
+  @type subscribe_opt :: {:delivery_timeout_ms, non_neg_integer()}
+
   @typedoc "Opaque fetch correlation reference returned by `fetch/4`."
   @type fetch_ref :: reference()
 
@@ -325,13 +328,52 @@ defmodule MOQX do
   - `:moqx_track_ended` when the track finishes cleanly
   - `{:moqx_error, reason}` for asynchronous runtime failures
 
+  Supported options:
+
+  - `:delivery_timeout_ms` -- MOQT DELIVERY TIMEOUT (parameter type `0x02`) in milliseconds.
+
   Misuse errors, such as calling this with a publisher session, are returned as
   `{:error, reason}` immediately.
   """
   @spec subscribe(session(), String.t(), String.t()) :: :ok | {:error, String.t()}
   def subscribe(session, broadcast_path, track_name)
       when is_binary(broadcast_path) and is_binary(track_name) do
-    MOQX.Native.subscribe(session, broadcast_path, track_name)
+    subscribe(session, broadcast_path, track_name, [])
+  end
+
+  @doc """
+  Same as `subscribe/3`, with explicit subscription options.
+  """
+  @spec subscribe(session(), String.t(), String.t(), [subscribe_opt()]) ::
+          :ok | {:error, String.t()}
+  def subscribe(session, broadcast_path, track_name, opts)
+      when is_binary(broadcast_path) and is_binary(track_name) and is_list(opts) do
+    delivery_timeout_ms =
+      opts |> Keyword.get(:delivery_timeout_ms) |> normalize_delivery_timeout_ms!()
+
+    validate_subscribe_opts_keys!(opts)
+
+    MOQX.Native.subscribe(session, broadcast_path, track_name, delivery_timeout_ms)
+  end
+
+  defp validate_subscribe_opts_keys!(opts) do
+    allowed_keys = [:delivery_timeout_ms]
+
+    case Keyword.keys(opts) -- allowed_keys do
+      [] -> :ok
+      [key | _] -> raise ArgumentError, "unexpected subscribe option #{inspect(key)}"
+    end
+  end
+
+  defp normalize_delivery_timeout_ms!(nil), do: nil
+
+  defp normalize_delivery_timeout_ms!(delivery_timeout_ms)
+       when is_integer(delivery_timeout_ms) and delivery_timeout_ms >= 0,
+       do: delivery_timeout_ms
+
+  defp normalize_delivery_timeout_ms!(delivery_timeout_ms) do
+    raise ArgumentError,
+          "expected :delivery_timeout_ms to be a non-negative integer, got: #{inspect(delivery_timeout_ms)}"
   end
 
   # ---------------------------------------------------------------------------
