@@ -5,19 +5,18 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
 
   ## Usage
 
-      mix moqtail.demo.debug <relay_url> [options]
+      mix moqtail.demo.debug [relay_url] [options]
 
   Examples:
 
-      mix moqtail.demo.debug https://abr.moqtail.dev/demo
+      mix moqtail.demo.debug
+      mix moqtail.demo.debug --track 259
       mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail
-      mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail --track 259
       mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail --list-tracks-only
 
   Options:
 
-    * `--namespace` - catalog/subscription namespace. Defaults to URL path
-      without leading slash, or `"moqtail"` when URL path is empty.
+    * `--namespace` - catalog/subscription namespace (default: `"moqtail"`).
     * `--track` - track name to subscribe to directly (skips interactive prompt).
     * `--list-tracks-only` - fetch/subscribe catalog, print tracks, and exit.
     * `--timeout` - connect/catalog/subscription timeout in ms (default: `10_000`).
@@ -31,6 +30,9 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
 
   @shortdoc "Debug a moqtail relay track with live latency/bandwidth stats"
   @requirements ["app.start"]
+
+  @default_relay_url "https://ord.abr.moqtail.dev"
+  @default_namespace "moqtail"
 
   alias MOQX.DemoDebugStats
 
@@ -69,11 +71,8 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
       invalid != [] ->
         {:error, "invalid options: #{inspect(invalid)}"}
 
-      positional == [] ->
-        {:error, "missing relay URL\n\n#{@moduledoc}"}
-
       true ->
-        [url | _] = positional
+        url = List.first(positional) || @default_relay_url
 
         timeout = positive_int!(opts[:timeout], :timeout, 10_000)
         run_timeout_ms = if(opts[:timeout], do: positive_int!(opts[:timeout], :timeout, nil))
@@ -81,7 +80,7 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
         {:ok,
          %{
            url: url,
-           namespace: opts[:namespace] || namespace_from_url(url),
+           namespace: opts[:namespace] || @default_namespace,
            track_name: opts[:track],
            list_tracks_only: opts[:list_tracks_only] || false,
            timeout: timeout,
@@ -364,15 +363,6 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
   defp remaining_runtime_ms(start_mono_ms, now_mono_ms, run_timeout_ms) do
     elapsed_ms = max(now_mono_ms - start_mono_ms, 0)
     max(run_timeout_ms - elapsed_ms, 0)
-  end
-
-  defp namespace_from_url(url) do
-    case URI.parse(url).path do
-      nil -> "moqtail"
-      "" -> "moqtail"
-      "/" -> "moqtail"
-      path -> String.trim_leading(path, "/")
-    end
   end
 
   defp positive_int!(nil, _name, default), do: default

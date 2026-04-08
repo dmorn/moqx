@@ -249,11 +249,10 @@ end
 For quick manual debugging, use the built-in Mix task:
 
 ```bash
-mix moqtail.demo.debug https://abr.moqtail.dev/demo
-# or
-mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail
-mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail --track 259
-mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail --list-tracks-only
+mix moqtail.demo.debug
+# defaults to https://ord.abr.moqtail.dev and namespace moqtail
+mix moqtail.demo.debug --track 259
+mix moqtail.demo.debug --list-tracks-only
 ```
 
 The task will:
