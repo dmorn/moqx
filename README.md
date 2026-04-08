@@ -8,7 +8,7 @@
 
 ```elixir
 # mix.exs
-{:moqx, "~> 0.1.0"}
+{:moqx, "~> 0.2.0"}
 ```
 
 Release metadata:

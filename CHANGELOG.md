@@ -2,6 +2,26 @@
 
 All notable changes to `moqx` will be documented in this file.
 
+## [0.2.0] - 2026-04-08
+
+First release of the current Rustler + `moqtail-rs` based Elixir MOQ client library line.
+
+### Added
+
+- CMSF catalog decoding and media track discovery via `MOQX.Catalog`
+- raw fetch and catalog retrieval APIs for subscriber sessions
+- validated relay-backed integration coverage for v14/v17 interop and live relay behavior
+
+### Changed
+
+- native integration migrated to `moqtail-rs`
+- publish flow aligned around `PublishNamespace` behavior
+- docs and examples updated for the current client contract
+
+### Notes
+
+- `moqx` on Hex had prior unrelated releases; `0.2.0` marks this project line as the canonical continuation.
+
 ## [0.1.0] - 2026-03-30
 
 Initial public client release.
