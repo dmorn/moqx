@@ -4,6 +4,22 @@
 
 **Status:** early client library with a deliberately narrow, documented support contract.
 
+## Spec references (RFCs and drafts)
+
+`moqx` (through `moqtail-rs` / moqtail) is aligned with the current MOQ/WebTransport stack.
+At the time of writing, that means a mix of published RFCs and active IETF drafts:
+
+- [RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport](https://www.rfc-editor.org/rfc/rfc9000)
+- [RFC 9001 — Using TLS to Secure QUIC](https://www.rfc-editor.org/rfc/rfc9001)
+- [RFC 9002 — QUIC Loss Detection and Congestion Control](https://www.rfc-editor.org/rfc/rfc9002)
+- [RFC 9114 — HTTP/3](https://www.rfc-editor.org/rfc/rfc9114)
+- [RFC 9221 — QUIC DATAGRAM](https://www.rfc-editor.org/rfc/rfc9221)
+- [RFC 9297 — HTTP Datagrams and the Capsule Protocol](https://www.rfc-editor.org/rfc/rfc9297)
+- [draft-ietf-webtrans-http3 — WebTransport over HTTP/3](https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/)
+- [draft-ietf-moq-transport — Media over QUIC Transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/)
+
+For MOQ-specific behavior, treat the active MOQ transport draft and moqtail interoperability behavior as the practical reference until final RFC publication.
+
 ## Installation
 
 ```elixir
