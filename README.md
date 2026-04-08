@@ -244,6 +244,35 @@ receive do
 end
 ```
 
+### Mix task: interactive relay debug
+
+For quick manual debugging, use the built-in Mix task:
+
+```bash
+mix moqtail.demo.debug https://abr.moqtail.dev/demo
+# or
+mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail
+mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail --track 259
+mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail --list-tracks-only
+```
+
+The task will:
+
+1. connect as a subscriber,
+2. load catalog via fetch (with live-subscribe fallback when fetch has no objects),
+3. prompt you to choose a track (or use `--track <name>`),
+4. subscribe and print live stats each interval:
+   - PRFT latency (or `n/a` if unavailable),
+   - bandwidth (`B/s` and `kbps`),
+   - groups/sec,
+   - objects/sec.
+
+Use `mix help moqtail.demo.debug` for full options.
+
+Tips:
+- `--list-tracks-only` is handy for scripting/discovery without subscribing.
+- pass `--timeout <ms>` to auto-stop after a bounded runtime.
+
 ### Fetch
 
 Fetch retrieves raw track objects by range from a subscriber session.
