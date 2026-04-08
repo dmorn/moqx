@@ -1,6 +1,8 @@
 defmodule MOQXIntegrationTest do
   use ExUnit.Case, async: false
 
+  alias MOQX.Debug
+
   @moduletag :integration
   @timeout 15_000
 
@@ -107,6 +109,25 @@ defmodule MOQXIntegrationTest do
       end
     end
 
+    test "subscribe/4 accepts delivery_timeout_ms and still receives catalog" do
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = relay_namespace()
+
+        :ok = MOQX.subscribe(subscriber, ns, "catalog", delivery_timeout_ms: 1_500)
+        await_subscribed!(ns, "catalog")
+
+        {_group_id, payload} = await_frame!()
+        assert byte_size(payload) > 0
+
+        assert {:ok, catalog} = MOQX.Catalog.decode(payload)
+        assert MOQX.Catalog.tracks(catalog) != []
+      after
+        :ok = MOQX.close(subscriber)
+      end
+    end
+
     test "subscribe to a video track delivers live frames" do
       subscriber = connect_subscriber!()
 
@@ -133,6 +154,41 @@ defmodule MOQXIntegrationTest do
           assert is_integer(group_id)
           assert byte_size(payload) > 0
         end
+      after
+        :ok = MOQX.close(subscriber)
+      end
+    end
+
+    test "video frames expose PRFT for latency estimation" do
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = relay_namespace()
+
+        # Discover one video track from the catalog
+        :ok = MOQX.subscribe(subscriber, ns, "catalog")
+        await_subscribed!(ns, "catalog")
+
+        {_gid, catalog_payload} = await_frame!()
+        {:ok, catalog} = MOQX.Catalog.decode(catalog_payload)
+
+        video = MOQX.Catalog.video_tracks(catalog) |> List.first()
+        assert video, "expected at least one video track in catalog"
+
+        :ok = MOQX.subscribe(subscriber, ns, video.name)
+        await_subscribed!(ns, video.name)
+
+        {_group_id, payload} = await_frame!()
+
+        boxes = Debug.top_level_boxes(payload)
+        assert Enum.any?(boxes, &(&1.type == "prft"))
+
+        assert {:ok, prft} = Debug.parse_prft(payload)
+        assert prft.version in [0, 1]
+
+        assert {:ok, age_ms} = Debug.publisher_age_ms(payload)
+        assert age_ms >= 0
+        assert age_ms < 60_000
       after
         :ok = MOQX.close(subscriber)
       end
