@@ -2,6 +2,18 @@
 
 All notable changes to `moqx` will be documented in this file.
 
+## [0.2.1] - 2026-04-09
+
+### Added
+
+- `mix moqx.e2e.pubsub` task for end-to-end publisher/subscriber relay smoke testing.
+- README examples for running relay E2E smoke tests, including Cloudflare draft-14 relay endpoints.
+
+### Changed
+
+- integration test tagging split to keep CI deterministic (`:integration`) while keeping live public relay coverage opt-in (`:public_relay_live`).
+- `mix test.integration` now excludes `:public_relay_live` tests by default.
+
 ## [0.2.0] - 2026-04-08
 
 First release of the current Rustler + `moqtail-rs` based Elixir MOQ client library line.

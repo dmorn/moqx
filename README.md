@@ -24,7 +24,7 @@ For MOQ-specific behavior, treat the active MOQ transport draft and moqtail inte
 
 ```elixir
 # mix.exs
-{:moqx, "~> 0.2.0"}
+{:moqx, "~> 0.2.1"}
 ```
 
 Release metadata:
