@@ -6,9 +6,8 @@ defmodule MOQXIntegrationTest do
   @moduletag :integration
   @timeout 15_000
 
-  # External relay tests require MOQX_EXTERNAL_RELAY_URL to be set,
+  # Integration relay tests can use MOQX_EXTERNAL_RELAY_URL,
   # or default to https://ord.abr.moqtail.dev.
-  # These tests are excluded by default (tagged :external_relay).
 
   defp relay_url do
     System.get_env("MOQX_EXTERNAL_RELAY_URL", "https://ord.abr.moqtail.dev")
@@ -54,6 +53,37 @@ defmodule MOQXIntegrationTest do
     end
   end
 
+  defp subscribe_with_retry!(subscriber, namespace, track_name, timeout \\ @timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
+  end
+
+  defp subscribe_with_retry_loop(subscriber, namespace, track_name, deadline) do
+    :ok = MOQX.subscribe(subscriber, namespace, track_name)
+
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      flunk("subscribe timeout for #{namespace}/#{track_name}")
+    else
+      receive do
+        {:moqx_subscribed, ^namespace, ^track_name} ->
+          :ok
+
+        {:moqx_error, reason} ->
+          if String.contains?(reason, "Unknown track namespace") do
+            Process.sleep(100)
+            subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
+          else
+            flunk("subscribe failed: #{inspect(reason)}")
+          end
+      after
+        min(1_000, remaining) ->
+          subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
+      end
+    end
+  end
+
   defp await_frame! do
     receive do
       {:moqx_frame, group_id, payload} -> {group_id, payload}
@@ -63,9 +93,7 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  describe "external relay: connect" do
-    @describetag :external_relay
-
+  describe "integration relay: connect" do
     test "subscriber connects and reports draft-14 version" do
       subscriber = connect_subscriber!()
 
@@ -88,9 +116,7 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  describe "external relay: subscribe" do
-    @describetag :external_relay
-
+  describe "integration relay: subscribe" do
     test "subscribe to catalog track delivers a valid CMSF catalog" do
       subscriber = connect_subscriber!()
 
@@ -226,9 +252,36 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  describe "external relay: role guardrails" do
-    @describetag :external_relay
+  describe "integration relay: pub/sub e2e" do
+    test "publisher frame is received by subscriber on same relay" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
 
+      try do
+        ns = "moqx-e2e-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+        payload = "hello-from-moqx-integration"
+
+        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        subscribe_with_retry!(subscriber, ns, track_name)
+
+        :ok = MOQX.write_frame(track, payload)
+
+        {group_id, got_payload} = await_matching_payload_frame!(payload)
+        assert is_integer(group_id)
+        assert got_payload == payload
+
+        :ok = MOQX.finish_track(track)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+  end
+
+  describe "integration relay: role guardrails" do
     test "publish rejects subscriber sessions" do
       subscriber = connect_subscriber!()
 
@@ -273,9 +326,7 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  describe "external relay: catalog-driven flow" do
-    @describetag :external_relay
-
+  describe "integration relay: catalog-driven flow" do
     test "full catalog-driven subscribe: connect, catalog, decode, subscribe video" do
       subscriber = connect_subscriber!()
 
@@ -318,6 +369,33 @@ defmodule MOQXIntegrationTest do
   end
 
   # -- Helpers ----------------------------------------------------------------
+
+  defp await_matching_payload_frame!(expected_payload, timeout \\ @timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_matching_payload_frame_loop(expected_payload, deadline)
+  end
+
+  defp await_matching_payload_frame_loop(expected_payload, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      flunk("frame timeout waiting for payload #{inspect(expected_payload)}")
+    else
+      receive do
+        {:moqx_frame, group_id, payload} when payload == expected_payload ->
+          {group_id, payload}
+
+        {:moqx_frame, _group_id, _payload} ->
+          await_matching_payload_frame_loop(expected_payload, deadline)
+
+        {:moqx_error, reason} ->
+          flunk("frame receive failed: #{inspect(reason)}")
+      after
+        remaining ->
+          flunk("frame timeout waiting for payload #{inspect(expected_payload)}")
+      end
+    end
+  end
 
   defp collect_frames(duration_ms) do
     deadline = System.monotonic_time(:millisecond) + duration_ms
