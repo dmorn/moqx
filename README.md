@@ -270,6 +270,7 @@ Use `mix help moqtail.demo.debug` for full options.
 
 Tips:
 - `--list-tracks-only` is handy for scripting/discovery without subscribing.
+- `--show-raw` prints full per-track raw catalog maps.
 - pass `--timeout <ms>` to auto-stop after a bounded runtime.
 
 ### Fetch

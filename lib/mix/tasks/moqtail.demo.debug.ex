@@ -24,6 +24,7 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
       when it expires, the task exits cleanly.
     * `--interval-ms` - stats print interval in ms (default: `1_000`).
     * `--delivery-timeout-ms` - passed through to `MOQX.subscribe/4`.
+    * `--show-raw` - include full per-track raw catalog maps in listing output.
     * `--help` - prints this help.
   """
   use Mix.Task
@@ -34,6 +35,7 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
   @default_relay_url "https://ord.abr.moqtail.dev"
   @default_namespace "moqtail"
 
+  alias MOQX.Catalog.Track
   alias MOQX.DemoDebugStats
 
   @impl Mix.Task
@@ -60,6 +62,7 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
           timeout: :integer,
           interval_ms: :integer,
           delivery_timeout_ms: :integer,
+          show_raw: :boolean,
           help: :boolean
         ]
       )
@@ -86,7 +89,8 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
            timeout: timeout,
            run_timeout_ms: run_timeout_ms,
            interval_ms: positive_int!(opts[:interval_ms], :interval_ms, 1_000),
-           subscribe_opts: build_subscribe_opts(opts)
+           subscribe_opts: build_subscribe_opts(opts),
+           show_raw: opts[:show_raw] || false
          }}
     end
   end
@@ -101,9 +105,9 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
       catalog = load_catalog!(subscriber, config.namespace, config.timeout)
 
       if config.list_tracks_only do
-        print_available_tracks!(catalog)
+        print_available_tracks!(catalog, config.show_raw)
       else
-        track = choose_track!(catalog, config.track_name)
+        track = choose_track!(catalog, config.track_name, config.show_raw)
 
         Mix.shell().info("subscribing to #{config.namespace}/#{track.name}...")
         :ok = MOQX.subscribe(subscriber, config.namespace, track.name, config.subscribe_opts)
@@ -212,19 +216,19 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
     end
   end
 
-  defp choose_track!(catalog, nil) do
-    tracks = print_available_tracks!(catalog)
+  defp choose_track!(catalog, nil, show_raw?) do
+    tracks = print_available_tracks!(catalog, show_raw?)
     choose_track_loop(tracks)
   end
 
-  defp choose_track!(catalog, track_name) when is_binary(track_name) do
+  defp choose_track!(catalog, track_name, _show_raw?) when is_binary(track_name) do
     case MOQX.Catalog.get_track(catalog, track_name) do
       nil -> Mix.raise("track #{inspect(track_name)} not found in catalog")
       track -> track
     end
   end
 
-  defp print_available_tracks!(catalog) do
+  defp print_available_tracks!(catalog, show_raw?) do
     tracks = MOQX.Catalog.tracks(catalog)
 
     if tracks == [] do
@@ -236,12 +240,46 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
     tracks
     |> Enum.with_index(1)
     |> Enum.each(fn {track, index} ->
-      Mix.shell().info(
-        "#{index}. name=#{track.name} role=#{inspect(track.role)} codec=#{inspect(track.codec)} packaging=#{inspect(track.packaging)}"
-      )
+      Mix.shell().info("#{index}. #{format_track_line(track, show_raw?)}")
     end)
 
     tracks
+  end
+
+  defp format_track_line(track, show_raw?) do
+    summary =
+      [
+        "name=#{track.name}",
+        "role=#{inspect(track.role)}",
+        "codec=#{inspect(track.codec)}",
+        "packaging=#{inspect(track.packaging)}"
+      ]
+      |> Enum.join(" ")
+
+    description = Track.describe(track)
+
+    lines = [
+      summary,
+      "   explicit: #{inspect(description.explicit, limit: :infinity, printable_limit: :infinity)}",
+      "   inferred: #{inspect(description.inferred, limit: :infinity, printable_limit: :infinity)}",
+      "   extra: #{inspect(description.extra, limit: :infinity, printable_limit: :infinity)}"
+    ]
+
+    lines =
+      if show_raw? do
+        raw_lines =
+          track.raw
+          |> Enum.sort_by(fn {key, _value} -> key end)
+          |> Enum.map(fn {key, value} ->
+            "    - #{key}: #{inspect(value, limit: :infinity, printable_limit: :infinity)}"
+          end)
+
+        lines ++ ["   raw:" | raw_lines]
+      else
+        lines
+      end
+
+    Enum.join(lines, "\n")
   end
 
   defp choose_track_loop(tracks) do

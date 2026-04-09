@@ -99,12 +99,18 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
       {:ok, broadcast} = MOQX.publish(publisher, cfg.namespace)
       {:ok, track} = MOQX.create_track(broadcast, cfg.track)
 
-      :ok = MOQX.subscribe(subscriber, cfg.namespace, cfg.track)
-      await_subscribed!(cfg.namespace, cfg.track, cfg.timeout)
+      # Some relays need a brief window to register the just-published namespace.
+      Process.sleep(300)
 
-      :ok = MOQX.write_frame(track, cfg.payload)
+      subscribe_with_retry!(subscriber, cfg.namespace, cfg.track, cfg.timeout)
 
-      {group_id, payload} = await_frame!(cfg.timeout)
+      # Send a few frames to smooth over first-object timing on remote relays.
+      Enum.each(1..3, fn _ ->
+        :ok = MOQX.write_frame(track, cfg.payload)
+        Process.sleep(100)
+      end)
+
+      {group_id, payload} = await_matching_payload_frame!(cfg.payload, cfg.timeout)
 
       if payload != cfg.payload do
         Mix.raise(
@@ -140,23 +146,70 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
     end
   end
 
-  defp await_subscribed!(namespace, track_name, timeout) do
-    receive do
-      {:moqx_subscribed, ^namespace, ^track_name} -> :ok
-      {:moqx_error, reason} -> Mix.raise("subscribe failed: #{inspect(reason)}")
-    after
-      timeout -> Mix.raise("subscribe timeout for #{namespace}/#{track_name}")
+  defp subscribe_with_retry!(subscriber, namespace, track_name, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
+  end
+
+  defp subscribe_with_retry_loop(subscriber, namespace, track_name, deadline) do
+    :ok = MOQX.subscribe(subscriber, namespace, track_name)
+
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      Mix.raise("subscribe timeout for #{namespace}/#{track_name}")
+    else
+      receive do
+        {:moqx_subscribed, ^namespace, ^track_name} ->
+          :ok
+
+        {:moqx_error, reason} ->
+          if retryable_subscribe_reason?(reason) do
+            Process.sleep(150)
+            subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
+          else
+            Mix.raise("subscribe failed: #{inspect(reason)}")
+          end
+      after
+        min(1_000, remaining) ->
+          subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
+      end
     end
   end
 
-  defp await_frame!(timeout) do
-    receive do
-      {:moqx_frame, group_id, payload} -> {group_id, payload}
-      {:moqx_error, reason} -> Mix.raise("frame receive failed: #{inspect(reason)}")
-    after
-      timeout -> Mix.raise("frame timeout")
+  defp await_matching_payload_frame!(expected_payload, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_matching_payload_frame_loop(expected_payload, deadline)
+  end
+
+  defp await_matching_payload_frame_loop(expected_payload, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      Mix.raise("frame timeout waiting for payload #{inspect(expected_payload)}")
+    else
+      receive do
+        {:moqx_frame, group_id, payload} when payload == expected_payload ->
+          {group_id, payload}
+
+        {:moqx_frame, _group_id, _payload} ->
+          await_matching_payload_frame_loop(expected_payload, deadline)
+
+        {:moqx_error, reason} ->
+          Mix.raise("frame receive failed: #{inspect(reason)}")
+      after
+        remaining ->
+          Mix.raise("frame timeout waiting for payload #{inspect(expected_payload)}")
+      end
     end
   end
+
+  defp retryable_subscribe_reason?(reason) when is_binary(reason) do
+    String.contains?(reason, "Unknown track namespace") or
+      String.contains?(reason, "internal error")
+  end
+
+  defp retryable_subscribe_reason?(_reason), do: false
 
   defp positive_int!(nil, _name, default), do: default
 

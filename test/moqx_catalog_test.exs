@@ -56,6 +56,60 @@ defmodule MOQX.CatalogTest do
     assert hd(catalog.tracks).depends == []
   end
 
+  test "explicit_metadata/1 exposes normalized explicit fields" do
+    {:ok, catalog} = Catalog.decode(fixture("moqtail.json"))
+    track = Catalog.get_track(catalog, "259")
+
+    explicit = Track.explicit_metadata(track)
+
+    assert explicit.name == "259"
+    assert explicit.role == "video"
+    assert explicit.codec == "avc1.42C01F"
+    assert explicit.packaging == "cmaf"
+    assert explicit.bitrate == 1_500_000
+    assert explicit.width == 960
+    assert explicit.height == 540
+  end
+
+  test "extra_metadata/1 returns unknown extension keys only" do
+    payload = ~s({"tracks":[{"name":"t","role":"video","foo":"bar","codec":"avc1.42C01F"}]})
+
+    {:ok, catalog} = Catalog.decode(payload)
+    track = Catalog.get_track(catalog, "t")
+
+    assert Track.extra_metadata(track) == %{"foo" => "bar"}
+  end
+
+  test "inferred_metadata/1 infers container from packaging when initData is absent" do
+    {:ok, catalog} = Catalog.decode(fixture("moqtail.json"))
+    track = Catalog.get_track(catalog, "259")
+
+    assert %{container: :cmaf, container_source: :packaging} = Track.inferred_metadata(track)
+  end
+
+  test "inferred_metadata/1 infers container from initData when present" do
+    init_data = mp4_init_data()
+
+    payload =
+      JSON.encode!(%{
+        "tracks" => [
+          %{
+            "name" => "v",
+            "role" => "video",
+            "codec" => "avc1.42C01F",
+            "packaging" => "chunk-per-object",
+            "initData" => Base.encode64(init_data)
+          }
+        ]
+      })
+
+    {:ok, catalog} = Catalog.decode(payload)
+    track = Catalog.get_track(catalog, "v")
+
+    assert %{container: :fmp4, container_source: :init_data, init_data_major_brand: "iso5"} =
+             Track.inferred_metadata(track)
+  end
+
   test "version and supports_delta_updates are nil when absent" do
     {:ok, catalog} = Catalog.decode(fixture("minimal.json"))
     assert catalog.version == nil
@@ -209,5 +263,14 @@ defmodule MOQX.CatalogTest do
     send(self(), {:moqx_fetch_object, ref, 0, 0, "not json"})
     send(self(), {:moqx_fetch_done, ref})
     assert {:error, "invalid JSON"} = MOQX.await_catalog(ref, 1_000)
+  end
+
+  defp mp4_init_data do
+    box("ftyp", <<"iso5", 0::32, "iso5">>) <> box("moov", <<>>)
+  end
+
+  defp box(type, body) when is_binary(type) and byte_size(type) == 4 do
+    size = 8 + byte_size(body)
+    <<size::32, type::binary-size(4), body::binary>>
   end
 end
