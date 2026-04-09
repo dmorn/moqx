@@ -24,7 +24,7 @@ For MOQ-specific behavior, treat the active MOQ transport draft and moqtail inte
 
 ```elixir
 # mix.exs
-{:moqx, "~> 0.2.1"}
+{:moqx, "~> 0.3.0"}
 ```
 
 Release metadata:
@@ -119,7 +119,7 @@ that path. Publish and subscribe paths can stay relative to that root:
 
 ```elixir
 {:ok, broadcast} = MOQX.publish(publisher, "alice")
-:ok = MOQX.subscribe(subscriber, "alice", "video")
+{:ok, _sub_ref} = MOQX.subscribe(subscriber, "alice", "video")
 ```
 
 If you need dynamic role selection:
@@ -168,22 +168,26 @@ Subscriptions are asynchronous and use `FilterType::LatestObject` with
 then forwards new objects as they arrive. This is the standard pattern for
 live media consumption from moqtail-style relays.
 
-`subscribe/3` returns `:ok` immediately, then messages arrive in the caller
-process.
+`subscribe/3` returns `{:ok, sub_ref}` immediately, then messages arrive in
+the caller process correlated by `sub_ref`.
 
-`subscribe/4` accepts subscription options. Currently supported:
+`subscribe/4` accepts subscription options. For catalog-driven flows,
+`subscribe_track/3,4` is a convenience wrapper around `subscribe/4`.
+
+`subscribe/4` options:
 
 - `delivery_timeout_ms` -- MOQT DELIVERY TIMEOUT parameter (`0x02`) in milliseconds.
 
 The supported subscription message contract is:
 
-- `{:moqx_subscribed, namespace, track_name}` when the subscription becomes active
-- `{:moqx_frame, group_id, payload}` for each object
-- `:moqx_track_ended` when the track finishes cleanly
-- `{:moqx_error, reason}` for asynchronous subscription/runtime failures
+- `{:moqx_subscribed, sub_ref, namespace, track_name}` when the subscription becomes active
+- `{:moqx_track_init, sub_ref, init_data, track_meta}` once per subscription
+- `{:moqx_frame, sub_ref, group_id, payload}` for each object
+- `{:moqx_track_ended, sub_ref}` when the track finishes cleanly
+- `{:moqx_error, sub_ref, reason}` for asynchronous subscription/runtime failures
 
 ```elixir
-:ok =
+{:ok, sub_ref} =
   MOQX.subscribe(
     subscriber,
     "moqtail",
@@ -192,11 +196,15 @@ The supported subscription message contract is:
   )
 
 receive do
-  {:moqx_subscribed, "moqtail", "catalog"} -> :ok
+  {:moqx_subscribed, ^sub_ref, "moqtail", "catalog"} -> :ok
 end
 
 receive do
-  {:moqx_frame, group_id, payload} ->
+  {:moqx_track_init, ^sub_ref, _init_data, _track_meta} -> :ok
+end
+
+receive do
+  {:moqx_frame, ^sub_ref, group_id, payload} ->
     IO.inspect({group_id, byte_size(payload)}, label: "catalog object")
 end
 ```
@@ -215,15 +223,19 @@ subscriber =
   end
 
 # Subscribe to the catalog track to discover available media
-:ok = MOQX.subscribe(subscriber, "moqtail", "catalog")
+{:ok, catalog_ref} = MOQX.subscribe(subscriber, "moqtail", "catalog")
 
 receive do
-  {:moqx_subscribed, _, _} -> :ok
+  {:moqx_subscribed, ^catalog_ref, _, _} -> :ok
+end
+
+receive do
+  {:moqx_track_init, ^catalog_ref, _init_data, _track_meta} -> :ok
 end
 
 catalog =
   receive do
-    {:moqx_frame, _group, payload} ->
+    {:moqx_frame, ^catalog_ref, _group, payload} ->
       {:ok, cat} = MOQX.Catalog.decode(payload)
       cat
   end
@@ -231,15 +243,20 @@ catalog =
 # Pick a video track and subscribe
 video = MOQX.Catalog.video_tracks(catalog) |> List.first()
 
-:ok = MOQX.subscribe(subscriber, "moqtail", video.name)
+{:ok, video_ref} = MOQX.subscribe_track(subscriber, "moqtail", video)
 
 receive do
-  {:moqx_subscribed, _, _} -> :ok
+  {:moqx_subscribed, ^video_ref, _, _} -> :ok
+end
+
+receive do
+  {:moqx_track_init, ^video_ref, init_data, track_meta} ->
+    IO.inspect({byte_size(init_data || <<>>), track_meta}, label: "video init")
 end
 
 # Receive live video frames
 receive do
-  {:moqx_frame, group_id, payload} ->
+  {:moqx_frame, ^video_ref, group_id, payload} ->
     IO.puts("video frame: group=#{group_id} size=#{byte_size(payload)}")
 end
 ```
@@ -249,10 +266,10 @@ end
 For quick manual debugging, use the built-in Mix task:
 
 ```bash
-mix moqtail.demo.debug
+mix moqx.moqtail.demo
 # defaults to https://ord.abr.moqtail.dev and namespace moqtail
-mix moqtail.demo.debug --track 259
-mix moqtail.demo.debug --list-tracks-only
+mix moqx.moqtail.demo --track 259
+mix moqx.moqtail.demo --list-tracks-only
 ```
 
 The task will:
@@ -266,7 +283,7 @@ The task will:
    - groups/sec,
    - objects/sec.
 
-Use `mix help moqtail.demo.debug` for full options.
+Use `mix help moqx.moqtail.demo` for full options.
 
 Tips:
 - `--list-tracks-only` is handy for scripting/discovery without subscribing.

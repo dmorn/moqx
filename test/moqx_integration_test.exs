@@ -43,10 +43,10 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp await_subscribed!(namespace, track_name) do
+  defp await_subscribed!(sub_ref, namespace, track_name) do
     receive do
-      {:moqx_subscribed, ^namespace, ^track_name} -> :ok
-      {:moqx_error, reason} -> flunk("subscribe failed: #{inspect(reason)}")
+      {:moqx_subscribed, ^sub_ref, ^namespace, ^track_name} -> :ok
+      {:moqx_error, ^sub_ref, reason} -> flunk("subscribe failed: #{inspect(reason)}")
     after
       @timeout -> flunk("subscribe timeout for #{namespace}/#{track_name}")
     end
@@ -58,7 +58,7 @@ defmodule MOQXIntegrationTest do
   end
 
   defp subscribe_with_retry_loop(subscriber, namespace, track_name, deadline) do
-    :ok = MOQX.subscribe(subscriber, namespace, track_name)
+    {:ok, sub_ref} = MOQX.subscribe(subscriber, namespace, track_name)
 
     remaining = deadline - System.monotonic_time(:millisecond)
 
@@ -66,10 +66,10 @@ defmodule MOQXIntegrationTest do
       flunk("subscribe timeout for #{namespace}/#{track_name}")
     else
       receive do
-        {:moqx_subscribed, ^namespace, ^track_name} ->
+        {:moqx_subscribed, ^sub_ref, ^namespace, ^track_name} ->
           :ok
 
-        {:moqx_error, reason} ->
+        {:moqx_error, ^sub_ref, reason} ->
           if String.contains?(reason, "Unknown track namespace") do
             Process.sleep(100)
             subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
@@ -85,8 +85,8 @@ defmodule MOQXIntegrationTest do
 
   defp await_frame! do
     receive do
-      {:moqx_frame, group_id, payload} -> {group_id, payload}
-      {:moqx_error, reason} -> flunk("frame receive failed: #{inspect(reason)}")
+      {:moqx_frame, _sub_ref, group_id, payload} -> {group_id, payload}
+      {:moqx_error, _sub_ref, reason} -> flunk("frame receive failed: #{inspect(reason)}")
     after
       @timeout -> flunk("frame timeout")
     end
@@ -124,8 +124,8 @@ defmodule MOQXIntegrationTest do
 
       try do
         ns = relay_namespace()
-        :ok = MOQX.subscribe(subscriber, ns, "catalog")
-        await_subscribed!(ns, "catalog")
+        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog")
+        await_subscribed!(sub_ref, ns, "catalog")
 
         {_group_id, payload} = await_frame!()
         assert byte_size(payload) > 0
@@ -144,8 +144,8 @@ defmodule MOQXIntegrationTest do
       try do
         ns = relay_namespace()
 
-        :ok = MOQX.subscribe(subscriber, ns, "catalog", delivery_timeout_ms: 1_500)
-        await_subscribed!(ns, "catalog")
+        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog", delivery_timeout_ms: 1_500)
+        await_subscribed!(sub_ref, ns, "catalog")
 
         {_group_id, payload} = await_frame!()
         assert byte_size(payload) > 0
@@ -165,8 +165,8 @@ defmodule MOQXIntegrationTest do
         ns = relay_namespace()
 
         # First get the catalog to discover tracks
-        :ok = MOQX.subscribe(subscriber, ns, "catalog")
-        await_subscribed!(ns, "catalog")
+        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog")
+        await_subscribed!(sub_ref, ns, "catalog")
 
         {_gid, catalog_payload} = await_frame!()
         {:ok, catalog} = MOQX.Catalog.decode(catalog_payload)
@@ -175,8 +175,8 @@ defmodule MOQXIntegrationTest do
         assert video, "expected at least one video track in catalog"
 
         # Subscribe to the video track
-        :ok = MOQX.subscribe(subscriber, ns, video.name)
-        await_subscribed!(ns, video.name)
+        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, video.name)
+        await_subscribed!(sub_ref, ns, video.name)
 
         # Receive at least 3 video frames
         for _ <- 1..3 do
@@ -197,8 +197,8 @@ defmodule MOQXIntegrationTest do
         ns = relay_namespace()
 
         # Discover one video track from the catalog
-        :ok = MOQX.subscribe(subscriber, ns, "catalog")
-        await_subscribed!(ns, "catalog")
+        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog")
+        await_subscribed!(sub_ref, ns, "catalog")
 
         {_gid, catalog_payload} = await_frame!()
         {:ok, catalog} = MOQX.Catalog.decode(catalog_payload)
@@ -206,8 +206,8 @@ defmodule MOQXIntegrationTest do
         video = MOQX.Catalog.video_tracks(catalog) |> List.first()
         assert video, "expected at least one video track in catalog"
 
-        :ok = MOQX.subscribe(subscriber, ns, video.name)
-        await_subscribed!(ns, video.name)
+        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, video.name)
+        await_subscribed!(sub_ref, ns, video.name)
 
         {_group_id, payload} = await_frame!()
 
@@ -233,8 +233,8 @@ defmodule MOQXIntegrationTest do
         ns = relay_namespace()
 
         # Subscribe to catalog
-        :ok = MOQX.subscribe(subscriber, ns, "catalog")
-        await_subscribed!(ns, "catalog")
+        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog")
+        await_subscribed!(sub_ref, ns, "catalog")
         {_gid, catalog_payload} = await_frame!()
         {:ok, catalog} = MOQX.Catalog.decode(catalog_payload)
 
@@ -242,8 +242,8 @@ defmodule MOQXIntegrationTest do
         assert video
 
         # Subscribe to video (catalog subscription is still active)
-        :ok = MOQX.subscribe(subscriber, ns, video.name)
-        await_subscribed!(ns, video.name)
+        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, video.name)
+        await_subscribed!(sub_ref, ns, video.name)
 
         # Collect frames for a few seconds — we should see frames from
         # both subscriptions (catalog updates + video)
@@ -346,8 +346,8 @@ defmodule MOQXIntegrationTest do
         ns = relay_namespace()
 
         # Subscribe to catalog
-        :ok = MOQX.subscribe(subscriber, ns, "catalog")
-        await_subscribed!(ns, "catalog")
+        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog")
+        await_subscribed!(sub_ref, ns, "catalog")
 
         # Get and decode catalog
         {_gid, payload} = await_frame!()
@@ -366,8 +366,8 @@ defmodule MOQXIntegrationTest do
         assert video.codec
 
         # Subscribe to discovered video track
-        :ok = MOQX.subscribe(subscriber, ns, video.name)
-        await_subscribed!(ns, video.name)
+        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, video.name)
+        await_subscribed!(sub_ref, ns, video.name)
 
         # Verify we get actual video data
         {group_id, frame} = await_frame!()
@@ -394,13 +394,13 @@ defmodule MOQXIntegrationTest do
       flunk("frame timeout waiting for payload #{inspect(expected_payload)}")
     else
       receive do
-        {:moqx_frame, group_id, payload} when payload == expected_payload ->
+        {:moqx_frame, _sub_ref, group_id, payload} when payload == expected_payload ->
           {group_id, payload}
 
-        {:moqx_frame, _group_id, _payload} ->
+        {:moqx_frame, _sub_ref, _group_id, _payload} ->
           await_matching_payload_frame_loop(expected_payload, deadline)
 
-        {:moqx_error, reason} ->
+        {:moqx_error, _sub_ref, reason} ->
           flunk("frame receive failed: #{inspect(reason)}")
       after
         remaining ->
@@ -421,10 +421,10 @@ defmodule MOQXIntegrationTest do
       Enum.reverse(acc)
     else
       receive do
-        {:moqx_frame, group_id, payload} ->
+        {:moqx_frame, _sub_ref, group_id, payload} ->
           collect_frames_loop(deadline, [{group_id, payload} | acc])
 
-        {:moqx_subscribed, _, _} ->
+        {:moqx_subscribed, _sub_ref, _, _} ->
           collect_frames_loop(deadline, acc)
 
         _ ->

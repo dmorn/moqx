@@ -152,7 +152,7 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
   end
 
   defp subscribe_with_retry_loop(subscriber, namespace, track_name, deadline) do
-    :ok = MOQX.subscribe(subscriber, namespace, track_name)
+    {:ok, sub_ref} = MOQX.subscribe(subscriber, namespace, track_name)
 
     remaining = deadline - System.monotonic_time(:millisecond)
 
@@ -160,10 +160,10 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
       Mix.raise("subscribe timeout for #{namespace}/#{track_name}")
     else
       receive do
-        {:moqx_subscribed, ^namespace, ^track_name} ->
+        {:moqx_subscribed, ^sub_ref, ^namespace, ^track_name} ->
           :ok
 
-        {:moqx_error, reason} ->
+        {:moqx_error, ^sub_ref, reason} ->
           if retryable_subscribe_reason?(reason) do
             Process.sleep(150)
             subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
@@ -189,13 +189,13 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
       Mix.raise("frame timeout waiting for payload #{inspect(expected_payload)}")
     else
       receive do
-        {:moqx_frame, group_id, payload} when payload == expected_payload ->
+        {:moqx_frame, _sub_ref, group_id, payload} when payload == expected_payload ->
           {group_id, payload}
 
-        {:moqx_frame, _group_id, _payload} ->
+        {:moqx_frame, _sub_ref, _group_id, _payload} ->
           await_matching_payload_frame_loop(expected_payload, deadline)
 
-        {:moqx_error, reason} ->
+        {:moqx_error, _sub_ref, reason} ->
           Mix.raise("frame receive failed: #{inspect(reason)}")
       after
         remaining ->

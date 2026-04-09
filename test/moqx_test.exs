@@ -15,6 +15,8 @@ defmodule MOQXTest do
   test "public API exposes subscribe and fetch helpers" do
     assert is_function(&MOQX.subscribe/3)
     assert is_function(&MOQX.subscribe/4)
+    assert is_function(&MOQX.subscribe_track/3)
+    assert is_function(&MOQX.subscribe_track/4)
     assert is_function(&MOQX.fetch/4)
     assert is_function(&MOQX.fetch_catalog/1)
     assert is_function(&MOQX.fetch_catalog/2)
@@ -79,6 +81,40 @@ defmodule MOQXTest do
                  "unexpected subscribe option :unknown",
                  fn ->
                    MOQX.subscribe(:not_a_session, "ns", "track", unknown: true)
+                 end
+  end
+
+  test "subscribe/4 validates init_data type before session inspection" do
+    assert_raise ArgumentError,
+                 "expected :init_data to be a binary, got: 123",
+                 fn ->
+                   MOQX.subscribe(:not_a_session, "ns", "track", init_data: 123)
+                 end
+  end
+
+  test "subscribe/4 validates track_meta type before session inspection" do
+    assert_raise ArgumentError,
+                 "expected :track_meta to be a map, got: :bad",
+                 fn ->
+                   MOQX.subscribe(:not_a_session, "ns", "track", track_meta: :bad)
+                 end
+  end
+
+  test "subscribe/4 validates track struct type before session inspection" do
+    assert_raise ArgumentError,
+                 "expected :track to be a %MOQX.Catalog.Track{}, got: :bad",
+                 fn ->
+                   MOQX.subscribe(:not_a_session, "ns", "track", track: :bad)
+                 end
+  end
+
+  test "subscribe_track/4 rejects :track option in opts" do
+    track = %MOQX.Catalog.Track{name: "video", depends: [], raw: %{}}
+
+    assert_raise ArgumentError,
+                 "subscribe_track/4 does not accept :track in opts",
+                 fn ->
+                   MOQX.subscribe_track(:not_a_session, "ns", track, track: track)
                  end
   end
 

@@ -1,18 +1,18 @@
-defmodule Mix.Tasks.Moqtail.Demo.Debug do
+defmodule Mix.Tasks.Moqx.Moqtail.Demo do
   @moduledoc """
   Connects to a relay, fetches a catalog, lets you choose a track, then prints
   live runtime stats (bandwidth, groups/s, objects/s, PRFT latency when present).
 
   ## Usage
 
-      mix moqtail.demo.debug [relay_url] [options]
+      mix moqx.moqtail.demo [relay_url] [options]
 
   Examples:
 
-      mix moqtail.demo.debug
-      mix moqtail.demo.debug --track 259
-      mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail
-      mix moqtail.demo.debug https://ord.abr.moqtail.dev --namespace moqtail --list-tracks-only
+      mix moqx.moqtail.demo
+      mix moqx.moqtail.demo --track 259
+      mix moqx.moqtail.demo https://ord.abr.moqtail.dev --namespace moqtail
+      mix moqx.moqtail.demo https://ord.abr.moqtail.dev --namespace moqtail --list-tracks-only
 
   Options:
 
@@ -101,33 +101,45 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
     subscriber = await_connected!(config.timeout)
 
     try do
-      Mix.shell().info("loading catalog (namespace=#{config.namespace})...")
-      catalog = load_catalog!(subscriber, config.namespace, config.timeout)
+      cond do
+        config.list_tracks_only ->
+          Mix.shell().info("loading catalog (namespace=#{config.namespace})...")
+          catalog = load_catalog!(subscriber, config.namespace, config.timeout)
+          print_available_tracks!(catalog, config.show_raw)
 
-      if config.list_tracks_only do
-        print_available_tracks!(catalog, config.show_raw)
-      else
-        track = choose_track!(catalog, config.track_name, config.show_raw)
+        is_binary(config.track_name) ->
+          run_stream_for_track!(subscriber, config, config.track_name)
 
-        Mix.shell().info("subscribing to #{config.namespace}/#{track.name}...")
-        :ok = MOQX.subscribe(subscriber, config.namespace, track.name, config.subscribe_opts)
-        await_subscribed!(config.namespace, track.name, config.timeout)
-
-        print_stream_start(config.interval_ms, config.run_timeout_ms)
-
-        now_mono_ms = System.monotonic_time(:millisecond)
-
-        stream_stats_loop(
-          config.interval_ms,
-          DemoDebugStats.new(),
-          now_mono_ms,
-          config.run_timeout_ms,
-          now_mono_ms + config.interval_ms
-        )
+        true ->
+          Mix.shell().info("loading catalog (namespace=#{config.namespace})...")
+          catalog = load_catalog!(subscriber, config.namespace, config.timeout)
+          track = choose_track!(catalog, nil, config.show_raw)
+          run_stream_for_track!(subscriber, config, track.name)
       end
     after
       :ok = MOQX.close(subscriber)
     end
+  end
+
+  defp run_stream_for_track!(subscriber, config, track_name) do
+    Mix.shell().info("subscribing to #{config.namespace}/#{track_name}...")
+
+    {:ok, sub_ref} =
+      MOQX.subscribe(subscriber, config.namespace, track_name, config.subscribe_opts)
+
+    await_subscribed!(sub_ref, config.namespace, track_name, config.timeout)
+
+    print_stream_start(config.interval_ms, config.run_timeout_ms)
+
+    now_mono_ms = System.monotonic_time(:millisecond)
+
+    stream_stats_loop(
+      config.interval_ms,
+      DemoDebugStats.new(),
+      now_mono_ms,
+      config.run_timeout_ms,
+      now_mono_ms + config.interval_ms
+    )
   end
 
   defp build_subscribe_opts(opts) do
@@ -179,14 +191,25 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
         catalog
 
       {:error, reason} ->
-        if String.contains?(reason, "NoObjects") do
-          Mix.shell().info("catalog fetch returned NoObjects; falling back to live subscribe...")
+        if catalog_fetch_fallback_reason?(reason) do
+          Mix.shell().info(
+            "catalog fetch was unavailable (#{reason}); falling back to live subscribe..."
+          )
+
           subscribe_catalog!(subscriber, namespace, timeout)
         else
           Mix.raise("catalog load failed: #{reason}")
         end
     end
   end
+
+  defp catalog_fetch_fallback_reason?(reason) when is_binary(reason) do
+    String.contains?(reason, "NoObjects") or
+      String.contains?(reason, "TrackDoesNotExist") or
+      String.contains?(reason, "Track does not exist")
+  end
+
+  defp catalog_fetch_fallback_reason?(_reason), do: false
 
   defp fetch_catalog(subscriber, namespace, timeout) do
     with {:ok, ref} <- MOQX.fetch_catalog(subscriber, namespace: namespace),
@@ -198,21 +221,48 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
   end
 
   defp subscribe_catalog!(subscriber, namespace, timeout) do
-    :ok = MOQX.subscribe(subscriber, namespace, "catalog")
-    await_subscribed!(namespace, "catalog", timeout)
+    deadline = System.monotonic_time(:millisecond) + timeout
+    subscribe_catalog_loop(subscriber, namespace, deadline)
+  end
 
-    receive do
-      {:moqx_frame, _group_id, payload} ->
+  defp subscribe_catalog_loop(subscriber, namespace, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      Mix.raise("timed out waiting for first catalog object")
+    end
+
+    {:ok, sub_ref} = MOQX.subscribe(subscriber, namespace, "catalog")
+    await_subscribed!(sub_ref, namespace, "catalog", remaining)
+
+    case await_catalog_payload(sub_ref, min(1_000, remaining)) do
+      {:ok, payload} ->
         case MOQX.Catalog.decode(payload) do
           {:ok, catalog} -> catalog
           {:error, reason} -> Mix.raise("catalog decode failed: #{reason}")
         end
 
-      {:moqx_error, reason} ->
+      :retry ->
+        subscribe_catalog_loop(subscriber, namespace, deadline)
+
+      {:error, reason} ->
         Mix.raise("catalog subscribe failed: #{reason}")
+    end
+  end
+
+  defp await_catalog_payload(sub_ref, timeout) do
+    receive do
+      {:moqx_frame, ^sub_ref, _group_id, payload} ->
+        {:ok, payload}
+
+      {:moqx_track_init, ^sub_ref, _init_data, _track_meta} ->
+        await_catalog_payload(sub_ref, timeout)
+
+      {:moqx_error, ^sub_ref, reason} ->
+        {:error, reason}
     after
       timeout ->
-        Mix.raise("timed out waiting for first catalog object")
+        :retry
     end
   end
 
@@ -313,10 +363,10 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
     end
   end
 
-  defp await_subscribed!(namespace, track_name, timeout) do
+  defp await_subscribed!(sub_ref, namespace, track_name, timeout) do
     receive do
-      {:moqx_subscribed, ^namespace, ^track_name} -> :ok
-      {:moqx_error, reason} -> Mix.raise("subscribe failed: #{reason}")
+      {:moqx_subscribed, ^sub_ref, ^namespace, ^track_name} -> :ok
+      {:moqx_error, ^sub_ref, reason} -> Mix.raise("subscribe failed: #{reason}")
     after
       timeout -> Mix.raise("timed out waiting for subscription")
     end
@@ -353,7 +403,7 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
           receive_after_ms(next_tick_mono_ms, now_mono_ms, stream_started_mono_ms, run_timeout_ms)
 
         receive do
-          {:moqx_frame, group_id, payload} ->
+          {:moqx_frame, _sub_ref, group_id, payload} ->
             stream_stats_loop(
               interval_ms,
               DemoDebugStats.add_frame(stats, group_id, payload),
@@ -362,10 +412,10 @@ defmodule Mix.Tasks.Moqtail.Demo.Debug do
               next_tick_mono_ms
             )
 
-          {:moqx_error, reason} ->
+          {:moqx_error, _sub_ref, reason} ->
             Mix.raise("stream error: #{reason}")
 
-          :moqx_track_ended ->
+          {:moqx_track_ended, _sub_ref} ->
             Mix.shell().info("track ended")
         after
           receive_after_ms ->

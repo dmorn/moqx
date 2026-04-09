@@ -33,6 +33,7 @@ mod atoms {
         moqx_connected,
         moqx_session_closed,
         moqx_subscribed,
+        moqx_track_init,
         moqx_frame,
         moqx_track_ended,
         moqx_error,
@@ -70,6 +71,10 @@ struct PendingSubscribe {
     caller_pid: LocalPid,
     broadcast_path: String,
     track_name: String,
+    term_env: OwnedEnv,
+    subscription_ref_term: SavedTerm,
+    track_meta_term: SavedTerm,
+    init_data: Option<Vec<u8>>,
 }
 
 struct ActiveSubscription {
@@ -78,6 +83,8 @@ struct ActiveSubscription {
     broadcast_path: String,
     #[allow(dead_code)]
     track_name: String,
+    ref_env: OwnedEnv,
+    subscription_ref_term: SavedTerm,
 }
 
 struct PendingPublish {
@@ -463,17 +470,57 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                 .unwrap()
                 .remove(&ok.request_id);
             if let Some(p) = pending {
+                let ref_env = OwnedEnv::new();
+                let subscription_ref_term = p.term_env.run(|term_env| {
+                    let sub_ref = p.subscription_ref_term.load(term_env);
+                    ref_env.save(sub_ref)
+                });
+
                 inner.active_subscriptions.lock().unwrap().insert(
                     ok.track_alias,
                     ActiveSubscription {
                         caller_pid: p.caller_pid,
                         broadcast_path: p.broadcast_path.clone(),
                         track_name: p.track_name.clone(),
+                        ref_env,
+                        subscription_ref_term,
                     },
                 );
+
                 let mut msg_env = OwnedEnv::new();
-                let _ = msg_env.send_and_clear(&p.caller_pid, |env| {
-                    (atoms::moqx_subscribed(), p.broadcast_path, p.track_name).encode(env)
+                let init_data = p.init_data.clone();
+                p.term_env.run(|term_env| {
+                    let sub_ref = p.subscription_ref_term.load(term_env);
+                    let track_meta = p.track_meta_term.load(term_env);
+
+                    let _ = msg_env.send_and_clear(&p.caller_pid, |env| {
+                        (
+                            atoms::moqx_subscribed(),
+                            sub_ref.in_env(env),
+                            p.broadcast_path.clone(),
+                            p.track_name.clone(),
+                        )
+                            .encode(env)
+                    });
+
+                    let _ = msg_env.send_and_clear(&p.caller_pid, |env| {
+                        let init_data_term: rustler::Term = match &init_data {
+                            Some(data) => {
+                                let mut bin = NewBinary::new(env, data.len());
+                                bin.as_mut_slice().copy_from_slice(data);
+                                bin.into()
+                            }
+                            None => rustler::types::atom::nil().encode(env),
+                        };
+
+                        (
+                            atoms::moqx_track_init(),
+                            sub_ref.in_env(env),
+                            init_data_term,
+                            track_meta.in_env(env),
+                        )
+                            .encode(env)
+                    });
                 });
             }
         }
@@ -489,8 +536,11 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                     err.error_code, err.reason_phrase
                 );
                 let mut msg_env = OwnedEnv::new();
-                let _ = msg_env.send_and_clear(&p.caller_pid, |env| {
-                    (atoms::moqx_error(), reason).encode(env)
+                p.term_env.run(|term_env| {
+                    let sub_ref = p.subscription_ref_term.load(term_env);
+                    let _ = msg_env.send_and_clear(&p.caller_pid, |env| {
+                        (atoms::moqx_error(), sub_ref.in_env(env), reason.clone()).encode(env)
+                    });
                 });
             }
         }
@@ -747,14 +797,14 @@ async fn handle_subgroup_stream(
     );
 
     // Look up subscription by track_alias
-    let caller_pid = {
+    let has_subscription = {
         let guard = inner.active_subscriptions.lock().unwrap();
-        guard.get(&track_alias).map(|s| s.caller_pid)
+        guard.get(&track_alias).is_some()
     };
 
-    let Some(caller_pid) = caller_pid else {
+    if !has_subscription {
         return Ok(()); // Unknown track alias, skip
-    };
+    }
 
     // Read SubgroupObjects
     let mut prev_object_id: Option<u64> = None;
@@ -768,13 +818,21 @@ async fn handle_subgroup_stream(
                 if let Some(payload) = &obj.payload {
                     let data = payload.clone();
                     let gid = group_id;
-                    let mut msg_env = OwnedEnv::new();
-                    let _ = msg_env.send_and_clear(&caller_pid, |env| {
-                        let mut bin = NewBinary::new(env, data.len());
-                        bin.as_mut_slice().copy_from_slice(&data);
-                        let bin_term: rustler::Term = bin.into();
-                        (atoms::moqx_frame(), gid, bin_term).encode(env)
-                    });
+
+                    let guard = inner.active_subscriptions.lock().unwrap();
+                    if let Some(active) = guard.get(&track_alias) {
+                        let mut msg_env = OwnedEnv::new();
+                        let pid = active.caller_pid;
+                        active.ref_env.run(|ref_env| {
+                            let sub_ref = active.subscription_ref_term.load(ref_env);
+                            let _ = msg_env.send_and_clear(&pid, |env| {
+                                let mut bin = NewBinary::new(env, data.len());
+                                bin.as_mut_slice().copy_from_slice(&data);
+                                let bin_term: rustler::Term = bin.into();
+                                (atoms::moqx_frame(), sub_ref.in_env(env), gid, bin_term).encode(env)
+                            });
+                        });
+                    }
                 }
             }
             Ok(None) => break,
@@ -1112,9 +1170,12 @@ fn finish_track(track: ResourceArc<TrackProducerRes>) -> rustler::NifResult<Atom
 fn subscribe(
     env: Env,
     session: ResourceArc<SessionRes>,
+    subscription_ref: Reference,
     broadcast_path: String,
     track_name: String,
     delivery_timeout_ms: Option<u64>,
+    init_data: Option<Binary>,
+    track_meta: rustler::Term,
 ) -> rustler::NifResult<Atom> {
     if !session.role.can_consume() {
         return Err(rustler::Error::Term(Box::new(
@@ -1138,6 +1199,11 @@ fn subscribe(
         None => vec![],
     };
 
+    let init_data = init_data.map(|bin| bin.as_slice().to_vec());
+    let term_env = OwnedEnv::new();
+    let subscription_ref_term = term_env.save(subscription_ref);
+    let track_meta_term = term_env.save(track_meta);
+
     runtime().spawn(async move {
         let request_id = inner.allocate_request_id();
         let subscribe_msg = MoqSubscribe::new_latest_object(
@@ -1156,6 +1222,10 @@ fn subscribe(
                 caller_pid,
                 broadcast_path: broadcast_path.clone(),
                 track_name: track_name.clone(),
+                term_env,
+                subscription_ref_term,
+                track_meta_term,
+                init_data,
             },
         );
 
@@ -1165,11 +1235,21 @@ fn subscribe(
             .await
             .is_err()
         {
-            inner.pending_subscribes.lock().unwrap().remove(&request_id);
-            let mut msg_env = OwnedEnv::new();
-            let _ = msg_env.send_and_clear(&caller_pid, |env| {
-                (atoms::moqx_error(), "control channel closed").encode(env)
-            });
+            let pending = inner.pending_subscribes.lock().unwrap().remove(&request_id);
+            if let Some(p) = pending {
+                let mut msg_env = OwnedEnv::new();
+                p.term_env.run(|term_env| {
+                    let sub_ref = p.subscription_ref_term.load(term_env);
+                    let _ = msg_env.send_and_clear(&caller_pid, |env| {
+                        (
+                            atoms::moqx_error(),
+                            sub_ref.in_env(env),
+                            "control channel closed",
+                        )
+                            .encode(env)
+                    });
+                });
+            }
         }
     });
 

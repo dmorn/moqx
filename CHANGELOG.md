@@ -2,6 +2,27 @@
 
 All notable changes to `moqx` will be documented in this file.
 
+## [0.3.0] - 2026-04-09
+
+### Added
+
+- `MOQX.subscribe_track/3,4` convenience API for catalog-driven subscriptions.
+- Track metadata helpers on `MOQX.Catalog.Track`:
+  - `explicit_metadata/1`
+  - `inferred_metadata/1`
+  - `extra_metadata/1`
+  - `describe/1`
+- New relay debug task `mix moqx.moqtail.demo` (catalog listing, interactive selection, runtime stats, catalog fallback behavior).
+
+### Changed
+
+- **Breaking** subscription contract now returns and propagates `subscription_ref`:
+  - `subscribe/3,4` now return `{:ok, sub_ref}`.
+  - subscription messages now include `sub_ref`.
+- **Breaking** subscription lifecycle now emits `{:moqx_track_init, sub_ref, init_data, track_meta}` once per subscription.
+- Integration/E2E tasks and tests updated for the new subscription correlation model.
+- README/docs/examples updated for the new API and task naming.
+
 ## [0.2.1] - 2026-04-09
 
 ### Added

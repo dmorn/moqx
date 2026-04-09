@@ -1,4 +1,6 @@
 defmodule MOQX do
+  alias MOQX.Catalog.Track
+
   @moduledoc """
   Elixir bindings for Media over QUIC (MOQ) via Rustler NIFs on top of
   `moqtail-rs`.
@@ -20,7 +22,7 @@ defmodule MOQX do
   3. publish a broadcast with `publish/2`
   4. create one or more tracks with `create_track/2`
   5. send frames with `write_frame/2`
-  6. subscribe with `subscribe/3`
+  6. subscribe with `subscribe/3` or `subscribe_track/3`
   7. fetch raw track objects with `fetch/4` or `fetch_catalog/2` (subscriber only)
   8. decode a CMSF catalog with `MOQX.Catalog.decode/1` and discover tracks
 
@@ -28,7 +30,7 @@ defmodule MOQX do
 
   - `connect_publisher/1`, `connect_subscriber/1`, and `connect/2` return `:ok` immediately
   - the caller later receives exactly one connect result: `{:moqx_connected, session}` or `{:error, reason}`
-  - `subscribe/3` returns `:ok` immediately
+  - `subscribe/3` returns `{:ok, sub_ref}` immediately
   - the caller later receives subscription lifecycle messages
   - immediate misuse errors are returned synchronously as `{:error, reason}`
   - asynchronous relay/runtime failures arrive later as process messages
@@ -56,18 +58,22 @@ defmodule MOQX do
           {:error, reason} -> raise "subscriber connect failed: \#{inspect(reason)}"
         end
 
-      :ok = MOQX.subscribe(subscriber, "anon/demo", "video")
+      {:ok, sub_ref} = MOQX.subscribe(subscriber, "anon/demo", "video")
 
       receive do
-        {:moqx_subscribed, "anon/demo", "video"} -> :ok
+        {:moqx_subscribed, ^sub_ref, "anon/demo", "video"} -> :ok
       end
 
       receive do
-        {:moqx_frame, 0, payload} -> payload
+        {:moqx_track_init, ^sub_ref, _init_data, _track_meta} -> :ok
       end
 
       receive do
-        :moqx_track_ended -> :ok
+        {:moqx_frame, ^sub_ref, 0, payload} -> payload
+      end
+
+      receive do
+        {:moqx_track_ended, ^sub_ref} -> :ok
       end
 
       # Fetch and decode a remote catalog
@@ -111,15 +117,23 @@ defmodule MOQX do
   @typedoc "Connection result delivered to the caller process."
   @type connect_message :: {:moqx_connected, session()} | {:error, String.t()}
 
+  @typedoc "Opaque subscription correlation reference returned by `subscribe/3,4`."
+  @type subscription_ref :: reference()
+
   @typedoc "Subscription messages delivered to the caller process."
   @type subscribe_message ::
-          {:moqx_subscribed, String.t(), String.t()}
-          | {:moqx_frame, non_neg_integer(), binary()}
-          | :moqx_track_ended
-          | {:moqx_error, String.t()}
+          {:moqx_subscribed, subscription_ref(), String.t(), String.t()}
+          | {:moqx_track_init, subscription_ref(), binary() | nil, map()}
+          | {:moqx_frame, subscription_ref(), non_neg_integer(), binary()}
+          | {:moqx_track_ended, subscription_ref()}
+          | {:moqx_error, subscription_ref(), String.t()}
 
-  @typedoc "Subscribe options accepted by `subscribe/4`."
-  @type subscribe_opt :: {:delivery_timeout_ms, non_neg_integer()}
+  @typedoc "Subscribe options accepted by `subscribe/4` and `subscribe_track/4`."
+  @type subscribe_opt ::
+          {:delivery_timeout_ms, non_neg_integer()}
+          | {:init_data, binary()}
+          | {:track_meta, map()}
+          | {:track, Track.t()}
 
   @typedoc "Opaque fetch correlation reference returned by `fetch/4`."
   @type fetch_ref :: reference()
@@ -296,7 +310,7 @@ defmodule MOQX do
   Writes one frame to a track.
 
   Each call creates the next group in that track. Group sequence numbers are
-  delivered to subscribers in `{:moqx_frame, group_seq, payload}` messages.
+  delivered to subscribers in `{:moqx_frame, sub_ref, group_seq, payload}` messages.
   """
   @spec write_frame(track(), binary()) :: :ok | {:error, String.t()}
   def write_frame(track, data) when is_binary(data) do
@@ -306,7 +320,7 @@ defmodule MOQX do
   @doc """
   Finishes a track.
 
-  Subscribers receive `:moqx_track_ended` after the track is fully consumed.
+  Subscribers receive `{:moqx_track_ended, sub_ref}` after the track is fully consumed.
   """
   @spec finish_track(track()) :: :ok | {:error, String.t()}
   def finish_track(track) do
@@ -320,22 +334,27 @@ defmodule MOQX do
   @doc """
   Subscribes a subscriber session to one track in a broadcast.
 
-  Returns `:ok` immediately. The caller later receives a
-  `t:subscribe_message/0` stream:
+  Returns `{:ok, subscription_ref}` immediately. The caller later receives a
+  `t:subscribe_message/0` stream correlated by that `subscription_ref`:
 
-  - `{:moqx_subscribed, broadcast_path, track_name}` when the subscription is active
-  - `{:moqx_frame, group_seq, payload}` for each frame
-  - `:moqx_track_ended` when the track finishes cleanly
-  - `{:moqx_error, reason}` for asynchronous runtime failures
+  - `{:moqx_subscribed, sub_ref, broadcast_path, track_name}` when active
+  - `{:moqx_track_init, sub_ref, init_data, track_meta}` once per subscription
+  - `{:moqx_frame, sub_ref, group_seq, payload}` for each frame object
+  - `{:moqx_track_ended, sub_ref}` when the track finishes cleanly
+  - `{:moqx_error, sub_ref, reason}` for asynchronous runtime failures
 
   Supported options:
 
-  - `:delivery_timeout_ms` -- MOQT DELIVERY TIMEOUT (parameter type `0x02`) in milliseconds.
+  - `:delivery_timeout_ms` -- MOQT DELIVERY TIMEOUT (parameter type `0x02`) in milliseconds
+  - `:init_data` -- binary init segment/configuration to surface in `:moqx_track_init`
+  - `:track_meta` -- map surfaced in `:moqx_track_init`
+  - `:track` -- `%MOQX.Catalog.Track{}` convenience; fills `:init_data` and `:track_meta`
 
   Misuse errors, such as calling this with a publisher session, are returned as
   `{:error, reason}` immediately.
   """
-  @spec subscribe(session(), String.t(), String.t()) :: :ok | {:error, String.t()}
+  @spec subscribe(session(), String.t(), String.t()) ::
+          {:ok, subscription_ref()} | {:error, String.t()}
   def subscribe(session, broadcast_path, track_name)
       when is_binary(broadcast_path) and is_binary(track_name) do
     subscribe(session, broadcast_path, track_name, [])
@@ -345,24 +364,113 @@ defmodule MOQX do
   Same as `subscribe/3`, with explicit subscription options.
   """
   @spec subscribe(session(), String.t(), String.t(), [subscribe_opt()]) ::
-          :ok | {:error, String.t()}
+          {:ok, subscription_ref()} | {:error, String.t()}
   def subscribe(session, broadcast_path, track_name, opts)
       when is_binary(broadcast_path) and is_binary(track_name) and is_list(opts) do
     delivery_timeout_ms =
       opts |> Keyword.get(:delivery_timeout_ms) |> normalize_delivery_timeout_ms!()
 
+    {init_data, track_meta} = normalize_subscribe_track_payload!(opts)
+
     validate_subscribe_opts_keys!(opts)
 
-    MOQX.Native.subscribe(session, broadcast_path, track_name, delivery_timeout_ms)
+    sub_ref = make_ref()
+
+    case MOQX.Native.subscribe(
+           session,
+           sub_ref,
+           broadcast_path,
+           track_name,
+           delivery_timeout_ms,
+           init_data,
+           track_meta
+         ) do
+      :ok -> {:ok, sub_ref}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  Subscribes using a `%MOQX.Catalog.Track{}`.
+
+  This convenience helper derives `track_name`, `init_data`, and `track_meta`
+  from the provided track and forwards to `subscribe/4`.
+  """
+  @spec subscribe_track(session(), String.t(), Track.t()) ::
+          {:ok, subscription_ref()} | {:error, String.t()}
+  def subscribe_track(session, broadcast_path, %Track{} = track)
+      when is_binary(broadcast_path) do
+    subscribe_track(session, broadcast_path, track, [])
+  end
+
+  @doc """
+  Same as `subscribe_track/3`, with explicit options.
+
+  `:track` is not accepted here (it is implied by the `track` argument).
+  """
+  @spec subscribe_track(session(), String.t(), Track.t(), [subscribe_opt()]) ::
+          {:ok, subscription_ref()} | {:error, String.t()}
+  def subscribe_track(session, broadcast_path, %Track{} = track, opts)
+      when is_binary(broadcast_path) and is_list(opts) do
+    if Keyword.has_key?(opts, :track) do
+      raise ArgumentError, "subscribe_track/4 does not accept :track in opts"
+    end
+
+    subscribe(session, broadcast_path, track.name, Keyword.put(opts, :track, track))
   end
 
   defp validate_subscribe_opts_keys!(opts) do
-    allowed_keys = [:delivery_timeout_ms]
+    allowed_keys = [:delivery_timeout_ms, :init_data, :track_meta, :track]
 
     case Keyword.keys(opts) -- allowed_keys do
       [] -> :ok
       [key | _] -> raise ArgumentError, "unexpected subscribe option #{inspect(key)}"
     end
+  end
+
+  defp normalize_subscribe_track_payload!(opts) do
+    init_data = opts |> Keyword.get(:init_data) |> normalize_subscribe_init_data!()
+    track_meta = opts |> Keyword.get(:track_meta, %{}) |> normalize_subscribe_track_meta!()
+
+    case Keyword.get(opts, :track) do
+      nil ->
+        {init_data, track_meta}
+
+      track ->
+        normalize_subscribe_track_payload_from_track!(track, init_data, track_meta)
+    end
+  end
+
+  defp normalize_subscribe_track_payload_from_track!(%Track{} = track, init_data, track_meta) do
+    normalized_init_data = init_data || track.init_data
+
+    normalized_track_meta =
+      case track_meta do
+        %{} = map when map_size(map) == 0 -> Track.describe(track)
+        map -> map
+      end
+
+    {normalized_init_data, normalized_track_meta}
+  end
+
+  defp normalize_subscribe_track_payload_from_track!(track, _init_data, _track_meta) do
+    raise ArgumentError,
+          "expected :track to be a %MOQX.Catalog.Track{}, got: #{inspect(track)}"
+  end
+
+  defp normalize_subscribe_init_data!(nil), do: nil
+  defp normalize_subscribe_init_data!(init_data) when is_binary(init_data), do: init_data
+
+  defp normalize_subscribe_init_data!(init_data) do
+    raise ArgumentError,
+          "expected :init_data to be a binary, got: #{inspect(init_data)}"
+  end
+
+  defp normalize_subscribe_track_meta!(track_meta) when is_map(track_meta), do: track_meta
+
+  defp normalize_subscribe_track_meta!(track_meta) do
+    raise ArgumentError,
+          "expected :track_meta to be a map, got: #{inspect(track_meta)}"
   end
 
   defp normalize_delivery_timeout_ms!(nil), do: nil
