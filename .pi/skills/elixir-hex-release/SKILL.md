@@ -49,6 +49,8 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
    mix hex.publish
    ```
    - For first release of a package, this step is the authoritative publication.
+   - If Hex publication requires interactive OTP/2FA input, **do not run it automatically**.
+     Pause and explicitly ask the user to run `mix hex.publish` themselves.
 7. Publish docs (recommended):
    ```bash
    mix hex.docs
@@ -62,6 +64,10 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
 - Required before committing: `mix format`, `mix test`, `mix credo`.
 - Existing tag/release operations may happen independently, but Hex publication is the critical ship step.
 - Keep release notes aligned with `CHANGELOG.md`.
+
+## Operator interaction directive
+- For any command that requires interactive secrets/2FA (especially `mix hex.publish`), stop and ask the user to execute it manually.
+- The assistant may prepare everything up to that point (commit, tag, push, docs), then hand off with exact next command(s).
 
 ## Quick operator checklist
 - [ ] Preflight checks pass
