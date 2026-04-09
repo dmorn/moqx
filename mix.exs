@@ -68,7 +68,7 @@ defmodule MOQX.MixProject do
   defp aliases do
     [
       ci: ["format --check-formatted", "credo --strict", "test --exclude integration"],
-      "test.integration": ["test --only integration"]
+      "test.integration": ["test --only integration --exclude public_relay_live"]
     ]
   end
 end

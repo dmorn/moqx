@@ -438,7 +438,9 @@ mix test.integration
 ```
 
 - `mix ci` runs formatting, Credo, and non-integration tests
-- `mix test.integration` runs the integration suite
+- `mix test.integration` runs the deterministic integration suite (excludes `:public_relay_live` tests)
+- run live public-relay coverage explicitly with:
+  `mix test --include integration --include public_relay_live`
 
 ### Local relay TLS
 

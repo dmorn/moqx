@@ -3,7 +3,6 @@ defmodule MOQXIntegrationTest do
 
   alias MOQX.Debug
 
-  @moduletag :integration
   @timeout 15_000
 
   # Integration relay tests can use MOQX_EXTERNAL_RELAY_URL,
@@ -94,6 +93,7 @@ defmodule MOQXIntegrationTest do
   end
 
   describe "integration relay: connect" do
+    @tag :integration
     test "subscriber connects and reports draft-14 version" do
       subscriber = connect_subscriber!()
 
@@ -105,6 +105,7 @@ defmodule MOQXIntegrationTest do
       end
     end
 
+    @tag :integration
     test "publisher connects" do
       publisher = connect_publisher!()
 
@@ -117,6 +118,7 @@ defmodule MOQXIntegrationTest do
   end
 
   describe "integration relay: subscribe" do
+    @tag :public_relay_live
     test "subscribe to catalog track delivers a valid CMSF catalog" do
       subscriber = connect_subscriber!()
 
@@ -135,6 +137,7 @@ defmodule MOQXIntegrationTest do
       end
     end
 
+    @tag :public_relay_live
     test "subscribe/4 accepts delivery_timeout_ms and still receives catalog" do
       subscriber = connect_subscriber!()
 
@@ -154,6 +157,7 @@ defmodule MOQXIntegrationTest do
       end
     end
 
+    @tag :public_relay_live
     test "subscribe to a video track delivers live frames" do
       subscriber = connect_subscriber!()
 
@@ -185,6 +189,7 @@ defmodule MOQXIntegrationTest do
       end
     end
 
+    @tag :public_relay_live
     test "video frames expose PRFT for latency estimation" do
       subscriber = connect_subscriber!()
 
@@ -220,6 +225,7 @@ defmodule MOQXIntegrationTest do
       end
     end
 
+    @tag :public_relay_live
     test "multiple concurrent subscriptions deliver interleaved frames" do
       subscriber = connect_subscriber!()
 
@@ -253,6 +259,7 @@ defmodule MOQXIntegrationTest do
   end
 
   describe "integration relay: pub/sub e2e" do
+    @tag :integration
     test "publisher frame is received by subscriber on same relay" do
       publisher = connect_publisher!()
       subscriber = connect_subscriber!()
@@ -282,6 +289,7 @@ defmodule MOQXIntegrationTest do
   end
 
   describe "integration relay: role guardrails" do
+    @tag :integration
     test "publish rejects subscriber sessions" do
       subscriber = connect_subscriber!()
 
@@ -293,6 +301,7 @@ defmodule MOQXIntegrationTest do
       end
     end
 
+    @tag :integration
     test "subscribe rejects publisher sessions" do
       publisher = connect_publisher!()
 
@@ -304,6 +313,7 @@ defmodule MOQXIntegrationTest do
       end
     end
 
+    @tag :integration
     test "fetch rejects publisher sessions" do
       publisher = connect_publisher!()
 
@@ -315,6 +325,7 @@ defmodule MOQXIntegrationTest do
       end
     end
 
+    @tag :integration
     test "fetch_catalog rejects publisher sessions" do
       publisher = connect_publisher!()
 
@@ -327,6 +338,7 @@ defmodule MOQXIntegrationTest do
   end
 
   describe "integration relay: catalog-driven flow" do
+    @tag :public_relay_live
     test "full catalog-driven subscribe: connect, catalog, decode, subscribe video" do
       subscriber = connect_subscriber!()
 
