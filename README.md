@@ -273,6 +273,22 @@ Tips:
 - `--show-raw` prints full per-track raw catalog maps.
 - pass `--timeout <ms>` to auto-stop after a bounded runtime.
 
+### Mix task: relay pub/sub end-to-end smoke test
+
+For a quick publisher+subscriber roundtrip against a relay, use:
+
+```bash
+mix moqx.e2e.pubsub
+# defaults to https://ord.abr.moqtail.dev
+
+# Cloudflare draft-14 relay endpoints
+mix moqx.e2e.pubsub https://interop-relay.cloudflare.mediaoverquic.com:443 --timeout 20000
+mix moqx.e2e.pubsub https://draft-14.cloudflare.mediaoverquic.com --timeout 20000
+```
+
+The task connects as both publisher and subscriber, publishes a test track,
+subscribes to it, and verifies the subscriber receives the expected payload.
+
 ### Fetch
 
 Fetch retrieves raw track objects by range from a subscriber session.
