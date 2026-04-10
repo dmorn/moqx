@@ -104,17 +104,32 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
       cond do
         config.list_tracks_only ->
           Mix.shell().info("loading catalog (namespace=#{config.namespace})...")
-          catalog = load_catalog!(subscriber, config.namespace, config.timeout)
-          print_available_tracks!(catalog, config.show_raw)
+
+          case load_catalog(subscriber, config.namespace, config.timeout) do
+            {:ok, catalog} ->
+              print_available_tracks!(catalog, config.show_raw)
+
+            {:error, reason} ->
+              Mix.raise("catalog unavailable: #{reason}")
+          end
 
         is_binary(config.track_name) ->
           run_stream_for_track!(subscriber, config, config.track_name)
 
         true ->
           Mix.shell().info("loading catalog (namespace=#{config.namespace})...")
-          catalog = load_catalog!(subscriber, config.namespace, config.timeout)
-          track = choose_track!(catalog, nil, config.show_raw)
-          run_stream_for_track!(subscriber, config, track.name)
+
+          track_name =
+            case load_catalog(subscriber, config.namespace, config.timeout) do
+              {:ok, catalog} ->
+                choose_track!(catalog, nil, config.show_raw).name
+
+              {:error, reason} ->
+                Mix.shell().error("catalog unavailable: #{reason}")
+                prompt_track_name_without_catalog!()
+            end
+
+          run_stream_for_track!(subscriber, config, track_name)
       end
     after
       :ok = MOQX.close(subscriber)
@@ -185,10 +200,10 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
     end
   end
 
-  defp load_catalog!(subscriber, namespace, timeout) do
+  defp load_catalog(subscriber, namespace, timeout) do
     case fetch_catalog(subscriber, namespace, timeout) do
       {:ok, catalog} ->
-        catalog
+        {:ok, catalog}
 
       {:error, reason} ->
         if catalog_fetch_fallback_reason?(reason) do
@@ -196,9 +211,9 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
             "catalog fetch was unavailable (#{reason}); falling back to live subscribe..."
           )
 
-          subscribe_catalog!(subscriber, namespace, timeout)
+          subscribe_catalog(subscriber, namespace, timeout)
         else
-          Mix.raise("catalog load failed: #{reason}")
+          {:error, reason}
         end
     end
   end
@@ -220,7 +235,7 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
     end
   end
 
-  defp subscribe_catalog!(subscriber, namespace, timeout) do
+  defp subscribe_catalog(subscriber, namespace, timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout
     subscribe_catalog_loop(subscriber, namespace, deadline)
   end
@@ -229,24 +244,27 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
-      Mix.raise("timed out waiting for first catalog object")
+      {:error, "timed out waiting for first catalog object"}
+    else
+      do_subscribe_catalog_loop(subscriber, namespace, deadline, remaining)
     end
+  end
 
+  defp do_subscribe_catalog_loop(subscriber, namespace, deadline, remaining) do
     {:ok, sub_ref} = MOQX.subscribe(subscriber, namespace, "catalog")
     await_subscribed!(sub_ref, namespace, "catalog", remaining)
 
     case await_catalog_payload(sub_ref, min(1_000, remaining)) do
-      {:ok, payload} ->
-        case MOQX.Catalog.decode(payload) do
-          {:ok, catalog} -> catalog
-          {:error, reason} -> Mix.raise("catalog decode failed: #{reason}")
-        end
+      {:ok, payload} -> decode_catalog_payload(payload)
+      :retry -> subscribe_catalog_loop(subscriber, namespace, deadline)
+      {:error, reason} -> {:error, "catalog subscribe failed: #{reason}"}
+    end
+  end
 
-      :retry ->
-        subscribe_catalog_loop(subscriber, namespace, deadline)
-
-      {:error, reason} ->
-        Mix.raise("catalog subscribe failed: #{reason}")
+  defp decode_catalog_payload(payload) do
+    case MOQX.Catalog.decode(payload) do
+      {:ok, catalog} -> {:ok, catalog}
+      {:error, reason} -> {:error, "catalog decode failed: #{reason}"}
     end
   end
 
@@ -360,6 +378,26 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
       _ ->
         Mix.shell().error("invalid selection")
         choose_track_loop(tracks)
+    end
+  end
+
+  defp prompt_track_name_without_catalog! do
+    Mix.shell().info("catalog is unavailable; enter a track name manually (or q)")
+
+    case IO.gets("Track name: ") do
+      :eof ->
+        Mix.raise("stdin closed")
+
+      nil ->
+        Mix.raise("stdin closed")
+
+      input ->
+        case String.trim(input) do
+          "" -> prompt_track_name_without_catalog!()
+          "q" -> Mix.raise("aborted")
+          "quit" -> Mix.raise("aborted")
+          name -> name
+        end
     end
   end
 
