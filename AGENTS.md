@@ -1,1 +1,2 @@
-- before committing, ensure you `mix format`, run the tests, and run `mix credo` (elixir's linter) and refactor accordingly
+- before committing, ensure you `mix format`, run the tests, run `mix credo` (elixir's linter) and refactor accordingly, ensure documentation stays consistent
+- if you find stale documentation, point it out: we either have to update or remove it
