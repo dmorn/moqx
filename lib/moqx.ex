@@ -20,11 +20,12 @@ defmodule MOQX do
   1. connect a publisher session with `connect_publisher/1`
   2. connect a subscriber session with `connect_subscriber/1`
   3. publish a broadcast with `publish/2`
-  4. create one or more tracks with `create_track/2`
-  5. send frames with `write_frame/2`
-  6. subscribe with `subscribe/3` or `subscribe_track/3`
-  7. fetch raw track objects with `fetch/4` or `fetch_catalog/2` (subscriber only)
-  8. decode a CMSF catalog with `MOQX.Catalog.decode/1` and discover tracks
+  4. optionally publish catalog objects with `publish_catalog/2` and `update_catalog/2`
+  5. create one or more tracks with `create_track/2`
+  6. send frames with `write_frame/2`
+  7. subscribe with `subscribe/3` or `subscribe_track/3`
+  8. fetch raw track objects with `fetch/4` or `fetch_catalog/2` (subscriber only)
+  9. decode a CMSF catalog with `MOQX.Catalog.decode/1` and discover tracks
 
   Connection and subscription are asynchronous:
 
@@ -113,6 +114,9 @@ defmodule MOQX do
 
   @typedoc "Opaque track resource returned by `create_track/2`."
   @opaque track :: reference()
+
+  @typedoc "Raw CMSF catalog payload bytes (UTF-8 JSON)."
+  @type catalog_payload :: binary()
 
   @typedoc "Connection result delivered to the caller process."
   @type connect_message :: {:moqx_connected, session()} | {:error, String.t()}
@@ -304,6 +308,33 @@ defmodule MOQX do
   @spec create_track(broadcast(), String.t()) :: {:ok, track()} | {:error, String.t()}
   def create_track(broadcast, track_name) when is_binary(track_name) do
     MOQX.Native.create_track(broadcast, track_name)
+  end
+
+  @doc """
+  Creates and publishes the initial catalog object on the `"catalog"` track.
+
+  This convenience helper composes `create_track/2` and `update_catalog/2`:
+
+      {:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_json)
+
+  Returns `{:ok, catalog_track}` when both steps succeed.
+  """
+  @spec publish_catalog(broadcast(), catalog_payload()) :: {:ok, track()} | {:error, String.t()}
+  def publish_catalog(broadcast, catalog_payload) when is_binary(catalog_payload) do
+    with {:ok, catalog_track} <- create_track(broadcast, "catalog"),
+         :ok <- update_catalog(catalog_track, catalog_payload) do
+      {:ok, catalog_track}
+    end
+  end
+
+  @doc """
+  Writes one catalog object to an existing catalog track.
+
+  Use this to push catalog updates after the initial `publish_catalog/2` call.
+  """
+  @spec update_catalog(track(), catalog_payload()) :: :ok | {:error, String.t()}
+  def update_catalog(track, catalog_payload) when is_binary(catalog_payload) do
+    write_frame(track, catalog_payload)
   end
 
   @doc """

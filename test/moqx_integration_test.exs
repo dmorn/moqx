@@ -286,6 +286,45 @@ defmodule MOQXIntegrationTest do
         :ok = MOQX.close(publisher)
       end
     end
+
+    @tag :integration
+    test "publisher catalog helper is relayed downstream" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-catalog-#{System.system_time(:millisecond)}"
+        media_track_name = "demo"
+        media_payload = "hello-media"
+
+        catalog_payload =
+          ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"#{media_track_name}","role":"video","codec":"avc1.42C01F","packaging":"cmaf"}]})
+
+        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        {:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_payload)
+        {:ok, media_track} = MOQX.create_track(broadcast, media_track_name)
+
+        subscribe_with_retry!(subscriber, ns, "catalog")
+        subscribe_with_retry!(subscriber, ns, media_track_name)
+
+        :ok = MOQX.update_catalog(catalog_track, catalog_payload)
+        :ok = MOQX.write_frame(media_track, media_payload)
+
+        {_catalog_group_id, got_catalog_payload} = await_matching_payload_frame!(catalog_payload)
+        assert {:ok, catalog} = MOQX.Catalog.decode(got_catalog_payload)
+
+        assert %MOQX.Catalog.Track{name: ^media_track_name} =
+                 MOQX.Catalog.get_track(catalog, media_track_name)
+
+        {_media_group_id, got_media_payload} = await_matching_payload_frame!(media_payload)
+        assert got_media_payload == media_payload
+
+        :ok = MOQX.finish_track(media_track)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
   end
 
   describe "integration relay: role guardrails" do

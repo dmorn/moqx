@@ -2,6 +2,18 @@
 
 All notable changes to `moqx` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `MOQX.publish_catalog/2` helper to create and publish the initial `"catalog"` track object.
+- `MOQX.update_catalog/2` helper to publish subsequent catalog objects.
+- Integration E2E coverage that verifies publisher-provided catalog objects are relayed downstream.
+
+### Changed
+
+- README and module docs now explicitly document the publisher-driven catalog flow used with moqtail-style relays.
+
 ## [0.3.0] - 2026-04-09
 
 ### Added

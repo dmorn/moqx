@@ -44,6 +44,7 @@ Today `moqx` supports a single client-side path:
 - broadcasts, tracks, and frame delivery
 - live subscription via SUBSCRIBE with `FilterType::LatestObject`
 - raw fetch for retrieving track objects by range (subscriber sessions only)
+- publisher-side catalog publication helpers via `publish_catalog/2` and `update_catalog/2`
 - raw catalog retrieval via `fetch_catalog/2` and `await_catalog/2`
 - CMSF catalog parsing and track discovery via `MOQX.Catalog`
 - relay authentication through the connect URL query, using `?jwt=...`
@@ -154,11 +155,34 @@ Notes:
 
 ```elixir
 {:ok, broadcast} = MOQX.publish(publisher, "anon/demo")
-{:ok, track} = MOQX.create_track(broadcast, "video")
 
+catalog_json = ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"video","role":"video"}]})
+{:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_json)
+:ok = MOQX.update_catalog(catalog_track, catalog_json)
+
+{:ok, track} = MOQX.create_track(broadcast, "video")
 :ok = MOQX.write_frame(track, "frame-1")
 :ok = MOQX.write_frame(track, "frame-2")
 :ok = MOQX.finish_track(track)
+```
+
+### Publisher-side catalog publication
+
+In moqtail-style relays, the publisher is responsible for publishing the
+`"catalog"` track. The relay then forwards that catalog track downstream to
+subscribers.
+
+Use `publish_catalog/2` for initial publication, then `update_catalog/2` for
+subsequent catalog objects:
+
+```elixir
+{:ok, broadcast} = MOQX.publish(publisher, "my-namespace")
+
+catalog_json =
+  ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"video","role":"video"}]})
+
+{:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_json)
+:ok = MOQX.update_catalog(catalog_track, catalog_json)
 ```
 
 ### Subscribe
