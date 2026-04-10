@@ -194,6 +194,21 @@ https://draft-14.cloudflare.mediaoverquic.com
 
 TODO: test pub/sub against Cloudflare relay.
 
+For current `moqx` defaults, we commonly target:
+
+```
+https://ord.abr.moqtail.dev
+```
+
+A browser demo player is available at:
+
+```
+https://abr.moqtail.dev/demo
+```
+
+Use it as a quick external sanity check when relay-based tests/tasks fail, to
+differentiate local client regressions from relay availability issues.
+
 ---
 
 ## moq-clock source — key patterns for the Elixir binding

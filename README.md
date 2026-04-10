@@ -313,6 +313,9 @@ Tips:
 - `--list-tracks-only` is handy for scripting/discovery without subscribing.
 - `--show-raw` prints full per-track raw catalog maps.
 - pass `--timeout <ms>` to auto-stop after a bounded runtime.
+- the default relay (`https://ord.abr.moqtail.dev`) has an online demo player at
+  `https://abr.moqtail.dev/demo`, which is useful for quickly double-checking
+  relay availability outside of `moqx`.
 
 ### Mix task: relay pub/sub end-to-end smoke test
 
