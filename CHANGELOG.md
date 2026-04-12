@@ -4,6 +4,18 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-12
+
+### Fixed
+
+- `MOQX.unsubscribe/1` and subscription handle `Drop` no longer panic the
+  NIF with `send_and_clear: current thread is managed`. Environment work
+  (message send to the caller) is now performed inside the Tokio runtime
+  instead of on the BEAM scheduler thread invoking the NIF/GC.
+- Added end-to-end integration coverage for `unsubscribe/1` (live relay
+  roundtrip verifying `:moqx_track_ended`, frame cut-off, and idempotent
+  double-unsubscribe).
+
 ## [0.4.0] - 2026-04-12
 
 ### Added

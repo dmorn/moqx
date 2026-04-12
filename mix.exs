@@ -4,7 +4,7 @@ defmodule MOQX.MixProject do
   def project do
     [
       app: :moqx,
-      version: "0.4.0",
+      version: "0.4.1",
       description: description(),
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
