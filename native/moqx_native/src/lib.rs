@@ -186,28 +186,31 @@ fn cleanup_subscription(session: &Arc<SessionInner>, request_id: u64) {
         alias.and_then(|a| guard.remove(&a))
     };
 
-    if let Some(p) = pending {
-        let mut msg_env = OwnedEnv::new();
-        let pid = p.caller_pid;
-        p.term_env.run(|term_env| {
-            let sub_ref = p.subscription_ref_term.load(term_env);
-            let _ = msg_env.send_and_clear(&pid, |env| {
-                (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
-            });
-        });
-    } else if let Some(a) = active {
-        let mut msg_env = OwnedEnv::new();
-        let pid = a.caller_pid;
-        a.ref_env.run(|ref_env| {
-            let sub_ref = a.subscription_ref_term.load(ref_env);
-            let _ = msg_env.send_and_clear(&pid, |env| {
-                (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
-            });
-        });
-    }
-
+    // OwnedEnv::run and send_and_clear must execute on a non-scheduler
+    // thread, so do all environment work inside the Tokio runtime spawn
+    // rather than on the calling NIF/Drop thread.
     let tx = session.control_tx.clone();
     runtime().spawn(async move {
+        if let Some(p) = pending {
+            let mut msg_env = OwnedEnv::new();
+            let pid = p.caller_pid;
+            p.term_env.run(|term_env| {
+                let sub_ref = p.subscription_ref_term.load(term_env);
+                let _ = msg_env.send_and_clear(&pid, |env| {
+                    (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
+                });
+            });
+        } else if let Some(a) = active {
+            let mut msg_env = OwnedEnv::new();
+            let pid = a.caller_pid;
+            a.ref_env.run(|ref_env| {
+                let sub_ref = a.subscription_ref_term.load(ref_env);
+                let _ = msg_env.send_and_clear(&pid, |env| {
+                    (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
+                });
+            });
+        }
+
         let _ = tx
             .send(ControlMessage::Unsubscribe(Box::new(MoqUnsubscribe::new(
                 request_id,

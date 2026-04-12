@@ -83,6 +83,37 @@ defmodule MOQXIntegrationTest do
     end
   end
 
+  defp subscribe_with_retry_handle!(subscriber, namespace, track_name, timeout \\ @timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    subscribe_with_retry_handle_loop(subscriber, namespace, track_name, deadline)
+  end
+
+  defp subscribe_with_retry_handle_loop(subscriber, namespace, track_name, deadline) do
+    {:ok, handle} = MOQX.subscribe(subscriber, namespace, track_name)
+
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      flunk("subscribe timeout for #{namespace}/#{track_name}")
+    else
+      receive do
+        {:moqx_subscribed, ^handle, ^namespace, ^track_name} ->
+          handle
+
+        {:moqx_error, ^handle, reason} ->
+          if String.contains?(reason, "Unknown track namespace") do
+            Process.sleep(100)
+            subscribe_with_retry_handle_loop(subscriber, namespace, track_name, deadline)
+          else
+            flunk("subscribe failed: #{inspect(reason)}")
+          end
+      after
+        min(1_000, remaining) ->
+          subscribe_with_retry_handle_loop(subscriber, namespace, track_name, deadline)
+      end
+    end
+  end
+
   defp await_frame! do
     receive do
       {:moqx_frame, _sub_ref, group_id, payload} -> {group_id, payload}
@@ -320,6 +351,68 @@ defmodule MOQXIntegrationTest do
         assert got_media_payload == media_payload
 
         :ok = MOQX.finish_track(media_track)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "unsubscribe/1 stops frame delivery and emits moqx_track_ended" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-unsub-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+        payload1 = "before-unsub"
+        payload2 = "after-unsub"
+
+        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        handle = subscribe_with_retry_handle!(subscriber, ns, track_name)
+
+        :ok = MOQX.write_frame(track, payload1)
+        {_gid, got} = await_matching_payload_frame!(payload1)
+        assert got == payload1
+
+        assert :ok = MOQX.unsubscribe(handle)
+
+        assert_receive {:moqx_track_ended, ^handle}, @timeout
+
+        # Publisher keeps writing; subscriber must not see the new frame.
+        :ok = MOQX.write_frame(track, payload2)
+
+        refute_receive {:moqx_frame, ^handle, _group_id, _payload}, 1_500
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "unsubscribe/1 is idempotent" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-unsub-idem-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+
+        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        {:ok, _track} = MOQX.create_track(broadcast, track_name)
+
+        handle = subscribe_with_retry_handle!(subscriber, ns, track_name)
+
+        assert :ok = MOQX.unsubscribe(handle)
+        assert_receive {:moqx_track_ended, ^handle}, @timeout
+
+        # Second call must be a silent no-op and emit no further messages.
+        assert :ok = MOQX.unsubscribe(handle)
+
+        refute_receive {:moqx_track_ended, ^handle}, 500
+        refute_receive {:moqx_error, ^handle, _reason}, 500
       after
         :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)
