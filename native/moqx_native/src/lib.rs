@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use moqtail::model::common::pair::KeyValuePair;
 use moqtail::model::common::tuple::{Tuple, TupleField};
 use moqtail::model::control::client_setup::ClientSetup;
-use moqtail::model::control::constant::{DRAFT_14, GroupOrder as MoqGroupOrder};
+use moqtail::model::control::constant::{DRAFT_14, GroupOrder as MoqGroupOrder, PublishDoneStatusCode};
 use moqtail::model::control::control_message::ControlMessage;
 use moqtail::model::control::fetch::{Fetch as MoqFetch, StandAloneFetchProps};
 use moqtail::model::control::publish_namespace::PublishNamespace;
@@ -79,6 +79,7 @@ struct PendingSubscribe {
 
 struct ActiveSubscription {
     caller_pid: LocalPid,
+    request_id: u64,
     #[allow(dead_code)]
     broadcast_path: String,
     #[allow(dead_code)]
@@ -480,6 +481,7 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                     ok.track_alias,
                     ActiveSubscription {
                         caller_pid: p.caller_pid,
+                        request_id: ok.request_id,
                         broadcast_path: p.broadcast_path.clone(),
                         track_name: p.track_name.clone(),
                         ref_env,
@@ -540,6 +542,38 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                     let sub_ref = p.subscription_ref_term.load(term_env);
                     let _ = msg_env.send_and_clear(&p.caller_pid, |env| {
                         (atoms::moqx_error(), sub_ref.in_env(env), reason.clone()).encode(env)
+                    });
+                });
+            }
+        }
+        ControlMessage::PublishDone(done) => {
+            let removed = {
+                let mut guard = inner.active_subscriptions.lock().unwrap();
+                let alias = guard
+                    .iter()
+                    .find(|(_, sub)| sub.request_id == done.request_id)
+                    .map(|(alias, _)| *alias);
+                alias.and_then(|a| guard.remove(&a))
+            };
+            if let Some(active) = removed {
+                let graceful = matches!(
+                    done.status_code,
+                    PublishDoneStatusCode::TrackEnded | PublishDoneStatusCode::SubscriptionEnded
+                );
+                let mut msg_env = OwnedEnv::new();
+                let pid = active.caller_pid;
+                active.ref_env.run(|ref_env| {
+                    let sub_ref = active.subscription_ref_term.load(ref_env);
+                    let _ = msg_env.send_and_clear(&pid, |env| {
+                        if graceful {
+                            (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
+                        } else {
+                            let reason = format!(
+                                "publish done: status={:?} reason={:?}",
+                                done.status_code, done.reason_phrase
+                            );
+                            (atoms::moqx_error(), sub_ref.in_env(env), reason).encode(env)
+                        }
                     });
                 });
             }
