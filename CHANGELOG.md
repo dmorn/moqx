@@ -4,6 +4,8 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-12
+
 ### Added
 
 - `MOQX.unsubscribe/1` cancels an active track subscription by sending MOQ
