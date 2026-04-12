@@ -31,7 +31,7 @@ defmodule MOQX do
 
   - `connect_publisher/1`, `connect_subscriber/1`, and `connect/2` return `:ok` immediately
   - the caller later receives exactly one connect result: `{:moqx_connected, session}` or `{:error, reason}`
-  - `subscribe/3` returns `{:ok, sub_ref}` immediately
+  - `subscribe/3` returns `{:ok, handle}` immediately; call `unsubscribe/1` to cancel
   - the caller later receives subscription lifecycle messages
   - immediate misuse errors are returned synchronously as `{:error, reason}`
   - asynchronous relay/runtime failures arrive later as process messages
@@ -59,22 +59,24 @@ defmodule MOQX do
           {:error, reason} -> raise "subscriber connect failed: \#{inspect(reason)}"
         end
 
-      {:ok, sub_ref} = MOQX.subscribe(subscriber, "anon/demo", "video")
+      {:ok, sub} = MOQX.subscribe(subscriber, "anon/demo", "video")
 
       receive do
-        {:moqx_subscribed, ^sub_ref, "anon/demo", "video"} -> :ok
+        {:moqx_subscribed, ^sub, "anon/demo", "video"} -> :ok
       end
 
       receive do
-        {:moqx_track_init, ^sub_ref, _init_data, _track_meta} -> :ok
+        {:moqx_track_init, ^sub, _init_data, _track_meta} -> :ok
       end
 
       receive do
-        {:moqx_frame, ^sub_ref, 0, payload} -> payload
+        {:moqx_frame, ^sub, 0, payload} -> payload
       end
 
+      :ok = MOQX.unsubscribe(sub)
+
       receive do
-        {:moqx_track_ended, ^sub_ref} -> :ok
+        {:moqx_track_ended, ^sub} -> :ok
       end
 
       # Fetch and decode a remote catalog
@@ -121,16 +123,22 @@ defmodule MOQX do
   @typedoc "Connection result delivered to the caller process."
   @type connect_message :: {:moqx_connected, session()} | {:error, String.t()}
 
-  @typedoc "Opaque subscription correlation reference returned by `subscribe/3,4`."
-  @type subscription_ref :: reference()
+  @typedoc """
+  Opaque subscription handle returned by `subscribe/3,4`.
+
+  Holds the internal state needed to cancel the subscription via
+  `unsubscribe/1`. When the last reference to the handle is garbage
+  collected, the subscription is automatically canceled.
+  """
+  @type subscription_handle :: reference()
 
   @typedoc "Subscription messages delivered to the caller process."
   @type subscribe_message ::
-          {:moqx_subscribed, subscription_ref(), String.t(), String.t()}
-          | {:moqx_track_init, subscription_ref(), binary() | nil, map()}
-          | {:moqx_frame, subscription_ref(), non_neg_integer(), binary()}
-          | {:moqx_track_ended, subscription_ref()}
-          | {:moqx_error, subscription_ref(), String.t()}
+          {:moqx_subscribed, subscription_handle(), String.t(), String.t()}
+          | {:moqx_track_init, subscription_handle(), binary() | nil, map()}
+          | {:moqx_frame, subscription_handle(), non_neg_integer(), binary()}
+          | {:moqx_track_ended, subscription_handle()}
+          | {:moqx_error, subscription_handle(), String.t()}
 
   @typedoc "Subscribe options accepted by `subscribe/4` and `subscribe_track/4`."
   @type subscribe_opt ::
@@ -341,7 +349,7 @@ defmodule MOQX do
   Writes one frame to a track.
 
   Each call creates the next group in that track. Group sequence numbers are
-  delivered to subscribers in `{:moqx_frame, sub_ref, group_seq, payload}` messages.
+  delivered to subscribers in `{:moqx_frame, handle, group_seq, payload}` messages.
   """
   @spec write_frame(track(), binary()) :: :ok | {:error, String.t()}
   def write_frame(track, data) when is_binary(data) do
@@ -351,7 +359,7 @@ defmodule MOQX do
   @doc """
   Finishes a track.
 
-  Subscribers receive `{:moqx_track_ended, sub_ref}` after the track is fully consumed.
+  Subscribers receive `{:moqx_track_ended, handle}` after the track is fully consumed.
   """
   @spec finish_track(track()) :: :ok | {:error, String.t()}
   def finish_track(track) do
@@ -365,14 +373,15 @@ defmodule MOQX do
   @doc """
   Subscribes a subscriber session to one track in a broadcast.
 
-  Returns `{:ok, subscription_ref}` immediately. The caller later receives a
-  `t:subscribe_message/0` stream correlated by that `subscription_ref`:
+  Returns `{:ok, handle}` immediately. The caller later receives a
+  `t:subscribe_message/0` stream correlated by that `handle`:
 
-  - `{:moqx_subscribed, sub_ref, broadcast_path, track_name}` when active
-  - `{:moqx_track_init, sub_ref, init_data, track_meta}` once per subscription
-  - `{:moqx_frame, sub_ref, group_seq, payload}` for each frame object
-  - `{:moqx_track_ended, sub_ref}` when the track finishes cleanly
-  - `{:moqx_error, sub_ref, reason}` for asynchronous runtime failures
+  - `{:moqx_subscribed, handle, broadcast_path, track_name}` when active
+  - `{:moqx_track_init, handle, init_data, track_meta}` once per subscription
+  - `{:moqx_frame, handle, group_seq, payload}` for each frame object
+  - `{:moqx_track_ended, handle}` when the track finishes cleanly or after
+    `unsubscribe/1` is acknowledged by the relay
+  - `{:moqx_error, handle, reason}` for asynchronous runtime failures
 
   Supported options:
 
@@ -385,7 +394,7 @@ defmodule MOQX do
   `{:error, reason}` immediately.
   """
   @spec subscribe(session(), String.t(), String.t()) ::
-          {:ok, subscription_ref()} | {:error, String.t()}
+          {:ok, subscription_handle()} | {:error, String.t()}
   def subscribe(session, broadcast_path, track_name)
       when is_binary(broadcast_path) and is_binary(track_name) do
     subscribe(session, broadcast_path, track_name, [])
@@ -395,7 +404,7 @@ defmodule MOQX do
   Same as `subscribe/3`, with explicit subscription options.
   """
   @spec subscribe(session(), String.t(), String.t(), [subscribe_opt()]) ::
-          {:ok, subscription_ref()} | {:error, String.t()}
+          {:ok, subscription_handle()} | {:error, String.t()}
   def subscribe(session, broadcast_path, track_name, opts)
       when is_binary(broadcast_path) and is_binary(track_name) and is_list(opts) do
     delivery_timeout_ms =
@@ -405,19 +414,16 @@ defmodule MOQX do
 
     validate_subscribe_opts_keys!(opts)
 
-    sub_ref = make_ref()
-
     case MOQX.Native.subscribe(
            session,
-           sub_ref,
            broadcast_path,
            track_name,
            delivery_timeout_ms,
            init_data,
            track_meta
          ) do
-      :ok -> {:ok, sub_ref}
       {:error, _reason} = error -> error
+      handle -> {:ok, handle}
     end
   end
 
@@ -428,7 +434,7 @@ defmodule MOQX do
   from the provided track and forwards to `subscribe/4`.
   """
   @spec subscribe_track(session(), String.t(), Track.t()) ::
-          {:ok, subscription_ref()} | {:error, String.t()}
+          {:ok, subscription_handle()} | {:error, String.t()}
   def subscribe_track(session, broadcast_path, %Track{} = track)
       when is_binary(broadcast_path) do
     subscribe_track(session, broadcast_path, track, [])
@@ -440,7 +446,7 @@ defmodule MOQX do
   `:track` is not accepted here (it is implied by the `track` argument).
   """
   @spec subscribe_track(session(), String.t(), Track.t(), [subscribe_opt()]) ::
-          {:ok, subscription_ref()} | {:error, String.t()}
+          {:ok, subscription_handle()} | {:error, String.t()}
   def subscribe_track(session, broadcast_path, %Track{} = track, opts)
       when is_binary(broadcast_path) and is_list(opts) do
     if Keyword.has_key?(opts, :track) do
@@ -448,6 +454,24 @@ defmodule MOQX do
     end
 
     subscribe(session, broadcast_path, track.name, Keyword.put(opts, :track, track))
+  end
+
+  @doc """
+  Cancels an active track subscription.
+
+  Sends MOQ `Unsubscribe` to the relay and removes local subscription state.
+  The caller may still receive `{:moqx_track_ended, handle}` once the relay
+  acknowledges with `PublishDone`.
+
+  Idempotent: repeated calls (and calls after the subscription has already
+  ended) return `:ok` without sending further control traffic.
+
+  Dropping the handle (garbage collection) triggers the same cleanup, so
+  short-lived subscribing processes do not need to call this explicitly.
+  """
+  @spec unsubscribe(subscription_handle()) :: :ok
+  def unsubscribe(handle) when is_reference(handle) do
+    MOQX.Native.unsubscribe(handle)
   end
 
   defp validate_subscribe_opts_keys!(opts) do

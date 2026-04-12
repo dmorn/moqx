@@ -17,9 +17,16 @@ defmodule MOQXTest do
     assert is_function(&MOQX.subscribe/4)
     assert is_function(&MOQX.subscribe_track/3)
     assert is_function(&MOQX.subscribe_track/4)
+    assert is_function(&MOQX.unsubscribe/1)
     assert is_function(&MOQX.fetch/4)
     assert is_function(&MOQX.fetch_catalog/1)
     assert is_function(&MOQX.fetch_catalog/2)
+  end
+
+  test "unsubscribe/1 rejects non-reference arguments" do
+    assert_raise FunctionClauseError, fn -> MOQX.unsubscribe(:not_a_handle) end
+    assert_raise FunctionClauseError, fn -> MOQX.unsubscribe("ref") end
+    assert_raise FunctionClauseError, fn -> MOQX.unsubscribe(nil) end
   end
 
   test "connect/2 requires an explicit role" do

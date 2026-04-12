@@ -20,7 +20,6 @@ defmodule MOQX.Native do
   # Subscribe
   def subscribe(
         _session,
-        _subscription_ref,
         _broadcast_path,
         _track_name,
         _delivery_timeout_ms,
@@ -28,6 +27,8 @@ defmodule MOQX.Native do
         _track_meta
       ),
       do: :erlang.nif_error(:nif_not_loaded)
+
+  def unsubscribe(_handle), do: :erlang.nif_error(:nif_not_loaded)
 
   # Fetch
   def fetch(_session, _ref, _namespace, _track_name, _priority, _group_order, _start, _end),

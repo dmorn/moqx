@@ -192,8 +192,9 @@ Subscriptions are asynchronous and use `FilterType::LatestObject` with
 then forwards new objects as they arrive. This is the standard pattern for
 live media consumption from moqtail-style relays.
 
-`subscribe/3` returns `{:ok, sub_ref}` immediately, then messages arrive in
-the caller process correlated by `sub_ref`.
+`subscribe/3` returns `{:ok, handle}` immediately, then messages arrive in
+the caller process correlated by `handle`. The handle is an opaque
+subscription resource (appears as a `reference()` to Elixir code).
 
 `subscribe/4` accepts subscription options. For catalog-driven flows,
 `subscribe_track/3,4` is a convenience wrapper around `subscribe/4`.
@@ -204,14 +205,15 @@ the caller process correlated by `sub_ref`.
 
 The supported subscription message contract is:
 
-- `{:moqx_subscribed, sub_ref, namespace, track_name}` when the subscription becomes active
-- `{:moqx_track_init, sub_ref, init_data, track_meta}` once per subscription
-- `{:moqx_frame, sub_ref, group_id, payload}` for each object
-- `{:moqx_track_ended, sub_ref}` when the track finishes cleanly
-- `{:moqx_error, sub_ref, reason}` for asynchronous subscription/runtime failures
+- `{:moqx_subscribed, handle, namespace, track_name}` when the subscription becomes active
+- `{:moqx_track_init, handle, init_data, track_meta}` once per subscription
+- `{:moqx_frame, handle, group_id, payload}` for each object
+- `{:moqx_track_ended, handle}` when the track finishes cleanly, or after
+  `unsubscribe/1` is acknowledged by the relay
+- `{:moqx_error, handle, reason}` for asynchronous subscription/runtime failures
 
 ```elixir
-{:ok, sub_ref} =
+{:ok, handle} =
   MOQX.subscribe(
     subscriber,
     "moqtail",
@@ -220,18 +222,26 @@ The supported subscription message contract is:
   )
 
 receive do
-  {:moqx_subscribed, ^sub_ref, "moqtail", "catalog"} -> :ok
+  {:moqx_subscribed, ^handle, "moqtail", "catalog"} -> :ok
 end
 
 receive do
-  {:moqx_track_init, ^sub_ref, _init_data, _track_meta} -> :ok
+  {:moqx_track_init, ^handle, _init_data, _track_meta} -> :ok
 end
 
 receive do
-  {:moqx_frame, ^sub_ref, group_id, payload} ->
+  {:moqx_frame, ^handle, group_id, payload} ->
     IO.inspect({group_id, byte_size(payload)}, label: "catalog object")
 end
+
+:ok = MOQX.unsubscribe(handle)
 ```
+
+`unsubscribe/1` is idempotent and fire-and-forget: it sends MOQ
+`Unsubscribe` to the relay and removes local subscription state. If the
+handle is garbage-collected before `unsubscribe/1` is called, the same
+cleanup runs automatically — so short-lived subscribing processes do not
+need to unsubscribe explicitly.
 
 ### Catalog-driven subscription
 

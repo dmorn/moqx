@@ -6,12 +6,28 @@ All notable changes to `moqx` will be documented in this file.
 
 ### Added
 
+- `MOQX.unsubscribe/1` cancels an active track subscription by sending MOQ
+  `Unsubscribe` to the relay. Idempotent and fire-and-forget; the caller
+  subsequently receives `{:moqx_track_ended, handle}` when the relay
+  acknowledges.
+- Dropping a subscription handle (GC) now automatically cancels the
+  subscription — short-lived subscribing processes no longer need to
+  unsubscribe explicitly to free relay-side resources.
+- `{:moqx_track_ended, handle}` is now emitted on publisher-side
+  `PublishDone` (graceful `TrackEnded` / `SubscriptionEnded` status codes).
+  The corresponding local subscription state is removed in the same path,
+  fixing a small leak in `active_subscriptions`.
 - `MOQX.publish_catalog/2` helper to create and publish the initial `"catalog"` track object.
 - `MOQX.update_catalog/2` helper to publish subsequent catalog objects.
 - Integration E2E coverage that verifies publisher-provided catalog objects are relayed downstream.
 
 ### Changed
 
+- **Breaking:** `MOQX.subscribe/3,4` and `MOQX.subscribe_track/3,4` now
+  return an opaque subscription handle (Rustler resource) instead of a
+  bare `make_ref()`. Pattern-matching and `is_reference/1` continue to
+  work; callers that depended on `make_ref()` semantics (serialization,
+  external storage) need to adapt.
 - README and module docs now explicitly document the publisher-driven catalog flow used with moqtail-style relays.
 
 ## [0.3.0] - 2026-04-09

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
@@ -19,6 +19,7 @@ use moqtail::model::control::fetch::{Fetch as MoqFetch, StandAloneFetchProps};
 use moqtail::model::control::publish_namespace::PublishNamespace;
 use moqtail::model::control::subscribe::Subscribe as MoqSubscribe;
 use moqtail::model::control::subscribe_ok::SubscribeOk;
+use moqtail::model::control::unsubscribe::Unsubscribe as MoqUnsubscribe;
 use moqtail::model::data::constant::{ObjectForwardingPreference, ObjectStatus};
 use moqtail::model::data::fetch_object::FetchObject;
 use moqtail::model::data::subgroup_header::SubgroupHeader;
@@ -149,9 +150,71 @@ pub struct TrackProducerRes {
     group_seq: AtomicU64,
 }
 
+pub struct SubscriptionHandle {
+    session: Arc<SessionInner>,
+    request_id: u64,
+    canceled: AtomicBool,
+}
+
 impl Resource for SessionRes {}
 impl Resource for BroadcastProducerRes {}
 impl Resource for TrackProducerRes {}
+impl Resource for SubscriptionHandle {}
+
+impl Drop for SubscriptionHandle {
+    fn drop(&mut self) {
+        if self.canceled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        cleanup_subscription(&self.session, self.request_id);
+    }
+}
+
+fn cleanup_subscription(session: &Arc<SessionInner>, request_id: u64) {
+    let pending = session
+        .pending_subscribes
+        .lock()
+        .unwrap()
+        .remove(&request_id);
+
+    let active = {
+        let mut guard = session.active_subscriptions.lock().unwrap();
+        let alias = guard
+            .iter()
+            .find(|(_, sub)| sub.request_id == request_id)
+            .map(|(alias, _)| *alias);
+        alias.and_then(|a| guard.remove(&a))
+    };
+
+    if let Some(p) = pending {
+        let mut msg_env = OwnedEnv::new();
+        let pid = p.caller_pid;
+        p.term_env.run(|term_env| {
+            let sub_ref = p.subscription_ref_term.load(term_env);
+            let _ = msg_env.send_and_clear(&pid, |env| {
+                (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
+            });
+        });
+    } else if let Some(a) = active {
+        let mut msg_env = OwnedEnv::new();
+        let pid = a.caller_pid;
+        a.ref_env.run(|ref_env| {
+            let sub_ref = a.subscription_ref_term.load(ref_env);
+            let _ = msg_env.send_and_clear(&pid, |env| {
+                (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
+            });
+        });
+    }
+
+    let tx = session.control_tx.clone();
+    runtime().spawn(async move {
+        let _ = tx
+            .send(ControlMessage::Unsubscribe(Box::new(MoqUnsubscribe::new(
+                request_id,
+            ))))
+            .await;
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Role
@@ -1201,16 +1264,15 @@ fn finish_track(track: ResourceArc<TrackProducerRes>) -> rustler::NifResult<Atom
 // ---------------------------------------------------------------------------
 
 #[rustler::nif]
-fn subscribe(
-    env: Env,
+fn subscribe<'a>(
+    env: Env<'a>,
     session: ResourceArc<SessionRes>,
-    subscription_ref: Reference,
     broadcast_path: String,
     track_name: String,
     delivery_timeout_ms: Option<u64>,
     init_data: Option<Binary>,
     track_meta: rustler::Term,
-) -> rustler::NifResult<Atom> {
+) -> rustler::NifResult<rustler::Term<'a>> {
     if !session.role.can_consume() {
         return Err(rustler::Error::Term(Box::new(
             "subscribe requires a subscriber session; use MOQX.connect_subscriber/1".to_string(),
@@ -1234,42 +1296,54 @@ fn subscribe(
     };
 
     let init_data = init_data.map(|bin| bin.as_slice().to_vec());
+    let request_id = inner.allocate_request_id();
+
+    let handle = ResourceArc::new(SubscriptionHandle {
+        session: inner.clone(),
+        request_id,
+        canceled: AtomicBool::new(false),
+    });
+
     let term_env = OwnedEnv::new();
-    let subscription_ref_term = term_env.save(subscription_ref);
+    let subscription_ref_term = term_env.save(handle.clone());
     let track_meta_term = term_env.save(track_meta);
 
+    let subscribe_msg = MoqSubscribe::new_latest_object(
+        request_id,
+        Tuple::from_utf8_path(&namespace),
+        TupleField::from_utf8(&track_name),
+        0, // subscriber_priority
+        MoqGroupOrder::Ascending,
+        true, // forward
+        subscribe_parameters,
+    );
+
+    inner.pending_subscribes.lock().unwrap().insert(
+        request_id,
+        PendingSubscribe {
+            caller_pid,
+            broadcast_path: broadcast_path.clone(),
+            track_name: track_name.clone(),
+            term_env,
+            subscription_ref_term,
+            track_meta_term,
+            init_data,
+        },
+    );
+
+    let inner_send = inner.clone();
     runtime().spawn(async move {
-        let request_id = inner.allocate_request_id();
-        let subscribe_msg = MoqSubscribe::new_latest_object(
-            request_id,
-            Tuple::from_utf8_path(&namespace),
-            TupleField::from_utf8(&track_name),
-            0, // subscriber_priority
-            MoqGroupOrder::Ascending,
-            true, // forward
-            subscribe_parameters,
-        );
-
-        inner.pending_subscribes.lock().unwrap().insert(
-            request_id,
-            PendingSubscribe {
-                caller_pid,
-                broadcast_path: broadcast_path.clone(),
-                track_name: track_name.clone(),
-                term_env,
-                subscription_ref_term,
-                track_meta_term,
-                init_data,
-            },
-        );
-
-        if inner
+        if inner_send
             .control_tx
             .send(ControlMessage::Subscribe(Box::new(subscribe_msg)))
             .await
             .is_err()
         {
-            let pending = inner.pending_subscribes.lock().unwrap().remove(&request_id);
+            let pending = inner_send
+                .pending_subscribes
+                .lock()
+                .unwrap()
+                .remove(&request_id);
             if let Some(p) = pending {
                 let mut msg_env = OwnedEnv::new();
                 p.term_env.run(|term_env| {
@@ -1287,6 +1361,19 @@ fn subscribe(
         }
     });
 
+    Ok(handle.encode(env))
+}
+
+// ---------------------------------------------------------------------------
+// NIF: unsubscribe
+// ---------------------------------------------------------------------------
+
+#[rustler::nif]
+fn unsubscribe(handle: ResourceArc<SubscriptionHandle>) -> rustler::NifResult<Atom> {
+    if handle.canceled.swap(true, Ordering::SeqCst) {
+        return Ok(atoms::ok());
+    }
+    cleanup_subscription(&handle.session, handle.request_id);
     Ok(atoms::ok())
 }
 
@@ -1413,6 +1500,7 @@ fn load(env: Env, _: rustler::Term) -> bool {
     env.register::<SessionRes>().is_ok()
         && env.register::<BroadcastProducerRes>().is_ok()
         && env.register::<TrackProducerRes>().is_ok()
+        && env.register::<SubscriptionHandle>().is_ok()
 }
 
 rustler::init!("Elixir.MOQX.Native", load = load);
