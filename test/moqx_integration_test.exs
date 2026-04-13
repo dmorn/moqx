@@ -102,18 +102,18 @@ defmodule MOQXIntegrationTest do
   end
 
   defp await_track_active!(track, namespace, track_name, timeout \\ @timeout) do
-    receive do
-      {:moqx_track_active,
-       %MOQX.TrackActive{track: ^track, namespace: ^namespace, track_name: ^track_name}} ->
+    case MOQX.Helpers.await_track_active(track, timeout) do
+      :ok ->
         :ok
 
-      {:moqx_request_error, %MOQX.RequestError{handle: ^track, message: reason}} ->
-        flunk("track activation request error: #{inspect(reason)}")
+      {:error, :timeout} ->
+        flunk("track activation timeout for #{namespace}/#{track_name}")
 
-      {:moqx_transport_error, %MOQX.TransportError{handle: ^track, message: reason}} ->
-        flunk("track activation transport error: #{inspect(reason)}")
-    after
-      timeout -> flunk("track activation timeout for #{namespace}/#{track_name}")
+      {:error, %MOQX.RequestError{code: :track_closed}} ->
+        flunk("track closed before activation for #{namespace}/#{track_name}")
+
+      {:error, other} ->
+        flunk("unexpected await_track_active error: #{inspect(other)}")
     end
   end
 
@@ -440,8 +440,8 @@ defmodule MOQXIntegrationTest do
         subscribe_and_await!(subscriber, ns, "catalog")
         subscribe_and_await!(subscriber, ns, media_track_name)
 
-        {:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_payload)
-        :ok = MOQX.update_catalog(catalog_track, catalog_payload)
+        {:ok, catalog_track} = MOQX.Helpers.publish_catalog(broadcast, catalog_payload)
+        :ok = MOQX.Helpers.update_catalog(catalog_track, catalog_payload)
         :ok = MOQX.write_frame(media_track, media_payload)
 
         objects = collect_objects_until_both_seen([catalog_payload, media_payload], @timeout)
@@ -821,7 +821,7 @@ defmodule MOQXIntegrationTest do
       try do
         assert {:error,
                 %MOQX.RequestError{op: :fetch, message: "fetch requires a subscriber session"}} =
-                 MOQX.fetch_catalog(publisher)
+                 MOQX.Helpers.fetch_catalog(publisher)
       after
         :ok = MOQX.close(publisher)
       end

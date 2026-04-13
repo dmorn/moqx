@@ -12,15 +12,26 @@ defmodule MOQXTest do
     assert is_function(&MOQX.close/1)
   end
 
-  test "public API exposes subscribe and fetch helpers" do
+  test "public API exposes subscribe and fetch primitives" do
     assert is_function(&MOQX.subscribe/3)
     assert is_function(&MOQX.subscribe/4)
     assert is_function(&MOQX.subscribe_track/3)
     assert is_function(&MOQX.subscribe_track/4)
     assert is_function(&MOQX.unsubscribe/1)
     assert is_function(&MOQX.fetch/4)
-    assert is_function(&MOQX.fetch_catalog/1)
-    assert is_function(&MOQX.fetch_catalog/2)
+  end
+
+  test "helpers module exposes optional convenience APIs" do
+    assert is_function(&MOQX.Helpers.publish_catalog/2)
+    assert is_function(&MOQX.Helpers.update_catalog/2)
+    assert is_function(&MOQX.Helpers.fetch_catalog/1)
+    assert is_function(&MOQX.Helpers.fetch_catalog/2)
+    assert is_function(&MOQX.Helpers.await_catalog/1)
+    assert is_function(&MOQX.Helpers.await_catalog/2)
+    assert is_function(&MOQX.Helpers.await_track_active/1)
+    assert is_function(&MOQX.Helpers.await_track_active/2)
+    assert is_function(&MOQX.Helpers.write_frame_when_active/2)
+    assert is_function(&MOQX.Helpers.write_frame_when_active/3)
   end
 
   test "unsubscribe/1 rejects non-reference arguments" do

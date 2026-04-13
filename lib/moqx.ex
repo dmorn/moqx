@@ -18,8 +18,9 @@ defmodule MOQX do
     - request-level failures (`{:moqx_request_error, %MOQX.RequestError{}}`)
     - transport/runtime failures (`{:moqx_transport_error, %MOQX.TransportError{}}`)
 
-  Convenience helpers (`write_frame/2`, `publish_catalog/2`, `fetch_catalog/2`,
-  `await_catalog/2`) are wrappers on top of the core primitives.
+  Optional convenience flows (`publish_catalog/2`, `update_catalog/2`,
+  `fetch_catalog/2`, `await_catalog/2`, `await_track_active/2`, etc.) live in
+  `MOQX.Helpers` on top of this core API.
 
   ## Example
 
@@ -374,34 +375,6 @@ defmodule MOQX do
       {:error, reason} ->
         {:error, sync_request_error(:create_track, reason, handle: broadcast)}
     end
-  end
-
-  @doc """
-  Creates and publishes the initial catalog object on the `"catalog"` track.
-
-  This convenience helper composes `create_track/2` and `update_catalog/2`:
-
-      {:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_json)
-
-  Returns `{:ok, catalog_track}` when both steps succeed.
-  """
-  @spec publish_catalog(broadcast(), catalog_payload()) ::
-          {:ok, track()} | {:error, MOQX.RequestError.t()}
-  def publish_catalog(broadcast, catalog_payload) when is_binary(catalog_payload) do
-    with {:ok, catalog_track} <- create_track(broadcast, "catalog"),
-         :ok <- update_catalog(catalog_track, catalog_payload) do
-      {:ok, catalog_track}
-    end
-  end
-
-  @doc """
-  Writes one catalog object to an existing catalog track.
-
-  Use this to push catalog updates after the initial `publish_catalog/2` call.
-  """
-  @spec update_catalog(track(), catalog_payload()) :: :ok | {:error, MOQX.RequestError.t()}
-  def update_catalog(track, catalog_payload) when is_binary(catalog_payload) do
-    write_frame(track, catalog_payload)
   end
 
   @doc """
@@ -941,76 +914,6 @@ defmodule MOQX do
     end
   end
 
-  @doc """
-  Fetches the raw catalog track bytes.
-
-  This is a thin wrapper over `fetch/4` with catalog defaults:
-
-  - namespace: `"moqtail"`
-  - track name: `"catalog"`
-  - priority: `0`
-  - group order: `:original`
-  - start: `{0, 0}`
-  - end: `{0, 1}`
-  """
-  @spec fetch_catalog(session(), Keyword.t()) ::
-          {:ok, fetch_ref()} | {:error, MOQX.RequestError.t()}
-  def fetch_catalog(session, opts \\ []) when is_list(opts) do
-    namespace = opts |> Keyword.get(:namespace, "moqtail") |> normalize_fetch_namespace!()
-
-    fetch_opts =
-      opts
-      |> Keyword.delete(:namespace)
-      |> Keyword.put_new(:priority, 0)
-      |> Keyword.put_new(:group_order, :original)
-      |> Keyword.put_new(:start, {0, 0})
-      |> Keyword.put_new(:end, {0, 1})
-
-    fetch(session, namespace, "catalog", fetch_opts)
-  end
-
-  @doc """
-  Collects fetch messages for `ref` and decodes the payload as a CMSF catalog.
-
-  Blocks the caller until all objects are received, then concatenates the
-  payloads and passes them to `MOQX.Catalog.decode/1`.
-
-  Returns `{:ok, catalog}` on success, `{:error, reason}` on fetch failure
-  or decode failure, and `{:error, "timeout"}` if no terminal message arrives
-  within `timeout` milliseconds.
-
-  ## Example
-
-      {:ok, ref} = MOQX.fetch_catalog(subscriber, namespace: "moqtail")
-      {:ok, catalog} = MOQX.await_catalog(ref)
-  """
-  @spec await_catalog(fetch_ref(), timeout()) ::
-          {:ok, MOQX.Catalog.t()} | {:error, String.t()}
-  def await_catalog(ref, timeout \\ 5_000) when is_reference(ref) do
-    await_catalog_loop(ref, [], timeout)
-  end
-
-  defp await_catalog_loop(ref, acc, timeout) do
-    receive do
-      {:moqx_fetch_ok, %MOQX.FetchOk{ref: ^ref}} ->
-        await_catalog_loop(ref, acc, timeout)
-
-      {:moqx_fetch_object, %MOQX.FetchObject{ref: ^ref, payload: payload}} ->
-        await_catalog_loop(ref, [acc | [payload]], timeout)
-
-      {:moqx_fetch_done, %MOQX.FetchDone{ref: ^ref}} ->
-        MOQX.Catalog.decode(IO.iodata_to_binary(acc))
-
-      {:moqx_request_error, %MOQX.RequestError{op: :fetch, ref: ^ref, message: reason}} ->
-        {:error, reason}
-
-      {:moqx_transport_error, %MOQX.TransportError{op: :fetch, ref: ^ref, message: reason}} ->
-        {:error, reason}
-    after
-      timeout -> {:error, "timeout"}
-    end
-  end
-
   defp validate_fetch_opts_keys!(opts) do
     allowed_keys = [:priority, :group_order, :start, :end]
 
@@ -1018,13 +921,6 @@ defmodule MOQX do
       [] -> :ok
       [key | _] -> raise ArgumentError, "unexpected fetch option #{inspect(key)}"
     end
-  end
-
-  defp normalize_fetch_namespace!(namespace) when is_binary(namespace), do: namespace
-
-  defp normalize_fetch_namespace!(namespace) do
-    raise ArgumentError,
-          "expected catalog :namespace to be a string, got: #{inspect(namespace)}"
   end
 
   defp normalize_fetch_priority!(priority) when is_integer(priority) and priority in 0..255,

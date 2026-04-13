@@ -234,8 +234,8 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
   defp catalog_fetch_fallback_reason?(_reason), do: false
 
   defp fetch_catalog(subscriber, namespace, timeout) do
-    with {:ok, ref} <- MOQX.fetch_catalog(subscriber, namespace: namespace),
-         {:ok, catalog} <- MOQX.await_catalog(ref, timeout) do
+    with {:ok, ref} <- MOQX.Helpers.fetch_catalog(subscriber, namespace: namespace),
+         {:ok, catalog} <- MOQX.Helpers.await_catalog(ref, timeout) do
       {:ok, catalog}
     else
       {:error, reason} -> {:error, reason}

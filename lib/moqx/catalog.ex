@@ -2,13 +2,13 @@ defmodule MOQX.Catalog do
   @moduledoc """
   Decodes CMSF catalog payloads and provides track discovery helpers.
 
-  A CMSF catalog is a UTF-8 JSON payload retrieved via `MOQX.fetch_catalog/2`.
+  A CMSF catalog is a UTF-8 JSON payload retrieved via `MOQX.Helpers.fetch_catalog/2`.
   This module parses those raw bytes into an inspectable Elixir structure.
 
   ## Example
 
-      {:ok, ref} = MOQX.fetch_catalog(subscriber, namespace: "moqtail")
-      {:ok, catalog} = MOQX.await_catalog(ref, 5_000)
+      {:ok, ref} = MOQX.Helpers.fetch_catalog(subscriber, namespace: "moqtail")
+      {:ok, catalog} = MOQX.Helpers.await_catalog(ref, 5_000)
 
       catalog
       |> MOQX.Catalog.video_tracks()

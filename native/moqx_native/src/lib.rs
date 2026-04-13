@@ -1404,7 +1404,7 @@ async fn handle_subgroup_stream(
     // just before the control loop processes the matching SubscribeOk(track_alias).
     // Wait briefly for local activation before deciding this alias is unknown.
     let has_subscription =
-        wait_for_active_subscription(inner, track_alias, Duration::from_millis(500), Duration::from_millis(5)).await;
+        wait_for_active_subscription(inner, track_alias, Duration::from_millis(2_000), Duration::from_millis(5)).await;
 
     if !has_subscription {
         return Ok(());
