@@ -115,6 +115,12 @@ defmodule MOQX do
           {:moqx_request_error, MOQX.RequestError.t()}
           | {:moqx_transport_error, MOQX.TransportError.t()}
 
+  @typedoc "Publish-side track lifecycle messages delivered to the caller process."
+  @type track_message ::
+          {:moqx_track_active, MOQX.TrackActive.t()}
+          | {:moqx_track_closed, MOQX.TrackClosed.t()}
+          | async_error_message()
+
   @typedoc "Publish-side subgroup messages delivered to the caller process."
   @type subgroup_message ::
           {:moqx_flush_ok, MOQX.FlushDone.t()}
@@ -348,21 +354,26 @@ defmodule MOQX do
         {:ok, publish_ref}
 
       {:error, reason} ->
-        {:error,
-         %MOQX.RequestError{
-           op: :publish,
-           message: reason,
-           ref: publish_ref
-         }}
+        {:error, sync_request_error(:publish, reason, ref: publish_ref)}
     end
   end
 
   @doc """
   Creates a named track inside a broadcast.
+
+  Track activation is asynchronous. The caller receives
+  `{:moqx_track_active, %MOQX.TrackActive{track: track, ...}}` once relay-side
+  subscribe activation is observed for this track.
   """
-  @spec create_track(broadcast(), String.t()) :: {:ok, track()} | {:error, String.t()}
+  @spec create_track(broadcast(), String.t()) :: {:ok, track()} | {:error, MOQX.RequestError.t()}
   def create_track(broadcast, track_name) when is_binary(track_name) do
-    MOQX.Native.create_track(broadcast, track_name)
+    case MOQX.Native.create_track(broadcast, track_name) do
+      {:ok, track} ->
+        {:ok, track}
+
+      {:error, reason} ->
+        {:error, sync_request_error(:create_track, reason, handle: broadcast)}
+    end
   end
 
   @doc """
@@ -374,7 +385,8 @@ defmodule MOQX do
 
   Returns `{:ok, catalog_track}` when both steps succeed.
   """
-  @spec publish_catalog(broadcast(), catalog_payload()) :: {:ok, track()} | {:error, String.t()}
+  @spec publish_catalog(broadcast(), catalog_payload()) ::
+          {:ok, track()} | {:error, MOQX.RequestError.t()}
   def publish_catalog(broadcast, catalog_payload) when is_binary(catalog_payload) do
     with {:ok, catalog_track} <- create_track(broadcast, "catalog"),
          :ok <- update_catalog(catalog_track, catalog_payload) do
@@ -387,7 +399,7 @@ defmodule MOQX do
 
   Use this to push catalog updates after the initial `publish_catalog/2` call.
   """
-  @spec update_catalog(track(), catalog_payload()) :: :ok | {:error, String.t()}
+  @spec update_catalog(track(), catalog_payload()) :: :ok | {:error, MOQX.RequestError.t()}
   def update_catalog(track, catalog_payload) when is_binary(catalog_payload) do
     write_frame(track, catalog_payload)
   end
@@ -399,11 +411,8 @@ defmodule MOQX do
   subgroup id `0`, writes one object, closes the stream. Each call creates the
   next group in that track.
 
-  The call is synchronously gated by track lifecycle:
-
-  - `{:error, "track_not_active"}` when no downstream subscribe has activated
-    this track yet
-  - `{:error, "track_closed"}` after `finish_track/1` was called for this track handle
+  The call is synchronously gated by track lifecycle and returns typed request
+  errors with `code: :track_not_active | :track_closed` when not writable.
 
   Subscribers receive `{:moqx_object, handle, %MOQX.Object{group_id: group_seq,
   subgroup_id: 0, object_id: 0, status: :normal, payload: data}}`.
@@ -412,7 +421,7 @@ defmodule MOQX do
   markers, or multiple objects per group use `open_subgroup/3` +
   `write_object/4` + `close_subgroup/2`.
   """
-  @spec write_frame(track(), binary()) :: :ok | {:error, String.t()}
+  @spec write_frame(track(), binary()) :: :ok | {:error, MOQX.RequestError.t()}
   def write_frame(track, data) when is_binary(data) do
     group_id = MOQX.Native.track_next_group_id(track)
 
@@ -428,12 +437,21 @@ defmodule MOQX do
   Subscribers eventually receive terminal lifecycle via
   `{:moqx_publish_done, %MOQX.PublishDone{...}}`.
 
+  The track owner process receives
+  `{:moqx_track_closed, %MOQX.TrackClosed{track: track, ...}}` exactly once.
+
   After `finish_track/1`, further writes on the same track handle fail
-  synchronously with `{:error, "track_closed"}`.
+  synchronously with typed request error `code: :track_closed`.
   """
-  @spec finish_track(track()) :: :ok | {:error, String.t()}
+  @spec finish_track(track()) :: :ok | {:error, MOQX.RequestError.t()}
   def finish_track(track) do
-    MOQX.Native.finish_track(track)
+    case MOQX.Native.finish_track(track) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, sync_request_error(:finish_track, reason, handle: track)}
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -447,11 +465,8 @@ defmodule MOQX do
   asynchronously). Any async failure during stream open, write, flush, or close
   arrives later as `{:moqx_transport_error, %MOQX.TransportError{...}}`.
 
-  Synchronous lifecycle gating applies before stream open:
-
-  - `{:error, "track_not_active"}` if the track is not yet activated by a
-    downstream subscription
-  - `{:error, "track_closed"}` if `finish_track/1` was already called
+  Synchronous lifecycle gating applies before stream open and failures return
+  typed request errors with `code: :track_not_active | :track_closed`.
 
   `group_id` is an explicit non-negative integer chosen by the caller. Multiple
   calls with the same `group_id` but different `:subgroup_id` open parallel
@@ -477,7 +492,7 @@ defmodule MOQX do
       `:extensions`. (default `false`)
   """
   @spec open_subgroup(track(), non_neg_integer(), [open_subgroup_opt()]) ::
-          {:ok, subgroup_handle()} | {:error, String.t()}
+          {:ok, subgroup_handle()} | {:error, MOQX.RequestError.t()}
   def open_subgroup(track, group_id, opts \\ [])
       when is_integer(group_id) and group_id >= 0 and is_list(opts) do
     subgroup_id = opts |> Keyword.get(:subgroup_id, 0) |> normalize_subgroup_id!()
@@ -497,8 +512,11 @@ defmodule MOQX do
            end_of_group,
            extensions_present
          ) do
-      {:ok, handle} -> {:ok, handle}
-      {:error, _reason} = error -> error
+      {:ok, handle} ->
+        {:ok, handle}
+
+      {:error, reason} ->
+        {:error, sync_request_error(:open_subgroup, reason, handle: track)}
     end
   end
 
@@ -521,7 +539,7 @@ defmodule MOQX do
     * `:extensions` — per-object extension headers (default `[]`).
   """
   @spec write_object(subgroup_handle(), non_neg_integer(), binary(), [write_object_opt()]) ::
-          :ok | {:error, String.t()}
+          :ok | {:error, MOQX.RequestError.t()}
   def write_object(subgroup, object_id, payload, opts \\ [])
       when is_reference(subgroup) and is_integer(object_id) and object_id >= 0 and
              is_binary(payload) and is_list(opts) do
@@ -530,7 +548,13 @@ defmodule MOQX do
 
     validate_write_object_opts!(opts)
 
-    MOQX.Native.write_object(subgroup, object_id, payload, extensions, status)
+    case MOQX.Native.write_object(subgroup, object_id, payload, extensions, status) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, sync_request_error(:write_object, reason, handle: subgroup)}
+    end
   end
 
   @doc """
@@ -547,13 +571,20 @@ defmodule MOQX do
   end-of-group marker, matching the semantics of `close_subgroup(handle,
   end_of_group: false)`.
   """
-  @spec close_subgroup(subgroup_handle(), [close_subgroup_opt()]) :: :ok | {:error, String.t()}
+  @spec close_subgroup(subgroup_handle(), [close_subgroup_opt()]) ::
+          :ok | {:error, MOQX.RequestError.t()}
   def close_subgroup(subgroup, opts \\ []) when is_reference(subgroup) and is_list(opts) do
     end_of_group = opts |> Keyword.get(:end_of_group, false) |> normalize_boolean!(:end_of_group)
 
     validate_close_subgroup_opts!(opts)
 
-    MOQX.Native.close_subgroup(subgroup, end_of_group)
+    case MOQX.Native.close_subgroup(subgroup, end_of_group) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, sync_request_error(:close_subgroup, reason, handle: subgroup)}
+    end
   end
 
   @doc """
@@ -573,13 +604,7 @@ defmodule MOQX do
         {:ok, flush_ref}
 
       {:error, reason} ->
-        {:error,
-         %MOQX.RequestError{
-           op: :flush_subgroup,
-           message: reason,
-           ref: flush_ref,
-           handle: subgroup
-         }}
+        {:error, sync_request_error(:flush_subgroup, reason, ref: flush_ref, handle: subgroup)}
     end
   end
 
@@ -1031,6 +1056,30 @@ defmodule MOQX do
 
   defp normalize_fetch_end!(nil), do: nil
   defp normalize_fetch_end!(location), do: normalize_fetch_location!(location, :end)
+
+  defp sync_request_error(op, reason, opts) do
+    {message, code} = normalize_sync_reason(reason)
+
+    %MOQX.RequestError{
+      op: op,
+      message: message,
+      code: code,
+      ref: Keyword.get(opts, :ref),
+      handle: Keyword.get(opts, :handle)
+    }
+  end
+
+  defp normalize_sync_reason(reason) when is_atom(reason), do: {Atom.to_string(reason), reason}
+
+  defp normalize_sync_reason(reason) when is_binary(reason) do
+    case reason do
+      "track_not_active" -> {reason, :track_not_active}
+      "track_closed" -> {reason, :track_closed}
+      other -> {other, nil}
+    end
+  end
+
+  defp normalize_sync_reason(reason), do: {inspect(reason), nil}
 
   defp validate_fetch_range!(_start, nil), do: :ok
 

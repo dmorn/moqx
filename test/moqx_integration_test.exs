@@ -101,26 +101,29 @@ defmodule MOQXIntegrationTest do
     handle
   end
 
-  defp write_frame_when_active!(track, payload, timeout \\ @timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    write_frame_when_active_loop(track, payload, deadline)
-  end
-
-  defp write_frame_when_active_loop(track, payload, deadline) do
-    case MOQX.write_frame(track, payload) do
-      :ok ->
+  defp await_track_active!(track, namespace, track_name, timeout \\ @timeout) do
+    receive do
+      {:moqx_track_active,
+       %MOQX.TrackActive{track: ^track, namespace: ^namespace, track_name: ^track_name}} ->
         :ok
 
-      {:error, "track_not_active"} ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          flunk("timed out waiting for track activation")
-        else
-          Process.sleep(10)
-          write_frame_when_active_loop(track, payload, deadline)
-        end
+      {:moqx_request_error, %MOQX.RequestError{handle: ^track, message: reason}} ->
+        flunk("track activation request error: #{inspect(reason)}")
 
-      {:error, reason} ->
-        flunk("write_frame failed unexpectedly: #{inspect(reason)}")
+      {:moqx_transport_error, %MOQX.TransportError{handle: ^track, message: reason}} ->
+        flunk("track activation transport error: #{inspect(reason)}")
+    after
+      timeout -> flunk("track activation timeout for #{namespace}/#{track_name}")
+    end
+  end
+
+  defp await_track_closed!(track, namespace, track_name, timeout \\ @timeout) do
+    receive do
+      {:moqx_track_closed,
+       %MOQX.TrackClosed{track: ^track, namespace: ^namespace, track_name: ^track_name}} ->
+        :ok
+    after
+      timeout -> flunk("track closed timeout for #{namespace}/#{track_name}")
     end
   end
 
@@ -318,7 +321,8 @@ defmodule MOQXIntegrationTest do
         broadcast = publish_and_await_broadcast!(publisher, ns)
         {:ok, track} = MOQX.create_track(broadcast, track_name)
 
-        assert {:error, "track_not_active"} = MOQX.write_frame(track, "frame-before-subscribe")
+        assert {:error, %MOQX.RequestError{op: :open_subgroup, code: :track_not_active}} =
+                 MOQX.write_frame(track, "frame-before-subscribe")
       after
         :ok = MOQX.close(publisher)
       end
@@ -340,13 +344,12 @@ defmodule MOQXIntegrationTest do
 
           {:ok, handle} = MOQX.subscribe(subscriber, ns, track_name)
 
-          # Start pushing the first frame as soon as the publisher track becomes
-          # active, without waiting for local :moqx_subscribe_ok first. This
-          # stresses control/data-plane ordering on the subscriber side.
-          writer = Task.async(fn -> write_frame_when_active!(track, payload) end)
+          # Write immediately after publisher track activation, before waiting
+          # for local :moqx_subscribe_ok, to stress control/data ordering.
+          await_track_active!(track, ns, track_name)
+          assert :ok = MOQX.write_frame(track, payload)
 
           await_subscribed!(handle, ns, track_name)
-          assert :ok = Task.await(writer, @timeout)
 
           {group_id, got_payload} = await_matching_payload_frame!(payload)
           assert is_integer(group_id)
@@ -403,10 +406,15 @@ defmodule MOQXIntegrationTest do
 
         subscribe_and_await!(subscriber, ns, track_name)
 
+        await_track_active!(track, ns, track_name)
+
         :ok = MOQX.write_frame(track, "before-finish")
         :ok = MOQX.finish_track(track)
 
-        assert {:error, "track_closed"} = MOQX.write_frame(track, "after-finish")
+        await_track_closed!(track, ns, track_name)
+
+        assert {:error, %MOQX.RequestError{op: :open_subgroup, code: :track_closed}} =
+                 MOQX.write_frame(track, "after-finish")
       after
         :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)
@@ -436,13 +444,23 @@ defmodule MOQXIntegrationTest do
         :ok = MOQX.update_catalog(catalog_track, catalog_payload)
         :ok = MOQX.write_frame(media_track, media_payload)
 
-        {_catalog_group_id, got_catalog_payload} = await_matching_payload_frame!(catalog_payload)
+        objects = collect_objects_until_both_seen([catalog_payload, media_payload], @timeout)
+
+        got_catalog_payload =
+          objects
+          |> Enum.find(&(&1.payload == catalog_payload))
+          |> Map.fetch!(:payload)
+
+        got_media_payload =
+          objects
+          |> Enum.find(&(&1.payload == media_payload))
+          |> Map.fetch!(:payload)
+
         assert {:ok, catalog} = MOQX.Catalog.decode(got_catalog_payload)
 
         assert %MOQX.Catalog.Track{name: ^media_track_name} =
                  MOQX.Catalog.get_track(catalog, media_track_name)
 
-        {_media_group_id, got_media_payload} = await_matching_payload_frame!(media_payload)
         assert got_media_payload == media_payload
 
         :ok = MOQX.finish_track(media_track)

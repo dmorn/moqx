@@ -44,6 +44,8 @@ mod atoms {
         moqx_object,
         moqx_end_of_group,
         moqx_flush_ok,
+        moqx_track_active,
+        moqx_track_closed,
         moqx_publish_done,
         moqx_request_error,
         moqx_transport_error,
@@ -58,6 +60,8 @@ mod atoms {
         write_object,
         close_subgroup,
         flush_subgroup,
+        track_not_active,
+        track_closed,
         runtime,
         publisher,
         subscriber,
@@ -160,6 +164,23 @@ struct EndOfGroupOut<'a> {
 }
 
 #[derive(rustler::NifStruct)]
+#[module = "MOQX.TrackActive"]
+struct TrackActiveOut<'a> {
+    track: rustler::Term<'a>,
+    namespace: String,
+    track_name: String,
+    track_alias: u64,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.TrackClosed"]
+struct TrackClosedOut<'a> {
+    track: rustler::Term<'a>,
+    namespace: String,
+    track_name: String,
+}
+
+#[derive(rustler::NifStruct)]
 #[module = "MOQX.PublishDone"]
 struct PublishDoneOut<'a> {
     handle: rustler::Term<'a>,
@@ -259,10 +280,21 @@ struct PendingPublish {
     namespace: String,
 }
 
+struct TrackNotifier {
+    caller_pid: LocalPid,
+    term_env: OwnedEnv,
+    track_term: SavedTerm,
+    namespace: String,
+    track_name: String,
+    active_notified: bool,
+    closed_notified: bool,
+}
+
 struct TrackLifecycle {
     created: bool,
     active_alias: Option<u64>,
     closed: bool,
+    notifiers: Vec<TrackNotifier>,
 }
 
 impl TrackLifecycle {
@@ -271,6 +303,7 @@ impl TrackLifecycle {
             created: true,
             active_alias: None,
             closed: false,
+            notifiers: Vec::new(),
         }
     }
 
@@ -279,6 +312,7 @@ impl TrackLifecycle {
             created: false,
             active_alias: None,
             closed: false,
+            notifiers: Vec::new(),
         }
     }
 }
@@ -309,43 +343,91 @@ impl SessionInner {
         self.next_track_alias.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn register_track(&self, key: &str) {
+    fn register_track(
+        &self,
+        key: &str,
+        caller_pid: LocalPid,
+        track_term_env: OwnedEnv,
+        track_term: SavedTerm,
+        namespace: String,
+        track_name: String,
+    ) -> (Option<u64>, bool) {
         let mut guard = self.track_lifecycle.lock().unwrap();
         let entry = guard.entry(key.to_string()).or_insert_with(TrackLifecycle::pending);
         entry.created = true;
         entry.closed = false;
+
+        let mut notifier = TrackNotifier {
+            caller_pid,
+            term_env: track_term_env,
+            track_term,
+            namespace,
+            track_name,
+            active_notified: false,
+            closed_notified: false,
+        };
+
+        notifier.active_notified = entry.active_alias.is_some();
+        notifier.closed_notified = entry.closed;
+
+        let active_alias = entry.active_alias;
+        let closed = entry.closed;
+
+        entry.notifiers.push(notifier);
+
+        (active_alias, closed)
     }
 
     fn activate_track(&self, key: &str, track_alias: u64) {
         let mut guard = self.track_lifecycle.lock().unwrap();
         let entry = guard.entry(key.to_string()).or_insert_with(TrackLifecycle::pending);
-        if !entry.closed {
-            entry.active_alias = Some(track_alias);
+        if entry.closed {
+            return;
+        }
+
+        entry.active_alias = Some(track_alias);
+
+        for notifier in entry.notifiers.iter_mut() {
+            if !notifier.active_notified {
+                send_track_active(notifier, track_alias);
+                notifier.active_notified = true;
+            }
         }
     }
 
-    fn write_track_alias(&self, key: &str) -> Result<u64, &'static str> {
+    fn write_track_alias(&self, key: &str) -> Result<u64, Atom> {
         let guard = self.track_lifecycle.lock().unwrap();
         let Some(entry) = guard.get(key) else {
-            return Err("track_not_active");
+            return Err(atoms::track_not_active());
         };
 
         if entry.closed {
-            return Err("track_closed");
+            return Err(atoms::track_closed());
         }
 
         if !entry.created {
-            return Err("track_not_active");
+            return Err(atoms::track_not_active());
         }
 
-        entry.active_alias.ok_or("track_not_active")
+        entry.active_alias.ok_or(atoms::track_not_active())
     }
 
-    fn close_track(&self, key: &str) {
+    fn close_track(&self, key: &str) -> Vec<TrackNotifier> {
         let mut guard = self.track_lifecycle.lock().unwrap();
         let entry = guard.entry(key.to_string()).or_insert_with(TrackLifecycle::created);
+
+        if entry.closed {
+            return Vec::new();
+        }
+
         entry.closed = true;
         entry.active_alias = None;
+
+        for notifier in entry.notifiers.iter_mut() {
+            notifier.closed_notified = true;
+        }
+
+        std::mem::take(&mut entry.notifiers)
     }
 }
 
@@ -1492,6 +1574,41 @@ fn send_track_ended(inner: &Arc<SessionInner>, track_alias: u64) {
     });
 }
 
+fn send_track_active(notifier: &TrackNotifier, track_alias: u64) {
+    let mut msg_env = OwnedEnv::new();
+    let pid = notifier.caller_pid;
+
+    notifier.term_env.run(|term_env| {
+        let track_ref = notifier.track_term.load(term_env);
+        let _ = msg_env.send_and_clear(&pid, |env| {
+            let payload = TrackActiveOut {
+                track: track_ref.in_env(env),
+                namespace: notifier.namespace.clone(),
+                track_name: notifier.track_name.clone(),
+                track_alias,
+            };
+            (atoms::moqx_track_active(), payload).encode(env)
+        });
+    });
+}
+
+fn send_track_closed(notifier: &TrackNotifier) {
+    let mut msg_env = OwnedEnv::new();
+    let pid = notifier.caller_pid;
+
+    notifier.term_env.run(|term_env| {
+        let track_ref = notifier.track_term.load(term_env);
+        let _ = msg_env.send_and_clear(&pid, |env| {
+            let payload = TrackClosedOut {
+                track: track_ref.in_env(env),
+                namespace: notifier.namespace.clone(),
+                track_name: notifier.track_name.clone(),
+            };
+            (atoms::moqx_track_closed(), payload).encode(env)
+        });
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Stream reading helpers
 // ---------------------------------------------------------------------------
@@ -1743,14 +1860,76 @@ fn create_track<'a>(
     track_name: String,
 ) -> rustler::NifResult<rustler::Term<'a>> {
     let key = format!("{}/{}", broadcast.namespace.trim_matches('/'), track_name);
-    broadcast.session.register_track(&key);
 
     let res = ResourceArc::new(TrackProducerRes {
         session: broadcast.session.clone(),
         namespace: broadcast.namespace.clone(),
-        track_name,
+        track_name: track_name.clone(),
         group_seq: AtomicU64::new(0),
     });
+
+    let caller_pid = env.pid();
+    let term_env = OwnedEnv::new();
+    let track_term = term_env.save(res.clone());
+
+    let (active_alias, closed) = broadcast.session.register_track(
+        &key,
+        caller_pid,
+        term_env,
+        track_term,
+        broadcast.namespace.clone(),
+        track_name.clone(),
+    );
+
+    if let Some(track_alias) = active_alias {
+        let pid = caller_pid;
+        let namespace = broadcast.namespace.clone();
+        let track_name_clone = track_name.clone();
+        let track_res = res.clone();
+
+        runtime().spawn(async move {
+            let mut msg_env = OwnedEnv::new();
+            let term_env = OwnedEnv::new();
+            let track_term_saved = term_env.save(track_res);
+            term_env.run(|saved_env| {
+                let track_term = track_term_saved.load(saved_env);
+                let _ = msg_env.send_and_clear(&pid, |env| {
+                    let payload = TrackActiveOut {
+                        track: track_term.in_env(env),
+                        namespace: namespace.clone(),
+                        track_name: track_name_clone.clone(),
+                        track_alias,
+                    };
+                    (atoms::moqx_track_active(), payload).encode(env)
+                });
+            });
+        });
+    }
+
+    if closed {
+        let pid = caller_pid;
+        let namespace = broadcast.namespace.clone();
+        let track_name_clone = track_name.clone();
+        let track_res = res.clone();
+
+        runtime().spawn(async move {
+            let mut msg_env = OwnedEnv::new();
+            let term_env = OwnedEnv::new();
+            let track_term_saved = term_env.save(track_res);
+            term_env.run(|saved_env| {
+                let track_term = track_term_saved.load(saved_env);
+                let _ = msg_env.send_and_clear(&pid, |env| {
+                    let payload = TrackClosedOut {
+                        track: track_term.in_env(env),
+                        namespace: namespace.clone(),
+                        track_name: track_name_clone.clone(),
+                    };
+                    (atoms::moqx_track_closed(), payload).encode(env)
+                });
+            });
+        });
+    }
+
     Ok((atoms::ok(), res).encode(env))
 }
 
@@ -1933,7 +2112,7 @@ fn open_subgroup<'a>(
     let track_alias = track
         .session
         .write_track_alias(&key)
-        .map_err(|reason| rustler::Error::Term(Box::new(reason.to_string())))?;
+        .map_err(|reason| rustler::Error::Term(Box::new(reason)))?;
 
     let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel::<SubgroupOp>();
 
@@ -2270,7 +2449,13 @@ fn flush_subgroup(
 #[rustler::nif]
 fn finish_track(track: ResourceArc<TrackProducerRes>) -> rustler::NifResult<Atom> {
     let key = format!("{}/{}", track.namespace.trim_matches('/'), track.track_name);
-    track.session.close_track(&key);
+    let notifiers = track.session.close_track(&key);
+
+    runtime().spawn(async move {
+        for notifier in notifiers.iter() {
+            send_track_closed(notifier);
+        }
+    });
 
     Ok(atoms::ok())
 }

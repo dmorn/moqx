@@ -12,6 +12,9 @@ defmodule MOQX.RequestError do
   @type op ::
           :connect
           | :publish
+          | :create_track
+          | :write_frame
+          | :finish_track
           | :subscribe
           | :fetch
           | :open_subgroup
@@ -137,6 +140,37 @@ defmodule MOQX.EndOfGroup do
           handle: reference(),
           group_id: non_neg_integer(),
           subgroup_id: non_neg_integer()
+        }
+end
+
+defmodule MOQX.TrackActive do
+  @moduledoc """
+  Publisher track lifecycle event emitted when relay-side subscribe activation is observed.
+  """
+
+  @enforce_keys [:track, :namespace, :track_name, :track_alias]
+  defstruct [:track, :namespace, :track_name, :track_alias]
+
+  @type t :: %__MODULE__{
+          track: reference(),
+          namespace: String.t(),
+          track_name: String.t(),
+          track_alias: non_neg_integer()
+        }
+end
+
+defmodule MOQX.TrackClosed do
+  @moduledoc """
+  Publisher track lifecycle event emitted when a local track is finished/closed.
+  """
+
+  @enforce_keys [:track, :namespace, :track_name]
+  defstruct [:track, :namespace, :track_name]
+
+  @type t :: %__MODULE__{
+          track: reference(),
+          namespace: String.t(),
+          track_name: String.t()
         }
 end
 
