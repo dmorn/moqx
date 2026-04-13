@@ -285,6 +285,23 @@ defmodule MOQXIntegrationTest do
 
   describe "integration relay: pub/sub e2e" do
     @tag :integration
+    test "write_frame returns track_not_active before downstream subscribe activation" do
+      publisher = connect_publisher!()
+
+      try do
+        ns = "moqx-e2e-not-active-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+
+        broadcast = publish_and_await_broadcast!(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        assert {:error, "track_not_active"} = MOQX.write_frame(track, "frame-before-subscribe")
+      after
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
     test "publisher frame is received by subscriber on same relay" do
       publisher = connect_publisher!()
       subscriber = connect_subscriber!()
@@ -306,6 +323,30 @@ defmodule MOQXIntegrationTest do
         assert got_payload == payload
 
         :ok = MOQX.finish_track(track)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "finish_track closes track handle for future writes" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-track-closed-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+
+        broadcast = publish_and_await_broadcast!(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        subscribe_and_await!(subscriber, ns, track_name)
+
+        :ok = MOQX.write_frame(track, "before-finish")
+        :ok = MOQX.finish_track(track)
+
+        assert {:error, "track_closed"} = MOQX.write_frame(track, "after-finish")
       after
         :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)
