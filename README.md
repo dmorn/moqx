@@ -180,7 +180,15 @@ catalog_json = ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"v
 :ok = MOQX.write_frame(track, "frame-1")
 :ok = MOQX.write_frame(track, "frame-2")
 :ok = MOQX.finish_track(track)
+
+# lifecycle gating on the same handle:
+{:error, "track_closed"} = MOQX.write_frame(track, "frame-3")
 ```
+
+Write calls are explicitly lifecycle-gated (no silent drops):
+
+- `{:error, "track_not_active"}` before a downstream subscribe activates the track
+- `{:error, "track_closed"}` after `finish_track/1`
 
 ### Publisher-side catalog publication
 

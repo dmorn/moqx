@@ -17,6 +17,11 @@ All notable changes to `moqx` will be documented in this file.
   via `{:moqx_publish_ok, %MOQX.PublishOk{...}}` after relay ack.
   Failures are delivered as typed async request/transport errors with
   `op: :publish` and the matching `publish_ref`.
+- **Breaking:** publisher write lifecycle now has explicit synchronous gating.
+  Writes no longer silently drop before downstream activation.
+  `write_frame/2` and `open_subgroup/3` now fail with
+  `{:error, "track_not_active"}` before subscribe activation and
+  `{:error, "track_closed"}` after `finish_track/1`.
 - **Breaking:** subgroup flush is now explicitly correlated.
   `flush_subgroup/1` returns `{:ok, flush_ref}` and asynchronous completion is
   delivered as `{:moqx_flush_ok, %MOQX.FlushDone{...}}` (or typed transport

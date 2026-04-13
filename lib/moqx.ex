@@ -399,6 +399,12 @@ defmodule MOQX do
   subgroup id `0`, writes one object, closes the stream. Each call creates the
   next group in that track.
 
+  The call is synchronously gated by track lifecycle:
+
+  - `{:error, "track_not_active"}` when no downstream subscribe has activated
+    this track yet
+  - `{:error, "track_closed"}` after `finish_track/1` was called for this track handle
+
   Subscribers receive `{:moqx_object, handle, %MOQX.Object{group_id: group_seq,
   subgroup_id: 0, object_id: 0, status: :normal, payload: data}}`.
 
@@ -421,6 +427,9 @@ defmodule MOQX do
 
   Subscribers eventually receive terminal lifecycle via
   `{:moqx_publish_done, %MOQX.PublishDone{...}}`.
+
+  After `finish_track/1`, further writes on the same track handle fail
+  synchronously with `{:error, "track_closed"}`.
   """
   @spec finish_track(track()) :: :ok | {:error, String.t()}
   def finish_track(track) do
@@ -437,6 +446,12 @@ defmodule MOQX do
   Returns `{:ok, handle}` synchronously (the QUIC uni-stream is opened
   asynchronously). Any async failure during stream open, write, flush, or close
   arrives later as `{:moqx_transport_error, %MOQX.TransportError{...}}`.
+
+  Synchronous lifecycle gating applies before stream open:
+
+  - `{:error, "track_not_active"}` if the track is not yet activated by a
+    downstream subscription
+  - `{:error, "track_closed"}` if `finish_track/1` was already called
 
   `group_id` is an explicit non-negative integer chosen by the caller. Multiple
   calls with the same `group_id` but different `:subgroup_id` open parallel
