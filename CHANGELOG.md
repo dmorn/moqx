@@ -4,6 +4,40 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** connect is now explicitly correlated. `connect/2`,
+  `connect_publisher/2`, and `connect_subscriber/2` return `{:ok, connect_ref}`.
+  Asynchronous connect outcomes are delivered as typed messages:
+  `{:moqx_connect_ok, %MOQX.ConnectOk{...}}`,
+  `{:moqx_request_error, %MOQX.RequestError{...}}`, and
+  `{:moqx_transport_error, %MOQX.TransportError{...}}`.
+- **Breaking:** subgroup flush is now explicitly correlated.
+  `flush_subgroup/1` returns `{:ok, flush_ref}` and asynchronous completion is
+  delivered as `{:moqx_flush_ok, %MOQX.FlushDone{...}}` (or typed transport
+  failure).
+- **Breaking:** subscribe/fetch/object lifecycle messages now use typed payload
+  structs and explicit message families.
+  `:moqx_subscribed`/`:moqx_track_ended`/`:moqx_fetch_started`/`:moqx_fetch_error`
+  tuple contracts are replaced by typed events such as
+  `:moqx_subscribe_ok`, `:moqx_publish_done`, `:moqx_fetch_ok`, and the shared
+  async error families.
+- **Breaking:** asynchronous generic tuple errors (`{:error, reason}` and
+  `{:moqx_error, ..., reason}`) are no longer the primary public contract.
+  Async failures now flow through `%MOQX.RequestError{}` and
+  `%MOQX.TransportError{}`.
+- `await_catalog/2` now consumes the typed fetch message contract.
+- Mix tasks (`moqx.e2e.pubsub`, `moqx.moqtail.demo`) and integration helpers now
+  follow the typed async contract.
+
+### Documentation
+
+- Rewrote README and module docs to align with the low-level async contract and
+  remove stale tuple-era examples (`:moqx_frame`, `:moqx_subscribed`,
+  `:moqx_track_ended`, `:moqx_error`, etc.).
+- Clarified core async message families and correlation behavior for connect,
+  subscribe, fetch, and subgroup flush.
+
 ## [0.4.1] - 2026-04-12
 
 ### Fixed
