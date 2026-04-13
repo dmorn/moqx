@@ -1,0 +1,18 @@
+services:
+  relay:
+    image: ${MOQX_RELAY_IMAGE:-ghcr.io/moqtail/relay:sha-190e502@sha256:36c929b71140a83158da383721f1d59f199a9f643ab5d033910258f5aa2903ee}
+    platform: linux/amd64
+    command:
+      - --host
+      - 0.0.0.0
+      - --port
+      - "4433"
+      - --cert-file
+      - /certs/cert.pem
+      - --key-file
+      - /certs/key.pem
+    ports:
+      - "4433:4433/udp"
+    volumes:
+      - ./.tmp/integration-certs/cert.pem:/certs/cert.pem:ro
+      - ./.tmp/integration-certs/key.pem:/certs/key.pem:ro

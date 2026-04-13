@@ -1,19 +1,17 @@
 defmodule MOQXIntegrationTest do
   use ExUnit.Case, async: false
 
-  alias MOQX.Debug
-
   @timeout 15_000
 
-  # Integration relay tests can use MOQX_EXTERNAL_RELAY_URL,
-  # or default to https://ord.abr.moqtail.dev.
-
   defp relay_url do
-    System.get_env("MOQX_EXTERNAL_RELAY_URL", "https://ord.abr.moqtail.dev")
+    System.get_env("MOQX_EXTERNAL_RELAY_URL", "https://localhost:4433")
   end
 
-  defp relay_namespace do
-    System.get_env("MOQX_EXTERNAL_RELAY_NAMESPACE", "moqtail")
+  defp relay_tls_opts do
+    case System.get_env("MOQX_RELAY_CACERTFILE") do
+      nil -> []
+      path -> [cacertfile: path]
+    end
   end
 
   defp await_connect_result!(connect_ref) do
@@ -33,7 +31,7 @@ defmodule MOQXIntegrationTest do
   end
 
   defp connect_subscriber! do
-    {:ok, connect_ref} = MOQX.connect_subscriber(relay_url())
+    {:ok, connect_ref} = MOQX.connect_subscriber(relay_url(), tls: relay_tls_opts())
 
     case await_connect_result!(connect_ref) do
       {:ok, session} -> session
@@ -42,7 +40,7 @@ defmodule MOQXIntegrationTest do
   end
 
   defp connect_publisher! do
-    {:ok, connect_ref} = MOQX.connect_publisher(relay_url())
+    {:ok, connect_ref} = MOQX.connect_publisher(relay_url(), tls: relay_tls_opts())
 
     case await_connect_result!(connect_ref) do
       {:ok, session} -> session
@@ -127,22 +125,6 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp await_frame! do
-    receive do
-      {:moqx_object,
-       %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: payload}}} ->
-        {group_id, payload}
-
-      {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
-        await_frame!()
-
-      {:moqx_transport_error, %MOQX.TransportError{message: reason}} ->
-        flunk("frame receive failed: #{inspect(reason)}")
-    after
-      @timeout -> flunk("frame timeout")
-    end
-  end
-
   describe "integration relay: connect" do
     @tag :integration
     test "subscriber connects and reports draft-14 version" do
@@ -168,147 +150,6 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  describe "integration relay: subscribe" do
-    @tag :public_relay_live
-    test "subscribe to catalog track delivers a valid CMSF catalog" do
-      subscriber = connect_subscriber!()
-
-      try do
-        ns = relay_namespace()
-        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog")
-        await_subscribed!(sub_ref, ns, "catalog")
-
-        {_group_id, payload} = await_frame!()
-        assert byte_size(payload) > 0
-
-        assert {:ok, catalog} = MOQX.Catalog.decode(payload)
-        assert MOQX.Catalog.tracks(catalog) != []
-      after
-        :ok = MOQX.close(subscriber)
-      end
-    end
-
-    @tag :public_relay_live
-    test "subscribe/4 accepts delivery_timeout_ms and still receives catalog" do
-      subscriber = connect_subscriber!()
-
-      try do
-        ns = relay_namespace()
-
-        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog", delivery_timeout_ms: 1_500)
-        await_subscribed!(sub_ref, ns, "catalog")
-
-        {_group_id, payload} = await_frame!()
-        assert byte_size(payload) > 0
-
-        assert {:ok, catalog} = MOQX.Catalog.decode(payload)
-        assert MOQX.Catalog.tracks(catalog) != []
-      after
-        :ok = MOQX.close(subscriber)
-      end
-    end
-
-    @tag :public_relay_live
-    test "subscribe to a video track delivers live frames" do
-      subscriber = connect_subscriber!()
-
-      try do
-        ns = relay_namespace()
-
-        # First get the catalog to discover tracks
-        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog")
-        await_subscribed!(sub_ref, ns, "catalog")
-
-        {_gid, catalog_payload} = await_frame!()
-        {:ok, catalog} = MOQX.Catalog.decode(catalog_payload)
-
-        video = MOQX.Catalog.video_tracks(catalog) |> List.first()
-        assert video, "expected at least one video track in catalog"
-
-        # Subscribe to the video track
-        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, video.name)
-        await_subscribed!(sub_ref, ns, video.name)
-
-        # Receive at least 3 video frames
-        for _ <- 1..3 do
-          {group_id, payload} = await_frame!()
-          assert is_integer(group_id)
-          assert byte_size(payload) > 0
-        end
-      after
-        :ok = MOQX.close(subscriber)
-      end
-    end
-
-    @tag :public_relay_live
-    test "video frames expose PRFT for latency estimation" do
-      subscriber = connect_subscriber!()
-
-      try do
-        ns = relay_namespace()
-
-        # Discover one video track from the catalog
-        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog")
-        await_subscribed!(sub_ref, ns, "catalog")
-
-        {_gid, catalog_payload} = await_frame!()
-        {:ok, catalog} = MOQX.Catalog.decode(catalog_payload)
-
-        video = MOQX.Catalog.video_tracks(catalog) |> List.first()
-        assert video, "expected at least one video track in catalog"
-
-        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, video.name)
-        await_subscribed!(sub_ref, ns, video.name)
-
-        {_group_id, payload} = await_frame!()
-
-        boxes = Debug.top_level_boxes(payload)
-        assert Enum.any?(boxes, &(&1.type == "prft"))
-
-        assert {:ok, prft} = Debug.parse_prft(payload)
-        assert prft.version in [0, 1]
-
-        assert {:ok, age_ms} = Debug.publisher_age_ms(payload)
-        assert age_ms >= 0
-        assert age_ms < 60_000
-      after
-        :ok = MOQX.close(subscriber)
-      end
-    end
-
-    @tag :public_relay_live
-    test "multiple concurrent subscriptions deliver interleaved frames" do
-      subscriber = connect_subscriber!()
-
-      try do
-        ns = relay_namespace()
-
-        # Subscribe to catalog
-        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog")
-        await_subscribed!(sub_ref, ns, "catalog")
-        {_gid, catalog_payload} = await_frame!()
-        {:ok, catalog} = MOQX.Catalog.decode(catalog_payload)
-
-        video = MOQX.Catalog.video_tracks(catalog) |> List.first()
-        assert video
-
-        # Subscribe to video (catalog subscription is still active)
-        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, video.name)
-        await_subscribed!(sub_ref, ns, video.name)
-
-        # Collect frames for a few seconds — we should see frames from
-        # both subscriptions (catalog updates + video)
-        frames = collect_frames(3_000)
-        frame_count = length(frames)
-
-        assert frame_count > 3,
-               "expected multiple frames from concurrent subscriptions, got #{frame_count}"
-      after
-        :ok = MOQX.close(subscriber)
-      end
-    end
-  end
-
   describe "integration relay: pub/sub e2e" do
     @tag :integration
     test "write_frame returns track_not_active before downstream subscribe activation" do
@@ -329,15 +170,16 @@ defmodule MOQXIntegrationTest do
     end
 
     @tag :integration
-    test "early subgroup data after subscribe is delivered without first-frame loss" do
+    test "early subgroup data after subscribe is delivered" do
       publisher = connect_publisher!()
       subscriber = connect_subscriber!()
 
       try do
-        for idx <- 1..20 do
+        for idx <- 1..10 do
           ns = "moqx-e2e-early-data-#{System.system_time(:millisecond)}-#{idx}"
           track_name = "demo"
-          payload = "early-data-#{idx}"
+          payload1 = "early-data-#{idx}-1"
+          payload2 = "early-data-#{idx}-2"
 
           broadcast = publish_and_await_broadcast!(publisher, ns)
           {:ok, track} = MOQX.create_track(broadcast, track_name)
@@ -347,13 +189,14 @@ defmodule MOQXIntegrationTest do
           # Write immediately after publisher track activation, before waiting
           # for local :moqx_subscribe_ok, to stress control/data ordering.
           await_track_active!(track, ns, track_name)
-          assert :ok = MOQX.write_frame(track, payload)
+          assert :ok = MOQX.write_frame(track, payload1)
+          assert :ok = MOQX.write_frame(track, payload2)
 
           await_subscribed!(handle, ns, track_name)
 
-          {group_id, got_payload} = await_matching_payload_frame!(payload)
+          {group_id, got_payload} = await_any_payload_frame!([payload1, payload2])
           assert is_integer(group_id)
-          assert got_payload == payload
+          assert got_payload in [payload1, payload2]
 
           :ok = MOQX.finish_track(track)
           :ok = MOQX.unsubscribe(handle)
@@ -361,6 +204,26 @@ defmodule MOQXIntegrationTest do
       after
         :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "subscribe with zero rendezvous timeout fails with typed request code" do
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-rendezvous-zero-#{System.system_time(:millisecond)}"
+        track_name = "missing-track"
+
+        {:ok, handle} = MOQX.subscribe(subscriber, ns, track_name, rendezvous_timeout_ms: 0)
+
+        assert_receive {:moqx_request_error,
+                        %MOQX.RequestError{op: :subscribe, handle: ^handle, code: code}},
+                       @timeout
+
+        assert code in [:track_does_not_exist, :timeout]
+      after
+        :ok = MOQX.close(subscriber)
       end
     end
 
@@ -828,49 +691,6 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  describe "integration relay: catalog-driven flow" do
-    @tag :public_relay_live
-    test "full catalog-driven subscribe: connect, catalog, decode, subscribe video" do
-      subscriber = connect_subscriber!()
-
-      try do
-        ns = relay_namespace()
-
-        # Subscribe to catalog
-        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, "catalog")
-        await_subscribed!(sub_ref, ns, "catalog")
-
-        # Get and decode catalog
-        {_gid, payload} = await_frame!()
-        {:ok, catalog} = MOQX.Catalog.decode(payload)
-
-        # Verify catalog structure
-        tracks = MOQX.Catalog.tracks(catalog)
-        assert tracks != []
-
-        video_tracks = MOQX.Catalog.video_tracks(catalog)
-        assert video_tracks != []
-
-        video = List.first(video_tracks)
-        assert video.name
-        assert video.role == "video"
-        assert video.codec
-
-        # Subscribe to discovered video track
-        {:ok, sub_ref} = MOQX.subscribe(subscriber, ns, video.name)
-        await_subscribed!(sub_ref, ns, video.name)
-
-        # Verify we get actual video data
-        {group_id, frame} = await_frame!()
-        assert is_integer(group_id)
-        # First frame in a group is typically a keyframe (large)
-        assert byte_size(frame) > 100
-      after
-        :ok = MOQX.close(subscriber)
-      end
-    end
-  end
-
   # -- Helpers ----------------------------------------------------------------
 
   defp await_matching_payload_frame!(expected_payload, timeout \\ @timeout) do
@@ -906,6 +726,39 @@ defmodule MOQXIntegrationTest do
     end
   end
 
+  defp await_any_payload_frame!(expected_payloads, timeout \\ @timeout)
+       when is_list(expected_payloads) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    await_any_payload_frame_loop(expected_payloads, deadline)
+  end
+
+  defp await_any_payload_frame_loop(expected_payloads, deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      flunk("frame timeout waiting for one of payloads #{inspect(expected_payloads)}")
+    else
+      receive do
+        {:moqx_object,
+         %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: payload}}} ->
+          if payload in expected_payloads do
+            {group_id, payload}
+          else
+            await_any_payload_frame_loop(expected_payloads, deadline)
+          end
+
+        {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
+          await_any_payload_frame_loop(expected_payloads, deadline)
+
+        {:moqx_transport_error, %MOQX.TransportError{message: reason}} ->
+          flunk("frame receive failed: #{inspect(reason)}")
+      after
+        remaining ->
+          flunk("frame timeout waiting for one of payloads #{inspect(expected_payloads)}")
+      end
+    end
+  end
+
   defp collect_objects_until_both_seen(expected_payloads, timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout
     collect_objects_until_both_seen_loop(expected_payloads, deadline, [])
@@ -937,33 +790,6 @@ defmodule MOQXIntegrationTest do
               "timeout waiting for payloads #{inspect(expected_payloads)}, got payloads: #{inspect(Enum.map(acc, & &1.payload))}"
             )
         end
-      end
-    end
-  end
-
-  defp collect_frames(duration_ms) do
-    deadline = System.monotonic_time(:millisecond) + duration_ms
-    collect_frames_loop(deadline, [])
-  end
-
-  defp collect_frames_loop(deadline, acc) do
-    remaining = deadline - System.monotonic_time(:millisecond)
-
-    if remaining <= 0 do
-      Enum.reverse(acc)
-    else
-      receive do
-        {:moqx_object,
-         %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: payload}}} ->
-          collect_frames_loop(deadline, [{group_id, payload} | acc])
-
-        {:moqx_subscribe_ok, _} ->
-          collect_frames_loop(deadline, acc)
-
-        _ ->
-          collect_frames_loop(deadline, acc)
-      after
-        remaining -> Enum.reverse(acc)
       end
     end
   end

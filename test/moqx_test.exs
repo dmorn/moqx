@@ -86,11 +86,30 @@ defmodule MOQXTest do
                  end
   end
 
-  test "subscribe/4 validates delivery_timeout_ms before session inspection" do
+  test "subscribe/4 validates rendezvous_timeout_ms before session inspection" do
+    assert_raise ArgumentError,
+                 "expected :rendezvous_timeout_ms to be a non-negative integer, got: -1",
+                 fn ->
+                   MOQX.subscribe(:not_a_session, "ns", "track", rendezvous_timeout_ms: -1)
+                 end
+  end
+
+  test "subscribe/4 still accepts delivery_timeout_ms as a deprecated alias" do
     assert_raise ArgumentError,
                  "expected :delivery_timeout_ms to be a non-negative integer, got: -1",
                  fn ->
                    MOQX.subscribe(:not_a_session, "ns", "track", delivery_timeout_ms: -1)
+                 end
+  end
+
+  test "subscribe/4 rejects passing both timeout option keys" do
+    assert_raise ArgumentError,
+                 "subscribe/4 accepts only one of :rendezvous_timeout_ms or :delivery_timeout_ms",
+                 fn ->
+                   MOQX.subscribe(:not_a_session, "ns", "track",
+                     rendezvous_timeout_ms: 1_000,
+                     delivery_timeout_ms: 1_000
+                   )
                  end
   end
 

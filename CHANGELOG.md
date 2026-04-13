@@ -46,6 +46,15 @@ All notable changes to `moqx` will be documented in this file.
   `await_catalog/2`).
 - Mix tasks (`moqx.e2e.pubsub`, `moqx.moqtail.demo`) and integration helpers now
   follow the typed async contract.
+- Integration tests now assume a relay endpoint provided by environment
+  (`MOQX_EXTERNAL_RELAY_URL`) and trusted CA path (`MOQX_RELAY_CACERTFILE`),
+  with Docker-based local/CI orchestration as the primary deterministic path.
+- Removed `:public_relay_live` integration tests; public relay interop checks now
+  live in manual mix tasks.
+- Subscribe availability timeout is now exposed as
+  `rendezvous_timeout_ms` (`delivery_timeout_ms` remains as a deprecated alias)
+  and subscribe request rejections now carry typed `RequestError.code` values
+  (for example `:track_does_not_exist` / `:timeout`).
 
 ### Documentation
 

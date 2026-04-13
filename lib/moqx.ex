@@ -163,7 +163,8 @@ defmodule MOQX do
 
   @typedoc "Subscribe options accepted by `subscribe/4` and `subscribe_track/4`."
   @type subscribe_opt ::
-          {:delivery_timeout_ms, non_neg_integer()}
+          {:rendezvous_timeout_ms, non_neg_integer()}
+          | {:delivery_timeout_ms, non_neg_integer()}
           | {:init_data, binary()}
           | {:track_meta, map()}
           | {:track, Track.t()}
@@ -693,7 +694,9 @@ defmodule MOQX do
 
   Supported options:
 
-  - `:delivery_timeout_ms` -- MOQT DELIVERY TIMEOUT (parameter type `0x02`) in milliseconds
+  - `:rendezvous_timeout_ms` -- how long the relay may wait for publisher availability
+    before rejecting the request (encoded as MOQT DELIVERY TIMEOUT parameter `0x02`)
+  - `:delivery_timeout_ms` -- deprecated alias for `:rendezvous_timeout_ms`
   - `:init_data` -- binary init segment/configuration to surface in `:moqx_track_init`
   - `:track_meta` -- map surfaced in `:moqx_track_init`
   - `:track` -- `%MOQX.Catalog.Track{}` convenience; fills `:init_data` and `:track_meta`
@@ -715,8 +718,7 @@ defmodule MOQX do
           {:ok, subscription_handle()} | {:error, MOQX.RequestError.t()}
   def subscribe(session, broadcast_path, track_name, opts)
       when is_binary(broadcast_path) and is_binary(track_name) and is_list(opts) do
-    delivery_timeout_ms =
-      opts |> Keyword.get(:delivery_timeout_ms) |> normalize_delivery_timeout_ms!()
+    rendezvous_timeout_ms = normalize_rendezvous_timeout_ms!(opts)
 
     {init_data, track_meta} = normalize_subscribe_track_payload!(opts)
 
@@ -726,7 +728,7 @@ defmodule MOQX do
            session,
            broadcast_path,
            track_name,
-           delivery_timeout_ms,
+           rendezvous_timeout_ms,
            init_data,
            track_meta
          ) do
@@ -790,7 +792,7 @@ defmodule MOQX do
   end
 
   defp validate_subscribe_opts_keys!(opts) do
-    allowed_keys = [:delivery_timeout_ms, :init_data, :track_meta, :track]
+    allowed_keys = [:rendezvous_timeout_ms, :delivery_timeout_ms, :init_data, :track_meta, :track]
 
     case Keyword.keys(opts) -- allowed_keys do
       [] -> :ok
@@ -843,15 +845,33 @@ defmodule MOQX do
           "expected :track_meta to be a map, got: #{inspect(track_meta)}"
   end
 
-  defp normalize_delivery_timeout_ms!(nil), do: nil
+  defp normalize_rendezvous_timeout_ms!(opts) do
+    rendezvous_timeout_ms = Keyword.get(opts, :rendezvous_timeout_ms)
+    delivery_timeout_ms = Keyword.get(opts, :delivery_timeout_ms)
 
-  defp normalize_delivery_timeout_ms!(delivery_timeout_ms)
-       when is_integer(delivery_timeout_ms) and delivery_timeout_ms >= 0,
-       do: delivery_timeout_ms
+    case {rendezvous_timeout_ms, delivery_timeout_ms} do
+      {nil, nil} ->
+        nil
 
-  defp normalize_delivery_timeout_ms!(delivery_timeout_ms) do
+      {timeout_ms, nil} ->
+        normalize_timeout_ms!(timeout_ms, :rendezvous_timeout_ms)
+
+      {nil, timeout_ms} ->
+        normalize_timeout_ms!(timeout_ms, :delivery_timeout_ms)
+
+      {_rendezvous, _delivery} ->
+        raise ArgumentError,
+              "subscribe/4 accepts only one of :rendezvous_timeout_ms or :delivery_timeout_ms"
+    end
+  end
+
+  defp normalize_timeout_ms!(timeout_ms, _key)
+       when is_integer(timeout_ms) and timeout_ms >= 0,
+       do: timeout_ms
+
+  defp normalize_timeout_ms!(timeout_ms, key) do
     raise ArgumentError,
-          "expected :delivery_timeout_ms to be a non-negative integer, got: #{inspect(delivery_timeout_ms)}"
+          "expected #{inspect(key)} to be a non-negative integer, got: #{inspect(timeout_ms)}"
   end
 
   # ---------------------------------------------------------------------------

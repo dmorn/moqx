@@ -16,7 +16,7 @@ use moqtail::model::common::pair::KeyValuePair;
 use moqtail::model::common::tuple::{Tuple, TupleField};
 use moqtail::model::control::client_setup::ClientSetup;
 use moqtail::model::control::constant::{
-    GroupOrder as MoqGroupOrder, PublishDoneStatusCode, DRAFT_14,
+    GroupOrder as MoqGroupOrder, PublishDoneStatusCode, SubscribeErrorCode, DRAFT_14,
 };
 use moqtail::model::control::control_message::ControlMessage;
 use moqtail::model::control::fetch::{Fetch as MoqFetch, StandAloneFetchProps};
@@ -73,6 +73,14 @@ mod atoms {
         does_not_exist,
         end_of_group,
         end_of_track,
+        internal_error,
+        unauthorized,
+        timeout,
+        not_supported,
+        track_does_not_exist,
+        invalid_range,
+        malformed_auth_token,
+        expired_auth_token,
     }
 }
 
@@ -226,6 +234,19 @@ fn publish_done_status_to_atom(status: PublishDoneStatusCode) -> Atom {
         PublishDoneStatusCode::TrackEnded => atoms::ended(),
         PublishDoneStatusCode::SubscriptionEnded => atoms::unsubscribe_ack(),
         _ => atoms::unknown(),
+    }
+}
+
+fn subscribe_error_code_to_atom(code: SubscribeErrorCode) -> Atom {
+    match code {
+        SubscribeErrorCode::InternalError => atoms::internal_error(),
+        SubscribeErrorCode::Unauthorized => atoms::unauthorized(),
+        SubscribeErrorCode::Timeout => atoms::timeout(),
+        SubscribeErrorCode::NotSupported => atoms::not_supported(),
+        SubscribeErrorCode::TrackDoesNotExist => atoms::track_does_not_exist(),
+        SubscribeErrorCode::InvalidRange => atoms::invalid_range(),
+        SubscribeErrorCode::MalformedAuthToken => atoms::malformed_auth_token(),
+        SubscribeErrorCode::ExpiredAuthToken => atoms::expired_auth_token(),
     }
 }
 
@@ -1003,7 +1024,7 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                         let payload = RequestErrorOut {
                             op: atoms::subscribe(),
                             message: reason.clone(),
-                            code: None,
+                            code: Some(subscribe_error_code_to_atom(err.error_code)),
                             r#ref: nil,
                             handle: sub_ref.in_env(env),
                         };
@@ -2470,7 +2491,7 @@ fn subscribe<'a>(
     session: ResourceArc<SessionRes>,
     broadcast_path: String,
     track_name: String,
-    delivery_timeout_ms: Option<u64>,
+    rendezvous_timeout_ms: Option<u64>,
     init_data: Option<Binary>,
     track_meta: rustler::Term,
 ) -> rustler::NifResult<rustler::Term<'a>> {
@@ -2484,11 +2505,11 @@ fn subscribe<'a>(
     let inner = session.inner.clone();
     let namespace = normalize_path(&session.root, &broadcast_path);
 
-    let subscribe_parameters = match delivery_timeout_ms {
+    let subscribe_parameters = match rendezvous_timeout_ms {
         Some(timeout_ms) => {
             vec![KeyValuePair::try_new_varint(0x02, timeout_ms).map_err(|e| {
                 rustler::Error::Term(Box::new(format!(
-                    "invalid delivery_timeout_ms parameter: {:?}",
+                    "invalid rendezvous timeout parameter: {:?}",
                     e
                 )))
             })?]

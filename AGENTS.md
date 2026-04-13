@@ -1,2 +1,4 @@
 - before committing, ensure you `mix format`, run the tests, run `mix credo` (elixir's linter) and refactor accordingly, ensure documentation stays consistent
 - if you find stale documentation, point it out: we either have to update or remove it
+- this project is based on moqtail. Before making any design decisions, ensure you check out what has been chosen there
+- this project is based on a series of MOQT IETF documents (linked in README), which should always be consulted before making decisions

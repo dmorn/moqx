@@ -227,7 +227,9 @@ Subscriptions are asynchronous and correlated by subscription handle.
 
 `subscribe/4` options:
 
-- `delivery_timeout_ms` -- MOQT DELIVERY TIMEOUT parameter (`0x02`) in milliseconds.
+- `rendezvous_timeout_ms` -- how long the relay may wait for publisher availability
+  before rejecting subscribe (encoded as MOQT DELIVERY TIMEOUT parameter `0x02`).
+- `delivery_timeout_ms` -- deprecated alias for `rendezvous_timeout_ms`.
 
 The subscription message contract is:
 
@@ -240,7 +242,7 @@ The subscription message contract is:
 - `{:moqx_transport_error, %MOQX.TransportError{op: :subscribe, handle, ...}}`
 
 ```elixir
-{:ok, handle} = MOQX.subscribe(subscriber, "moqtail", "catalog", delivery_timeout_ms: 1_500)
+{:ok, handle} = MOQX.subscribe(subscriber, "moqtail", "catalog", rendezvous_timeout_ms: 1_500)
 
 receive do
   {:moqx_subscribe_ok, %MOQX.SubscribeOk{handle: ^handle}} -> :ok
@@ -487,13 +489,29 @@ For an explicit split between fast checks and integration coverage:
 
 ```bash
 mix ci
-mix test.integration
+scripts/test_integration.sh
 ```
 
 - `mix ci` runs formatting, Credo, and non-integration tests
-- `mix test.integration` runs the deterministic integration suite (excludes `:public_relay_live` tests)
-- run live public-relay coverage explicitly with:
-  `mix test --include integration --include public_relay_live`
+- `scripts/test_integration.sh` starts a pinned relay Docker image with local
+  TLS certs and runs `mix test.integration`
+
+You can override relay version independently from the locally compiled moqtail
+library by setting `MOQX_RELAY_IMAGE`, for example:
+
+```bash
+MOQX_RELAY_IMAGE=ghcr.io/moqtail/relay:sha-190e502 scripts/test_integration.sh
+```
+
+Set a digest-pinned reference for strict reproducibility:
+
+```bash
+MOQX_RELAY_IMAGE='ghcr.io/moqtail/relay:sha-190e502@sha256:36c929b71140a83158da383721f1d59f199a9f643ab5d033910258f5aa2903ee' scripts/test_integration.sh
+```
+
+`mix test.integration` can still be run directly if you provide a relay URL and
+trusted CA path via environment (`MOQX_EXTERNAL_RELAY_URL`,
+`MOQX_RELAY_CACERTFILE`).
 
 ### Local relay TLS
 

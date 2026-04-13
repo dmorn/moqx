@@ -62,13 +62,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Check out pinned moq-dev relay workspace
-        uses: actions/checkout@v6
-        with:
-          repository: moq-dev/moq
-          ref: aae43f824b9b8d93b68dd6a765f8bec691f60c0b
-          path: .moq-dev
-
       - uses: erlef/setup-beam@v1
         with:
           elixir-version: '1.19.0'
@@ -94,16 +87,27 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-            .moq-dev/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('mix.lock', 'native/moqx_native/Cargo.lock', '.moq-dev/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('mix.lock', 'native/moqx_native/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Install Elixir dependencies
         run: mix deps.get
 
-      - name: Build relay binary for integration tests
-        run: cargo build --manifest-path .moq-dev/Cargo.toml --release -p moq-relay
+      - name: Generate integration relay certificates
+        run: scripts/generate_integration_certs.sh .tmp/integration-certs
+
+      - name: Start pinned relay image
+        env:
+          MOQX_RELAY_IMAGE: ghcr.io/moqtail/relay:sha-190e502@sha256:36c929b71140a83158da383721f1d59f199a9f643ab5d033910258f5aa2903ee
+        run: docker compose -f docker-compose.integration.yml up -d relay
 
       - name: Run relay-backed integration tests
+        env:
+          MOQX_EXTERNAL_RELAY_URL: https://localhost:4433
+          MOQX_RELAY_CACERTFILE: .tmp/integration-certs/ca.pem
         run: mix test.integration
+
+      - name: Stop relay image
+        if: always()
+        run: docker compose -f docker-compose.integration.yml down --remove-orphans
