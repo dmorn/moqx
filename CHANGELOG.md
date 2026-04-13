@@ -22,6 +22,9 @@ All notable changes to `moqx` will be documented in this file.
   `write_frame/2` and `open_subgroup/3` now fail with
   `{:error, "track_not_active"}` before subscribe activation and
   `{:error, "track_closed"}` after `finish_track/1`.
+- Subscriber data-path race handling now tolerates early subgroup streams that
+  arrive just before local `SubscribeOk` state installation, reducing first-frame
+  loss risk under control/data-plane reordering.
 - **Breaking:** subgroup flush is now explicitly correlated.
   `flush_subgroup/1` returns `{:ok, flush_ref}` and asynchronous completion is
   delivered as `{:moqx_flush_ok, %MOQX.FlushDone{...}}` (or typed transport
