@@ -12,7 +12,7 @@ defmodule MOQX.Native do
   def session_close(_session), do: :erlang.nif_error(:nif_not_loaded)
 
   # Publish
-  def publish(_session, _broadcast_path), do: :erlang.nif_error(:nif_not_loaded)
+  def publish(_session, _broadcast_path, _publish_ref), do: :erlang.nif_error(:nif_not_loaded)
   def create_track(_broadcast, _track_name), do: :erlang.nif_error(:nif_not_loaded)
   def track_next_group_id(_track), do: :erlang.nif_error(:nif_not_loaded)
   def finish_track(_track), do: :erlang.nif_error(:nif_not_loaded)

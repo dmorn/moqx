@@ -66,6 +66,21 @@ defmodule MOQX.ConnectOk do
         }
 end
 
+defmodule MOQX.PublishOk do
+  @moduledoc """
+  Successful asynchronous publish-namespace readiness result.
+  """
+
+  @enforce_keys [:ref, :broadcast, :namespace]
+  defstruct [:ref, :broadcast, :namespace]
+
+  @type t :: %__MODULE__{
+          ref: reference(),
+          broadcast: reference(),
+          namespace: String.t()
+        }
+end
+
 defmodule MOQX.SubscribeOk do
   @moduledoc """
   Successful asynchronous subscribe establishment event.

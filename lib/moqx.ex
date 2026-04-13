@@ -128,6 +128,14 @@ defmodule MOQX do
           {:moqx_connect_ok, MOQX.ConnectOk.t()}
           | async_error_message()
 
+  @typedoc "Opaque publish correlation reference returned by `publish/2`."
+  @opaque publish_ref :: reference()
+
+  @typedoc "Publish namespace readiness messages delivered to the caller process."
+  @type publish_message ::
+          {:moqx_publish_ok, MOQX.PublishOk.t()}
+          | async_error_message()
+
   @typedoc """
   Opaque subscription handle returned by `subscribe/3,4`.
 
@@ -316,16 +324,37 @@ defmodule MOQX do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Creates a broadcast handle for the given path on a publisher session.
+  Submits publish-namespace announcement for the given path on a publisher session.
 
-  The broadcast is announced lazily on the first successful `write_frame/2`.
+  Returns `{:ok, publish_ref}` immediately. The broadcast becomes usable only
+  after the caller receives:
 
-  Misuse errors, such as calling this with a subscriber session, are returned as
-  `{:error, reason}` immediately.
+  - `{:moqx_publish_ok, %MOQX.PublishOk{ref: publish_ref, broadcast: broadcast, ...}}`
+
+  Failures are delivered as typed async errors correlated by `publish_ref`:
+
+  - `{:moqx_request_error, %MOQX.RequestError{op: :publish, ref: publish_ref, ...}}`
+  - `{:moqx_transport_error, %MOQX.TransportError{op: :publish, ref: publish_ref, ...}}`
+
+  This explicit lifecycle prevents downstream code from creating tracks before
+  the relay acknowledges namespace readiness.
   """
-  @spec publish(session(), String.t()) :: {:ok, broadcast()} | {:error, String.t()}
+  @spec publish(session(), String.t()) :: {:ok, publish_ref()} | {:error, MOQX.RequestError.t()}
   def publish(session, broadcast_path) when is_binary(broadcast_path) do
-    MOQX.Native.publish(session, broadcast_path)
+    publish_ref = make_ref()
+
+    case MOQX.Native.publish(session, broadcast_path, publish_ref) do
+      :ok ->
+        {:ok, publish_ref}
+
+      {:error, reason} ->
+        {:error,
+         %MOQX.RequestError{
+           op: :publish,
+           message: reason,
+           ref: publish_ref
+         }}
+    end
   end
 
   @doc """

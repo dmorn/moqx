@@ -37,6 +37,7 @@ mod atoms {
         error,
         moqx_connect_ok,
         moqx_session_closed,
+        moqx_publish_ok,
         moqx_subscribe_ok,
         moqx_track_init,
         moqx_object,
@@ -49,6 +50,7 @@ mod atoms {
         moqx_fetch_object,
         moqx_fetch_done,
         connect,
+        publish,
         subscribe,
         fetch,
         open_subgroup,
@@ -88,6 +90,14 @@ struct ConnectOkOut<'a> {
     session: rustler::Term<'a>,
     role: Atom,
     version: String,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.PublishOk"]
+struct PublishOkOut<'a> {
+    r#ref: rustler::Term<'a>,
+    broadcast: rustler::Term<'a>,
+    namespace: String,
 }
 
 #[derive(rustler::NifStruct)]
@@ -242,7 +252,10 @@ struct ActiveSubscription {
 }
 
 struct PendingPublish {
-    tx: oneshot::Sender<Result<(), String>>,
+    caller_pid: LocalPid,
+    ref_env: OwnedEnv,
+    publish_ref_term: SavedTerm,
+    namespace: String,
 }
 
 /// A track that a remote subscriber has subscribed to via the relay.
@@ -951,7 +964,25 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                 .unwrap()
                 .remove(&ok.request_id);
             if let Some(pp) = pending {
-                let _ = pp.tx.send(Ok(()));
+                let mut msg_env = OwnedEnv::new();
+                let pid = pp.caller_pid;
+                let namespace = pp.namespace.clone();
+                let broadcast = ResourceArc::new(BroadcastProducerRes {
+                    session: inner.clone(),
+                    namespace,
+                });
+
+                pp.ref_env.run(|ref_env| {
+                    let publish_ref = pp.publish_ref_term.load(ref_env);
+                    let _ = msg_env.send_and_clear(&pid, |env| {
+                        let payload = PublishOkOut {
+                            r#ref: publish_ref.in_env(env),
+                            broadcast: broadcast.encode(env),
+                            namespace: pp.namespace.clone(),
+                        };
+                        (atoms::moqx_publish_ok(), payload).encode(env)
+                    });
+                });
             }
         }
         ControlMessage::PublishError(err) => {
@@ -961,18 +992,55 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                 .unwrap()
                 .remove(&err.request_id);
             if let Some(pp) = pending {
-                let _ = pp.tx.send(Err(format!("publish error: {:?}", err)));
+                let reason = format!(
+                    "publish rejected: error={:?} reason={:?}",
+                    err.error_code, err.reason_phrase
+                );
+                let mut msg_env = OwnedEnv::new();
+                let pid = pp.caller_pid;
+
+                pp.ref_env.run(|ref_env| {
+                    let publish_ref = pp.publish_ref_term.load(ref_env);
+                    let _ = msg_env.send_and_clear(&pid, |env| {
+                        let nil = rustler::types::atom::nil().to_term(env);
+                        let payload = RequestErrorOut {
+                            op: atoms::publish(),
+                            message: reason.clone(),
+                            code: None,
+                            r#ref: publish_ref.in_env(env),
+                            handle: nil,
+                        };
+                        (atoms::moqx_request_error(), payload).encode(env)
+                    });
+                });
             }
         }
         ControlMessage::PublishNamespaceOk(ok) => {
-            // Treat as publish confirmation (same request_id flow)
             let pending = inner
                 .pending_publishes
                 .lock()
                 .unwrap()
                 .remove(&ok.request_id);
             if let Some(pp) = pending {
-                let _ = pp.tx.send(Ok(()));
+                let mut msg_env = OwnedEnv::new();
+                let pid = pp.caller_pid;
+                let namespace = pp.namespace.clone();
+                let broadcast = ResourceArc::new(BroadcastProducerRes {
+                    session: inner.clone(),
+                    namespace,
+                });
+
+                pp.ref_env.run(|ref_env| {
+                    let publish_ref = pp.publish_ref_term.load(ref_env);
+                    let _ = msg_env.send_and_clear(&pid, |env| {
+                        let payload = PublishOkOut {
+                            r#ref: publish_ref.in_env(env),
+                            broadcast: broadcast.encode(env),
+                            namespace: pp.namespace.clone(),
+                        };
+                        (atoms::moqx_publish_ok(), payload).encode(env)
+                    });
+                });
             }
         }
         ControlMessage::PublishNamespaceError(err) => {
@@ -982,9 +1050,27 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                 .unwrap()
                 .remove(&err.request_id);
             if let Some(pp) = pending {
-                let _ = pp
-                    .tx
-                    .send(Err(format!("publish namespace error: {:?}", err)));
+                let reason = format!(
+                    "publish namespace rejected: error={:?} reason={:?}",
+                    err.error_code, err.reason_phrase
+                );
+                let mut msg_env = OwnedEnv::new();
+                let pid = pp.caller_pid;
+
+                pp.ref_env.run(|ref_env| {
+                    let publish_ref = pp.publish_ref_term.load(ref_env);
+                    let _ = msg_env.send_and_clear(&pid, |env| {
+                        let nil = rustler::types::atom::nil().to_term(env);
+                        let payload = RequestErrorOut {
+                            op: atoms::publish(),
+                            message: reason.clone(),
+                            code: None,
+                            r#ref: publish_ref.in_env(env),
+                            handle: nil,
+                        };
+                        (atoms::moqx_request_error(), payload).encode(env)
+                    });
+                });
             }
         }
         ControlMessage::Subscribe(sub) => {
@@ -1517,45 +1603,68 @@ fn session_close(session: ResourceArc<SessionRes>) -> Atom {
 // ---------------------------------------------------------------------------
 
 #[rustler::nif]
-fn publish<'a>(
-    env: Env<'a>,
+fn publish(
+    env: Env,
     session: ResourceArc<SessionRes>,
     broadcast_path: String,
-) -> rustler::NifResult<rustler::Term<'a>> {
+    publish_ref: Reference,
+) -> rustler::NifResult<Atom> {
     if !session.role.can_publish() {
         return Err(rustler::Error::Term(Box::new(
             "publish requires a publisher session; use MOQX.connect_publisher/1".to_string(),
         )));
     }
 
+    let caller_pid = env.pid();
     let namespace = normalize_path(&session.root, &broadcast_path);
     let inner = session.inner.clone();
 
-    // Send PublishNamespace to announce availability to the relay.
-    // This is fire-and-forget from the NIF perspective; the relay will
-    // respond with PublishNamespaceOk which is handled by the control loop.
-    let ns_clone = namespace.clone();
-    runtime().spawn(async move {
-        let request_id = inner.allocate_request_id();
-        let (tx, _rx) = oneshot::channel();
-        inner
-            .pending_publishes
-            .lock()
-            .unwrap()
-            .insert(request_id, PendingPublish { tx });
+    let request_id = inner.allocate_request_id();
+    let ref_env = OwnedEnv::new();
+    let publish_ref_term = ref_env.save(publish_ref);
 
-        let msg = PublishNamespace::new(request_id, Tuple::from_utf8_path(&ns_clone), &[]);
-        let _ = inner
+    inner.pending_publishes.lock().unwrap().insert(
+        request_id,
+        PendingPublish {
+            caller_pid,
+            ref_env,
+            publish_ref_term,
+            namespace: namespace.clone(),
+        },
+    );
+
+    runtime().spawn(async move {
+        let msg = PublishNamespace::new(request_id, Tuple::from_utf8_path(&namespace), &[]);
+        if inner
             .control_tx
             .send(ControlMessage::PublishNamespace(Box::new(msg)))
-            .await;
+            .await
+            .is_err()
+        {
+            let pending = inner.pending_publishes.lock().unwrap().remove(&request_id);
+            if let Some(pp) = pending {
+                let mut msg_env = OwnedEnv::new();
+                let pid = pp.caller_pid;
+
+                pp.ref_env.run(|ref_env| {
+                    let publish_ref = pp.publish_ref_term.load(ref_env);
+                    let _ = msg_env.send_and_clear(&pid, |env| {
+                        let nil = rustler::types::atom::nil().to_term(env);
+                        let payload = TransportErrorOut {
+                            op: atoms::publish(),
+                            message: "control channel closed".to_string(),
+                            kind: Some(atoms::runtime()),
+                            r#ref: publish_ref.in_env(env),
+                            handle: nil,
+                        };
+                        (atoms::moqx_transport_error(), payload).encode(env)
+                    });
+                });
+            }
+        }
     });
 
-    let res = ResourceArc::new(BroadcastProducerRes {
-        session: session.inner.clone(),
-        namespace,
-    });
-    Ok((atoms::ok(), res).encode(env))
+    Ok(atoms::ok())
 }
 
 #[rustler::nif]
