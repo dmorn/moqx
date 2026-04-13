@@ -9,6 +9,7 @@ use rustler::types::reference::Reference;
 use rustler::{Atom, Binary, Encoder, Env, LocalPid, NewBinary, OwnedEnv, Resource, ResourceArc};
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::time::{sleep, Duration, Instant};
 
 use moqtail::model::common::location::Location;
 use moqtail::model::common::pair::KeyValuePair;
@@ -1266,6 +1267,32 @@ async fn handle_fetch_stream(
     Ok(())
 }
 
+async fn wait_for_active_subscription(
+    inner: &Arc<SessionInner>,
+    track_alias: u64,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> bool {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let has_subscription = {
+            let guard = inner.active_subscriptions.lock().unwrap();
+            guard.contains_key(&track_alias)
+        };
+
+        if has_subscription {
+            return true;
+        }
+
+        if Instant::now() >= deadline {
+            return false;
+        }
+
+        sleep(poll_interval).await;
+    }
+}
+
 async fn handle_subgroup_stream(
     mut recv: wtransport::RecvStream,
     inner: &Arc<SessionInner>,
@@ -1291,10 +1318,12 @@ async fn handle_subgroup_stream(
     let has_extensions = header_type.has_extensions();
     let header_marks_eog = header_type.contains_end_of_group();
 
-    let has_subscription = {
-        let guard = inner.active_subscriptions.lock().unwrap();
-        guard.contains_key(&track_alias)
-    };
+    // Control and data travel on independent streams. A subgroup stream may arrive
+    // just before the control loop processes the matching SubscribeOk(track_alias).
+    // Wait briefly for local activation before deciding this alias is unknown.
+    let has_subscription =
+        wait_for_active_subscription(inner, track_alias, Duration::from_millis(500), Duration::from_millis(5)).await;
+
     if !has_subscription {
         return Ok(());
     }
