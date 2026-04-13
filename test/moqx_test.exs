@@ -165,8 +165,10 @@ defmodule MOQXTest do
                  end
   end
 
-  test "invalid URLs return an error tuple" do
-    assert {:error, reason} = MOQX.connect_publisher(":::invalid")
+  test "invalid URLs return a typed request error" do
+    assert {:error, %MOQX.RequestError{op: :connect, message: reason}} =
+             MOQX.connect_publisher(":::invalid")
+
     assert is_binary(reason)
   end
 

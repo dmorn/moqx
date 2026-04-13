@@ -7,7 +7,7 @@ defmodule MOQX.RequestError do
   """
 
   @enforce_keys [:op, :message]
-  defstruct [:op, :message, :code, :ref, :handle, details: %{}]
+  defstruct [:op, :message, :code, :ref, :handle]
 
   @type op ::
           :connect
@@ -24,8 +24,7 @@ defmodule MOQX.RequestError do
           message: String.t(),
           code: atom() | non_neg_integer() | nil,
           ref: reference() | nil,
-          handle: reference() | nil,
-          details: map()
+          handle: reference() | nil
         }
 end
 
@@ -38,7 +37,7 @@ defmodule MOQX.TransportError do
   """
 
   @enforce_keys [:op, :message]
-  defstruct [:op, :message, :kind, :ref, :handle, details: %{}]
+  defstruct [:op, :message, :kind, :ref, :handle]
 
   @type op :: MOQX.RequestError.op()
 
@@ -47,8 +46,7 @@ defmodule MOQX.TransportError do
           message: String.t(),
           kind: atom() | nil,
           ref: reference() | nil,
-          handle: reference() | nil,
-          details: map()
+          handle: reference() | nil
         }
 end
 

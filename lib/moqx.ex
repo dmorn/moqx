@@ -246,7 +246,8 @@ defmodule MOQX do
 
   Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
   """
-  @spec connect(String.t(), [connect_opt()]) :: :ok | {:error, String.t()}
+  @spec connect(String.t(), [connect_opt()]) ::
+          {:ok, connect_ref()} | {:error, MOQX.RequestError.t()}
   def connect(url, opts) when is_binary(url) and is_list(opts) do
     role =
       case Keyword.fetch(opts, :role) do
@@ -256,7 +257,15 @@ defmodule MOQX do
 
     {tls_verify, tls_cacertfile} = opts |> Keyword.get(:tls, []) |> normalize_connect_tls!()
 
-    MOQX.Native.connect(url, role, tls_verify, tls_cacertfile)
+    connect_ref = make_ref()
+
+    case MOQX.Native.connect(url, role, tls_verify, tls_cacertfile, connect_ref) do
+      :ok ->
+        {:ok, connect_ref}
+
+      {:error, reason} ->
+        {:error, %MOQX.RequestError{op: :connect, message: reason, ref: connect_ref}}
+    end
   end
 
   @doc """
@@ -265,7 +274,8 @@ defmodule MOQX do
   Accepts the same options as `connect/2`, except `:role` is fixed to `:publisher`.
   Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
   """
-  @spec connect_publisher(String.t(), Keyword.t()) :: :ok | {:error, String.t()}
+  @spec connect_publisher(String.t(), Keyword.t()) ::
+          {:ok, connect_ref()} | {:error, MOQX.RequestError.t()}
   def connect_publisher(url, opts \\ []) when is_binary(url) and is_list(opts) do
     connect(url, Keyword.put(opts, :role, :publisher))
   end
@@ -276,7 +286,8 @@ defmodule MOQX do
   Accepts the same options as `connect/2`, except `:role` is fixed to `:subscriber`.
   Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
   """
-  @spec connect_subscriber(String.t(), Keyword.t()) :: :ok | {:error, String.t()}
+  @spec connect_subscriber(String.t(), Keyword.t()) ::
+          {:ok, connect_ref()} | {:error, MOQX.RequestError.t()}
   def connect_subscriber(url, opts \\ []) when is_binary(url) and is_list(opts) do
     connect(url, Keyword.put(opts, :role, :subscriber))
   end
@@ -554,9 +565,24 @@ defmodule MOQX do
   `{:moqx_flushed, handle}` when the flush completes, or
   `{:moqx_error, handle, reason}` on failure.
   """
-  @spec flush_subgroup(subgroup_handle()) :: :ok | {:error, String.t()}
+  @spec flush_subgroup(subgroup_handle()) ::
+          {:ok, flush_ref()} | {:error, MOQX.RequestError.t()}
   def flush_subgroup(subgroup) when is_reference(subgroup) do
-    MOQX.Native.flush_subgroup(subgroup)
+    flush_ref = make_ref()
+
+    case MOQX.Native.flush_subgroup(subgroup, flush_ref) do
+      :ok ->
+        {:ok, flush_ref}
+
+      {:error, reason} ->
+        {:error,
+         %MOQX.RequestError{
+           op: :flush_subgroup,
+           message: reason,
+           ref: flush_ref,
+           handle: subgroup
+         }}
+    end
   end
 
   defp normalize_subgroup_id!(nil), do: nil

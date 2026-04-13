@@ -97,8 +97,8 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
 
   defp run_with_config(config) do
     Mix.shell().info("connecting to #{config.url} as subscriber...")
-    :ok = connect_subscriber!(config.url, config.timeout)
-    subscriber = await_connected!(config.timeout)
+    connect_ref = connect_subscriber!(config.url, config.timeout)
+    subscriber = await_connected!(connect_ref, config.timeout)
 
     try do
       cond do
@@ -176,10 +176,10 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
 
   defp connect_subscriber!(url, _timeout) do
     case MOQX.connect_subscriber(url) do
-      :ok ->
-        :ok
+      {:ok, connect_ref} ->
+        connect_ref
 
-      {:error, reason} ->
+      {:error, %MOQX.RequestError{message: reason}} ->
         hint =
           if String.contains?(reason, "connection closed by peer") do
             " (relay may require a different root path and/or JWT in ?jwt=...)"
@@ -191,10 +191,17 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
     end
   end
 
-  defp await_connected!(timeout) do
+  defp await_connected!(connect_ref, timeout) do
     receive do
-      {:moqx_connected, session} -> session
-      {:error, reason} -> Mix.raise("connect failed: #{reason}")
+      {:moqx_connect_ok, %MOQX.ConnectOk{ref: ^connect_ref, session: session}} ->
+        session
+
+      {:moqx_request_error, %MOQX.RequestError{op: :connect, ref: ^connect_ref, message: reason}} ->
+        Mix.raise("connect failed: #{reason}")
+
+      {:moqx_transport_error,
+       %MOQX.TransportError{op: :connect, ref: ^connect_ref, message: reason}} ->
+        Mix.raise("connect failed: #{reason}")
     after
       timeout -> Mix.raise("timed out waiting for connect")
     end

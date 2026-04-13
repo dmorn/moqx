@@ -89,11 +89,11 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
     Mix.shell().info("relay: #{cfg.relay_url}")
     Mix.shell().info("namespace/track: #{cfg.namespace}/#{cfg.track}")
 
-    :ok = MOQX.connect_publisher(cfg.relay_url)
-    publisher = await_connected!(cfg.timeout, :publisher)
+    {:ok, pub_ref} = MOQX.connect_publisher(cfg.relay_url)
+    publisher = await_connected!(pub_ref, cfg.timeout, :publisher)
 
-    :ok = MOQX.connect_subscriber(cfg.relay_url)
-    subscriber = await_connected!(cfg.timeout, :subscriber)
+    {:ok, sub_ref} = MOQX.connect_subscriber(cfg.relay_url)
+    subscriber = await_connected!(sub_ref, cfg.timeout, :subscriber)
 
     try do
       {:ok, broadcast} = MOQX.publish(publisher, cfg.namespace)
@@ -127,9 +127,9 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
     end
   end
 
-  defp await_connected!(timeout, role) do
+  defp await_connected!(connect_ref, timeout, role) do
     receive do
-      {:moqx_connected, session} ->
+      {:moqx_connect_ok, %MOQX.ConnectOk{ref: ^connect_ref, session: session}} ->
         if MOQX.session_role(session) != role do
           Mix.raise(
             "expected #{role} session, got #{inspect(MOQX.session_role(session))} (#{MOQX.session_version(session)})"
@@ -138,7 +138,11 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
 
         session
 
-      {:error, reason} ->
+      {:moqx_request_error, %MOQX.RequestError{op: :connect, ref: ^connect_ref, message: reason}} ->
+        Mix.raise("connect failed (#{role}): #{inspect(reason)}")
+
+      {:moqx_transport_error,
+       %MOQX.TransportError{op: :connect, ref: ^connect_ref, message: reason}} ->
         Mix.raise("connect failed (#{role}): #{inspect(reason)}")
     after
       timeout ->

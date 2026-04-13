@@ -14,7 +14,9 @@ use moqtail::model::common::location::Location;
 use moqtail::model::common::pair::KeyValuePair;
 use moqtail::model::common::tuple::{Tuple, TupleField};
 use moqtail::model::control::client_setup::ClientSetup;
-use moqtail::model::control::constant::{DRAFT_14, GroupOrder as MoqGroupOrder, PublishDoneStatusCode};
+use moqtail::model::control::constant::{
+    GroupOrder as MoqGroupOrder, PublishDoneStatusCode, DRAFT_14,
+};
 use moqtail::model::control::control_message::ControlMessage;
 use moqtail::model::control::fetch::{Fetch as MoqFetch, StandAloneFetchProps};
 use moqtail::model::control::publish_namespace::PublishNamespace;
@@ -34,18 +36,27 @@ mod atoms {
         ok,
         error,
         moqx_connected,
+        moqx_connect_ok,
         moqx_session_closed,
         moqx_subscribed,
         moqx_track_init,
         moqx_object,
         moqx_end_of_group,
         moqx_flushed,
+        moqx_flush_ok,
         moqx_track_ended,
         moqx_error,
+        moqx_request_error,
+        moqx_transport_error,
         moqx_fetch_started,
         moqx_fetch_object,
         moqx_fetch_done,
         moqx_fetch_error,
+        connect,
+        flush_subgroup,
+        runtime,
+        publisher,
+        subscriber,
         normal,
         does_not_exist,
         end_of_group,
@@ -63,6 +74,32 @@ struct MoqxObjectOut<'a> {
     status: Atom,
     extensions: Vec<rustler::Term<'a>>,
     payload: rustler::Term<'a>,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.ConnectOk"]
+struct ConnectOkOut<'a> {
+    r#ref: rustler::Term<'a>,
+    session: rustler::Term<'a>,
+    role: Atom,
+    version: String,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.FlushDone"]
+struct FlushDoneOut<'a> {
+    r#ref: rustler::Term<'a>,
+    handle: rustler::Term<'a>,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.TransportError"]
+struct TransportErrorOut<'a> {
+    op: Atom,
+    message: String,
+    kind: Option<Atom>,
+    r#ref: rustler::Term<'a>,
+    handle: rustler::Term<'a>,
 }
 
 fn status_to_atom(status: ObjectStatus) -> Atom {
@@ -202,7 +239,9 @@ enum SubgroupOp {
     Close {
         emit_end_of_group_marker: bool,
     },
-    Flush,
+    Flush {
+        tx: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// A handle to an open subgroup on a publishing track.
@@ -458,6 +497,7 @@ fn connect(
     role: String,
     tls_verify: String,
     tls_cacertfile: Option<String>,
+    connect_ref: Reference,
 ) -> rustler::NifResult<Atom> {
     let parsed_url = url::Url::parse(&url)
         .map_err(|e| rustler::Error::Term(Box::new(format!("invalid url: {e}"))))?;
@@ -468,21 +508,48 @@ fn connect(
     };
 
     let caller_pid = env.pid();
+    let ref_env = OwnedEnv::new();
+    let ref_term = ref_env.save(connect_ref);
 
     runtime().spawn(async move {
         match do_connect(parsed_url, role, tls).await {
             Ok(session_res) => {
                 let mut msg_env = OwnedEnv::new();
                 let resource = ResourceArc::new(session_res);
-                let _ = msg_env.send_and_clear(&caller_pid, |env| {
-                    (atoms::moqx_connected(), resource.encode(env)).encode(env)
+                ref_env.run(|saved_env| {
+                    let connect_ref_term = ref_term.load(saved_env);
+                    let role_atom = match resource.role {
+                        ConnectRole::Publisher => atoms::publisher(),
+                        ConnectRole::Subscriber => atoms::subscriber(),
+                    };
+
+                    let _ = msg_env.send_and_clear(&caller_pid, |env| {
+                        let payload = ConnectOkOut {
+                            r#ref: connect_ref_term.in_env(env),
+                            session: resource.encode(env),
+                            role: role_atom,
+                            version: resource.version.clone(),
+                        };
+                        (atoms::moqx_connect_ok(), payload).encode(env)
+                    });
                 });
             }
             Err(e) => {
                 let reason = format!("{e:#}");
                 let mut msg_env = OwnedEnv::new();
-                let _ = msg_env.send_and_clear(&caller_pid, |env| {
-                    (atoms::error(), reason).encode(env)
+                ref_env.run(|saved_env| {
+                    let connect_ref_term = ref_term.load(saved_env);
+                    let _ = msg_env.send_and_clear(&caller_pid, |env| {
+                        let nil = rustler::types::atom::nil().to_term(env);
+                        let payload = TransportErrorOut {
+                            op: atoms::connect(),
+                            message: reason.clone(),
+                            kind: Some(atoms::runtime()),
+                            r#ref: connect_ref_term.in_env(env),
+                            handle: nil,
+                        };
+                        (atoms::moqx_transport_error(), payload).encode(env)
+                    });
                 });
             }
         }
@@ -745,7 +812,11 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
             }
         }
         ControlMessage::FetchError(err) => {
-            let pending = inner.pending_fetches.lock().unwrap().remove(&err.request_id);
+            let pending = inner
+                .pending_fetches
+                .lock()
+                .unwrap()
+                .remove(&err.request_id);
             if let Some(pf) = pending {
                 let reason = format!(
                     "fetch rejected: error={:?} reason={:?}",
@@ -799,7 +870,9 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                 .unwrap()
                 .remove(&err.request_id);
             if let Some(pp) = pending {
-                let _ = pp.tx.send(Err(format!("publish namespace error: {:?}", err)));
+                let _ = pp
+                    .tx
+                    .send(Err(format!("publish namespace error: {:?}", err)));
             }
         }
         ControlMessage::Subscribe(sub) => {
@@ -958,8 +1031,9 @@ async fn handle_subgroup_stream(
     inner: &Arc<SessionInner>,
     header_type_byte: u8,
 ) -> anyhow::Result<()> {
-    let header_type = SubgroupHeaderType::try_from(header_type_byte as u64)
-        .map_err(|e| anyhow::anyhow!("invalid subgroup header type {header_type_byte:#x}: {e:?}"))?;
+    let header_type = SubgroupHeaderType::try_from(header_type_byte as u64).map_err(|e| {
+        anyhow::anyhow!("invalid subgroup header type {header_type_byte:#x}: {e:?}")
+    })?;
 
     let track_alias = read_varint_from_stream(&mut recv).await?;
     let group_id = read_varint_from_stream(&mut recv).await?;
@@ -1079,9 +1153,7 @@ fn send_subgroup_object(
             let ext_terms: Vec<rustler::Term> = ext_owned
                 .iter()
                 .map(|kv| match kv {
-                    KeyValuePair::VarInt { type_value, value } => {
-                        (*type_value, *value).encode(env)
-                    }
+                    KeyValuePair::VarInt { type_value, value } => (*type_value, *value).encode(env),
                     KeyValuePair::Bytes { type_value, value } => {
                         let mut b = NewBinary::new(env, value.len());
                         b.as_mut_slice().copy_from_slice(value);
@@ -1106,12 +1178,7 @@ fn send_subgroup_object(
     });
 }
 
-fn send_end_of_group(
-    inner: &Arc<SessionInner>,
-    track_alias: u64,
-    group_id: u64,
-    subgroup_id: u64,
-) {
+fn send_end_of_group(inner: &Arc<SessionInner>, track_alias: u64, group_id: u64, subgroup_id: u64) {
     let guard = inner.active_subscriptions.lock().unwrap();
     let Some(active) = guard.get(&track_alias) else {
         return;
@@ -1354,11 +1421,7 @@ fn publish<'a>(
             .unwrap()
             .insert(request_id, PendingPublish { tx });
 
-        let msg = PublishNamespace::new(
-            request_id,
-            Tuple::from_utf8_path(&ns_clone),
-            &[],
-        );
+        let msg = PublishNamespace::new(request_id, Tuple::from_utf8_path(&ns_clone), &[]);
         let _ = inner
             .control_tx
             .send(ControlMessage::PublishNamespace(Box::new(msg)))
@@ -1402,9 +1465,7 @@ fn track_next_group_id(track: ResourceArc<TrackProducerRes>) -> u64 {
 /// Decode `[{type :: non_neg_integer, value :: non_neg_integer | binary}]` from an Elixir
 /// term into `Vec<KeyValuePair>`. Enforces the MoQ parity rule (even types carry varints;
 /// odd types carry binaries) via `KeyValuePair::try_new_*`.
-fn decode_extensions<'a>(
-    term: rustler::Term<'a>,
-) -> rustler::NifResult<Vec<KeyValuePair>> {
+fn decode_extensions<'a>(term: rustler::Term<'a>) -> rustler::NifResult<Vec<KeyValuePair>> {
     let list: Vec<rustler::Term<'a>> = term.decode()?;
     let mut out = Vec::with_capacity(list.len());
     for item in list {
@@ -1543,26 +1604,13 @@ fn maybe_send_subgroup_error(res: &SubgroupRes, reason: String) {
 /// Try to send an Op into the subgroup's queue. No-op if the sender is already
 /// taken (either because the subgroup was closed, the consumer task finished, or
 /// the open path silently dropped).
-fn try_send_op(res: &SubgroupRes, op: SubgroupOp) {
+fn try_send_op(res: &SubgroupRes, op: SubgroupOp) -> bool {
     let guard = res.op_tx.lock().unwrap();
     if let Some(tx) = guard.as_ref() {
-        let _ = tx.send(op);
+        tx.send(op).is_ok()
+    } else {
+        false
     }
-}
-
-fn send_subgroup_flushed(res: &SubgroupRes) {
-    let guard = res.notify.lock().unwrap();
-    let Some(notify) = guard.as_ref() else {
-        return;
-    };
-    let pid = notify.caller_pid;
-    let mut msg_env = OwnedEnv::new();
-    notify.ref_env.run(|ref_env| {
-        let sg_ref = notify.subgroup_ref_term.load(ref_env);
-        let _ = msg_env.send_and_clear(&pid, |env| {
-            (atoms::moqx_flushed(), sg_ref.in_env(env)).encode(env)
-        });
-    });
 }
 
 #[rustler::nif]
@@ -1578,11 +1626,7 @@ fn open_subgroup<'a>(
     let has_extensions = extensions_present;
     let header_type = pick_subgroup_header_type(subgroup_id, has_extensions, end_of_group);
 
-    let key = format!(
-        "{}/{}",
-        track.namespace.trim_matches('/'),
-        track.track_name
-    );
+    let key = format!("{}/{}", track.namespace.trim_matches('/'), track.track_name);
 
     let silent_drop = Arc::new(AtomicBool::new(false));
     let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel::<SubgroupOp>();
@@ -1747,7 +1791,11 @@ async fn subgroup_consumer_loop(
                         forwarding_preference: ObjectForwardingPreference::Subgroup,
                         subgroup_id: Some(0),
                         status: ObjectStatus::EndOfGroup,
-                        extensions: if has_extensions { Some(Vec::new()) } else { None },
+                        extensions: if has_extensions {
+                            Some(Vec::new())
+                        } else {
+                            None
+                        },
                         payload: None,
                     };
                     if let Err(e) = stream.send_object(&eog_obj, previous_object_id).await {
@@ -1761,10 +1809,13 @@ async fn subgroup_consumer_loop(
                 break;
             }
 
-            SubgroupOp::Flush => match stream.flush().await {
-                Ok(()) => send_subgroup_flushed(&res),
-                Err(e) => maybe_send_subgroup_error(&res, format!("flush stream: {e:?}")),
-            },
+            SubgroupOp::Flush { tx } => {
+                let result = stream
+                    .flush()
+                    .await
+                    .map_err(|e| format!("flush stream: {e:?}"));
+                let _ = tx.send(result);
+            }
         }
     }
 
@@ -1782,8 +1833,7 @@ fn write_object<'a>(
     extensions: rustler::Term<'a>,
     status_atom: Atom,
 ) -> rustler::NifResult<Atom> {
-    let status = status_from_atom(status_atom)
-        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    let status = status_from_atom(status_atom).map_err(|e| rustler::Error::Term(Box::new(e)))?;
     let ext_kv = decode_extensions(extensions)?;
     let payload_bytes = Bytes::copy_from_slice(payload.as_slice());
 
@@ -1828,18 +1878,107 @@ fn close_subgroup(
 }
 
 #[rustler::nif]
-fn flush_subgroup(subgroup: ResourceArc<SubgroupRes>) -> rustler::NifResult<Atom> {
-    try_send_op(&subgroup, SubgroupOp::Flush);
+fn flush_subgroup(
+    env: Env,
+    subgroup: ResourceArc<SubgroupRes>,
+    flush_ref: Reference,
+) -> rustler::NifResult<Atom> {
+    let _ = env;
+    let (tx, rx) = oneshot::channel::<Result<(), String>>();
+
+    if !try_send_op(&subgroup, SubgroupOp::Flush { tx }) {
+        return Err(rustler::Error::Term(Box::new(
+            "subgroup is closed or unavailable".to_string(),
+        )));
+    }
+
+    let ref_env = OwnedEnv::new();
+    let ref_term = ref_env.save(flush_ref);
+    let subgroup_for_task = subgroup.clone();
+
+    runtime().spawn(async move {
+        match rx.await {
+            Ok(Ok(())) => {
+                let mut msg_env = OwnedEnv::new();
+                let guard = subgroup_for_task.notify.lock().unwrap();
+                let Some(notify) = guard.as_ref() else {
+                    return;
+                };
+                let pid = notify.caller_pid;
+
+                notify.ref_env.run(|sub_env| {
+                    let subgroup_ref = notify.subgroup_ref_term.load(sub_env);
+                    ref_env.run(|saved_env| {
+                        let flush_ref_term = ref_term.load(saved_env);
+                        let _ = msg_env.send_and_clear(&pid, |env| {
+                            let payload = FlushDoneOut {
+                                r#ref: flush_ref_term.in_env(env),
+                                handle: subgroup_ref.in_env(env),
+                            };
+                            (atoms::moqx_flush_ok(), payload).encode(env)
+                        });
+                    });
+                });
+            }
+            Ok(Err(reason)) => {
+                let mut msg_env = OwnedEnv::new();
+                let guard = subgroup_for_task.notify.lock().unwrap();
+                let Some(notify) = guard.as_ref() else {
+                    return;
+                };
+                let pid = notify.caller_pid;
+
+                notify.ref_env.run(|sub_env| {
+                    let subgroup_ref = notify.subgroup_ref_term.load(sub_env);
+                    ref_env.run(|saved_env| {
+                        let flush_ref_term = ref_term.load(saved_env);
+                        let _ = msg_env.send_and_clear(&pid, |env| {
+                            let payload = TransportErrorOut {
+                                op: atoms::flush_subgroup(),
+                                message: reason.clone(),
+                                kind: Some(atoms::runtime()),
+                                r#ref: flush_ref_term.in_env(env),
+                                handle: subgroup_ref.in_env(env),
+                            };
+                            (atoms::moqx_transport_error(), payload).encode(env)
+                        });
+                    });
+                });
+            }
+            Err(_) => {
+                let mut msg_env = OwnedEnv::new();
+                let guard = subgroup_for_task.notify.lock().unwrap();
+                let Some(notify) = guard.as_ref() else {
+                    return;
+                };
+                let pid = notify.caller_pid;
+
+                notify.ref_env.run(|sub_env| {
+                    let subgroup_ref = notify.subgroup_ref_term.load(sub_env);
+                    ref_env.run(|saved_env| {
+                        let flush_ref_term = ref_term.load(saved_env);
+                        let _ = msg_env.send_and_clear(&pid, |env| {
+                            let payload = TransportErrorOut {
+                                op: atoms::flush_subgroup(),
+                                message: "flush operation canceled".to_string(),
+                                kind: Some(atoms::runtime()),
+                                r#ref: flush_ref_term.in_env(env),
+                                handle: subgroup_ref.in_env(env),
+                            };
+                            (atoms::moqx_transport_error(), payload).encode(env)
+                        });
+                    });
+                });
+            }
+        }
+    });
+
     Ok(atoms::ok())
 }
 
 #[rustler::nif]
 fn finish_track(track: ResourceArc<TrackProducerRes>) -> rustler::NifResult<Atom> {
-    let key = format!(
-        "{}/{}",
-        track.namespace.trim_matches('/'),
-        track.track_name
-    );
+    let key = format!("{}/{}", track.namespace.trim_matches('/'), track.track_name);
     track
         .session
         .incoming_subscriptions

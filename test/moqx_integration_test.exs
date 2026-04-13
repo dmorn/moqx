@@ -16,28 +16,35 @@ defmodule MOQXIntegrationTest do
     System.get_env("MOQX_EXTERNAL_RELAY_NAMESPACE", "moqtail")
   end
 
-  defp await_connect_result! do
+  defp await_connect_result!(connect_ref) do
     receive do
-      {:moqx_connected, session} -> {:ok, session}
-      {:error, reason} -> {:error, reason}
+      {:moqx_connect_ok, %MOQX.ConnectOk{ref: ^connect_ref, session: session}} ->
+        {:ok, session}
+
+      {:moqx_request_error, %MOQX.RequestError{op: :connect, ref: ^connect_ref, message: reason}} ->
+        {:error, reason}
+
+      {:moqx_transport_error,
+       %MOQX.TransportError{op: :connect, ref: ^connect_ref, message: reason}} ->
+        {:error, reason}
     after
       @timeout -> raise "connect timeout"
     end
   end
 
   defp connect_subscriber! do
-    :ok = MOQX.connect_subscriber(relay_url())
+    {:ok, connect_ref} = MOQX.connect_subscriber(relay_url())
 
-    case await_connect_result!() do
+    case await_connect_result!(connect_ref) do
       {:ok, session} -> session
       {:error, reason} -> raise "subscriber connect failed: #{inspect(reason)}"
     end
   end
 
   defp connect_publisher! do
-    :ok = MOQX.connect_publisher(relay_url())
+    {:ok, connect_ref} = MOQX.connect_publisher(relay_url())
 
-    case await_connect_result!() do
+    case await_connect_result!(connect_ref) do
       {:ok, session} -> session
       {:error, reason} -> raise "publisher connect failed: #{inspect(reason)}"
     end
@@ -581,13 +588,13 @@ defmodule MOQXIntegrationTest do
 
         # First: exactly one data object, then exactly one :moqx_end_of_group, then nothing.
         assert_receive {:moqx_object, ^handle,
-                         %MOQX.Object{
-                           group_id: 0,
-                           subgroup_id: 0,
-                           object_id: 0,
-                           status: :normal,
-                           payload: ^payload
-                         }},
+                        %MOQX.Object{
+                          group_id: 0,
+                          subgroup_id: 0,
+                          object_id: 0,
+                          status: :normal,
+                          payload: ^payload
+                        }},
                        @timeout
 
         assert_receive {:moqx_end_of_group, ^handle, 0, 0}, @timeout
