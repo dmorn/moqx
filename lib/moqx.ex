@@ -12,7 +12,7 @@ defmodule MOQX do
 
   - split roles only: publisher sessions publish and subscriber sessions subscribe
   - WebTransport Draft 14 over moqtail-rs
-  - async operations are correlated (`connect_ref`, `flush_ref`, `fetch_ref`, subscription handle)
+  - async operations are correlated (`connect_ref`, `publish_ref`, `flush_ref`, `fetch_ref`, subscription handle)
   - async outcomes are explicit and typed:
     - lifecycle/success events (e.g. `%MOQX.ConnectOk{}`, `%MOQX.SubscribeOk{}`)
     - request-level failures (`{:moqx_request_error, %MOQX.RequestError{}}`)

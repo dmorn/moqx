@@ -112,7 +112,13 @@ When you connect to a rooted URL like `/room/123`, relay authorization is rooted
 that path. Publish and subscribe paths can stay relative to that root:
 
 ```elixir
-{:ok, broadcast} = MOQX.publish(publisher, "alice")
+{:ok, publish_ref} = MOQX.publish(publisher, "alice")
+
+broadcast =
+  receive do
+    {:moqx_publish_ok, %MOQX.PublishOk{ref: ^publish_ref, broadcast: broadcast}} -> broadcast
+  end
+
 {:ok, _sub_ref} = MOQX.subscribe(subscriber, "alice", "video")
 ```
 
@@ -146,8 +152,25 @@ Notes:
 
 ### Publish
 
+Publish namespace registration is asynchronous and explicit.
+`publish/2` returns `{:ok, publish_ref}` immediately, and the broadcast is
+usable only after `:moqx_publish_ok`:
+
 ```elixir
-{:ok, broadcast} = MOQX.publish(publisher, "anon/demo")
+{:ok, publish_ref} = MOQX.publish(publisher, "anon/demo")
+
+broadcast =
+  receive do
+    {:moqx_publish_ok,
+     %MOQX.PublishOk{ref: ^publish_ref, broadcast: broadcast, namespace: "anon/demo"}} ->
+      broadcast
+
+    {:moqx_request_error, %MOQX.RequestError{op: :publish, ref: ^publish_ref} = err} ->
+      raise "publish rejected: #{inspect(err)}"
+
+    {:moqx_transport_error, %MOQX.TransportError{op: :publish, ref: ^publish_ref} = err} ->
+      raise "publish transport failure: #{inspect(err)}"
+  end
 
 catalog_json = ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"video","role":"video"}]})
 {:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_json)
@@ -169,7 +192,12 @@ Use `publish_catalog/2` for initial publication, then `update_catalog/2` for
 subsequent catalog objects:
 
 ```elixir
-{:ok, broadcast} = MOQX.publish(publisher, "my-namespace")
+{:ok, publish_ref} = MOQX.publish(publisher, "my-namespace")
+
+broadcast =
+  receive do
+    {:moqx_publish_ok, %MOQX.PublishOk{ref: ^publish_ref, broadcast: broadcast}} -> broadcast
+  end
 
 catalog_json =
   ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"video","role":"video"}]})

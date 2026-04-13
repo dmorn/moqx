@@ -12,6 +12,11 @@ All notable changes to `moqx` will be documented in this file.
   `{:moqx_connect_ok, %MOQX.ConnectOk{...}}`,
   `{:moqx_request_error, %MOQX.RequestError{...}}`, and
   `{:moqx_transport_error, %MOQX.TransportError{...}}`.
+- **Breaking:** publish namespace readiness is now explicit and correlated.
+  `publish/2` returns `{:ok, publish_ref}` and the broadcast handle arrives only
+  via `{:moqx_publish_ok, %MOQX.PublishOk{...}}` after relay ack.
+  Failures are delivered as typed async request/transport errors with
+  `op: :publish` and the matching `publish_ref`.
 - **Breaking:** subgroup flush is now explicitly correlated.
   `flush_subgroup/1` returns `{:ok, flush_ref}` and asynchronous completion is
   delivered as `{:moqx_flush_ok, %MOQX.FlushDone{...}}` (or typed transport
