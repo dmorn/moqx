@@ -152,16 +152,29 @@ defmodule MOQX do
   @typedoc "Options for `close_subgroup/2`."
   @type close_subgroup_opt :: {:end_of_group, boolean()}
 
+  @typedoc "Opaque connect correlation reference returned by `connect/2`."
+  @opaque connect_ref :: reference()
+
+  @typedoc "Opaque flush correlation reference returned by `flush_subgroup/1`."
+  @opaque flush_ref :: reference()
+
+  @typedoc "Common asynchronous error message families."
+  @type async_error_message ::
+          {:moqx_request_error, MOQX.RequestError.t()}
+          | {:moqx_transport_error, MOQX.TransportError.t()}
+
   @typedoc "Publish-side subgroup messages delivered to the caller process."
   @type subgroup_message ::
-          {:moqx_flushed, subgroup_handle()}
-          | {:moqx_error, subgroup_handle(), String.t()}
+          {:moqx_flush_ok, MOQX.FlushDone.t()}
+          | async_error_message()
 
   @typedoc "Raw CMSF catalog payload bytes (UTF-8 JSON)."
   @type catalog_payload :: binary()
 
-  @typedoc "Connection result delivered to the caller process."
-  @type connect_message :: {:moqx_connected, session()} | {:error, String.t()}
+  @typedoc "Connection messages delivered to the caller process."
+  @type connect_message ::
+          {:moqx_connect_ok, MOQX.ConnectOk.t()}
+          | async_error_message()
 
   @typedoc """
   Opaque subscription handle returned by `subscribe/3,4`.
@@ -174,12 +187,12 @@ defmodule MOQX do
 
   @typedoc "Subscription messages delivered to the caller process."
   @type subscribe_message ::
-          {:moqx_subscribed, subscription_handle(), String.t(), String.t()}
-          | {:moqx_track_init, subscription_handle(), binary() | nil, map()}
-          | {:moqx_object, subscription_handle(), MOQX.Object.t()}
-          | {:moqx_end_of_group, subscription_handle(), non_neg_integer(), non_neg_integer()}
-          | {:moqx_track_ended, subscription_handle()}
-          | {:moqx_error, subscription_handle(), String.t()}
+          {:moqx_subscribe_ok, MOQX.SubscribeOk.t()}
+          | {:moqx_track_init, MOQX.TrackInit.t()}
+          | {:moqx_object, MOQX.ObjectReceived.t()}
+          | {:moqx_end_of_group, MOQX.EndOfGroup.t()}
+          | {:moqx_publish_done, MOQX.PublishDone.t()}
+          | async_error_message()
 
   @typedoc "Subscribe options accepted by `subscribe/4` and `subscribe_track/4`."
   @type subscribe_opt ::
@@ -206,10 +219,10 @@ defmodule MOQX do
 
   @typedoc "Fetch lifecycle messages delivered to the caller process."
   @type fetch_message ::
-          {:moqx_fetch_started, fetch_ref(), String.t(), String.t()}
-          | {:moqx_fetch_object, fetch_ref(), non_neg_integer(), non_neg_integer(), binary()}
-          | {:moqx_fetch_done, fetch_ref()}
-          | {:moqx_fetch_error, fetch_ref(), String.t()}
+          {:moqx_fetch_ok, MOQX.FetchOk.t()}
+          | {:moqx_fetch_object, MOQX.FetchObject.t()}
+          | {:moqx_fetch_done, MOQX.FetchDone.t()}
+          | async_error_message()
 
   @type connect_opt ::
           {:role, role()}
@@ -405,9 +418,8 @@ defmodule MOQX do
     group_id = MOQX.Native.track_next_group_id(track)
 
     with {:ok, sg} <- open_subgroup(track, group_id, subgroup_id: 0, priority: 0),
-         :ok <- write_object(sg, 0, data),
-         :ok <- close_subgroup(sg) do
-      :ok
+         :ok <- write_object(sg, 0, data) do
+      close_subgroup(sg)
     end
   end
 
@@ -468,7 +480,14 @@ defmodule MOQX do
 
     validate_open_subgroup_opts!(opts)
 
-    case MOQX.Native.open_subgroup(track, group_id, subgroup_id, priority, end_of_group, extensions_present) do
+    case MOQX.Native.open_subgroup(
+           track,
+           group_id,
+           subgroup_id,
+           priority,
+           end_of_group,
+           extensions_present
+         ) do
       {:ok, handle} -> {:ok, handle}
       {:error, _reason} = error -> error
     end
@@ -571,34 +590,38 @@ defmodule MOQX do
   end
 
   defp normalize_extensions!(exts) when is_list(exts) do
-    Enum.map(exts, fn
-      {type, value}
-      when is_integer(type) and type >= 0 and
-             (is_integer(value) or is_binary(value)) ->
-        cond do
-          rem(type, 2) == 0 and is_integer(value) and value >= 0 ->
-            {type, value}
-
-          rem(type, 2) == 1 and is_binary(value) ->
-            {type, value}
-
-          rem(type, 2) == 0 ->
-            raise ArgumentError,
-                  "extension type #{type} is even (varint) but value is not a non-negative integer: #{inspect(value)}"
-
-          true ->
-            raise ArgumentError,
-                  "extension type #{type} is odd (bytes) but value is not a binary: #{inspect(value)}"
-        end
-
-      other ->
-        raise ArgumentError,
-              "expected extension to be {non_neg_integer, non_neg_integer | binary}, got: #{inspect(other)}"
-    end)
+    Enum.map(exts, &normalize_extension!/1)
   end
 
   defp normalize_extensions!(other) do
     raise ArgumentError, "expected :extensions to be a list, got: #{inspect(other)}"
+  end
+
+  defp normalize_extension!({type, value}) when is_integer(type) and type >= 0 do
+    normalize_extension_value!(type, value)
+  end
+
+  defp normalize_extension!(other) do
+    raise ArgumentError,
+          "expected extension to be {non_neg_integer, non_neg_integer | binary}, got: #{inspect(other)}"
+  end
+
+  defp normalize_extension_value!(type, value) when rem(type, 2) == 0 do
+    if is_integer(value) and value >= 0 do
+      {type, value}
+    else
+      raise ArgumentError,
+            "extension type #{type} is even (varint) but value is not a non-negative integer: #{inspect(value)}"
+    end
+  end
+
+  defp normalize_extension_value!(type, value) do
+    if is_binary(value) do
+      {type, value}
+    else
+      raise ArgumentError,
+            "extension type #{type} is odd (bytes) but value is not a binary: #{inspect(value)}"
+    end
   end
 
   defp validate_open_subgroup_opts!(opts) do
