@@ -67,78 +67,38 @@ defmodule MOQXIntegrationTest do
     end
   end
 
-  defp subscribe_with_retry!(subscriber, namespace, track_name, timeout \\ @timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
-  end
+  defp await_publish_ok!(publish_ref, namespace, timeout) do
+    receive do
+      {:moqx_publish_ok,
+       %MOQX.PublishOk{ref: ^publish_ref, broadcast: broadcast, namespace: ^namespace}} ->
+        broadcast
 
-  defp subscribe_with_retry_loop(subscriber, namespace, track_name, deadline) do
-    {:ok, sub_ref} = MOQX.subscribe(subscriber, namespace, track_name)
+      {:moqx_request_error, %MOQX.RequestError{op: :publish, ref: ^publish_ref, message: reason}} ->
+        flunk("publish failed: #{inspect(reason)}")
 
-    remaining = deadline - System.monotonic_time(:millisecond)
-
-    if remaining <= 0 do
-      flunk("subscribe timeout for #{namespace}/#{track_name}")
-    else
-      receive do
-        {:moqx_subscribe_ok,
-         %MOQX.SubscribeOk{handle: ^sub_ref, namespace: ^namespace, track_name: ^track_name}} ->
-          :ok
-
-        {:moqx_request_error,
-         %MOQX.RequestError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
-          if String.contains?(reason, "Unknown track namespace") do
-            Process.sleep(100)
-            subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
-          else
-            flunk("subscribe failed: #{inspect(reason)}")
-          end
-
-        {:moqx_transport_error,
-         %MOQX.TransportError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
-          flunk("subscribe transport failed: #{inspect(reason)}")
-      after
-        min(1_000, remaining) ->
-          subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
-      end
+      {:moqx_transport_error,
+       %MOQX.TransportError{op: :publish, ref: ^publish_ref, message: reason}} ->
+        flunk("publish transport failed: #{inspect(reason)}")
+    after
+      timeout -> flunk("publish timeout for namespace #{namespace}")
     end
   end
 
-  defp subscribe_with_retry_handle!(subscriber, namespace, track_name, timeout \\ @timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    subscribe_with_retry_handle_loop(subscriber, namespace, track_name, deadline)
+  defp publish_and_await_broadcast!(publisher, namespace, timeout \\ @timeout) do
+    {:ok, publish_ref} = MOQX.publish(publisher, namespace)
+    await_publish_ok!(publish_ref, namespace, timeout)
   end
 
-  defp subscribe_with_retry_handle_loop(subscriber, namespace, track_name, deadline) do
+  defp subscribe_and_await!(subscriber, namespace, track_name) do
     {:ok, handle} = MOQX.subscribe(subscriber, namespace, track_name)
+    await_subscribed!(handle, namespace, track_name)
+    :ok
+  end
 
-    remaining = deadline - System.monotonic_time(:millisecond)
-
-    if remaining <= 0 do
-      flunk("subscribe timeout for #{namespace}/#{track_name}")
-    else
-      receive do
-        {:moqx_subscribe_ok,
-         %MOQX.SubscribeOk{handle: ^handle, namespace: ^namespace, track_name: ^track_name}} ->
-          handle
-
-        {:moqx_request_error,
-         %MOQX.RequestError{op: :subscribe, handle: ^handle, message: reason}} ->
-          if String.contains?(reason, "Unknown track namespace") do
-            Process.sleep(100)
-            subscribe_with_retry_handle_loop(subscriber, namespace, track_name, deadline)
-          else
-            flunk("subscribe failed: #{inspect(reason)}")
-          end
-
-        {:moqx_transport_error,
-         %MOQX.TransportError{op: :subscribe, handle: ^handle, message: reason}} ->
-          flunk("subscribe transport failed: #{inspect(reason)}")
-      after
-        min(1_000, remaining) ->
-          subscribe_with_retry_handle_loop(subscriber, namespace, track_name, deadline)
-      end
-    end
+  defp subscribe_and_await_handle!(subscriber, namespace, track_name) do
+    {:ok, handle} = MOQX.subscribe(subscriber, namespace, track_name)
+    await_subscribed!(handle, namespace, track_name)
+    handle
   end
 
   defp await_frame! do
@@ -334,10 +294,10 @@ defmodule MOQXIntegrationTest do
         track_name = "demo"
         payload = "hello-from-moqx-integration"
 
-        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        broadcast = publish_and_await_broadcast!(publisher, ns)
         {:ok, track} = MOQX.create_track(broadcast, track_name)
 
-        subscribe_with_retry!(subscriber, ns, track_name)
+        subscribe_and_await!(subscriber, ns, track_name)
 
         :ok = MOQX.write_frame(track, payload)
 
@@ -365,12 +325,12 @@ defmodule MOQXIntegrationTest do
         catalog_payload =
           ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"#{media_track_name}","role":"video","codec":"avc1.42C01F","packaging":"cmaf"}]})
 
-        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        broadcast = publish_and_await_broadcast!(publisher, ns)
         {:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_payload)
         {:ok, media_track} = MOQX.create_track(broadcast, media_track_name)
 
-        subscribe_with_retry!(subscriber, ns, "catalog")
-        subscribe_with_retry!(subscriber, ns, media_track_name)
+        subscribe_and_await!(subscriber, ns, "catalog")
+        subscribe_and_await!(subscriber, ns, media_track_name)
 
         :ok = MOQX.update_catalog(catalog_track, catalog_payload)
         :ok = MOQX.write_frame(media_track, media_payload)
@@ -402,10 +362,10 @@ defmodule MOQXIntegrationTest do
         payload1 = "before-unsub"
         payload2 = "after-unsub"
 
-        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        broadcast = publish_and_await_broadcast!(publisher, ns)
         {:ok, track} = MOQX.create_track(broadcast, track_name)
 
-        handle = subscribe_with_retry_handle!(subscriber, ns, track_name)
+        handle = subscribe_and_await_handle!(subscriber, ns, track_name)
 
         :ok = MOQX.write_frame(track, payload1)
         {_gid, got} = await_matching_payload_frame!(payload1)
@@ -434,10 +394,10 @@ defmodule MOQXIntegrationTest do
         ns = "moqx-e2e-unsub-idem-#{System.system_time(:millisecond)}"
         track_name = "demo"
 
-        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        broadcast = publish_and_await_broadcast!(publisher, ns)
         {:ok, _track} = MOQX.create_track(broadcast, track_name)
 
-        handle = subscribe_with_retry_handle!(subscriber, ns, track_name)
+        handle = subscribe_and_await_handle!(subscriber, ns, track_name)
 
         assert :ok = MOQX.unsubscribe(handle)
         assert_receive {:moqx_publish_done, %MOQX.PublishDone{handle: ^handle}}, @timeout
@@ -467,10 +427,10 @@ defmodule MOQXIntegrationTest do
         payload_a = "subgroup-A-payload"
         payload_b = "subgroup-B-payload"
 
-        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        broadcast = publish_and_await_broadcast!(publisher, ns)
         {:ok, track} = MOQX.create_track(broadcast, track_name)
 
-        subscribe_with_retry!(subscriber, ns, track_name)
+        subscribe_and_await!(subscriber, ns, track_name)
 
         group_id = 42
 
@@ -522,10 +482,10 @@ defmodule MOQXIntegrationTest do
         varint_ext = {2, 123_456}
         bytes_ext = {13, <<0xCA, 0xFE, 0xBA, 0xBE>>}
 
-        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        broadcast = publish_and_await_broadcast!(publisher, ns)
         {:ok, track} = MOQX.create_track(broadcast, track_name)
 
-        subscribe_with_retry!(subscriber, ns, track_name)
+        subscribe_and_await!(subscriber, ns, track_name)
 
         {:ok, sg} =
           MOQX.open_subgroup(track, 0,
@@ -565,7 +525,7 @@ defmodule MOQXIntegrationTest do
       publisher = connect_publisher!()
 
       try do
-        {:ok, broadcast} = MOQX.publish(publisher, "moqx-ext-reject")
+        broadcast = publish_and_await_broadcast!(publisher, "moqx-ext-reject")
         {:ok, track} = MOQX.create_track(broadcast, "demo")
 
         # open_subgroup itself no longer takes :extensions, so parity checks live
@@ -598,10 +558,10 @@ defmodule MOQXIntegrationTest do
         track_name = "demo"
         payload = "data-in-eog-subgroup"
 
-        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        broadcast = publish_and_await_broadcast!(publisher, ns)
         {:ok, track} = MOQX.create_track(broadcast, track_name)
 
-        handle = subscribe_with_retry_handle!(subscriber, ns, track_name)
+        handle = subscribe_and_await_handle!(subscriber, ns, track_name)
 
         # end_of_group: true selects the 0x18–0x1D header family AND enables
         # close_subgroup/emit_end_of_group_marker, which writes a Status=EndOfGroup
@@ -660,10 +620,10 @@ defmodule MOQXIntegrationTest do
         ns = "moqx-e2e-ext-missing-#{System.system_time(:millisecond)}"
         track_name = "demo"
 
-        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        broadcast = publish_and_await_broadcast!(publisher, ns)
         {:ok, track} = MOQX.create_track(broadcast, track_name)
 
-        handle = subscribe_with_retry_handle!(subscriber, ns, track_name)
+        handle = subscribe_and_await_handle!(subscriber, ns, track_name)
 
         {:ok, sg} = MOQX.open_subgroup(track, 0, subgroup_id: 0, extensions_present: false)
         :ok = MOQX.write_object(sg, 0, "p", extensions: [{2, 100}])
@@ -689,8 +649,11 @@ defmodule MOQXIntegrationTest do
       subscriber = connect_subscriber!()
 
       try do
-        assert {:error, reason} = MOQX.publish(subscriber, "test")
-        assert reason =~ "publish requires a publisher session"
+        assert {:error,
+                %MOQX.RequestError{
+                  op: :publish,
+                  message: "publish requires a publisher session; use MOQX.connect_publisher/1"
+                }} = MOQX.publish(subscriber, "test")
       after
         :ok = MOQX.close(subscriber)
       end

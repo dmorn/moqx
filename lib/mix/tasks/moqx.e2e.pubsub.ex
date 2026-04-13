@@ -96,13 +96,12 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
     subscriber = await_connected!(sub_ref, cfg.timeout, :subscriber)
 
     try do
-      {:ok, broadcast} = MOQX.publish(publisher, cfg.namespace)
+      {:ok, publish_ref} = MOQX.publish(publisher, cfg.namespace)
+      broadcast = await_published!(publish_ref, cfg.namespace, cfg.timeout)
       {:ok, track} = MOQX.create_track(broadcast, cfg.track)
 
-      # Some relays need a brief window to register the just-published namespace.
-      Process.sleep(300)
-
-      subscribe_with_retry!(subscriber, cfg.namespace, cfg.track, cfg.timeout)
+      {:ok, sub_ref} = MOQX.subscribe(subscriber, cfg.namespace, cfg.track)
+      await_subscribed!(sub_ref, cfg.namespace, cfg.track, cfg.timeout)
 
       # Send a few frames to smooth over first-object timing on remote relays.
       Enum.each(1..3, fn _ ->
@@ -150,40 +149,39 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
     end
   end
 
-  defp subscribe_with_retry!(subscriber, namespace, track_name, timeout) do
-    deadline = System.monotonic_time(:millisecond) + timeout
-    subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
+  defp await_published!(publish_ref, namespace, timeout) do
+    receive do
+      {:moqx_publish_ok,
+       %MOQX.PublishOk{ref: ^publish_ref, broadcast: broadcast, namespace: ^namespace}} ->
+        broadcast
+
+      {:moqx_request_error, %MOQX.RequestError{op: :publish, ref: ^publish_ref, message: reason}} ->
+        Mix.raise("publish failed: #{inspect(reason)}")
+
+      {:moqx_transport_error,
+       %MOQX.TransportError{op: :publish, ref: ^publish_ref, message: reason}} ->
+        Mix.raise("publish transport failure: #{inspect(reason)}")
+    after
+      timeout ->
+        Mix.raise("publish timeout for #{namespace}")
+    end
   end
 
-  defp subscribe_with_retry_loop(subscriber, namespace, track_name, deadline) do
-    {:ok, sub_ref} = MOQX.subscribe(subscriber, namespace, track_name)
+  defp await_subscribed!(sub_ref, namespace, track_name, timeout) do
+    receive do
+      {:moqx_subscribe_ok,
+       %MOQX.SubscribeOk{handle: ^sub_ref, namespace: ^namespace, track_name: ^track_name}} ->
+        :ok
 
-    remaining = deadline - System.monotonic_time(:millisecond)
+      {:moqx_request_error, %MOQX.RequestError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
+        Mix.raise("subscribe failed: #{inspect(reason)}")
 
-    if remaining <= 0 do
-      Mix.raise("subscribe timeout for #{namespace}/#{track_name}")
-    else
-      receive do
-        {:moqx_subscribe_ok,
-         %MOQX.SubscribeOk{handle: ^sub_ref, namespace: ^namespace, track_name: ^track_name}} ->
-          :ok
-
-        {:moqx_request_error,
-         %MOQX.RequestError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
-          if retryable_subscribe_reason?(reason) do
-            Process.sleep(150)
-            subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
-          else
-            Mix.raise("subscribe failed: #{inspect(reason)}")
-          end
-
-        {:moqx_transport_error,
-         %MOQX.TransportError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
-          Mix.raise("subscribe transport failure: #{inspect(reason)}")
-      after
-        min(1_000, remaining) ->
-          subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
-      end
+      {:moqx_transport_error,
+       %MOQX.TransportError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
+        Mix.raise("subscribe transport failure: #{inspect(reason)}")
+    after
+      timeout ->
+        Mix.raise("subscribe timeout for #{namespace}/#{track_name}")
     end
   end
 
@@ -219,13 +217,6 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
       end
     end
   end
-
-  defp retryable_subscribe_reason?(reason) when is_binary(reason) do
-    String.contains?(reason, "Unknown track namespace") or
-      String.contains?(reason, "internal error")
-  end
-
-  defp retryable_subscribe_reason?(_reason), do: false
 
   defp positive_int!(nil, _name, default), do: default
 
