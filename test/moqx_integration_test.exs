@@ -302,6 +302,41 @@ defmodule MOQXIntegrationTest do
     end
 
     @tag :integration
+    test "early subgroup data after subscribe is delivered without first-frame loss" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        for idx <- 1..20 do
+          ns = "moqx-e2e-early-data-#{System.system_time(:millisecond)}-#{idx}"
+          track_name = "demo"
+          payload = "early-data-#{idx}"
+
+          broadcast = publish_and_await_broadcast!(publisher, ns)
+          {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+          {:ok, handle} = MOQX.subscribe(subscriber, ns, track_name)
+
+          # Intentionally write before waiting for :moqx_subscribe_ok to stress
+          # the local control/data-plane ordering on the subscriber side.
+          :ok = MOQX.write_frame(track, payload)
+
+          await_subscribed!(handle, ns, track_name)
+
+          {group_id, got_payload} = await_matching_payload_frame!(payload)
+          assert is_integer(group_id)
+          assert got_payload == payload
+
+          :ok = MOQX.finish_track(track)
+          :ok = MOQX.unsubscribe(handle)
+        end
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
     test "publisher frame is received by subscriber on same relay" do
       publisher = connect_publisher!()
       subscriber = connect_subscriber!()
