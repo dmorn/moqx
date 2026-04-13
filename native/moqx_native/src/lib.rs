@@ -258,14 +258,28 @@ struct PendingPublish {
     namespace: String,
 }
 
-/// A track that a remote subscriber has subscribed to via the relay.
-/// The publisher needs to send data for this track.
-struct IncomingSubscription {
-    #[allow(dead_code)]
-    request_id: u64,
-    track_alias: u64,
-    #[allow(dead_code)]
-    track_name: String,
+struct TrackLifecycle {
+    created: bool,
+    active_alias: Option<u64>,
+    closed: bool,
+}
+
+impl TrackLifecycle {
+    fn created() -> Self {
+        Self {
+            created: true,
+            active_alias: None,
+            closed: false,
+        }
+    }
+
+    fn pending() -> Self {
+        Self {
+            created: false,
+            active_alias: None,
+            closed: false,
+        }
+    }
 }
 
 /// Shared session state behind Arc, accessed by background tasks and NIF calls.
@@ -278,9 +292,8 @@ struct SessionInner {
     active_subscriptions: std::sync::Mutex<HashMap<u64, ActiveSubscription>>,
     pending_fetches: std::sync::Mutex<HashMap<u64, PendingFetch>>,
     pending_publishes: std::sync::Mutex<HashMap<u64, PendingPublish>>,
-    /// Incoming subscriptions from the relay (subscriber → relay → publisher).
-    /// Keyed by "namespace/track_name" so write_frame can find the correct track_alias.
-    incoming_subscriptions: std::sync::Mutex<HashMap<String, IncomingSubscription>>,
+    /// Publisher-side track lifecycle keyed by "namespace/track_name".
+    track_lifecycle: std::sync::Mutex<HashMap<String, TrackLifecycle>>,
     #[allow(dead_code)]
     shutdown_tx: watch::Sender<bool>,
 }
@@ -293,6 +306,45 @@ impl SessionInner {
 
     fn allocate_track_alias(&self) -> u64 {
         self.next_track_alias.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn register_track(&self, key: &str) {
+        let mut guard = self.track_lifecycle.lock().unwrap();
+        let entry = guard.entry(key.to_string()).or_insert_with(TrackLifecycle::pending);
+        entry.created = true;
+        entry.closed = false;
+    }
+
+    fn activate_track(&self, key: &str, track_alias: u64) {
+        let mut guard = self.track_lifecycle.lock().unwrap();
+        let entry = guard.entry(key.to_string()).or_insert_with(TrackLifecycle::pending);
+        if !entry.closed {
+            entry.active_alias = Some(track_alias);
+        }
+    }
+
+    fn write_track_alias(&self, key: &str) -> Result<u64, &'static str> {
+        let guard = self.track_lifecycle.lock().unwrap();
+        let Some(entry) = guard.get(key) else {
+            return Err("track_not_active");
+        };
+
+        if entry.closed {
+            return Err("track_closed");
+        }
+
+        if !entry.created {
+            return Err("track_not_active");
+        }
+
+        entry.active_alias.ok_or("track_not_active")
+    }
+
+    fn close_track(&self, key: &str) {
+        let mut guard = self.track_lifecycle.lock().unwrap();
+        let entry = guard.entry(key.to_string()).or_insert_with(TrackLifecycle::created);
+        entry.closed = true;
+        entry.active_alias = None;
     }
 }
 
@@ -356,11 +408,6 @@ pub struct SubgroupRes {
     header_type: SubgroupHeaderType,
     // When None, the resource is unusable (consumer task exited). Operations become no-ops.
     op_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<SubgroupOp>>>,
-    // When true, writes/closes/flushes on a failed subgroup drop silently instead of
-    // emitting an async transport error. Used to match v0.4.x semantics when a write arrives
-    // before any subscriber has registered — the relay has nowhere to deliver it, but
-    // this is not a programming error.
-    silent_drop: Arc<AtomicBool>,
     // Mutex<Option<_>> provides Sync around the !Sync OwnedEnv inside SubgroupNotify.
     // Populated exactly once by `open_subgroup` right after the resource is created.
     notify: std::sync::Mutex<Option<SubgroupNotify>>,
@@ -727,7 +774,7 @@ async fn do_connect(
         active_subscriptions: std::sync::Mutex::new(HashMap::new()),
         pending_fetches: std::sync::Mutex::new(HashMap::new()),
         pending_publishes: std::sync::Mutex::new(HashMap::new()),
-        incoming_subscriptions: std::sync::Mutex::new(HashMap::new()),
+        track_lifecycle: std::sync::Mutex::new(HashMap::new()),
         shutdown_tx,
     });
 
@@ -1081,14 +1128,7 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
             let namespace = sub.track_namespace.to_utf8_path();
 
             let key = format!("{}/{}", namespace.trim_matches('/'), track_name);
-            inner.incoming_subscriptions.lock().unwrap().insert(
-                key,
-                IncomingSubscription {
-                    request_id: sub.request_id,
-                    track_alias,
-                    track_name: track_name.clone(),
-                },
-            );
+            inner.activate_track(&key, track_alias);
 
             // Send SubscribeOk back to the relay
             let ok = SubscribeOk::new_ascending_no_content(
@@ -1673,6 +1713,9 @@ fn create_track<'a>(
     broadcast: ResourceArc<BroadcastProducerRes>,
     track_name: String,
 ) -> rustler::NifResult<rustler::Term<'a>> {
+    let key = format!("{}/{}", broadcast.namespace.trim_matches('/'), track_name);
+    broadcast.session.register_track(&key);
+
     let res = ResourceArc::new(TrackProducerRes {
         session: broadcast.session.clone(),
         namespace: broadcast.namespace.clone(),
@@ -1833,17 +1876,8 @@ fn send_subgroup_error(res: &SubgroupRes, reason: String) {
     });
 }
 
-/// Wrapper that respects the silent_drop flag set by the open task.
-fn maybe_send_subgroup_error(res: &SubgroupRes, reason: String) {
-    if res.silent_drop.load(Ordering::SeqCst) {
-        return;
-    }
-    send_subgroup_error(res, reason);
-}
-
 /// Try to send an Op into the subgroup's queue. No-op if the sender is already
-/// taken (either because the subgroup was closed, the consumer task finished, or
-/// the open path silently dropped).
+/// taken (either because the subgroup was closed or the consumer task finished).
 fn try_send_op(res: &SubgroupRes, op: SubgroupOp) -> bool {
     let guard = res.op_tx.lock().unwrap();
     if let Some(tx) = guard.as_ref() {
@@ -1867,8 +1901,11 @@ fn open_subgroup<'a>(
     let header_type = pick_subgroup_header_type(subgroup_id, has_extensions, end_of_group);
 
     let key = format!("{}/{}", track.namespace.trim_matches('/'), track.track_name);
+    let track_alias = track
+        .session
+        .write_track_alias(&key)
+        .map_err(|reason| rustler::Error::Term(Box::new(reason.to_string())))?;
 
-    let silent_drop = Arc::new(AtomicBool::new(false));
     let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel::<SubgroupOp>();
 
     let res = ResourceArc::new(SubgroupRes {
@@ -1876,7 +1913,6 @@ fn open_subgroup<'a>(
         group_id,
         header_type,
         op_tx: std::sync::Mutex::new(Some(op_tx)),
-        silent_drop: silent_drop.clone(),
         notify: std::sync::Mutex::new(None),
         closed: AtomicBool::new(false),
     });
@@ -1895,13 +1931,12 @@ fn open_subgroup<'a>(
     runtime().spawn(async move {
         subgroup_consumer_loop(
             res_for_task,
-            key,
+            track_alias,
             group_id,
             subgroup_id,
             priority,
             has_extensions,
             end_of_group,
-            silent_drop,
             op_rx,
         )
         .await;
@@ -1913,27 +1948,14 @@ fn open_subgroup<'a>(
 #[allow(clippy::too_many_arguments)]
 async fn subgroup_consumer_loop(
     res: ResourceArc<SubgroupRes>,
-    key: String,
+    track_alias: u64,
     group_id: u64,
     subgroup_id: Option<u64>,
     priority: u8,
     has_extensions: bool,
     end_of_group: bool,
-    silent_drop: Arc<AtomicBool>,
     mut op_rx: tokio::sync::mpsc::UnboundedReceiver<SubgroupOp>,
 ) {
-    // Resolve track_alias synchronously (no retry — matches v0.4.x behavior).
-    let track_alias = {
-        let guard = res.session.incoming_subscriptions.lock().unwrap();
-        guard.get(&key).map(|s| s.track_alias)
-    };
-    let Some(track_alias) = track_alias else {
-        silent_drop.store(true, Ordering::SeqCst);
-        // Drain and drop any queued ops.
-        while op_rx.recv().await.is_some() {}
-        return;
-    };
-
     let header = build_subgroup_header(
         track_alias,
         group_id,
@@ -1962,7 +1984,7 @@ async fn subgroup_consumer_loop(
     {
         Ok(s) => s,
         Err(reason) => {
-            maybe_send_subgroup_error(&res, reason);
+            send_subgroup_error(&res, reason);
             while op_rx.recv().await.is_some() {}
             return;
         }
@@ -1995,7 +2017,7 @@ async fn subgroup_consumer_loop(
                     // Caller passed extensions but the header was opened without
                     // extensions_present: true. Surface as an explicit error rather than
                     // silently corrupting the stream.
-                    maybe_send_subgroup_error(
+                    send_subgroup_error(
                         &res,
                         "write_object: cannot attach extensions to a subgroup opened without extensions_present: true"
                             .to_string(),
@@ -2013,7 +2035,7 @@ async fn subgroup_consumer_loop(
                     payload: payload_opt,
                 };
                 if let Err(e) = stream.send_object(&object, previous_object_id).await {
-                    maybe_send_subgroup_error(&res, format!("send_object: {e:?}"));
+                    send_subgroup_error(&res, format!("send_object: {e:?}"));
                 } else {
                     previous_object_id = Some(object_id);
                 }
@@ -2039,11 +2061,11 @@ async fn subgroup_consumer_loop(
                         payload: None,
                     };
                     if let Err(e) = stream.send_object(&eog_obj, previous_object_id).await {
-                        maybe_send_subgroup_error(&res, format!("send eog marker: {e:?}"));
+                        send_subgroup_error(&res, format!("send eog marker: {e:?}"));
                     }
                 }
                 if let Err(e) = stream.finish().await {
-                    maybe_send_subgroup_error(&res, format!("finish stream: {e:?}"));
+                    send_subgroup_error(&res, format!("finish stream: {e:?}"));
                 }
                 finished = true;
                 break;
@@ -2219,12 +2241,7 @@ fn flush_subgroup(
 #[rustler::nif]
 fn finish_track(track: ResourceArc<TrackProducerRes>) -> rustler::NifResult<Atom> {
     let key = format!("{}/{}", track.namespace.trim_matches('/'), track.track_name);
-    track
-        .session
-        .incoming_subscriptions
-        .lock()
-        .unwrap()
-        .remove(&key);
+    track.session.close_track(&key);
 
     Ok(atoms::ok())
 }
