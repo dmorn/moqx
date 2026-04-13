@@ -277,16 +277,21 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
 
   defp await_catalog_payload(sub_ref, timeout) do
     receive do
-      {:moqx_object, ^sub_ref, %MOQX.Object{payload: payload}} ->
+      {:moqx_object,
+       %MOQX.ObjectReceived{handle: ^sub_ref, object: %MOQX.Object{payload: payload}}} ->
         {:ok, payload}
 
-      {:moqx_track_init, ^sub_ref, _init_data, _track_meta} ->
+      {:moqx_track_init, %MOQX.TrackInit{handle: ^sub_ref}} ->
         await_catalog_payload(sub_ref, timeout)
 
-      {:moqx_end_of_group, ^sub_ref, _group_id, _subgroup_id} ->
+      {:moqx_end_of_group, %MOQX.EndOfGroup{handle: ^sub_ref}} ->
         await_catalog_payload(sub_ref, timeout)
 
-      {:moqx_error, ^sub_ref, reason} ->
+      {:moqx_request_error, %MOQX.RequestError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
+        {:error, reason}
+
+      {:moqx_transport_error,
+       %MOQX.TransportError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
         {:error, reason}
     after
       timeout ->
@@ -413,8 +418,16 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
 
   defp await_subscribed!(sub_ref, namespace, track_name, timeout) do
     receive do
-      {:moqx_subscribed, ^sub_ref, ^namespace, ^track_name} -> :ok
-      {:moqx_error, ^sub_ref, reason} -> Mix.raise("subscribe failed: #{reason}")
+      {:moqx_subscribe_ok,
+       %MOQX.SubscribeOk{handle: ^sub_ref, namespace: ^namespace, track_name: ^track_name}} ->
+        :ok
+
+      {:moqx_request_error, %MOQX.RequestError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
+        Mix.raise("subscribe failed: #{reason}")
+
+      {:moqx_transport_error,
+       %MOQX.TransportError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
+        Mix.raise("subscribe transport failure: #{reason}")
     after
       timeout -> Mix.raise("timed out waiting for subscription")
     end
@@ -451,7 +464,8 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
           receive_after_ms(next_tick_mono_ms, now_mono_ms, stream_started_mono_ms, run_timeout_ms)
 
         receive do
-          {:moqx_object, _sub_ref, %MOQX.Object{group_id: group_id, payload: payload}} ->
+          {:moqx_object,
+           %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: payload}}} ->
             stream_stats_loop(
               interval_ms,
               DemoDebugStats.add_frame(stats, group_id, payload),
@@ -460,7 +474,7 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
               next_tick_mono_ms
             )
 
-          {:moqx_end_of_group, _sub_ref, _group_id, _subgroup_id} ->
+          {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
             stream_stats_loop(
               interval_ms,
               stats,
@@ -469,10 +483,10 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
               next_tick_mono_ms
             )
 
-          {:moqx_error, _sub_ref, reason} ->
+          {:moqx_transport_error, %MOQX.TransportError{message: reason}} ->
             Mix.raise("stream error: #{reason}")
 
-          {:moqx_track_ended, _sub_ref} ->
+          {:moqx_publish_done, %MOQX.PublishDone{}} ->
             Mix.shell().info("track ended")
         after
           receive_after_ms ->

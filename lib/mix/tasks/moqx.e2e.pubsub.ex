@@ -164,16 +164,22 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
       Mix.raise("subscribe timeout for #{namespace}/#{track_name}")
     else
       receive do
-        {:moqx_subscribed, ^sub_ref, ^namespace, ^track_name} ->
+        {:moqx_subscribe_ok,
+         %MOQX.SubscribeOk{handle: ^sub_ref, namespace: ^namespace, track_name: ^track_name}} ->
           :ok
 
-        {:moqx_error, ^sub_ref, reason} ->
+        {:moqx_request_error,
+         %MOQX.RequestError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
           if retryable_subscribe_reason?(reason) do
             Process.sleep(150)
             subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
           else
             Mix.raise("subscribe failed: #{inspect(reason)}")
           end
+
+        {:moqx_transport_error,
+         %MOQX.TransportError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
+          Mix.raise("subscribe transport failure: #{inspect(reason)}")
       after
         min(1_000, remaining) ->
           subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
@@ -193,16 +199,19 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
       Mix.raise("frame timeout waiting for payload #{inspect(expected_payload)}")
     else
       receive do
-        {:moqx_object, _sub_ref, %MOQX.Object{group_id: group_id, payload: ^expected_payload}} ->
+        {:moqx_object,
+         %MOQX.ObjectReceived{
+           object: %MOQX.Object{group_id: group_id, payload: ^expected_payload}
+         }} ->
           {group_id, expected_payload}
 
-        {:moqx_object, _sub_ref, %MOQX.Object{}} ->
+        {:moqx_object, %MOQX.ObjectReceived{}} ->
           await_matching_payload_frame_loop(expected_payload, deadline)
 
-        {:moqx_end_of_group, _sub_ref, _group_id, _subgroup_id} ->
+        {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
           await_matching_payload_frame_loop(expected_payload, deadline)
 
-        {:moqx_error, _sub_ref, reason} ->
+        {:moqx_transport_error, %MOQX.TransportError{message: reason}} ->
           Mix.raise("frame receive failed: #{inspect(reason)}")
       after
         remaining ->

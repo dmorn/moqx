@@ -5,95 +5,47 @@ defmodule MOQX do
   Elixir bindings for Media over QUIC (MOQ) via Rustler NIFs on top of
   `moqtail-rs`.
 
-  `moqx` intentionally exposes a narrow client-only contract:
+  `MOQX` is a thin, low-level, functional async API with explicit correlation
+  and typed async message families.
+
+  Core design points:
 
   - split roles only: publisher sessions publish and subscriber sessions subscribe
-  - WebTransport (Draft 14) only
-  - minimal client TLS controls with verification on by default
-  - relay auth carried in the connect URL query as `?jwt=...`
-  - rooted relay URLs whose path must match the token `root`
+  - WebTransport Draft 14 over moqtail-rs
+  - async operations are correlated (`connect_ref`, `flush_ref`, `fetch_ref`, subscription handle)
+  - async outcomes are explicit and typed:
+    - lifecycle/success events (e.g. `%MOQX.ConnectOk{}`, `%MOQX.SubscribeOk{}`)
+    - request-level failures (`{:moqx_request_error, %MOQX.RequestError{}}`)
+    - transport/runtime failures (`{:moqx_transport_error, %MOQX.TransportError{}}`)
 
-  Relay/server listener APIs remain out of scope.
-
-  `MOQX` exposes one clear, supported flow:
-
-  1. connect a publisher session with `connect_publisher/1`
-  2. connect a subscriber session with `connect_subscriber/1`
-  3. publish a broadcast with `publish/2`
-  4. optionally publish catalog objects with `publish_catalog/2` and `update_catalog/2`
-  5. create one or more tracks with `create_track/2`
-  6. send frames with `write_frame/2`
-  7. subscribe with `subscribe/3` or `subscribe_track/3`
-  8. fetch raw track objects with `fetch/4` or `fetch_catalog/2` (subscriber only)
-  9. decode a CMSF catalog with `MOQX.Catalog.decode/1` and discover tracks
-
-  Connection and subscription are asynchronous:
-
-  - `connect_publisher/1`, `connect_subscriber/1`, and `connect/2` return `:ok` immediately
-  - the caller later receives exactly one connect result: `{:moqx_connected, session}` or `{:error, reason}`
-  - `subscribe/3` returns `{:ok, handle}` immediately; call `unsubscribe/1` to cancel
-  - the caller later receives subscription lifecycle messages
-  - immediate misuse errors are returned synchronously as `{:error, reason}`
-  - asynchronous relay/runtime failures arrive later as process messages
+  Convenience helpers (`write_frame/2`, `publish_catalog/2`, `fetch_catalog/2`,
+  `await_catalog/2`) are wrappers on top of the core primitives.
 
   ## Example
 
-      :ok = MOQX.connect_publisher("https://relay.example.com")
-
-      publisher =
-        receive do
-          {:moqx_connected, session} -> session
-          {:error, reason} -> raise "publisher connect failed: \#{inspect(reason)}"
-        end
-
-      {:ok, broadcast} = MOQX.publish(publisher, "anon/demo")
-      {:ok, track} = MOQX.create_track(broadcast, "video")
-      :ok = MOQX.write_frame(track, "frame-1")
-      :ok = MOQX.finish_track(track)
-
-      :ok = MOQX.connect_subscriber("https://relay.example.com")
+      {:ok, connect_ref} = MOQX.connect_subscriber("https://relay.example.com")
 
       subscriber =
         receive do
-          {:moqx_connected, session} -> session
-          {:error, reason} -> raise "subscriber connect failed: \#{inspect(reason)}"
+          {:moqx_connect_ok, %MOQX.ConnectOk{ref: ^connect_ref, session: session}} -> session
+          {:moqx_request_error, %MOQX.RequestError{op: :connect, ref: ^connect_ref} = err} ->
+            raise "connect rejected: \#{inspect(err)}"
+
+          {:moqx_transport_error, %MOQX.TransportError{op: :connect, ref: ^connect_ref} = err} ->
+            raise "connect runtime failure: \#{inspect(err)}"
         end
 
-      {:ok, sub} = MOQX.subscribe(subscriber, "anon/demo", "video")
+      {:ok, handle} = MOQX.subscribe(subscriber, "anon/demo", "video")
 
       receive do
-        {:moqx_subscribed, ^sub, "anon/demo", "video"} -> :ok
+        {:moqx_subscribe_ok, %MOQX.SubscribeOk{handle: ^handle}} -> :ok
       end
 
       receive do
-        {:moqx_track_init, ^sub, _init_data, _track_meta} -> :ok
+        {:moqx_object, %MOQX.ObjectReceived{handle: ^handle, object: %MOQX.Object{} = obj}} -> obj
       end
 
-      receive do
-        {:moqx_object, ^sub, %MOQX.Object{group_id: 0, payload: payload}} -> payload
-      end
-
-      :ok = MOQX.unsubscribe(sub)
-
-      receive do
-        {:moqx_track_ended, ^sub} -> :ok
-      end
-
-      # Fetch and decode a remote catalog
-      {:ok, ref} = MOQX.fetch_catalog(subscriber)
-      {:ok, catalog} = MOQX.await_catalog(ref)
-
-      catalog
-      |> MOQX.Catalog.video_tracks()
-      |> Enum.map(& &1.name)
-
-  Broadcast announcement is lazy: a broadcast becomes visible to subscribers
-  on the first successful `write_frame/2` for any track in that broadcast.
-
-  TLS verification is enabled by default. For local development against a
-  self-signed relay, either configure a trusted local certificate chain or opt
-  into `tls: [verify: :insecure]` explicitly. Custom trust roots can be passed
-  with `tls: [cacertfile: "/path/to/rootCA.pem"]`.
+      :ok = MOQX.unsubscribe(handle)
   """
 
   @typedoc "Publisher or subscriber session role."
@@ -108,7 +60,7 @@ defmodule MOQX do
   @typedoc "TLS connect options."
   @type tls_opt :: {:verify, tls_verify()} | {:cacertfile, String.t()}
 
-  @typedoc "Opaque session resource returned in `{:moqx_connected, session}`."
+  @typedoc "Opaque session resource returned via `%MOQX.ConnectOk{}`."
   @opaque session :: reference()
 
   @typedoc "Opaque broadcast resource returned by `publish/2`."
@@ -244,7 +196,8 @@ defmodule MOQX do
   `connect/2` is the dynamic-role entrypoint only. There is no supported merged
   publisher/subscriber session mode, and listener/server APIs remain out of scope.
 
-  Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
+  Returns `{:ok, connect_ref}` immediately. The caller later receives a
+  `t:connect_message/0` correlated by that ref.
   """
   @spec connect(String.t(), [connect_opt()]) ::
           {:ok, connect_ref()} | {:error, MOQX.RequestError.t()}
@@ -272,7 +225,7 @@ defmodule MOQX do
   Connects a publisher session.
 
   Accepts the same options as `connect/2`, except `:role` is fixed to `:publisher`.
-  Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
+  Returns `{:ok, connect_ref}` immediately.
   """
   @spec connect_publisher(String.t(), Keyword.t()) ::
           {:ok, connect_ref()} | {:error, MOQX.RequestError.t()}
@@ -284,7 +237,7 @@ defmodule MOQX do
   Connects a subscriber session.
 
   Accepts the same options as `connect/2`, except `:role` is fixed to `:subscriber`.
-  Returns `:ok` immediately. The caller later receives a `t:connect_message/0`.
+  Returns `{:ok, connect_ref}` immediately.
   """
   @spec connect_subscriber(String.t(), Keyword.t()) ::
           {:ok, connect_ref()} | {:error, MOQX.RequestError.t()}
@@ -437,7 +390,8 @@ defmodule MOQX do
   @doc """
   Finishes a track.
 
-  Subscribers receive `{:moqx_track_ended, handle}` after the track is fully consumed.
+  Subscribers eventually receive terminal lifecycle via
+  `{:moqx_publish_done, %MOQX.PublishDone{...}}`.
   """
   @spec finish_track(track()) :: :ok | {:error, String.t()}
   def finish_track(track) do
@@ -453,7 +407,7 @@ defmodule MOQX do
 
   Returns `{:ok, handle}` synchronously (the QUIC uni-stream is opened
   asynchronously). Any async failure during stream open, write, flush, or close
-  arrives later on the caller process as `{:moqx_error, handle, reason}`.
+  arrives later as `{:moqx_transport_error, %MOQX.TransportError{...}}`.
 
   `group_id` is an explicit non-negative integer chosen by the caller. Multiple
   calls with the same `group_id` but different `:subgroup_id` open parallel
@@ -508,7 +462,7 @@ defmodule MOQX do
   Writes one object to an open subgroup.
 
   Returns `:ok` after the bytes are queued to the underlying Tokio runtime.
-  Any async failure arrives as `{:moqx_error, handle, reason}`.
+  Any async failure arrives as `{:moqx_transport_error, %MOQX.TransportError{...}}`.
 
   `object_id` must be strictly greater than the previous object's id on the
   same subgroup. Pick `0` for the first object and increment monotonically.
@@ -561,9 +515,9 @@ defmodule MOQX do
   @doc """
   Requests a flush of the subgroup's underlying QUIC stream.
 
-  Returns `:ok` immediately. The caller later receives
-  `{:moqx_flushed, handle}` when the flush completes, or
-  `{:moqx_error, handle, reason}` on failure.
+  Returns `{:ok, flush_ref}` immediately. The caller later receives
+  `{:moqx_flush_ok, %MOQX.FlushDone{...}}` when the flush completes, or
+  `{:moqx_transport_error, %MOQX.TransportError{...}}` on failure.
   """
   @spec flush_subgroup(subgroup_handle()) ::
           {:ok, flush_ref()} | {:error, MOQX.RequestError.t()}
@@ -687,14 +641,13 @@ defmodule MOQX do
   Returns `{:ok, handle}` immediately. The caller later receives a
   `t:subscribe_message/0` stream correlated by that `handle`:
 
-  - `{:moqx_subscribed, handle, broadcast_path, track_name}` when active
-  - `{:moqx_track_init, handle, init_data, track_meta}` once per subscription
-  - `{:moqx_object, handle, %MOQX.Object{}}` for each delivered object
-  - `{:moqx_end_of_group, handle, group_id, subgroup_id}` when a subgroup
-    signals end-of-group (via header flag, status-0x3 marker object, or both)
-  - `{:moqx_track_ended, handle}` when the track finishes cleanly or after
-    `unsubscribe/1` is acknowledged by the relay
-  - `{:moqx_error, handle, reason}` for asynchronous runtime failures
+  - `{:moqx_subscribe_ok, %MOQX.SubscribeOk{...}}` when active
+  - `{:moqx_track_init, %MOQX.TrackInit{...}}` once per subscription
+  - `{:moqx_object, %MOQX.ObjectReceived{...}}` for each delivered object
+  - `{:moqx_end_of_group, %MOQX.EndOfGroup{...}}` when a subgroup signals end-of-group
+  - `{:moqx_publish_done, %MOQX.PublishDone{...}}` on terminal lifecycle
+  - `{:moqx_request_error, %MOQX.RequestError{...}}` for request rejection
+  - `{:moqx_transport_error, %MOQX.TransportError{...}}` for runtime failures
 
   Supported options:
 
@@ -704,7 +657,7 @@ defmodule MOQX do
   - `:track` -- `%MOQX.Catalog.Track{}` convenience; fills `:init_data` and `:track_meta`
 
   Misuse errors, such as calling this with a publisher session, are returned as
-  `{:error, reason}` immediately.
+  `{:error, %MOQX.RequestError{...}}` immediately.
   """
   @spec subscribe(session(), String.t(), String.t()) ::
           {:ok, subscription_handle()} | {:error, MOQX.RequestError.t()}
@@ -780,8 +733,8 @@ defmodule MOQX do
   Cancels an active track subscription.
 
   Sends MOQ `Unsubscribe` to the relay and removes local subscription state.
-  The caller may still receive `{:moqx_track_ended, handle}` once the relay
-  acknowledges with `PublishDone`.
+  The caller may still receive `{:moqx_publish_done, %MOQX.PublishDone{...}}`
+  once the relay acknowledges with `PublishDone`.
 
   Idempotent: repeated calls (and calls after the subscription has already
   ended) return `:ok` without sending further control traffic.
@@ -870,7 +823,7 @@ defmodule MOQX do
   The caller later receives a `t:fetch_message/0` stream correlated by `ref`.
 
   Misuse errors, such as calling this with a publisher session, are returned as
-  `{:error, reason}` immediately.
+  `{:error, %MOQX.RequestError{...}}` immediately.
   """
   @spec fetch(session(), String.t(), String.t(), [fetch_opt()]) ::
           {:ok, fetch_ref()} | {:error, MOQX.RequestError.t()}

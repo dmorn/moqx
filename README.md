@@ -70,36 +70,29 @@ The intended API is the single `MOQX` module.
 
 ### Connect
 
-Connections are asynchronous. `connect_publisher/1`, `connect_publisher/2`,
-`connect_subscriber/1`, and `connect_subscriber/2` return `:ok` immediately,
-then the caller receives exactly one connect result message:
+Connections are asynchronous and explicitly correlated.
+`connect_publisher/2`, `connect_subscriber/2`, and `connect/2` return
+`{:ok, connect_ref}` immediately.
 
-- `{:moqx_connected, session}` on success
-- `{:error, reason}` if the async connect attempt fails
+Later, the caller receives one of:
 
-The stable, intended connect surface is:
-
-- `MOQX.connect_publisher/1,2`
-- `MOQX.connect_subscriber/1,2`
-- `MOQX.connect/2` with required `role: :publisher | :subscriber`
+- `{:moqx_connect_ok, %MOQX.ConnectOk{ref: connect_ref, session: session, role: role, version: version}}`
+- `{:moqx_request_error, %MOQX.RequestError{op: :connect, ref: connect_ref, ...}}`
+- `{:moqx_transport_error, %MOQX.TransportError{op: :connect, ref: connect_ref, ...}}`
 
 There is no supported `:both` session mode.
 
 ```elixir
-:ok = MOQX.connect_publisher("https://relay.example.com")
+{:ok, connect_ref} = MOQX.connect_publisher("https://relay.example.com")
 
 publisher =
   receive do
-    {:moqx_connected, session} -> session
-    {:error, reason} -> raise "publisher connect failed: #{inspect(reason)}"
-  end
+    {:moqx_connect_ok, %MOQX.ConnectOk{ref: ^connect_ref, session: session}} -> session
+    {:moqx_request_error, %MOQX.RequestError{ref: ^connect_ref} = err} ->
+      raise "connect rejected: #{inspect(err)}"
 
-:ok = MOQX.connect_subscriber("https://relay.example.com")
-
-subscriber =
-  receive do
-    {:moqx_connected, session} -> session
-    {:error, reason} -> raise "subscriber connect failed: #{inspect(reason)}"
+    {:moqx_transport_error, %MOQX.TransportError{ref: ^connect_ref} = err} ->
+      raise "connect transport failure: #{inspect(err)}"
   end
 ```
 
@@ -126,9 +119,9 @@ that path. Publish and subscribe paths can stay relative to that root:
 If you need dynamic role selection:
 
 ```elixir
-:ok = MOQX.connect(url, role: :publisher)
+{:ok, _ref} = MOQX.connect(url, role: :publisher)
 
-:ok =
+{:ok, _ref} =
   MOQX.connect_subscriber(
     "https://relay.internal.example/anon",
     tls: [cacertfile: "/path/to/rootCA.pem"]
@@ -187,51 +180,33 @@ catalog_json =
 
 ### Subscribe
 
-Subscriptions are asynchronous and use `FilterType::LatestObject` with
-`forward=true`, which means the relay delivers the most recent object and
-then forwards new objects as they arrive. This is the standard pattern for
-live media consumption from moqtail-style relays.
-
-`subscribe/3` returns `{:ok, handle}` immediately, then messages arrive in
-the caller process correlated by `handle`. The handle is an opaque
-subscription resource (appears as a `reference()` to Elixir code).
-
-`subscribe/4` accepts subscription options. For catalog-driven flows,
-`subscribe_track/3,4` is a convenience wrapper around `subscribe/4`.
+Subscriptions are asynchronous and correlated by subscription handle.
+`subscribe/3,4` returns `{:ok, handle}` immediately.
 
 `subscribe/4` options:
 
 - `delivery_timeout_ms` -- MOQT DELIVERY TIMEOUT parameter (`0x02`) in milliseconds.
 
-The supported subscription message contract is:
+The subscription message contract is:
 
-- `{:moqx_subscribed, handle, namespace, track_name}` when the subscription becomes active
-- `{:moqx_track_init, handle, init_data, track_meta}` once per subscription
-- `{:moqx_frame, handle, group_id, payload}` for each object
-- `{:moqx_track_ended, handle}` when the track finishes cleanly, or after
-  `unsubscribe/1` is acknowledged by the relay
-- `{:moqx_error, handle, reason}` for asynchronous subscription/runtime failures
+- `{:moqx_subscribe_ok, %MOQX.SubscribeOk{handle, namespace, track_name}}`
+- `{:moqx_track_init, %MOQX.TrackInit{handle, init_data, track_meta}}`
+- `{:moqx_object, %MOQX.ObjectReceived{handle, object: %MOQX.Object{...}}}`
+- `{:moqx_end_of_group, %MOQX.EndOfGroup{handle, group_id, subgroup_id}}`
+- `{:moqx_publish_done, %MOQX.PublishDone{handle, status, ...}}`
+- `{:moqx_request_error, %MOQX.RequestError{op: :subscribe, handle, ...}}`
+- `{:moqx_transport_error, %MOQX.TransportError{op: :subscribe, handle, ...}}`
 
 ```elixir
-{:ok, handle} =
-  MOQX.subscribe(
-    subscriber,
-    "moqtail",
-    "catalog",
-    delivery_timeout_ms: 1_500
-  )
+{:ok, handle} = MOQX.subscribe(subscriber, "moqtail", "catalog", delivery_timeout_ms: 1_500)
 
 receive do
-  {:moqx_subscribed, ^handle, "moqtail", "catalog"} -> :ok
+  {:moqx_subscribe_ok, %MOQX.SubscribeOk{handle: ^handle}} -> :ok
 end
 
 receive do
-  {:moqx_track_init, ^handle, _init_data, _track_meta} -> :ok
-end
-
-receive do
-  {:moqx_frame, ^handle, group_id, payload} ->
-    IO.inspect({group_id, byte_size(payload)}, label: "catalog object")
+  {:moqx_object, %MOQX.ObjectReceived{handle: ^handle, object: obj}} ->
+    IO.inspect({obj.group_id, byte_size(obj.payload)}, label: "catalog object")
 end
 
 :ok = MOQX.unsubscribe(handle)
@@ -248,50 +223,31 @@ need to unsubscribe explicitly.
 The typical flow for consuming live media from a moqtail relay:
 
 ```elixir
-# Connect
-:ok = MOQX.connect_subscriber("https://ord.abr.moqtail.dev")
+{:ok, connect_ref} = MOQX.connect_subscriber("https://ord.abr.moqtail.dev")
 
 subscriber =
   receive do
-    {:moqx_connected, session} -> session
+    {:moqx_connect_ok, %MOQX.ConnectOk{ref: ^connect_ref, session: session}} -> session
   end
 
-# Subscribe to the catalog track to discover available media
 {:ok, catalog_ref} = MOQX.subscribe(subscriber, "moqtail", "catalog")
 
 receive do
-  {:moqx_subscribed, ^catalog_ref, _, _} -> :ok
-end
-
-receive do
-  {:moqx_track_init, ^catalog_ref, _init_data, _track_meta} -> :ok
+  {:moqx_subscribe_ok, %MOQX.SubscribeOk{handle: ^catalog_ref}} -> :ok
 end
 
 catalog =
   receive do
-    {:moqx_frame, ^catalog_ref, _group, payload} ->
+    {:moqx_object, %MOQX.ObjectReceived{handle: ^catalog_ref, object: %{payload: payload}}} ->
       {:ok, cat} = MOQX.Catalog.decode(payload)
       cat
   end
 
-# Pick a video track and subscribe
 video = MOQX.Catalog.video_tracks(catalog) |> List.first()
-
 {:ok, video_ref} = MOQX.subscribe_track(subscriber, "moqtail", video)
 
 receive do
-  {:moqx_subscribed, ^video_ref, _, _} -> :ok
-end
-
-receive do
-  {:moqx_track_init, ^video_ref, init_data, track_meta} ->
-    IO.inspect({byte_size(init_data || <<>>), track_meta}, label: "video init")
-end
-
-# Receive live video frames
-receive do
-  {:moqx_frame, ^video_ref, group_id, payload} ->
-    IO.puts("video frame: group=#{group_id} size=#{byte_size(payload)}")
+  {:moqx_subscribe_ok, %MOQX.SubscribeOk{handle: ^video_ref}} -> :ok
 end
 ```
 
@@ -351,10 +307,11 @@ caller's mailbox correlated by `ref`.
 
 The fetch message contract is:
 
-- `{:moqx_fetch_started, ref, namespace, track_name}` when the fetch begins
-- `{:moqx_fetch_object, ref, group_id, object_id, payload}` for each object
-- `{:moqx_fetch_done, ref}` when the fetch completes
-- `{:moqx_fetch_error, ref, reason}` on failure
+- `{:moqx_fetch_ok, %MOQX.FetchOk{ref, namespace, track_name}}`
+- `{:moqx_fetch_object, %MOQX.FetchObject{ref, group_id, object_id, payload}}`
+- `{:moqx_fetch_done, %MOQX.FetchDone{ref}}`
+- `{:moqx_request_error, %MOQX.RequestError{op: :fetch, ref, ...}}`
+- `{:moqx_transport_error, %MOQX.TransportError{op: :fetch, ref, ...}}`
 
 Options:
 

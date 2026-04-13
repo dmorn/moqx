@@ -52,8 +52,16 @@ defmodule MOQXIntegrationTest do
 
   defp await_subscribed!(sub_ref, namespace, track_name) do
     receive do
-      {:moqx_subscribed, ^sub_ref, ^namespace, ^track_name} -> :ok
-      {:moqx_error, ^sub_ref, reason} -> flunk("subscribe failed: #{inspect(reason)}")
+      {:moqx_subscribe_ok,
+       %MOQX.SubscribeOk{handle: ^sub_ref, namespace: ^namespace, track_name: ^track_name}} ->
+        :ok
+
+      {:moqx_request_error, %MOQX.RequestError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
+        flunk("subscribe failed: #{inspect(reason)}")
+
+      {:moqx_transport_error,
+       %MOQX.TransportError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
+        flunk("subscribe transport failed: #{inspect(reason)}")
     after
       @timeout -> flunk("subscribe timeout for #{namespace}/#{track_name}")
     end
@@ -73,16 +81,22 @@ defmodule MOQXIntegrationTest do
       flunk("subscribe timeout for #{namespace}/#{track_name}")
     else
       receive do
-        {:moqx_subscribed, ^sub_ref, ^namespace, ^track_name} ->
+        {:moqx_subscribe_ok,
+         %MOQX.SubscribeOk{handle: ^sub_ref, namespace: ^namespace, track_name: ^track_name}} ->
           :ok
 
-        {:moqx_error, ^sub_ref, reason} ->
+        {:moqx_request_error,
+         %MOQX.RequestError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
           if String.contains?(reason, "Unknown track namespace") do
             Process.sleep(100)
             subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
           else
             flunk("subscribe failed: #{inspect(reason)}")
           end
+
+        {:moqx_transport_error,
+         %MOQX.TransportError{op: :subscribe, handle: ^sub_ref, message: reason}} ->
+          flunk("subscribe transport failed: #{inspect(reason)}")
       after
         min(1_000, remaining) ->
           subscribe_with_retry_loop(subscriber, namespace, track_name, deadline)
@@ -104,16 +118,22 @@ defmodule MOQXIntegrationTest do
       flunk("subscribe timeout for #{namespace}/#{track_name}")
     else
       receive do
-        {:moqx_subscribed, ^handle, ^namespace, ^track_name} ->
+        {:moqx_subscribe_ok,
+         %MOQX.SubscribeOk{handle: ^handle, namespace: ^namespace, track_name: ^track_name}} ->
           handle
 
-        {:moqx_error, ^handle, reason} ->
+        {:moqx_request_error,
+         %MOQX.RequestError{op: :subscribe, handle: ^handle, message: reason}} ->
           if String.contains?(reason, "Unknown track namespace") do
             Process.sleep(100)
             subscribe_with_retry_handle_loop(subscriber, namespace, track_name, deadline)
           else
             flunk("subscribe failed: #{inspect(reason)}")
           end
+
+        {:moqx_transport_error,
+         %MOQX.TransportError{op: :subscribe, handle: ^handle, message: reason}} ->
+          flunk("subscribe transport failed: #{inspect(reason)}")
       after
         min(1_000, remaining) ->
           subscribe_with_retry_handle_loop(subscriber, namespace, track_name, deadline)
@@ -123,13 +143,14 @@ defmodule MOQXIntegrationTest do
 
   defp await_frame! do
     receive do
-      {:moqx_object, _sub_ref, %MOQX.Object{group_id: group_id, payload: payload}} ->
+      {:moqx_object,
+       %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: payload}}} ->
         {group_id, payload}
 
-      {:moqx_end_of_group, _sub_ref, _group_id, _subgroup_id} ->
+      {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
         await_frame!()
 
-      {:moqx_error, _sub_ref, reason} ->
+      {:moqx_transport_error, %MOQX.TransportError{message: reason}} ->
         flunk("frame receive failed: #{inspect(reason)}")
     after
       @timeout -> flunk("frame timeout")
@@ -371,7 +392,7 @@ defmodule MOQXIntegrationTest do
     end
 
     @tag :integration
-    test "unsubscribe/1 stops frame delivery and emits moqx_track_ended" do
+    test "unsubscribe/1 stops frame delivery and emits moqx_publish_done" do
       publisher = connect_publisher!()
       subscriber = connect_subscriber!()
 
@@ -392,12 +413,12 @@ defmodule MOQXIntegrationTest do
 
         assert :ok = MOQX.unsubscribe(handle)
 
-        assert_receive {:moqx_track_ended, ^handle}, @timeout
+        assert_receive {:moqx_publish_done, %MOQX.PublishDone{handle: ^handle}}, @timeout
 
         # Publisher keeps writing; subscriber must not see the new frame.
         :ok = MOQX.write_frame(track, payload2)
 
-        refute_receive {:moqx_object, ^handle, %MOQX.Object{}}, 1_500
+        refute_receive {:moqx_object, %MOQX.ObjectReceived{handle: ^handle}}, 1_500
       after
         :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)
@@ -419,13 +440,16 @@ defmodule MOQXIntegrationTest do
         handle = subscribe_with_retry_handle!(subscriber, ns, track_name)
 
         assert :ok = MOQX.unsubscribe(handle)
-        assert_receive {:moqx_track_ended, ^handle}, @timeout
+        assert_receive {:moqx_publish_done, %MOQX.PublishDone{handle: ^handle}}, @timeout
 
         # Second call must be a silent no-op and emit no further messages.
         assert :ok = MOQX.unsubscribe(handle)
 
-        refute_receive {:moqx_track_ended, ^handle}, 500
-        refute_receive {:moqx_error, ^handle, _reason}, 500
+        refute_receive {:moqx_publish_done, %MOQX.PublishDone{handle: ^handle}}, 500
+
+        refute_receive {:moqx_transport_error,
+                        %MOQX.TransportError{op: :subscribe, handle: ^handle}},
+                       500
       after
         :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)
@@ -517,8 +541,11 @@ defmodule MOQXIntegrationTest do
 
         obj =
           receive do
-            {:moqx_object, _sub_ref, %MOQX.Object{payload: ^payload} = obj} -> obj
-            {:moqx_error, _sub_ref, reason} -> flunk("receive failed: #{inspect(reason)}")
+            {:moqx_object, %MOQX.ObjectReceived{object: %MOQX.Object{payload: ^payload} = obj}} ->
+              obj
+
+            {:moqx_transport_error, %MOQX.TransportError{message: reason}} ->
+              flunk("receive failed: #{inspect(reason)}")
           after
             @timeout -> flunk("timeout waiting for extension-bearing object")
           end
@@ -587,25 +614,35 @@ defmodule MOQXIntegrationTest do
         :ok = MOQX.close_subgroup(sg, end_of_group: true)
 
         # First: exactly one data object, then exactly one :moqx_end_of_group, then nothing.
-        assert_receive {:moqx_object, ^handle,
-                        %MOQX.Object{
-                          group_id: 0,
-                          subgroup_id: 0,
-                          object_id: 0,
-                          status: :normal,
-                          payload: ^payload
+        assert_receive {:moqx_object,
+                        %MOQX.ObjectReceived{
+                          handle: ^handle,
+                          object: %MOQX.Object{
+                            group_id: 0,
+                            subgroup_id: 0,
+                            object_id: 0,
+                            status: :normal,
+                            payload: ^payload
+                          }
                         }},
                        @timeout
 
-        assert_receive {:moqx_end_of_group, ^handle, 0, 0}, @timeout
+        assert_receive {:moqx_end_of_group,
+                        %MOQX.EndOfGroup{handle: ^handle, group_id: 0, subgroup_id: 0}},
+                       @timeout
 
         # No duplicate :moqx_end_of_group even though the publisher signalled via
         # both the header flag and the marker object.
-        refute_receive {:moqx_end_of_group, ^handle, _group_id, _subgroup_id}, 500
+        refute_receive {:moqx_end_of_group, %MOQX.EndOfGroup{handle: ^handle}}, 500
 
         # The marker object itself should NOT leak through as a :moqx_object with
         # status :end_of_group — that would force every subscriber to filter it.
-        refute_receive {:moqx_object, ^handle, %MOQX.Object{status: :end_of_group}}, 500
+        refute_receive {:moqx_object,
+                        %MOQX.ObjectReceived{
+                          handle: ^handle,
+                          object: %MOQX.Object{status: :end_of_group}
+                        }},
+                       500
 
         :ok = MOQX.finish_track(track)
       after
@@ -631,7 +668,10 @@ defmodule MOQXIntegrationTest do
         {:ok, sg} = MOQX.open_subgroup(track, 0, subgroup_id: 0, extensions_present: false)
         :ok = MOQX.write_object(sg, 0, "p", extensions: [{2, 100}])
 
-        assert_receive {:moqx_error, ^sg, reason}, @timeout
+        assert_receive {:moqx_transport_error,
+                        %MOQX.TransportError{op: :write_object, handle: ^sg, message: reason}},
+                       @timeout
+
         assert reason =~ "extensions_present"
 
         :ok = MOQX.close_subgroup(sg)
@@ -752,16 +792,19 @@ defmodule MOQXIntegrationTest do
       flunk("frame timeout waiting for payload #{inspect(expected_payload)}")
     else
       receive do
-        {:moqx_object, _sub_ref, %MOQX.Object{group_id: group_id, payload: ^expected_payload}} ->
+        {:moqx_object,
+         %MOQX.ObjectReceived{
+           object: %MOQX.Object{group_id: group_id, payload: ^expected_payload}
+         }} ->
           {group_id, expected_payload}
 
-        {:moqx_object, _sub_ref, %MOQX.Object{}} ->
+        {:moqx_object, %MOQX.ObjectReceived{}} ->
           await_matching_payload_frame_loop(expected_payload, deadline)
 
-        {:moqx_end_of_group, _sub_ref, _group_id, _subgroup_id} ->
+        {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
           await_matching_payload_frame_loop(expected_payload, deadline)
 
-        {:moqx_error, _sub_ref, reason} ->
+        {:moqx_transport_error, %MOQX.TransportError{message: reason}} ->
           flunk("frame receive failed: #{inspect(reason)}")
       after
         remaining ->
@@ -787,13 +830,13 @@ defmodule MOQXIntegrationTest do
         )
       else
         receive do
-          {:moqx_object, _sub_ref, %MOQX.Object{} = obj} ->
+          {:moqx_object, %MOQX.ObjectReceived{object: %MOQX.Object{} = obj}} ->
             collect_objects_until_both_seen_loop(expected_payloads, deadline, [obj | acc])
 
-          {:moqx_end_of_group, _sub_ref, _group_id, _subgroup_id} ->
+          {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
             collect_objects_until_both_seen_loop(expected_payloads, deadline, acc)
 
-          {:moqx_error, _sub_ref, reason} ->
+          {:moqx_transport_error, %MOQX.TransportError{message: reason}} ->
             flunk("receive failed: #{inspect(reason)}")
         after
           remaining ->
@@ -817,10 +860,11 @@ defmodule MOQXIntegrationTest do
       Enum.reverse(acc)
     else
       receive do
-        {:moqx_object, _sub_ref, %MOQX.Object{group_id: group_id, payload: payload}} ->
+        {:moqx_object,
+         %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: payload}}} ->
           collect_frames_loop(deadline, [{group_id, payload} | acc])
 
-        {:moqx_subscribed, _sub_ref, _, _} ->
+        {:moqx_subscribe_ok, _} ->
           collect_frames_loop(deadline, acc)
 
         _ ->
