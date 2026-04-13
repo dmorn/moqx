@@ -673,7 +673,8 @@ defmodule MOQXIntegrationTest do
       publisher = connect_publisher!()
 
       try do
-        assert {:error, "fetch requires a subscriber session"} =
+        assert {:error,
+                %MOQX.RequestError{op: :fetch, message: "fetch requires a subscriber session"}} =
                  MOQX.fetch(publisher, "moqtail", "catalog", [])
       after
         :ok = MOQX.close(publisher)
@@ -685,7 +686,9 @@ defmodule MOQXIntegrationTest do
       publisher = connect_publisher!()
 
       try do
-        assert {:error, "fetch requires a subscriber session"} = MOQX.fetch_catalog(publisher)
+        assert {:error,
+                %MOQX.RequestError{op: :fetch, message: "fetch requires a subscriber session"}} =
+                 MOQX.fetch_catalog(publisher)
       after
         :ok = MOQX.close(publisher)
       end

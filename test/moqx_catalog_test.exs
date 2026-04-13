@@ -218,16 +218,16 @@ defmodule MOQX.CatalogTest do
     payload = fixture("moqtail.json")
 
     spawn(fn ->
-      send(self(), {:moqx_fetch_started, ref, "moqtail", "catalog"})
-      send(self(), {:moqx_fetch_object, ref, 0, 0, payload})
-      send(self(), {:moqx_fetch_done, ref})
+      send(self(), {:moqx_fetch_ok, %MOQX.FetchOk{ref: ref, namespace: "moqtail", track_name: "catalog"}})
+      send(self(), {:moqx_fetch_object, %MOQX.FetchObject{ref: ref, group_id: 0, object_id: 0, payload: payload}})
+      send(self(), {:moqx_fetch_done, %MOQX.FetchDone{ref: ref}})
     end)
 
     # Messages are sent to self() inside the spawned process, so send them
     # directly to the test process instead.
-    send(self(), {:moqx_fetch_started, ref, "moqtail", "catalog"})
-    send(self(), {:moqx_fetch_object, ref, 0, 0, payload})
-    send(self(), {:moqx_fetch_done, ref})
+    send(self(), {:moqx_fetch_ok, %MOQX.FetchOk{ref: ref, namespace: "moqtail", track_name: "catalog"}})
+    send(self(), {:moqx_fetch_object, %MOQX.FetchObject{ref: ref, group_id: 0, object_id: 0, payload: payload}})
+    send(self(), {:moqx_fetch_done, %MOQX.FetchDone{ref: ref}})
 
     assert {:ok, %Catalog{}} = MOQX.await_catalog(ref, 1_000)
   end
@@ -239,17 +239,17 @@ defmodule MOQX.CatalogTest do
     mid = div(byte_size(full), 2)
     <<part1::binary-size(mid), part2::binary>> = full
 
-    send(self(), {:moqx_fetch_started, ref, "ns", "catalog"})
-    send(self(), {:moqx_fetch_object, ref, 0, 0, part1})
-    send(self(), {:moqx_fetch_object, ref, 0, 1, part2})
-    send(self(), {:moqx_fetch_done, ref})
+    send(self(), {:moqx_fetch_ok, %MOQX.FetchOk{ref: ref, namespace: "ns", track_name: "catalog"}})
+    send(self(), {:moqx_fetch_object, %MOQX.FetchObject{ref: ref, group_id: 0, object_id: 0, payload: part1}})
+    send(self(), {:moqx_fetch_object, %MOQX.FetchObject{ref: ref, group_id: 0, object_id: 1, payload: part2}})
+    send(self(), {:moqx_fetch_done, %MOQX.FetchDone{ref: ref}})
 
     assert {:ok, %Catalog{}} = MOQX.await_catalog(ref, 1_000)
   end
 
   test "await_catalog/2 returns error on fetch error" do
     ref = make_ref()
-    send(self(), {:moqx_fetch_error, ref, "relay rejected"})
+    send(self(), {:moqx_request_error, %MOQX.RequestError{op: :fetch, ref: ref, message: "relay rejected"}})
     assert {:error, "relay rejected"} = MOQX.await_catalog(ref, 1_000)
   end
 
@@ -260,8 +260,8 @@ defmodule MOQX.CatalogTest do
 
   test "await_catalog/2 returns decode error on bad payload" do
     ref = make_ref()
-    send(self(), {:moqx_fetch_object, ref, 0, 0, "not json"})
-    send(self(), {:moqx_fetch_done, ref})
+    send(self(), {:moqx_fetch_object, %MOQX.FetchObject{ref: ref, group_id: 0, object_id: 0, payload: "not json"}})
+    send(self(), {:moqx_fetch_done, %MOQX.FetchDone{ref: ref}})
     assert {:error, "invalid JSON"} = MOQX.await_catalog(ref, 1_000)
   end
 

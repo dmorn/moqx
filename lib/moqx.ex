@@ -707,7 +707,7 @@ defmodule MOQX do
   `{:error, reason}` immediately.
   """
   @spec subscribe(session(), String.t(), String.t()) ::
-          {:ok, subscription_handle()} | {:error, String.t()}
+          {:ok, subscription_handle()} | {:error, MOQX.RequestError.t()}
   def subscribe(session, broadcast_path, track_name)
       when is_binary(broadcast_path) and is_binary(track_name) do
     subscribe(session, broadcast_path, track_name, [])
@@ -717,7 +717,7 @@ defmodule MOQX do
   Same as `subscribe/3`, with explicit subscription options.
   """
   @spec subscribe(session(), String.t(), String.t(), [subscribe_opt()]) ::
-          {:ok, subscription_handle()} | {:error, String.t()}
+          {:ok, subscription_handle()} | {:error, MOQX.RequestError.t()}
   def subscribe(session, broadcast_path, track_name, opts)
       when is_binary(broadcast_path) and is_binary(track_name) and is_list(opts) do
     delivery_timeout_ms =
@@ -735,8 +735,15 @@ defmodule MOQX do
            init_data,
            track_meta
          ) do
-      {:error, _reason} = error -> error
-      handle -> {:ok, handle}
+      {:error, reason} ->
+        {:error,
+         %MOQX.RequestError{
+           op: :subscribe,
+           message: reason
+         }}
+
+      handle ->
+        {:ok, handle}
     end
   end
 
@@ -747,7 +754,7 @@ defmodule MOQX do
   from the provided track and forwards to `subscribe/4`.
   """
   @spec subscribe_track(session(), String.t(), Track.t()) ::
-          {:ok, subscription_handle()} | {:error, String.t()}
+          {:ok, subscription_handle()} | {:error, MOQX.RequestError.t()}
   def subscribe_track(session, broadcast_path, %Track{} = track)
       when is_binary(broadcast_path) do
     subscribe_track(session, broadcast_path, track, [])
@@ -759,7 +766,7 @@ defmodule MOQX do
   `:track` is not accepted here (it is implied by the `track` argument).
   """
   @spec subscribe_track(session(), String.t(), Track.t(), [subscribe_opt()]) ::
-          {:ok, subscription_handle()} | {:error, String.t()}
+          {:ok, subscription_handle()} | {:error, MOQX.RequestError.t()}
   def subscribe_track(session, broadcast_path, %Track{} = track, opts)
       when is_binary(broadcast_path) and is_list(opts) do
     if Keyword.has_key?(opts, :track) do
@@ -866,7 +873,7 @@ defmodule MOQX do
   `{:error, reason}` immediately.
   """
   @spec fetch(session(), String.t(), String.t(), [fetch_opt()]) ::
-          {:ok, fetch_ref()} | {:error, String.t()}
+          {:ok, fetch_ref()} | {:error, MOQX.RequestError.t()}
   def fetch(session, namespace, track_name, opts \\ [])
       when is_binary(namespace) and is_binary(track_name) and is_list(opts) do
     priority = opts |> Keyword.get(:priority, 0) |> normalize_fetch_priority!()
@@ -891,12 +898,24 @@ defmodule MOQX do
                start,
                end_location
              ) do
-          :ok -> {:ok, ref}
-          {:error, _reason} = error -> error
+          :ok ->
+            {:ok, ref}
+
+          {:error, reason} ->
+            {:error,
+             %MOQX.RequestError{
+               op: :fetch,
+               message: reason,
+               ref: ref
+             }}
         end
 
       :publisher ->
-        {:error, "fetch requires a subscriber session"}
+        {:error,
+         %MOQX.RequestError{
+           op: :fetch,
+           message: "fetch requires a subscriber session"
+         }}
     end
   end
 
@@ -912,7 +931,8 @@ defmodule MOQX do
   - start: `{0, 0}`
   - end: `{0, 1}`
   """
-  @spec fetch_catalog(session(), Keyword.t()) :: {:ok, fetch_ref()} | {:error, String.t()}
+  @spec fetch_catalog(session(), Keyword.t()) ::
+          {:ok, fetch_ref()} | {:error, MOQX.RequestError.t()}
   def fetch_catalog(session, opts \\ []) when is_list(opts) do
     namespace = opts |> Keyword.get(:namespace, "moqtail") |> normalize_fetch_namespace!()
 
@@ -950,16 +970,19 @@ defmodule MOQX do
 
   defp await_catalog_loop(ref, acc, timeout) do
     receive do
-      {:moqx_fetch_started, ^ref, _ns, _track} ->
+      {:moqx_fetch_ok, %MOQX.FetchOk{ref: ^ref}} ->
         await_catalog_loop(ref, acc, timeout)
 
-      {:moqx_fetch_object, ^ref, _group, _object, payload} ->
+      {:moqx_fetch_object, %MOQX.FetchObject{ref: ^ref, payload: payload}} ->
         await_catalog_loop(ref, [acc | [payload]], timeout)
 
-      {:moqx_fetch_done, ^ref} ->
+      {:moqx_fetch_done, %MOQX.FetchDone{ref: ^ref}} ->
         MOQX.Catalog.decode(IO.iodata_to_binary(acc))
 
-      {:moqx_fetch_error, ^ref, reason} ->
+      {:moqx_request_error, %MOQX.RequestError{op: :fetch, ref: ^ref, message: reason}} ->
+        {:error, reason}
+
+      {:moqx_transport_error, %MOQX.TransportError{op: :fetch, ref: ^ref, message: reason}} ->
         {:error, reason}
     after
       timeout -> {:error, "timeout"}

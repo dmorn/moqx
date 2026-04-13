@@ -35,28 +35,33 @@ mod atoms {
     rustler::atoms! {
         ok,
         error,
-        moqx_connected,
         moqx_connect_ok,
         moqx_session_closed,
-        moqx_subscribed,
+        moqx_subscribe_ok,
         moqx_track_init,
         moqx_object,
         moqx_end_of_group,
-        moqx_flushed,
         moqx_flush_ok,
-        moqx_track_ended,
-        moqx_error,
+        moqx_publish_done,
         moqx_request_error,
         moqx_transport_error,
-        moqx_fetch_started,
+        moqx_fetch_ok,
         moqx_fetch_object,
         moqx_fetch_done,
-        moqx_fetch_error,
         connect,
+        subscribe,
+        fetch,
+        open_subgroup,
+        write_object,
+        close_subgroup,
         flush_subgroup,
         runtime,
         publisher,
         subscriber,
+        ended,
+        unsubscribe_ack,
+        expired,
+        unknown,
         normal,
         does_not_exist,
         end_of_group,
@@ -93,6 +98,16 @@ struct FlushDoneOut<'a> {
 }
 
 #[derive(rustler::NifStruct)]
+#[module = "MOQX.RequestError"]
+struct RequestErrorOut<'a> {
+    op: Atom,
+    message: String,
+    code: Option<Atom>,
+    r#ref: rustler::Term<'a>,
+    handle: rustler::Term<'a>,
+}
+
+#[derive(rustler::NifStruct)]
 #[module = "MOQX.TransportError"]
 struct TransportErrorOut<'a> {
     op: Atom,
@@ -102,12 +117,83 @@ struct TransportErrorOut<'a> {
     handle: rustler::Term<'a>,
 }
 
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.SubscribeOk"]
+struct SubscribeOkOut<'a> {
+    handle: rustler::Term<'a>,
+    namespace: String,
+    track_name: String,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.TrackInit"]
+struct TrackInitOut<'a> {
+    handle: rustler::Term<'a>,
+    init_data: rustler::Term<'a>,
+    track_meta: rustler::Term<'a>,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.ObjectReceived"]
+struct ObjectReceivedOut<'a> {
+    handle: rustler::Term<'a>,
+    object: rustler::Term<'a>,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.EndOfGroup"]
+struct EndOfGroupOut<'a> {
+    handle: rustler::Term<'a>,
+    group_id: u64,
+    subgroup_id: u64,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.PublishDone"]
+struct PublishDoneOut<'a> {
+    handle: rustler::Term<'a>,
+    status: Atom,
+    code: Option<u64>,
+    message: Option<String>,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.FetchOk"]
+struct FetchOkOut<'a> {
+    r#ref: rustler::Term<'a>,
+    namespace: String,
+    track_name: String,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.FetchObject"]
+struct FetchObjectOut<'a> {
+    r#ref: rustler::Term<'a>,
+    group_id: u64,
+    object_id: u64,
+    payload: rustler::Term<'a>,
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.FetchDone"]
+struct FetchDoneOut<'a> {
+    r#ref: rustler::Term<'a>,
+}
+
 fn status_to_atom(status: ObjectStatus) -> Atom {
     match status {
         ObjectStatus::Normal => atoms::normal(),
         ObjectStatus::DoesNotExist => atoms::does_not_exist(),
         ObjectStatus::EndOfGroup => atoms::end_of_group(),
         ObjectStatus::EndOfTrack => atoms::end_of_track(),
+    }
+}
+
+fn publish_done_status_to_atom(status: PublishDoneStatusCode) -> Atom {
+    match status {
+        PublishDoneStatusCode::TrackEnded => atoms::ended(),
+        PublishDoneStatusCode::SubscriptionEnded => atoms::unsubscribe_ack(),
+        _ => atoms::unknown(),
     }
 }
 
@@ -258,7 +344,7 @@ pub struct SubgroupRes {
     // When None, the resource is unusable (consumer task exited). Operations become no-ops.
     op_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<SubgroupOp>>>,
     // When true, writes/closes/flushes on a failed subgroup drop silently instead of
-    // emitting {:moqx_error, ...}. Used to match v0.4.x semantics when a write arrives
+    // emitting an async transport error. Used to match v0.4.x semantics when a write arrives
     // before any subscriber has registered — the relay has nowhere to deliver it, but
     // this is not a programming error.
     silent_drop: Arc<AtomicBool>,
@@ -321,7 +407,13 @@ fn cleanup_subscription(session: &Arc<SessionInner>, request_id: u64) {
             p.term_env.run(|term_env| {
                 let sub_ref = p.subscription_ref_term.load(term_env);
                 let _ = msg_env.send_and_clear(&pid, |env| {
-                    (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
+                    let payload = PublishDoneOut {
+                        handle: sub_ref.in_env(env),
+                        status: atoms::unsubscribe_ack(),
+                        code: None,
+                        message: None,
+                    };
+                    (atoms::moqx_publish_done(), payload).encode(env)
                 });
             });
         } else if let Some(a) = active {
@@ -330,7 +422,13 @@ fn cleanup_subscription(session: &Arc<SessionInner>, request_id: u64) {
             a.ref_env.run(|ref_env| {
                 let sub_ref = a.subscription_ref_term.load(ref_env);
                 let _ = msg_env.send_and_clear(&pid, |env| {
-                    (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
+                    let payload = PublishDoneOut {
+                        handle: sub_ref.in_env(env),
+                        status: atoms::unsubscribe_ack(),
+                        code: None,
+                        message: None,
+                    };
+                    (atoms::moqx_publish_done(), payload).encode(env)
                 });
             });
         }
@@ -714,13 +812,12 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                     let track_meta = p.track_meta_term.load(term_env);
 
                     let _ = msg_env.send_and_clear(&p.caller_pid, |env| {
-                        (
-                            atoms::moqx_subscribed(),
-                            sub_ref.in_env(env),
-                            p.broadcast_path.clone(),
-                            p.track_name.clone(),
-                        )
-                            .encode(env)
+                        let payload = SubscribeOkOut {
+                            handle: sub_ref.in_env(env),
+                            namespace: p.broadcast_path.clone(),
+                            track_name: p.track_name.clone(),
+                        };
+                        (atoms::moqx_subscribe_ok(), payload).encode(env)
                     });
 
                     let _ = msg_env.send_and_clear(&p.caller_pid, |env| {
@@ -733,13 +830,13 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                             None => rustler::types::atom::nil().encode(env),
                         };
 
-                        (
-                            atoms::moqx_track_init(),
-                            sub_ref.in_env(env),
-                            init_data_term,
-                            track_meta.in_env(env),
-                        )
-                            .encode(env)
+                        let payload = TrackInitOut {
+                            handle: sub_ref.in_env(env),
+                            init_data: init_data_term,
+                            track_meta: track_meta.in_env(env),
+                        };
+
+                        (atoms::moqx_track_init(), payload).encode(env)
                     });
                 });
             }
@@ -759,7 +856,15 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                 p.term_env.run(|term_env| {
                     let sub_ref = p.subscription_ref_term.load(term_env);
                     let _ = msg_env.send_and_clear(&p.caller_pid, |env| {
-                        (atoms::moqx_error(), sub_ref.in_env(env), reason.clone()).encode(env)
+                        let nil = rustler::types::atom::nil().to_term(env);
+                        let payload = RequestErrorOut {
+                            op: atoms::subscribe(),
+                            message: reason.clone(),
+                            code: None,
+                            r#ref: nil,
+                            handle: sub_ref.in_env(env),
+                        };
+                        (atoms::moqx_request_error(), payload).encode(env)
                     });
                 });
             }
@@ -774,24 +879,18 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                 alias.and_then(|a| guard.remove(&a))
             };
             if let Some(active) = removed {
-                let graceful = matches!(
-                    done.status_code,
-                    PublishDoneStatusCode::TrackEnded | PublishDoneStatusCode::SubscriptionEnded
-                );
                 let mut msg_env = OwnedEnv::new();
                 let pid = active.caller_pid;
                 active.ref_env.run(|ref_env| {
                     let sub_ref = active.subscription_ref_term.load(ref_env);
                     let _ = msg_env.send_and_clear(&pid, |env| {
-                        if graceful {
-                            (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
-                        } else {
-                            let reason = format!(
-                                "publish done: status={:?} reason={:?}",
-                                done.status_code, done.reason_phrase
-                            );
-                            (atoms::moqx_error(), sub_ref.in_env(env), reason).encode(env)
-                        }
+                        let payload = PublishDoneOut {
+                            handle: sub_ref.in_env(env),
+                            status: publish_done_status_to_atom(done.status_code),
+                            code: None,
+                            message: Some(format!("{:?}", done.reason_phrase)),
+                        };
+                        (atoms::moqx_publish_done(), payload).encode(env)
                     });
                 });
             }
@@ -806,7 +905,12 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                 pf.ref_env.run(|ref_env| {
                     let ref_term = pf.ref_term.load(ref_env);
                     let _ = msg_env.send_and_clear(&pid, |env| {
-                        (atoms::moqx_fetch_started(), ref_term.in_env(env), ns, tn).encode(env)
+                        let payload = FetchOkOut {
+                            r#ref: ref_term.in_env(env),
+                            namespace: ns,
+                            track_name: tn,
+                        };
+                        (atoms::moqx_fetch_ok(), payload).encode(env)
                     });
                 });
             }
@@ -827,7 +931,15 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                 pf.ref_env.run(|ref_env| {
                     let ref_term = pf.ref_term.load(ref_env);
                     let _ = msg_env.send_and_clear(&pid, |env| {
-                        (atoms::moqx_fetch_error(), ref_term.in_env(env), reason).encode(env)
+                        let nil = rustler::types::atom::nil().to_term(env);
+                        let payload = RequestErrorOut {
+                            op: atoms::fetch(),
+                            message: reason,
+                            code: None,
+                            r#ref: ref_term.in_env(env),
+                            handle: nil,
+                        };
+                        (atoms::moqx_request_error(), payload).encode(env)
                     });
                 });
             }
@@ -992,14 +1104,13 @@ async fn handle_fetch_stream(
                                 let mut bin = NewBinary::new(env, data.len());
                                 bin.as_mut_slice().copy_from_slice(&data);
                                 let bin_term: rustler::Term = bin.into();
-                                (
-                                    atoms::moqx_fetch_object(),
-                                    ref_term.in_env(env),
-                                    gid,
-                                    oid,
-                                    bin_term,
-                                )
-                                    .encode(env)
+                                let payload = FetchObjectOut {
+                                    r#ref: ref_term.in_env(env),
+                                    group_id: gid,
+                                    object_id: oid,
+                                    payload: bin_term,
+                                };
+                                (atoms::moqx_fetch_object(), payload).encode(env)
                             });
                         });
                     }
@@ -1018,7 +1129,10 @@ async fn handle_fetch_stream(
         pf.ref_env.run(|ref_env| {
             let ref_term = pf.ref_term.load(ref_env);
             let _ = msg_env.send_and_clear(&pid, |env| {
-                (atoms::moqx_fetch_done(), ref_term.in_env(env)).encode(env)
+                let payload = FetchDoneOut {
+                    r#ref: ref_term.in_env(env),
+                };
+                (atoms::moqx_fetch_done(), payload).encode(env)
             });
         });
     }
@@ -1173,7 +1287,11 @@ fn send_subgroup_object(
                 payload: payload_term,
             };
 
-            (atoms::moqx_object(), sub_ref.in_env(env), obj).encode(env)
+            let payload = ObjectReceivedOut {
+                handle: sub_ref.in_env(env),
+                object: obj.encode(env),
+            };
+            (atoms::moqx_object(), payload).encode(env)
         });
     });
 }
@@ -1188,13 +1306,12 @@ fn send_end_of_group(inner: &Arc<SessionInner>, track_alias: u64, group_id: u64,
     active.ref_env.run(|ref_env| {
         let sub_ref = active.subscription_ref_term.load(ref_env);
         let _ = msg_env.send_and_clear(&pid, |env| {
-            (
-                atoms::moqx_end_of_group(),
-                sub_ref.in_env(env),
+            let payload = EndOfGroupOut {
+                handle: sub_ref.in_env(env),
                 group_id,
                 subgroup_id,
-            )
-                .encode(env)
+            };
+            (atoms::moqx_end_of_group(), payload).encode(env)
         });
     });
 }
@@ -1209,7 +1326,13 @@ fn send_track_ended(inner: &Arc<SessionInner>, track_alias: u64) {
     active.ref_env.run(|ref_env| {
         let sub_ref = active.subscription_ref_term.load(ref_env);
         let _ = msg_env.send_and_clear(&pid, |env| {
-            (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
+            let payload = PublishDoneOut {
+                handle: sub_ref.in_env(env),
+                status: atoms::ended(),
+                code: None,
+                message: None,
+            };
+            (atoms::moqx_publish_done(), payload).encode(env)
         });
     });
 }
@@ -1577,7 +1700,7 @@ fn status_atom_to_str(atom: Atom) -> Option<String> {
     out.into_inner().unwrap()
 }
 
-/// Send {:moqx_error, subgroup_ref, reason} to the resource's owning pid.
+/// Send {:moqx_transport_error, %MOQX.TransportError{...}} for subgroup failures.
 fn send_subgroup_error(res: &SubgroupRes, reason: String) {
     let guard = res.notify.lock().unwrap();
     let Some(notify) = guard.as_ref() else {
@@ -1588,7 +1711,15 @@ fn send_subgroup_error(res: &SubgroupRes, reason: String) {
     notify.ref_env.run(|ref_env| {
         let sg_ref = notify.subgroup_ref_term.load(ref_env);
         let _ = msg_env.send_and_clear(&pid, |env| {
-            (atoms::moqx_error(), sg_ref.in_env(env), reason.clone()).encode(env)
+            let nil = rustler::types::atom::nil().to_term(env);
+            let payload = TransportErrorOut {
+                op: atoms::write_object(),
+                message: reason.clone(),
+                kind: Some(atoms::runtime()),
+                r#ref: nil,
+                handle: sg_ref.in_env(env),
+            };
+            (atoms::moqx_transport_error(), payload).encode(env)
         });
     });
 }
@@ -2079,12 +2210,15 @@ fn subscribe<'a>(
                 p.term_env.run(|term_env| {
                     let sub_ref = p.subscription_ref_term.load(term_env);
                     let _ = msg_env.send_and_clear(&caller_pid, |env| {
-                        (
-                            atoms::moqx_error(),
-                            sub_ref.in_env(env),
-                            "control channel closed",
-                        )
-                            .encode(env)
+                        let nil = rustler::types::atom::nil().to_term(env);
+                        let payload = TransportErrorOut {
+                            op: atoms::subscribe(),
+                            message: "control channel closed".to_string(),
+                            kind: Some(atoms::runtime()),
+                            r#ref: nil,
+                            handle: sub_ref.in_env(env),
+                        };
+                        (atoms::moqx_transport_error(), payload).encode(env)
                     });
                 });
             }
@@ -2190,12 +2324,15 @@ fn fetch(
                 pf.ref_env.run(|ref_env| {
                     let ref_term = pf.ref_term.load(ref_env);
                     let _ = msg_env.send_and_clear(&pid, |env| {
-                        (
-                            atoms::moqx_fetch_error(),
-                            ref_term.in_env(env),
-                            "control channel closed",
-                        )
-                            .encode(env)
+                        let nil = rustler::types::atom::nil().to_term(env);
+                        let payload = TransportErrorOut {
+                            op: atoms::fetch(),
+                            message: "control channel closed".to_string(),
+                            kind: Some(atoms::runtime()),
+                            r#ref: ref_term.in_env(env),
+                            handle: nil,
+                        };
+                        (atoms::moqx_transport_error(), payload).encode(env)
                     });
                 });
             }
