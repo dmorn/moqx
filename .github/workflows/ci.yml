@@ -100,14 +100,21 @@ jobs:
       - name: Start pinned relay image
         env:
           MOQX_RELAY_IMAGE: ghcr.io/moqtail/relay:sha-190e502@sha256:36c929b71140a83158da383721f1d59f199a9f643ab5d033910258f5aa2903ee
-        run: docker compose -f docker-compose.integration.yml up -d relay
+        run: |
+          docker run -d --name moqx-relay --network host \
+            -v "$PWD/.tmp/integration-certs/cert.pem:/certs/cert.pem:ro" \
+            -v "$PWD/.tmp/integration-certs/key.pem:/certs/key.pem:ro" \
+            "$MOQX_RELAY_IMAGE" \
+            --host 0.0.0.0 --port 4433 --cert-file /certs/cert.pem --key-file /certs/key.pem
 
       - name: Run relay-backed integration tests
         env:
           MOQX_EXTERNAL_RELAY_URL: https://localhost:4433
           MOQX_RELAY_CACERTFILE: .tmp/integration-certs/ca.pem
-        run: mix test.integration
+        run: |
+          sleep 1
+          mix test.integration
 
       - name: Stop relay image
         if: always()
-        run: docker compose -f docker-compose.integration.yml down --remove-orphans
+        run: docker rm -f moqx-relay || true
