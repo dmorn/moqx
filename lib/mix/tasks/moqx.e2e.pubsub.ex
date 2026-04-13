@@ -189,10 +189,13 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
       Mix.raise("frame timeout waiting for payload #{inspect(expected_payload)}")
     else
       receive do
-        {:moqx_frame, _sub_ref, group_id, payload} when payload == expected_payload ->
-          {group_id, payload}
+        {:moqx_object, _sub_ref, %MOQX.Object{group_id: group_id, payload: ^expected_payload}} ->
+          {group_id, expected_payload}
 
-        {:moqx_frame, _sub_ref, _group_id, _payload} ->
+        {:moqx_object, _sub_ref, %MOQX.Object{}} ->
+          await_matching_payload_frame_loop(expected_payload, deadline)
+
+        {:moqx_end_of_group, _sub_ref, _group_id, _subgroup_id} ->
           await_matching_payload_frame_loop(expected_payload, deadline)
 
         {:moqx_error, _sub_ref, reason} ->

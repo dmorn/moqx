@@ -70,7 +70,7 @@ defmodule MOQX do
       end
 
       receive do
-        {:moqx_frame, ^sub, 0, payload} -> payload
+        {:moqx_object, ^sub, %MOQX.Object{group_id: 0, payload: payload}} -> payload
       end
 
       :ok = MOQX.unsubscribe(sub)
@@ -117,6 +117,46 @@ defmodule MOQX do
   @typedoc "Opaque track resource returned by `create_track/2`."
   @opaque track :: reference()
 
+  @typedoc "Opaque subgroup handle returned by `open_subgroup/3`."
+  @opaque subgroup_handle :: reference()
+
+  @typedoc """
+  Subgroup id convention, mirroring moqtail-ts:
+
+    * `nil` — first-object-id mode (wire format omits the subgroup id; receivers
+      infer it from the first object's id)
+    * `0` — fixed-zero mode (wire format has no subgroup id field either; receivers
+      default to 0)
+    * any positive integer — explicit subgroup id carried on the wire
+  """
+  @type subgroup_id :: nil | non_neg_integer()
+
+  @typedoc "Object status for `write_object/4` and received objects."
+  @type object_status :: :normal | :does_not_exist | :end_of_group | :end_of_track
+
+  @typedoc "Extension header on send or receive. Even types carry varints; odd types carry binaries."
+  @type extension :: {non_neg_integer(), non_neg_integer() | binary()}
+
+  @typedoc "Options for `open_subgroup/3`."
+  @type open_subgroup_opt ::
+          {:subgroup_id, subgroup_id()}
+          | {:priority, 0..255}
+          | {:end_of_group, boolean()}
+          | {:extensions, [extension()]}
+
+  @typedoc "Options for `write_object/4`."
+  @type write_object_opt ::
+          {:status, object_status()}
+          | {:extensions, [extension()]}
+
+  @typedoc "Options for `close_subgroup/2`."
+  @type close_subgroup_opt :: {:end_of_group, boolean()}
+
+  @typedoc "Publish-side subgroup messages delivered to the caller process."
+  @type subgroup_message ::
+          {:moqx_flushed, subgroup_handle()}
+          | {:moqx_error, subgroup_handle(), String.t()}
+
   @typedoc "Raw CMSF catalog payload bytes (UTF-8 JSON)."
   @type catalog_payload :: binary()
 
@@ -136,7 +176,8 @@ defmodule MOQX do
   @type subscribe_message ::
           {:moqx_subscribed, subscription_handle(), String.t(), String.t()}
           | {:moqx_track_init, subscription_handle(), binary() | nil, map()}
-          | {:moqx_frame, subscription_handle(), non_neg_integer(), binary()}
+          | {:moqx_object, subscription_handle(), MOQX.Object.t()}
+          | {:moqx_end_of_group, subscription_handle(), non_neg_integer(), non_neg_integer()}
           | {:moqx_track_ended, subscription_handle()}
           | {:moqx_error, subscription_handle(), String.t()}
 
@@ -348,12 +389,26 @@ defmodule MOQX do
   @doc """
   Writes one frame to a track.
 
-  Each call creates the next group in that track. Group sequence numbers are
-  delivered to subscribers in `{:moqx_frame, handle, group_seq, payload}` messages.
+  Convenience wrapper over the subgroup primitives: opens a subgroup with
+  subgroup id `0`, writes one object, closes the stream. Each call creates the
+  next group in that track.
+
+  Subscribers receive `{:moqx_object, handle, %MOQX.Object{group_id: group_seq,
+  subgroup_id: 0, object_id: 0, status: :normal, payload: data}}`.
+
+  For fine-grained control over subgroups, priority, extensions, end-of-group
+  markers, or multiple objects per group use `open_subgroup/3` +
+  `write_object/4` + `close_subgroup/2`.
   """
   @spec write_frame(track(), binary()) :: :ok | {:error, String.t()}
   def write_frame(track, data) when is_binary(data) do
-    MOQX.Native.write_frame(track, data)
+    group_id = MOQX.Native.track_next_group_id(track)
+
+    with {:ok, sg} <- open_subgroup(track, group_id, subgroup_id: 0, priority: 0),
+         :ok <- write_object(sg, 0, data),
+         :ok <- close_subgroup(sg) do
+      :ok
+    end
   end
 
   @doc """
@@ -364,6 +419,210 @@ defmodule MOQX do
   @spec finish_track(track()) :: :ok | {:error, String.t()}
   def finish_track(track) do
     MOQX.Native.finish_track(track)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Subgroup primitives
+  # ---------------------------------------------------------------------------
+
+  @doc """
+  Opens a subgroup on a publishing track.
+
+  Returns `{:ok, handle}` synchronously (the QUIC uni-stream is opened
+  asynchronously). Any async failure during stream open, write, flush, or close
+  arrives later on the caller process as `{:moqx_error, handle, reason}`.
+
+  `group_id` is an explicit non-negative integer chosen by the caller. Multiple
+  calls with the same `group_id` but different `:subgroup_id` open parallel
+  subgroup streams within the same group.
+
+  ## Options
+
+    * `:subgroup_id` — `nil | 0 | pos_integer` (default `0`). `nil` selects the
+      first-object-id mode (wire omits the subgroup id; receivers infer it from
+      the first object). `0` selects the fixed-zero mode. Any positive integer
+      is carried explicitly on the wire.
+
+    * `:priority` — `0..255` publisher priority (default `0`).
+
+    * `:end_of_group` — when `true`, the chosen subgroup header variant signals
+      that an end-of-group marker will be emitted. You must call
+      `close_subgroup(handle, end_of_group: true)` to actually write the marker.
+      (default `false`)
+
+    * `:extensions` — list of `{type, value}` pairs applied to *every* object
+      on this subgroup's stream. Even types carry varint values, odd types
+      carry binaries. Validation is strict at the boundary.
+  """
+  @spec open_subgroup(track(), non_neg_integer(), [open_subgroup_opt()]) ::
+          {:ok, subgroup_handle()} | {:error, String.t()}
+  def open_subgroup(track, group_id, opts \\ [])
+      when is_integer(group_id) and group_id >= 0 and is_list(opts) do
+    subgroup_id = opts |> Keyword.get(:subgroup_id, 0) |> normalize_subgroup_id!()
+    priority = opts |> Keyword.get(:priority, 0) |> normalize_priority!()
+    end_of_group = opts |> Keyword.get(:end_of_group, false) |> normalize_boolean!(:end_of_group)
+    extensions = opts |> Keyword.get(:extensions, []) |> normalize_extensions!()
+
+    validate_open_subgroup_opts!(opts)
+
+    case MOQX.Native.open_subgroup(track, group_id, subgroup_id, priority, end_of_group, extensions) do
+      {:ok, handle} -> {:ok, handle}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
+  Writes one object to an open subgroup.
+
+  Returns `:ok` after the bytes are queued to the underlying Tokio runtime.
+  Any async failure arrives as `{:moqx_error, handle, reason}`.
+
+  `object_id` must be strictly greater than the previous object's id on the
+  same subgroup. Pick `0` for the first object and increment monotonically.
+
+  ## Options
+
+    * `:status` — one of `:normal | :does_not_exist | :end_of_group |
+      :end_of_track` (default `:normal`). For `:normal`, the `payload` is sent
+      as-is. For marker statuses, the payload is ignored on the wire (the
+      object is a zero-length status marker).
+
+    * `:extensions` — per-object extension headers (default `[]`).
+  """
+  @spec write_object(subgroup_handle(), non_neg_integer(), binary(), [write_object_opt()]) ::
+          :ok | {:error, String.t()}
+  def write_object(subgroup, object_id, payload, opts \\ [])
+      when is_reference(subgroup) and is_integer(object_id) and object_id >= 0 and
+             is_binary(payload) and is_list(opts) do
+    status = opts |> Keyword.get(:status, :normal) |> normalize_status!()
+    extensions = opts |> Keyword.get(:extensions, []) |> normalize_extensions!()
+
+    validate_write_object_opts!(opts)
+
+    MOQX.Native.write_object(subgroup, object_id, payload, extensions, status)
+  end
+
+  @doc """
+  Closes a subgroup and finishes its underlying uni-stream.
+
+  ## Options
+
+    * `:end_of_group` — when `true`, emits an end-of-group marker object before
+      finishing the stream. Requires the subgroup to have been opened with
+      `end_of_group: true` (otherwise the on-wire header variant would be
+      inconsistent).
+
+  Dropping the handle (garbage collection) triggers a plain close without the
+  end-of-group marker, matching the semantics of `close_subgroup(handle,
+  end_of_group: false)`.
+  """
+  @spec close_subgroup(subgroup_handle(), [close_subgroup_opt()]) :: :ok | {:error, String.t()}
+  def close_subgroup(subgroup, opts \\ []) when is_reference(subgroup) and is_list(opts) do
+    end_of_group = opts |> Keyword.get(:end_of_group, false) |> normalize_boolean!(:end_of_group)
+
+    validate_close_subgroup_opts!(opts)
+
+    MOQX.Native.close_subgroup(subgroup, end_of_group)
+  end
+
+  @doc """
+  Requests a flush of the subgroup's underlying QUIC stream.
+
+  Returns `:ok` immediately. The caller later receives
+  `{:moqx_flushed, handle}` when the flush completes, or
+  `{:moqx_error, handle, reason}` on failure.
+  """
+  @spec flush_subgroup(subgroup_handle()) :: :ok | {:error, String.t()}
+  def flush_subgroup(subgroup) when is_reference(subgroup) do
+    MOQX.Native.flush_subgroup(subgroup)
+  end
+
+  defp normalize_subgroup_id!(nil), do: nil
+
+  defp normalize_subgroup_id!(id) when is_integer(id) and id >= 0, do: id
+
+  defp normalize_subgroup_id!(id) do
+    raise ArgumentError,
+          "expected :subgroup_id to be nil or a non-negative integer, got: #{inspect(id)}"
+  end
+
+  defp normalize_priority!(p) when is_integer(p) and p in 0..255, do: p
+
+  defp normalize_priority!(p) do
+    raise ArgumentError, "expected :priority to be an integer in 0..255, got: #{inspect(p)}"
+  end
+
+  defp normalize_boolean!(true, _name), do: true
+  defp normalize_boolean!(false, _name), do: false
+
+  defp normalize_boolean!(other, name) do
+    raise ArgumentError, "expected #{inspect(name)} to be a boolean, got: #{inspect(other)}"
+  end
+
+  defp normalize_status!(s) when s in [:normal, :does_not_exist, :end_of_group, :end_of_track],
+    do: s
+
+  defp normalize_status!(s) do
+    raise ArgumentError,
+          "expected :status to be one of :normal, :does_not_exist, :end_of_group, :end_of_track, got: #{inspect(s)}"
+  end
+
+  defp normalize_extensions!(exts) when is_list(exts) do
+    Enum.map(exts, fn
+      {type, value}
+      when is_integer(type) and type >= 0 and
+             (is_integer(value) or is_binary(value)) ->
+        cond do
+          rem(type, 2) == 0 and is_integer(value) and value >= 0 ->
+            {type, value}
+
+          rem(type, 2) == 1 and is_binary(value) ->
+            {type, value}
+
+          rem(type, 2) == 0 ->
+            raise ArgumentError,
+                  "extension type #{type} is even (varint) but value is not a non-negative integer: #{inspect(value)}"
+
+          true ->
+            raise ArgumentError,
+                  "extension type #{type} is odd (bytes) but value is not a binary: #{inspect(value)}"
+        end
+
+      other ->
+        raise ArgumentError,
+              "expected extension to be {non_neg_integer, non_neg_integer | binary}, got: #{inspect(other)}"
+    end)
+  end
+
+  defp normalize_extensions!(other) do
+    raise ArgumentError, "expected :extensions to be a list, got: #{inspect(other)}"
+  end
+
+  defp validate_open_subgroup_opts!(opts) do
+    allowed = [:subgroup_id, :priority, :end_of_group, :extensions]
+
+    case Keyword.keys(opts) -- allowed do
+      [] -> :ok
+      [key | _] -> raise ArgumentError, "unexpected open_subgroup option #{inspect(key)}"
+    end
+  end
+
+  defp validate_write_object_opts!(opts) do
+    allowed = [:status, :extensions]
+
+    case Keyword.keys(opts) -- allowed do
+      [] -> :ok
+      [key | _] -> raise ArgumentError, "unexpected write_object option #{inspect(key)}"
+    end
+  end
+
+  defp validate_close_subgroup_opts!(opts) do
+    allowed = [:end_of_group]
+
+    case Keyword.keys(opts) -- allowed do
+      [] -> :ok
+      [key | _] -> raise ArgumentError, "unexpected close_subgroup option #{inspect(key)}"
+    end
   end
 
   # ---------------------------------------------------------------------------
@@ -378,7 +637,9 @@ defmodule MOQX do
 
   - `{:moqx_subscribed, handle, broadcast_path, track_name}` when active
   - `{:moqx_track_init, handle, init_data, track_meta}` once per subscription
-  - `{:moqx_frame, handle, group_seq, payload}` for each frame object
+  - `{:moqx_object, handle, %MOQX.Object{}}` for each delivered object
+  - `{:moqx_end_of_group, handle, group_id, subgroup_id}` when a subgroup
+    signals end-of-group (via header flag, status-0x3 marker object, or both)
   - `{:moqx_track_ended, handle}` when the track finishes cleanly or after
     `unsubscribe/1` is acknowledged by the relay
   - `{:moqx_error, handle, reason}` for asynchronous runtime failures

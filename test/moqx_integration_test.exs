@@ -116,8 +116,14 @@ defmodule MOQXIntegrationTest do
 
   defp await_frame! do
     receive do
-      {:moqx_frame, _sub_ref, group_id, payload} -> {group_id, payload}
-      {:moqx_error, _sub_ref, reason} -> flunk("frame receive failed: #{inspect(reason)}")
+      {:moqx_object, _sub_ref, %MOQX.Object{group_id: group_id, payload: payload}} ->
+        {group_id, payload}
+
+      {:moqx_end_of_group, _sub_ref, _group_id, _subgroup_id} ->
+        await_frame!()
+
+      {:moqx_error, _sub_ref, reason} ->
+        flunk("frame receive failed: #{inspect(reason)}")
     after
       @timeout -> flunk("frame timeout")
     end
@@ -384,7 +390,7 @@ defmodule MOQXIntegrationTest do
         # Publisher keeps writing; subscriber must not see the new frame.
         :ok = MOQX.write_frame(track, payload2)
 
-        refute_receive {:moqx_frame, ^handle, _group_id, _payload}, 1_500
+        refute_receive {:moqx_object, ^handle, %MOQX.Object{}}, 1_500
       after
         :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)
@@ -413,6 +419,59 @@ defmodule MOQXIntegrationTest do
 
         refute_receive {:moqx_track_ended, ^handle}, 500
         refute_receive {:moqx_error, ^handle, _reason}, 500
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "two subgroups on the same group deliver in parallel with distinct priorities" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-parallel-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+        payload_a = "subgroup-A-payload"
+        payload_b = "subgroup-B-payload"
+
+        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        subscribe_with_retry!(subscriber, ns, track_name)
+
+        group_id = 42
+
+        {:ok, sg_a} =
+          MOQX.open_subgroup(track, group_id, subgroup_id: 0, priority: 200)
+
+        {:ok, sg_b} =
+          MOQX.open_subgroup(track, group_id, subgroup_id: 7, priority: 10)
+
+        :ok = MOQX.write_object(sg_a, 0, payload_a)
+        :ok = MOQX.write_object(sg_b, 0, payload_b)
+        :ok = MOQX.close_subgroup(sg_a)
+        :ok = MOQX.close_subgroup(sg_b)
+
+        objects = collect_objects_until_both_seen([payload_a, payload_b], @timeout)
+
+        obj_a = Enum.find(objects, &(&1.payload == payload_a))
+        obj_b = Enum.find(objects, &(&1.payload == payload_b))
+
+        assert %MOQX.Object{} = obj_a
+        assert %MOQX.Object{} = obj_b
+
+        assert obj_a.group_id == group_id
+        assert obj_b.group_id == group_id
+        assert obj_a.subgroup_id == 0
+        assert obj_b.subgroup_id == 7
+        assert obj_a.priority == 200
+        assert obj_b.priority == 10
+        assert obj_a.status == :normal
+        assert obj_b.status == :normal
+
+        :ok = MOQX.finish_track(track)
       after
         :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)
@@ -526,10 +585,13 @@ defmodule MOQXIntegrationTest do
       flunk("frame timeout waiting for payload #{inspect(expected_payload)}")
     else
       receive do
-        {:moqx_frame, _sub_ref, group_id, payload} when payload == expected_payload ->
-          {group_id, payload}
+        {:moqx_object, _sub_ref, %MOQX.Object{group_id: group_id, payload: ^expected_payload}} ->
+          {group_id, expected_payload}
 
-        {:moqx_frame, _sub_ref, _group_id, _payload} ->
+        {:moqx_object, _sub_ref, %MOQX.Object{}} ->
+          await_matching_payload_frame_loop(expected_payload, deadline)
+
+        {:moqx_end_of_group, _sub_ref, _group_id, _subgroup_id} ->
           await_matching_payload_frame_loop(expected_payload, deadline)
 
         {:moqx_error, _sub_ref, reason} ->
@@ -537,6 +599,41 @@ defmodule MOQXIntegrationTest do
       after
         remaining ->
           flunk("frame timeout waiting for payload #{inspect(expected_payload)}")
+      end
+    end
+  end
+
+  defp collect_objects_until_both_seen(expected_payloads, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    collect_objects_until_both_seen_loop(expected_payloads, deadline, [])
+  end
+
+  defp collect_objects_until_both_seen_loop(expected_payloads, deadline, acc) do
+    if Enum.all?(expected_payloads, fn p -> Enum.any?(acc, &(&1.payload == p)) end) do
+      acc
+    else
+      remaining = deadline - System.monotonic_time(:millisecond)
+
+      if remaining <= 0 do
+        flunk(
+          "timeout waiting for payloads #{inspect(expected_payloads)}, got payloads: #{inspect(Enum.map(acc, & &1.payload))}"
+        )
+      else
+        receive do
+          {:moqx_object, _sub_ref, %MOQX.Object{} = obj} ->
+            collect_objects_until_both_seen_loop(expected_payloads, deadline, [obj | acc])
+
+          {:moqx_end_of_group, _sub_ref, _group_id, _subgroup_id} ->
+            collect_objects_until_both_seen_loop(expected_payloads, deadline, acc)
+
+          {:moqx_error, _sub_ref, reason} ->
+            flunk("receive failed: #{inspect(reason)}")
+        after
+          remaining ->
+            flunk(
+              "timeout waiting for payloads #{inspect(expected_payloads)}, got payloads: #{inspect(Enum.map(acc, & &1.payload))}"
+            )
+        end
       end
     end
   end
@@ -553,7 +650,7 @@ defmodule MOQXIntegrationTest do
       Enum.reverse(acc)
     else
       receive do
-        {:moqx_frame, _sub_ref, group_id, payload} ->
+        {:moqx_object, _sub_ref, %MOQX.Object{group_id: group_id, payload: payload}} ->
           collect_frames_loop(deadline, [{group_id, payload} | acc])
 
         {:moqx_subscribed, _sub_ref, _, _} ->

@@ -270,10 +270,13 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
 
   defp await_catalog_payload(sub_ref, timeout) do
     receive do
-      {:moqx_frame, ^sub_ref, _group_id, payload} ->
+      {:moqx_object, ^sub_ref, %MOQX.Object{payload: payload}} ->
         {:ok, payload}
 
       {:moqx_track_init, ^sub_ref, _init_data, _track_meta} ->
+        await_catalog_payload(sub_ref, timeout)
+
+      {:moqx_end_of_group, ^sub_ref, _group_id, _subgroup_id} ->
         await_catalog_payload(sub_ref, timeout)
 
       {:moqx_error, ^sub_ref, reason} ->
@@ -441,10 +444,19 @@ defmodule Mix.Tasks.Moqx.Moqtail.Demo do
           receive_after_ms(next_tick_mono_ms, now_mono_ms, stream_started_mono_ms, run_timeout_ms)
 
         receive do
-          {:moqx_frame, _sub_ref, group_id, payload} ->
+          {:moqx_object, _sub_ref, %MOQX.Object{group_id: group_id, payload: payload}} ->
             stream_stats_loop(
               interval_ms,
               DemoDebugStats.add_frame(stats, group_id, payload),
+              stream_started_mono_ms,
+              run_timeout_ms,
+              next_tick_mono_ms
+            )
+
+          {:moqx_end_of_group, _sub_ref, _group_id, _subgroup_id} ->
+            stream_stats_loop(
+              interval_ms,
+              stats,
               stream_started_mono_ms,
               run_timeout_ms,
               next_tick_mono_ms

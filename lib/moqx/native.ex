@@ -14,8 +14,20 @@ defmodule MOQX.Native do
   # Publish
   def publish(_session, _broadcast_path), do: :erlang.nif_error(:nif_not_loaded)
   def create_track(_broadcast, _track_name), do: :erlang.nif_error(:nif_not_loaded)
-  def write_frame(_track, _data), do: :erlang.nif_error(:nif_not_loaded)
+  def track_next_group_id(_track), do: :erlang.nif_error(:nif_not_loaded)
   def finish_track(_track), do: :erlang.nif_error(:nif_not_loaded)
+
+  # Subgroup send-side primitives
+  def open_subgroup(_track, _group_id, _subgroup_id, _priority, _end_of_group, _extensions),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def write_object(_subgroup, _object_id, _payload, _extensions, _status),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def close_subgroup(_subgroup, _emit_end_of_group_marker),
+    do: :erlang.nif_error(:nif_not_loaded)
+
+  def flush_subgroup(_subgroup), do: :erlang.nif_error(:nif_not_loaded)
 
   # Subscribe
   def subscribe(

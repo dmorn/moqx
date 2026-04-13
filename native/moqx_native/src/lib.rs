@@ -10,6 +10,7 @@ use rustler::{Atom, Binary, Encoder, Env, LocalPid, NewBinary, OwnedEnv, Resourc
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, oneshot, watch};
 
+use moqtail::model::common::location::Location;
 use moqtail::model::common::pair::KeyValuePair;
 use moqtail::model::common::tuple::{Tuple, TupleField};
 use moqtail::model::control::client_setup::ClientSetup;
@@ -20,10 +21,11 @@ use moqtail::model::control::publish_namespace::PublishNamespace;
 use moqtail::model::control::subscribe::Subscribe as MoqSubscribe;
 use moqtail::model::control::subscribe_ok::SubscribeOk;
 use moqtail::model::control::unsubscribe::Unsubscribe as MoqUnsubscribe;
-use moqtail::model::data::constant::{ObjectForwardingPreference, ObjectStatus};
+use moqtail::model::data::constant::{
+    ObjectForwardingPreference, ObjectStatus, SubgroupHeaderType,
+};
 use moqtail::model::data::fetch_object::FetchObject;
 use moqtail::model::data::subgroup_header::SubgroupHeader;
-use moqtail::model::data::subgroup_object::SubgroupObject;
 use moqtail::transport::control_stream_handler::ControlStreamHandler;
 use moqtail::transport::data_stream_handler::{HeaderInfo, SendDataStream};
 
@@ -35,13 +37,40 @@ mod atoms {
         moqx_session_closed,
         moqx_subscribed,
         moqx_track_init,
-        moqx_frame,
+        moqx_object,
+        moqx_end_of_group,
+        moqx_flushed,
         moqx_track_ended,
         moqx_error,
         moqx_fetch_started,
         moqx_fetch_object,
         moqx_fetch_done,
         moqx_fetch_error,
+        normal,
+        does_not_exist,
+        end_of_group,
+        end_of_track,
+    }
+}
+
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.Object"]
+struct MoqxObjectOut<'a> {
+    group_id: u64,
+    subgroup_id: u64,
+    object_id: u64,
+    priority: u8,
+    status: Atom,
+    extensions: Vec<rustler::Term<'a>>,
+    payload: rustler::Term<'a>,
+}
+
+fn status_to_atom(status: ObjectStatus) -> Atom {
+    match status {
+        ObjectStatus::Normal => atoms::normal(),
+        ObjectStatus::DoesNotExist => atoms::does_not_exist(),
+        ObjectStatus::EndOfGroup => atoms::end_of_group(),
+        ObjectStatus::EndOfTrack => atoms::end_of_track(),
     }
 }
 
@@ -156,10 +185,55 @@ pub struct SubscriptionHandle {
     canceled: AtomicBool,
 }
 
+struct SubgroupNotify {
+    caller_pid: LocalPid,
+    ref_env: OwnedEnv,
+    subgroup_ref_term: SavedTerm,
+}
+
+/// Operation dispatched to a subgroup's single consumer task.
+enum SubgroupOp {
+    Write {
+        object_id: u64,
+        payload: Bytes,
+        extensions: Vec<KeyValuePair>,
+        status: ObjectStatus,
+    },
+    Close {
+        emit_end_of_group_marker: bool,
+    },
+    Flush,
+}
+
+/// A handle to an open subgroup on a publishing track.
+/// Owns the underlying QUIC uni-stream. Dropping (GC or explicit close) finishes the stream.
+/// All operations (write/close/flush) are dispatched through an mpsc queue so they are
+/// processed in strict FIFO order by a single consumer task. This matches the v0.4.x
+/// semantics where one Tokio task per write handled open+write+finish atomically.
+pub struct SubgroupRes {
+    #[allow(dead_code)]
+    session: Arc<SessionInner>,
+    #[allow(dead_code)]
+    group_id: u64,
+    header_type: SubgroupHeaderType,
+    // When None, the resource is unusable (consumer task exited). Operations become no-ops.
+    op_tx: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<SubgroupOp>>>,
+    // When true, writes/closes/flushes on a failed subgroup drop silently instead of
+    // emitting {:moqx_error, ...}. Used to match v0.4.x semantics when a write arrives
+    // before any subscriber has registered — the relay has nowhere to deliver it, but
+    // this is not a programming error.
+    silent_drop: Arc<AtomicBool>,
+    // Mutex<Option<_>> provides Sync around the !Sync OwnedEnv inside SubgroupNotify.
+    // Populated exactly once by `open_subgroup` right after the resource is created.
+    notify: std::sync::Mutex<Option<SubgroupNotify>>,
+    closed: AtomicBool,
+}
+
 impl Resource for SessionRes {}
 impl Resource for BroadcastProducerRes {}
 impl Resource for TrackProducerRes {}
 impl Resource for SubscriptionHandle {}
+impl Resource for SubgroupRes {}
 
 impl Drop for SubscriptionHandle {
     fn drop(&mut self) {
@@ -167,6 +241,17 @@ impl Drop for SubscriptionHandle {
             return;
         }
         cleanup_subscription(&self.session, self.request_id);
+    }
+}
+
+impl Drop for SubgroupRes {
+    fn drop(&mut self) {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // Dropping the Sender causes the consumer task to observe end-of-stream and
+        // finish the QUIC uni-stream. No explicit Close op is needed here.
+        let _ = self.op_tx.lock().unwrap().take();
     }
 }
 
@@ -873,66 +958,70 @@ async fn handle_subgroup_stream(
     inner: &Arc<SessionInner>,
     header_type_byte: u8,
 ) -> anyhow::Result<()> {
-    // Parse SubgroupHeader: we already read the type byte
-    // Read remaining header fields
+    let header_type = SubgroupHeaderType::try_from(header_type_byte as u64)
+        .map_err(|e| anyhow::anyhow!("invalid subgroup header type {header_type_byte:#x}: {e:?}"))?;
+
     let track_alias = read_varint_from_stream(&mut recv).await?;
     let group_id = read_varint_from_stream(&mut recv).await?;
 
-    // Determine if subgroup_id is present based on header type
-    let has_explicit_subgroup = matches!(header_type_byte, 0x14 | 0x15 | 0x1C | 0x1D);
-    let _subgroup_id = if has_explicit_subgroup {
+    let explicit_subgroup_id = if header_type.has_explicit_subgroup_id() {
         Some(read_varint_from_stream(&mut recv).await?)
     } else {
         None
     };
 
-    // Publisher priority
     let mut prio_buf = [0u8; 1];
     recv.read_exact(&mut prio_buf).await?;
+    let publisher_priority = prio_buf[0];
 
-    // Check if this header type has extensions
-    let has_extensions = matches!(
-        header_type_byte,
-        0x11 | 0x13 | 0x15 | 0x19 | 0x1B | 0x1D
-    );
+    let has_extensions = header_type.has_extensions();
+    let header_marks_eog = header_type.contains_end_of_group();
 
-    // Look up subscription by track_alias
     let has_subscription = {
         let guard = inner.active_subscriptions.lock().unwrap();
-        guard.get(&track_alias).is_some()
+        guard.contains_key(&track_alias)
     };
-
     if !has_subscription {
-        return Ok(()); // Unknown track alias, skip
+        return Ok(());
     }
 
-    // Read SubgroupObjects
     let mut prev_object_id: Option<u64> = None;
+    let mut resolved_subgroup_id: Option<u64> = if header_type.subgroup_id_is_zero() {
+        Some(0)
+    } else {
+        explicit_subgroup_id
+    };
+    let mut emitted_eog = false;
 
     loop {
         match read_subgroup_object(&mut recv, &prev_object_id, has_extensions).await {
             Ok(Some(obj)) => {
                 let object_id = obj.object_id;
+                if resolved_subgroup_id.is_none() {
+                    resolved_subgroup_id = Some(object_id);
+                }
+                let subgroup_id = resolved_subgroup_id.unwrap();
                 prev_object_id = Some(object_id);
 
-                if let Some(payload) = &obj.payload {
-                    let data = payload.clone();
-                    let gid = group_id;
+                send_subgroup_object(
+                    inner,
+                    track_alias,
+                    group_id,
+                    subgroup_id,
+                    object_id,
+                    publisher_priority,
+                    &obj.extensions,
+                    obj.status,
+                    obj.payload.as_ref(),
+                );
 
-                    let guard = inner.active_subscriptions.lock().unwrap();
-                    if let Some(active) = guard.get(&track_alias) {
-                        let mut msg_env = OwnedEnv::new();
-                        let pid = active.caller_pid;
-                        active.ref_env.run(|ref_env| {
-                            let sub_ref = active.subscription_ref_term.load(ref_env);
-                            let _ = msg_env.send_and_clear(&pid, |env| {
-                                let mut bin = NewBinary::new(env, data.len());
-                                bin.as_mut_slice().copy_from_slice(&data);
-                                let bin_term: rustler::Term = bin.into();
-                                (atoms::moqx_frame(), sub_ref.in_env(env), gid, bin_term).encode(env)
-                            });
-                        });
-                    }
+                if obj.status == ObjectStatus::EndOfGroup && !emitted_eog {
+                    send_end_of_group(inner, track_alias, group_id, subgroup_id);
+                    emitted_eog = true;
+                }
+
+                if obj.status == ObjectStatus::EndOfTrack {
+                    send_track_ended(inner, track_alias);
                 }
             }
             Ok(None) => break,
@@ -940,7 +1029,112 @@ async fn handle_subgroup_stream(
         }
     }
 
+    if header_marks_eog && !emitted_eog {
+        if let Some(sg) = resolved_subgroup_id {
+            send_end_of_group(inner, track_alias, group_id, sg);
+        }
+    }
+
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_subgroup_object(
+    inner: &Arc<SessionInner>,
+    track_alias: u64,
+    group_id: u64,
+    subgroup_id: u64,
+    object_id: u64,
+    priority: u8,
+    extensions: &[KeyValuePair],
+    status: ObjectStatus,
+    payload: Option<&Bytes>,
+) {
+    let guard = inner.active_subscriptions.lock().unwrap();
+    let Some(active) = guard.get(&track_alias) else {
+        return;
+    };
+    let pid = active.caller_pid;
+    let mut msg_env = OwnedEnv::new();
+    let payload_bytes = payload.cloned().unwrap_or_default();
+    let ext_owned: Vec<KeyValuePair> = extensions.to_vec();
+
+    active.ref_env.run(|ref_env| {
+        let sub_ref = active.subscription_ref_term.load(ref_env);
+        let _ = msg_env.send_and_clear(&pid, |env| {
+            let mut bin = NewBinary::new(env, payload_bytes.len());
+            bin.as_mut_slice().copy_from_slice(&payload_bytes);
+            let payload_term: rustler::Term = bin.into();
+
+            let ext_terms: Vec<rustler::Term> = ext_owned
+                .iter()
+                .map(|kv| match kv {
+                    KeyValuePair::VarInt { type_value, value } => {
+                        (*type_value, *value).encode(env)
+                    }
+                    KeyValuePair::Bytes { type_value, value } => {
+                        let mut b = NewBinary::new(env, value.len());
+                        b.as_mut_slice().copy_from_slice(value);
+                        let b_term: rustler::Term = b.into();
+                        (*type_value, b_term).encode(env)
+                    }
+                })
+                .collect();
+
+            let obj = MoqxObjectOut {
+                group_id,
+                subgroup_id,
+                object_id,
+                priority,
+                status: status_to_atom(status),
+                extensions: ext_terms,
+                payload: payload_term,
+            };
+
+            (atoms::moqx_object(), sub_ref.in_env(env), obj).encode(env)
+        });
+    });
+}
+
+fn send_end_of_group(
+    inner: &Arc<SessionInner>,
+    track_alias: u64,
+    group_id: u64,
+    subgroup_id: u64,
+) {
+    let guard = inner.active_subscriptions.lock().unwrap();
+    let Some(active) = guard.get(&track_alias) else {
+        return;
+    };
+    let pid = active.caller_pid;
+    let mut msg_env = OwnedEnv::new();
+    active.ref_env.run(|ref_env| {
+        let sub_ref = active.subscription_ref_term.load(ref_env);
+        let _ = msg_env.send_and_clear(&pid, |env| {
+            (
+                atoms::moqx_end_of_group(),
+                sub_ref.in_env(env),
+                group_id,
+                subgroup_id,
+            )
+                .encode(env)
+        });
+    });
+}
+
+fn send_track_ended(inner: &Arc<SessionInner>, track_alias: u64) {
+    let guard = inner.active_subscriptions.lock().unwrap();
+    let Some(active) = guard.get(&track_alias) else {
+        return;
+    };
+    let pid = active.caller_pid;
+    let mut msg_env = OwnedEnv::new();
+    active.ref_env.run(|ref_env| {
+        let sub_ref = active.subscription_ref_term.load(ref_env);
+        let _ = msg_env.send_and_clear(&pid, |env| {
+            (atoms::moqx_track_ended(), sub_ref.in_env(env)).encode(env)
+        });
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1011,12 +1205,20 @@ async fn read_fetch_object(
     }))
 }
 
+struct ParsedObject {
+    object_id: u64,
+    extensions: Vec<KeyValuePair>,
+    status: ObjectStatus,
+    payload: Option<Bytes>,
+}
+
 async fn read_subgroup_object(
     recv: &mut wtransport::RecvStream,
     prev_object_id: &Option<u64>,
     has_extensions: bool,
-) -> anyhow::Result<Option<SubgroupObject>> {
-    // Read object_id_delta
+) -> anyhow::Result<Option<ParsedObject>> {
+    use bytes::Buf;
+
     let delta = match read_varint_maybe(recv).await? {
         Some(v) => v,
         None => return Ok(None),
@@ -1027,31 +1229,44 @@ async fn read_subgroup_object(
         None => delta,
     };
 
-    // Extension headers (if present)
-    if has_extensions {
+    let extensions = if has_extensions {
         let ext_len = read_varint_from_stream(recv).await? as usize;
         if ext_len > 0 {
-            let mut skip = vec![0u8; ext_len];
-            recv.read_exact(&mut skip).await?;
+            let mut buf = vec![0u8; ext_len];
+            recv.read_exact(&mut buf).await?;
+            let mut cursor = Bytes::from(buf);
+            let mut pairs = Vec::new();
+            while cursor.has_remaining() {
+                match KeyValuePair::deserialize(&mut cursor) {
+                    Ok(p) => pairs.push(p),
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("invalid extension header: {e:?}"));
+                    }
+                }
+            }
+            pairs
+        } else {
+            Vec::new()
         }
-    }
+    } else {
+        Vec::new()
+    };
 
-    // Payload length
     let payload_len = read_varint_from_stream(recv).await? as usize;
-    let payload = if payload_len == 0 {
-        // Object status follows
-        let _status = read_varint_from_stream(recv).await?;
-        None
+    let (status, payload) = if payload_len == 0 {
+        let status_raw = read_varint_from_stream(recv).await?;
+        let status = ObjectStatus::try_from(status_raw).unwrap_or(ObjectStatus::Normal);
+        (status, None)
     } else {
         let mut data = vec![0u8; payload_len];
         recv.read_exact(&mut data).await?;
-        Some(Bytes::from(data))
+        (ObjectStatus::Normal, Some(Bytes::from(data)))
     };
 
-    Ok(Some(SubgroupObject {
+    Ok(Some(ParsedObject {
         object_id,
-        extension_headers: None,
-        object_status: None,
+        extensions,
+        status,
         payload,
     }))
 }
@@ -1162,87 +1377,431 @@ fn create_track<'a>(
     Ok((atoms::ok(), res).encode(env))
 }
 
+/// Reserves the next group_id for a track (auto-increments the track's internal counter).
+/// Used by the Elixir-side `MOQX.write_frame/2` sugar to pick a group without callers having
+/// to manage group state. Callers using `MOQX.open_subgroup/3` directly pass explicit group_ids.
 #[rustler::nif]
-fn write_frame(track: ResourceArc<TrackProducerRes>, data: Binary) -> rustler::NifResult<Atom> {
-    let payload = Bytes::copy_from_slice(data.as_slice());
-    let session = track.session.clone();
-    let namespace = track.namespace.clone();
-    let track_name_str = track.track_name.clone();
-    let group_seq = track.group_seq.fetch_add(1, Ordering::Relaxed);
+fn track_next_group_id(track: ResourceArc<TrackProducerRes>) -> u64 {
+    track.group_seq.fetch_add(1, Ordering::Relaxed)
+}
 
-    runtime().spawn(async move {
-        if let Err(e) = do_write_frame(
-            &session,
-            &namespace,
-            &track_name_str,
-            group_seq,
-            payload,
-        )
-        .await
-        {
-            let _ = e;
+// ---------------------------------------------------------------------------
+// NIF: open_subgroup / write_object / close_subgroup / flush_subgroup
+// ---------------------------------------------------------------------------
+
+#[derive(rustler::NifUntaggedEnum)]
+enum ExtValue {
+    VarInt(u64),
+    Bytes(Vec<u8>),
+}
+
+fn pick_subgroup_header_type(
+    subgroup_id: Option<u64>,
+    has_extensions: bool,
+    end_of_group: bool,
+) -> SubgroupHeaderType {
+    match (subgroup_id, has_extensions, end_of_group) {
+        (Some(0), false, false) => SubgroupHeaderType::Type0x10,
+        (Some(0), true, false) => SubgroupHeaderType::Type0x11,
+        (None, false, false) => SubgroupHeaderType::Type0x12,
+        (None, true, false) => SubgroupHeaderType::Type0x13,
+        (Some(_), false, false) => SubgroupHeaderType::Type0x14,
+        (Some(_), true, false) => SubgroupHeaderType::Type0x15,
+        (Some(0), false, true) => SubgroupHeaderType::Type0x18,
+        (Some(0), true, true) => SubgroupHeaderType::Type0x19,
+        (None, false, true) => SubgroupHeaderType::Type0x1A,
+        (None, true, true) => SubgroupHeaderType::Type0x1B,
+        (Some(_), false, true) => SubgroupHeaderType::Type0x1C,
+        (Some(_), true, true) => SubgroupHeaderType::Type0x1D,
+    }
+}
+
+fn build_subgroup_header(
+    track_alias: u64,
+    group_id: u64,
+    subgroup_id: Option<u64>,
+    priority: u8,
+    has_extensions: bool,
+    end_of_group: bool,
+) -> SubgroupHeader {
+    match subgroup_id {
+        Some(0) => SubgroupHeader::new_fixed_zero_id(
+            track_alias,
+            group_id,
+            priority,
+            has_extensions,
+            end_of_group,
+        ),
+        None => SubgroupHeader::new_first_object_id(
+            track_alias,
+            group_id,
+            priority,
+            has_extensions,
+            end_of_group,
+        ),
+        Some(id) => SubgroupHeader::new_with_explicit_id(
+            track_alias,
+            group_id,
+            id,
+            priority,
+            has_extensions,
+            end_of_group,
+        ),
+    }
+}
+
+fn status_from_atom(status: Atom) -> Result<ObjectStatus, String> {
+    // Compare atoms by encoding to string — rustler doesn't allow `==` on Atom directly.
+    // Use the fact that the atom module already defined each status atom; decode via match.
+    // Simplest approach: compare to the atom constants using Atom::to_term.
+    // But we don't have an Env here, so stringify instead.
+    let s = status_atom_to_str(status);
+    match s.as_deref() {
+        Some("normal") => Ok(ObjectStatus::Normal),
+        Some("does_not_exist") => Ok(ObjectStatus::DoesNotExist),
+        Some("end_of_group") => Ok(ObjectStatus::EndOfGroup),
+        Some("end_of_track") => Ok(ObjectStatus::EndOfTrack),
+        other => Err(format!("invalid status atom: {other:?}")),
+    }
+}
+
+fn status_atom_to_str(atom: Atom) -> Option<String> {
+    // Rustler's Atom doesn't expose a name getter without an Env. We rely on Encoder round-trip
+    // via a scratch OwnedEnv.
+    let env = OwnedEnv::new();
+    let out = std::sync::Mutex::new(None);
+    env.run(|e| {
+        let term = atom.to_term(e);
+        if let Ok(name) = term.atom_to_string() {
+            *out.lock().unwrap() = Some(name);
         }
     });
+    out.into_inner().unwrap()
+}
 
+fn ext_pairs_to_key_values(
+    pairs: Vec<(u64, ExtValue)>,
+) -> Result<Vec<KeyValuePair>, String> {
+    let mut out = Vec::with_capacity(pairs.len());
+    for (type_value, value) in pairs {
+        let kv = match value {
+            ExtValue::VarInt(v) => KeyValuePair::try_new_varint(type_value, v)
+                .map_err(|e| format!("invalid varint extension type={type_value}: {e:?}"))?,
+            ExtValue::Bytes(b) => {
+                let bytes = Bytes::from(b);
+                KeyValuePair::try_new_bytes(type_value, bytes)
+                    .map_err(|e| format!("invalid bytes extension type={type_value}: {e:?}"))?
+            }
+        };
+        out.push(kv);
+    }
+    Ok(out)
+}
+
+/// Send {:moqx_error, subgroup_ref, reason} to the resource's owning pid.
+fn send_subgroup_error(res: &SubgroupRes, reason: String) {
+    let guard = res.notify.lock().unwrap();
+    let Some(notify) = guard.as_ref() else {
+        return;
+    };
+    let pid = notify.caller_pid;
+    let mut msg_env = OwnedEnv::new();
+    notify.ref_env.run(|ref_env| {
+        let sg_ref = notify.subgroup_ref_term.load(ref_env);
+        let _ = msg_env.send_and_clear(&pid, |env| {
+            (atoms::moqx_error(), sg_ref.in_env(env), reason.clone()).encode(env)
+        });
+    });
+}
+
+/// Wrapper that respects the silent_drop flag set by the open task.
+fn maybe_send_subgroup_error(res: &SubgroupRes, reason: String) {
+    if res.silent_drop.load(Ordering::SeqCst) {
+        return;
+    }
+    send_subgroup_error(res, reason);
+}
+
+/// Try to send an Op into the subgroup's queue. No-op if the sender is already
+/// taken (either because the subgroup was closed, the consumer task finished, or
+/// the open path silently dropped).
+fn try_send_op(res: &SubgroupRes, op: SubgroupOp) {
+    let guard = res.op_tx.lock().unwrap();
+    if let Some(tx) = guard.as_ref() {
+        let _ = tx.send(op);
+    }
+}
+
+fn send_subgroup_flushed(res: &SubgroupRes) {
+    let guard = res.notify.lock().unwrap();
+    let Some(notify) = guard.as_ref() else {
+        return;
+    };
+    let pid = notify.caller_pid;
+    let mut msg_env = OwnedEnv::new();
+    notify.ref_env.run(|ref_env| {
+        let sg_ref = notify.subgroup_ref_term.load(ref_env);
+        let _ = msg_env.send_and_clear(&pid, |env| {
+            (atoms::moqx_flushed(), sg_ref.in_env(env)).encode(env)
+        });
+    });
+}
+
+#[rustler::nif]
+fn open_subgroup<'a>(
+    env: Env<'a>,
+    track: ResourceArc<TrackProducerRes>,
+    group_id: u64,
+    subgroup_id: Option<u64>,
+    priority: u8,
+    end_of_group: bool,
+    extensions: Vec<(u64, ExtValue)>,
+) -> rustler::NifResult<rustler::Term<'a>> {
+    let has_extensions = !extensions.is_empty();
+    // Validate extension parity up front so misuse errors are synchronous.
+    let _ = ext_pairs_to_key_values(extensions)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    let header_type = pick_subgroup_header_type(subgroup_id, has_extensions, end_of_group);
+
+    let key = format!(
+        "{}/{}",
+        track.namespace.trim_matches('/'),
+        track.track_name
+    );
+
+    let silent_drop = Arc::new(AtomicBool::new(false));
+    let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel::<SubgroupOp>();
+
+    let res = ResourceArc::new(SubgroupRes {
+        session: track.session.clone(),
+        group_id,
+        header_type,
+        op_tx: std::sync::Mutex::new(Some(op_tx)),
+        silent_drop: silent_drop.clone(),
+        notify: std::sync::Mutex::new(None),
+        closed: AtomicBool::new(false),
+    });
+
+    // Populate the notify channel so the consumer task can reach the caller pid.
+    let caller_pid = env.pid();
+    let ref_env = OwnedEnv::new();
+    let subgroup_ref_term = ref_env.save(res.clone());
+    *res.notify.lock().unwrap() = Some(SubgroupNotify {
+        caller_pid,
+        ref_env,
+        subgroup_ref_term,
+    });
+
+    let res_for_task = res.clone();
+    runtime().spawn(async move {
+        subgroup_consumer_loop(
+            res_for_task,
+            key,
+            group_id,
+            subgroup_id,
+            priority,
+            has_extensions,
+            end_of_group,
+            silent_drop,
+            op_rx,
+        )
+        .await;
+    });
+
+    Ok((atoms::ok(), res).encode(env))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn subgroup_consumer_loop(
+    res: ResourceArc<SubgroupRes>,
+    key: String,
+    group_id: u64,
+    subgroup_id: Option<u64>,
+    priority: u8,
+    has_extensions: bool,
+    end_of_group: bool,
+    silent_drop: Arc<AtomicBool>,
+    mut op_rx: tokio::sync::mpsc::UnboundedReceiver<SubgroupOp>,
+) {
+    // Resolve track_alias synchronously (no retry — matches v0.4.x behavior).
+    let track_alias = {
+        let guard = res.session.incoming_subscriptions.lock().unwrap();
+        guard.get(&key).map(|s| s.track_alias)
+    };
+    let Some(track_alias) = track_alias else {
+        silent_drop.store(true, Ordering::SeqCst);
+        // Drain and drop any queued ops.
+        while op_rx.recv().await.is_some() {}
+        return;
+    };
+
+    let header = build_subgroup_header(
+        track_alias,
+        group_id,
+        subgroup_id,
+        priority,
+        has_extensions,
+        end_of_group,
+    );
+
+    // Open the QUIC uni-stream + write the subgroup header.
+    let mut stream = match async {
+        let send = res
+            .session
+            .connection
+            .open_uni()
+            .await
+            .map_err(|e| format!("open_uni: {e:?}"))?
+            .await
+            .map_err(|e| format!("open_uni (accept): {e:?}"))?;
+        let send = Arc::new(tokio::sync::Mutex::new(send));
+        SendDataStream::new(send, HeaderInfo::Subgroup { header })
+            .await
+            .map_err(|e| format!("create data stream: {e:?}"))
+    }
+    .await
+    {
+        Ok(s) => s,
+        Err(reason) => {
+            maybe_send_subgroup_error(&res, reason);
+            while op_rx.recv().await.is_some() {}
+            return;
+        }
+    };
+
+    let mut previous_object_id: Option<u64> = None;
+    let mut finished = false;
+
+    while let Some(op) = op_rx.recv().await {
+        match op {
+            SubgroupOp::Write {
+                object_id,
+                payload,
+                extensions,
+                status,
+            } => {
+                let payload_opt = match status {
+                    ObjectStatus::Normal => Some(payload),
+                    _ => None,
+                };
+                let object = moqtail::model::data::object::Object {
+                    track_alias,
+                    location: Location::new(group_id, object_id),
+                    publisher_priority: 0,
+                    forwarding_preference: ObjectForwardingPreference::Subgroup,
+                    subgroup_id: Some(0),
+                    status,
+                    extensions: if extensions.is_empty() {
+                        None
+                    } else {
+                        Some(extensions)
+                    },
+                    payload: payload_opt,
+                };
+                if let Err(e) = stream.send_object(&object, previous_object_id).await {
+                    maybe_send_subgroup_error(&res, format!("send_object: {e:?}"));
+                } else {
+                    previous_object_id = Some(object_id);
+                }
+            }
+
+            SubgroupOp::Close {
+                emit_end_of_group_marker,
+            } => {
+                if emit_end_of_group_marker {
+                    let next_id = previous_object_id.map(|p| p + 1).unwrap_or(0);
+                    let eog_obj = moqtail::model::data::object::Object {
+                        track_alias,
+                        location: Location::new(group_id, next_id),
+                        publisher_priority: 0,
+                        forwarding_preference: ObjectForwardingPreference::Subgroup,
+                        subgroup_id: Some(0),
+                        status: ObjectStatus::EndOfGroup,
+                        extensions: None,
+                        payload: None,
+                    };
+                    if let Err(e) = stream.send_object(&eog_obj, previous_object_id).await {
+                        maybe_send_subgroup_error(&res, format!("send eog marker: {e:?}"));
+                    }
+                }
+                if let Err(e) = stream.finish().await {
+                    maybe_send_subgroup_error(&res, format!("finish stream: {e:?}"));
+                }
+                finished = true;
+                break;
+            }
+
+            SubgroupOp::Flush => match stream.flush().await {
+                Ok(()) => send_subgroup_flushed(&res),
+                Err(e) => maybe_send_subgroup_error(&res, format!("flush stream: {e:?}")),
+            },
+        }
+    }
+
+    if !finished {
+        // Sender dropped without an explicit Close (resource GC path).
+        let _ = stream.finish().await;
+    }
+}
+
+#[rustler::nif]
+fn write_object(
+    subgroup: ResourceArc<SubgroupRes>,
+    object_id: u64,
+    payload: Binary,
+    extensions: Vec<(u64, ExtValue)>,
+    status_atom: Atom,
+) -> rustler::NifResult<Atom> {
+    let status = status_from_atom(status_atom)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    let ext_kv = ext_pairs_to_key_values(extensions)
+        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    let payload_bytes = Bytes::copy_from_slice(payload.as_slice());
+
+    try_send_op(
+        &subgroup,
+        SubgroupOp::Write {
+            object_id,
+            payload: payload_bytes,
+            extensions: ext_kv,
+            status,
+        },
+    );
     Ok(atoms::ok())
 }
 
-async fn do_write_frame(
-    session: &Arc<SessionInner>,
-    namespace: &str,
-    track_name: &str,
-    group_seq: u64,
-    payload: Bytes,
-) -> anyhow::Result<()> {
-    // Look up the track_alias from the incoming subscription.
-    // The relay assigned this alias when it forwarded the subscriber's Subscribe.
-    let key = format!("{}/{}", namespace.trim_matches('/'), track_name);
-    let track_alias = {
-        let guard = session.incoming_subscriptions.lock().unwrap();
-        guard
-            .get(&key)
-            .map(|s| s.track_alias)
-            .ok_or_else(|| anyhow::anyhow!("no subscriber for {key}"))?
-    };
+#[rustler::nif]
+fn close_subgroup(
+    subgroup: ResourceArc<SubgroupRes>,
+    emit_end_of_group_marker: bool,
+) -> rustler::NifResult<Atom> {
+    if subgroup.closed.swap(true, Ordering::SeqCst) {
+        return Ok(atoms::ok());
+    }
 
-    let send = session.connection.open_uni().await?.await?;
-    let send = Arc::new(tokio::sync::Mutex::new(send));
+    let header_type = subgroup.header_type;
+    if emit_end_of_group_marker && !header_type.contains_end_of_group() {
+        return Err(rustler::Error::Term(Box::new(
+            "emit_end_of_group_marker=true requires subgroup opened with end_of_group: true"
+                .to_string(),
+        )));
+    }
 
-    let header = SubgroupHeader::new_fixed_zero_id(
-        track_alias,
-        group_seq,
-        0,     // priority
-        false, // no extensions
-        false, // no end-of-group marker
+    try_send_op(
+        &subgroup,
+        SubgroupOp::Close {
+            emit_end_of_group_marker,
+        },
     );
-    let header_info = HeaderInfo::Subgroup { header };
+    // Dropping the sender signals the consumer task to finish after draining.
+    let _ = subgroup.op_tx.lock().unwrap().take();
+    Ok(atoms::ok())
+}
 
-    let mut data_stream = SendDataStream::new(send, header_info)
-        .await
-        .map_err(|e| anyhow::anyhow!("create data stream: {e:?}"))?;
-
-    let object = moqtail::model::data::object::Object {
-        track_alias,
-        location: moqtail::model::common::location::Location::new(group_seq, 0),
-        publisher_priority: 0,
-        forwarding_preference: ObjectForwardingPreference::Subgroup,
-        subgroup_id: Some(0),
-        status: ObjectStatus::Normal,
-        extensions: None,
-        payload: Some(payload),
-    };
-
-    data_stream
-        .send_object(&object, None)
-        .await
-        .map_err(|e| anyhow::anyhow!("send object: {e:?}"))?;
-
-    data_stream
-        .finish()
-        .await
-        .map_err(|e| anyhow::anyhow!("finish stream: {e:?}"))?;
-
-    Ok(())
+#[rustler::nif]
+fn flush_subgroup(subgroup: ResourceArc<SubgroupRes>) -> rustler::NifResult<Atom> {
+    try_send_op(&subgroup, SubgroupOp::Flush);
+    Ok(atoms::ok())
 }
 
 #[rustler::nif]
@@ -1504,6 +2063,7 @@ fn load(env: Env, _: rustler::Term) -> bool {
         && env.register::<BroadcastProducerRes>().is_ok()
         && env.register::<TrackProducerRes>().is_ok()
         && env.register::<SubscriptionHandle>().is_ok()
+        && env.register::<SubgroupRes>().is_ok()
 }
 
 rustler::init!("Elixir.MOQX.Native", load = load);
