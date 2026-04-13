@@ -142,7 +142,7 @@ defmodule MOQX do
           {:subgroup_id, subgroup_id()}
           | {:priority, 0..255}
           | {:end_of_group, boolean()}
-          | {:extensions, [extension()]}
+          | {:extensions_present, boolean()}
 
   @typedoc "Options for `write_object/4`."
   @type write_object_opt ::
@@ -450,9 +450,10 @@ defmodule MOQX do
       `close_subgroup(handle, end_of_group: true)` to actually write the marker.
       (default `false`)
 
-    * `:extensions` — list of `{type, value}` pairs applied to *every* object
-      on this subgroup's stream. Even types carry varint values, odd types
-      carry binaries. Validation is strict at the boundary.
+    * `:extensions_present` — when `true`, the subgroup header declares that
+      every object on this stream carries an extensions block (possibly empty).
+      Required if any `write_object/4` on this subgroup will pass
+      `:extensions`. (default `false`)
   """
   @spec open_subgroup(track(), non_neg_integer(), [open_subgroup_opt()]) ::
           {:ok, subgroup_handle()} | {:error, String.t()}
@@ -461,11 +462,13 @@ defmodule MOQX do
     subgroup_id = opts |> Keyword.get(:subgroup_id, 0) |> normalize_subgroup_id!()
     priority = opts |> Keyword.get(:priority, 0) |> normalize_priority!()
     end_of_group = opts |> Keyword.get(:end_of_group, false) |> normalize_boolean!(:end_of_group)
-    extensions = opts |> Keyword.get(:extensions, []) |> normalize_extensions!()
+
+    extensions_present =
+      opts |> Keyword.get(:extensions_present, false) |> normalize_boolean!(:extensions_present)
 
     validate_open_subgroup_opts!(opts)
 
-    case MOQX.Native.open_subgroup(track, group_id, subgroup_id, priority, end_of_group, extensions) do
+    case MOQX.Native.open_subgroup(track, group_id, subgroup_id, priority, end_of_group, extensions_present) do
       {:ok, handle} -> {:ok, handle}
       {:error, _reason} = error -> error
     end
@@ -599,7 +602,7 @@ defmodule MOQX do
   end
 
   defp validate_open_subgroup_opts!(opts) do
-    allowed = [:subgroup_id, :priority, :end_of_group, :extensions]
+    allowed = [:subgroup_id, :priority, :end_of_group, :extensions_present]
 
     case Keyword.keys(opts) -- allowed do
       [] -> :ok

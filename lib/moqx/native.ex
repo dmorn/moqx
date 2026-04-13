@@ -18,7 +18,7 @@ defmodule MOQX.Native do
   def finish_track(_track), do: :erlang.nif_error(:nif_not_loaded)
 
   # Subgroup send-side primitives
-  def open_subgroup(_track, _group_id, _subgroup_id, _priority, _end_of_group, _extensions),
+  def open_subgroup(_track, _group_id, _subgroup_id, _priority, _end_of_group, _extensions_present),
     do: :erlang.nif_error(:nif_not_loaded)
 
   def write_object(_subgroup, _object_id, _payload, _extensions, _status),

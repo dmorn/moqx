@@ -477,6 +477,163 @@ defmodule MOQXIntegrationTest do
         :ok = MOQX.close(publisher)
       end
     end
+
+    @tag :integration
+    test "subgroup extensions round-trip varint and bytes values" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-ext-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+        payload = "payload-with-extensions"
+
+        varint_ext = {2, 123_456}
+        bytes_ext = {13, <<0xCA, 0xFE, 0xBA, 0xBE>>}
+
+        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        subscribe_with_retry!(subscriber, ns, track_name)
+
+        {:ok, sg} =
+          MOQX.open_subgroup(track, 0,
+            subgroup_id: 0,
+            priority: 42,
+            extensions_present: true
+          )
+
+        :ok =
+          MOQX.write_object(sg, 0, payload, extensions: [varint_ext, bytes_ext])
+
+        :ok = MOQX.close_subgroup(sg)
+
+        obj =
+          receive do
+            {:moqx_object, _sub_ref, %MOQX.Object{payload: ^payload} = obj} -> obj
+            {:moqx_error, _sub_ref, reason} -> flunk("receive failed: #{inspect(reason)}")
+          after
+            @timeout -> flunk("timeout waiting for extension-bearing object")
+          end
+
+        assert obj.priority == 42
+        assert obj.extensions == [varint_ext, bytes_ext]
+
+        :ok = MOQX.finish_track(track)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "open_subgroup rejects extensions with mismatched type parity" do
+      publisher = connect_publisher!()
+
+      try do
+        {:ok, broadcast} = MOQX.publish(publisher, "moqx-ext-reject")
+        {:ok, track} = MOQX.create_track(broadcast, "demo")
+
+        # open_subgroup itself no longer takes :extensions, so parity checks live
+        # on write_object. But first open a subgroup so we have a handle.
+        {:ok, sg} = MOQX.open_subgroup(track, 0, extensions_present: true)
+
+        # Even-type with binary value: invalid (even types are varints).
+        assert_raise ArgumentError, ~r/type 2 is even/, fn ->
+          MOQX.write_object(sg, 0, "p", extensions: [{2, <<1, 2>>}])
+        end
+
+        # Odd-type with integer value: invalid (odd types are bytes).
+        assert_raise ArgumentError, ~r/type 13 is odd/, fn ->
+          MOQX.write_object(sg, 0, "p", extensions: [{13, 42}])
+        end
+
+        :ok = MOQX.close_subgroup(sg)
+      after
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "end-of-group signalled via header flag + marker yields exactly one :moqx_end_of_group" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-eog-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+        payload = "data-in-eog-subgroup"
+
+        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        handle = subscribe_with_retry_handle!(subscriber, ns, track_name)
+
+        # end_of_group: true selects the 0x18–0x1D header family AND enables
+        # close_subgroup/emit_end_of_group_marker, which writes a Status=EndOfGroup
+        # marker object before finishing. The publisher signals EoG via *both*
+        # paths; the subscriber should see exactly one :moqx_end_of_group.
+        {:ok, sg} =
+          MOQX.open_subgroup(track, 0, subgroup_id: 0, priority: 10, end_of_group: true)
+
+        :ok = MOQX.write_object(sg, 0, payload)
+        :ok = MOQX.close_subgroup(sg, end_of_group: true)
+
+        # First: exactly one data object, then exactly one :moqx_end_of_group, then nothing.
+        assert_receive {:moqx_object, ^handle,
+                         %MOQX.Object{
+                           group_id: 0,
+                           subgroup_id: 0,
+                           object_id: 0,
+                           status: :normal,
+                           payload: ^payload
+                         }},
+                       @timeout
+
+        assert_receive {:moqx_end_of_group, ^handle, 0, 0}, @timeout
+
+        # No duplicate :moqx_end_of_group even though the publisher signalled via
+        # both the header flag and the marker object.
+        refute_receive {:moqx_end_of_group, ^handle, _group_id, _subgroup_id}, 500
+
+        # The marker object itself should NOT leak through as a :moqx_object with
+        # status :end_of_group — that would force every subscriber to filter it.
+        refute_receive {:moqx_object, ^handle, %MOQX.Object{status: :end_of_group}}, 500
+
+        :ok = MOQX.finish_track(track)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "write_object without extensions_present errors when :extensions is non-empty" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-ext-missing-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+
+        {:ok, broadcast} = MOQX.publish(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        handle = subscribe_with_retry_handle!(subscriber, ns, track_name)
+
+        {:ok, sg} = MOQX.open_subgroup(track, 0, subgroup_id: 0, extensions_present: false)
+        :ok = MOQX.write_object(sg, 0, "p", extensions: [{2, 100}])
+
+        assert_receive {:moqx_error, ^sg, reason}, @timeout
+        assert reason =~ "extensions_present"
+
+        :ok = MOQX.close_subgroup(sg)
+        :ok = MOQX.unsubscribe(handle)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
   end
 
   describe "integration relay: role guardrails" do

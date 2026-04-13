@@ -1003,25 +1003,35 @@ async fn handle_subgroup_stream(
                 let subgroup_id = resolved_subgroup_id.unwrap();
                 prev_object_id = Some(object_id);
 
-                send_subgroup_object(
-                    inner,
-                    track_alias,
-                    group_id,
-                    subgroup_id,
-                    object_id,
-                    publisher_priority,
-                    &obj.extensions,
-                    obj.status,
-                    obj.payload.as_ref(),
-                );
-
-                if obj.status == ObjectStatus::EndOfGroup && !emitted_eog {
-                    send_end_of_group(inner, track_alias, group_id, subgroup_id);
-                    emitted_eog = true;
-                }
-
-                if obj.status == ObjectStatus::EndOfTrack {
-                    send_track_ended(inner, track_alias);
+                match obj.status {
+                    // EndOfGroup / EndOfTrack are purely control markers. Collapse each
+                    // into its corresponding control event; do not also emit a data-object
+                    // message with an empty payload — that would force subscribers to
+                    // filter status tags themselves.
+                    ObjectStatus::EndOfGroup => {
+                        if !emitted_eog {
+                            send_end_of_group(inner, track_alias, group_id, subgroup_id);
+                            emitted_eog = true;
+                        }
+                    }
+                    ObjectStatus::EndOfTrack => {
+                        send_track_ended(inner, track_alias);
+                    }
+                    // Normal (data) and DoesNotExist (an informational gap) surface as
+                    // :moqx_object. The subscriber can branch on :status if needed.
+                    ObjectStatus::Normal | ObjectStatus::DoesNotExist => {
+                        send_subgroup_object(
+                            inner,
+                            track_alias,
+                            group_id,
+                            subgroup_id,
+                            object_id,
+                            publisher_priority,
+                            &obj.extensions,
+                            obj.status,
+                            obj.payload.as_ref(),
+                        );
+                    }
                 }
             }
             Ok(None) => break,
@@ -1389,10 +1399,37 @@ fn track_next_group_id(track: ResourceArc<TrackProducerRes>) -> u64 {
 // NIF: open_subgroup / write_object / close_subgroup / flush_subgroup
 // ---------------------------------------------------------------------------
 
-#[derive(rustler::NifUntaggedEnum)]
-enum ExtValue {
-    VarInt(u64),
-    Bytes(Vec<u8>),
+/// Decode `[{type :: non_neg_integer, value :: non_neg_integer | binary}]` from an Elixir
+/// term into `Vec<KeyValuePair>`. Enforces the MoQ parity rule (even types carry varints;
+/// odd types carry binaries) via `KeyValuePair::try_new_*`.
+fn decode_extensions<'a>(
+    term: rustler::Term<'a>,
+) -> rustler::NifResult<Vec<KeyValuePair>> {
+    let list: Vec<rustler::Term<'a>> = term.decode()?;
+    let mut out = Vec::with_capacity(list.len());
+    for item in list {
+        let (type_value, value_term): (u64, rustler::Term<'a>) = item.decode()?;
+        let kv = if let Ok(v) = value_term.decode::<u64>() {
+            KeyValuePair::try_new_varint(type_value, v).map_err(|e| {
+                rustler::Error::Term(Box::new(format!(
+                    "invalid varint extension type={type_value}: {e:?}"
+                )))
+            })?
+        } else if let Ok(b) = value_term.decode::<rustler::Binary<'a>>() {
+            let bytes = Bytes::copy_from_slice(b.as_slice());
+            KeyValuePair::try_new_bytes(type_value, bytes).map_err(|e| {
+                rustler::Error::Term(Box::new(format!(
+                    "invalid bytes extension type={type_value}: {e:?}"
+                )))
+            })?
+        } else {
+            return Err(rustler::Error::Term(Box::new(format!(
+                "extension value for type {type_value} must be a non-negative integer or a binary"
+            ))));
+        };
+        out.push(kv);
+    }
+    Ok(out)
 }
 
 fn pick_subgroup_header_type(
@@ -1479,25 +1516,6 @@ fn status_atom_to_str(atom: Atom) -> Option<String> {
     out.into_inner().unwrap()
 }
 
-fn ext_pairs_to_key_values(
-    pairs: Vec<(u64, ExtValue)>,
-) -> Result<Vec<KeyValuePair>, String> {
-    let mut out = Vec::with_capacity(pairs.len());
-    for (type_value, value) in pairs {
-        let kv = match value {
-            ExtValue::VarInt(v) => KeyValuePair::try_new_varint(type_value, v)
-                .map_err(|e| format!("invalid varint extension type={type_value}: {e:?}"))?,
-            ExtValue::Bytes(b) => {
-                let bytes = Bytes::from(b);
-                KeyValuePair::try_new_bytes(type_value, bytes)
-                    .map_err(|e| format!("invalid bytes extension type={type_value}: {e:?}"))?
-            }
-        };
-        out.push(kv);
-    }
-    Ok(out)
-}
-
 /// Send {:moqx_error, subgroup_ref, reason} to the resource's owning pid.
 fn send_subgroup_error(res: &SubgroupRes, reason: String) {
     let guard = res.notify.lock().unwrap();
@@ -1555,12 +1573,9 @@ fn open_subgroup<'a>(
     subgroup_id: Option<u64>,
     priority: u8,
     end_of_group: bool,
-    extensions: Vec<(u64, ExtValue)>,
+    extensions_present: bool,
 ) -> rustler::NifResult<rustler::Term<'a>> {
-    let has_extensions = !extensions.is_empty();
-    // Validate extension parity up front so misuse errors are synchronous.
-    let _ = ext_pairs_to_key_values(extensions)
-        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    let has_extensions = extensions_present;
     let header_type = pick_subgroup_header_type(subgroup_id, has_extensions, end_of_group);
 
     let key = format!(
@@ -1684,6 +1699,25 @@ async fn subgroup_consumer_loop(
                     ObjectStatus::Normal => Some(payload),
                     _ => None,
                 };
+                // When the subgroup header declared has_extensions=true, every object on
+                // the wire MUST carry an extensions block (possibly empty) or the receiver's
+                // parser falls out of sync. Respect that invariant even if the caller passes
+                // an empty list.
+                let extensions_opt = if has_extensions {
+                    Some(extensions)
+                } else if extensions.is_empty() {
+                    None
+                } else {
+                    // Caller passed extensions but the header was opened without
+                    // extensions_present: true. Surface as an explicit error rather than
+                    // silently corrupting the stream.
+                    maybe_send_subgroup_error(
+                        &res,
+                        "write_object: cannot attach extensions to a subgroup opened without extensions_present: true"
+                            .to_string(),
+                    );
+                    continue;
+                };
                 let object = moqtail::model::data::object::Object {
                     track_alias,
                     location: Location::new(group_id, object_id),
@@ -1691,11 +1725,7 @@ async fn subgroup_consumer_loop(
                     forwarding_preference: ObjectForwardingPreference::Subgroup,
                     subgroup_id: Some(0),
                     status,
-                    extensions: if extensions.is_empty() {
-                        None
-                    } else {
-                        Some(extensions)
-                    },
+                    extensions: extensions_opt,
                     payload: payload_opt,
                 };
                 if let Err(e) = stream.send_object(&object, previous_object_id).await {
@@ -1717,7 +1747,7 @@ async fn subgroup_consumer_loop(
                         forwarding_preference: ObjectForwardingPreference::Subgroup,
                         subgroup_id: Some(0),
                         status: ObjectStatus::EndOfGroup,
-                        extensions: None,
+                        extensions: if has_extensions { Some(Vec::new()) } else { None },
                         payload: None,
                     };
                     if let Err(e) = stream.send_object(&eog_obj, previous_object_id).await {
@@ -1745,17 +1775,16 @@ async fn subgroup_consumer_loop(
 }
 
 #[rustler::nif]
-fn write_object(
+fn write_object<'a>(
     subgroup: ResourceArc<SubgroupRes>,
     object_id: u64,
     payload: Binary,
-    extensions: Vec<(u64, ExtValue)>,
+    extensions: rustler::Term<'a>,
     status_atom: Atom,
 ) -> rustler::NifResult<Atom> {
     let status = status_from_atom(status_atom)
         .map_err(|e| rustler::Error::Term(Box::new(e)))?;
-    let ext_kv = ext_pairs_to_key_values(extensions)
-        .map_err(|e| rustler::Error::Term(Box::new(e)))?;
+    let ext_kv = decode_extensions(extensions)?;
     let payload_bytes = Bytes::copy_from_slice(payload.as_slice());
 
     try_send_op(
