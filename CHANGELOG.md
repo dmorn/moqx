@@ -19,9 +19,8 @@ All notable changes to `moqx` will be documented in this file.
   `op: :publish` and the matching `publish_ref`.
 - **Breaking:** publisher write lifecycle now has explicit synchronous gating.
   Writes no longer silently drop before downstream activation.
-  `write_frame/2` and `open_subgroup/3` now fail with
-  `{:error, "track_not_active"}` before subscribe activation and
-  `{:error, "track_closed"}` after `finish_track/1`.
+  `write_frame/2` and `open_subgroup/3` now fail synchronously with typed
+  `%MOQX.RequestError{code: :track_not_active | :track_closed}`.
 - Subscriber data-path race handling now tolerates early subgroup streams that
   arrive just before local `SubscribeOk` state installation, reducing first-frame
   loss risk under control/data-plane reordering.
@@ -39,7 +38,12 @@ All notable changes to `moqx` will be documented in this file.
   `{:moqx_error, ..., reason}`) are no longer the primary public contract.
   Async failures now flow through `%MOQX.RequestError{}` and
   `%MOQX.TransportError{}`.
-- `await_catalog/2` now consumes the typed fetch message contract.
+- Added explicit publisher track lifecycle events for track owners:
+  `{:moqx_track_active, %MOQX.TrackActive{...}}` and
+  `{:moqx_track_closed, %MOQX.TrackClosed{...}}`.
+- **Breaking:** helper-level convenience APIs moved out of core `MOQX` into
+  `MOQX.Helpers` (`publish_catalog/2`, `update_catalog/2`, `fetch_catalog/2`,
+  `await_catalog/2`).
 - Mix tasks (`moqx.e2e.pubsub`, `moqx.moqtail.demo`) and integration helpers now
   follow the typed async contract.
 

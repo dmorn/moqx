@@ -44,8 +44,10 @@ Today `moqx` supports a single client-side path:
 - broadcasts, tracks, and frame delivery
 - live subscription via SUBSCRIBE with `FilterType::LatestObject`
 - raw fetch for retrieving track objects by range (subscriber sessions only)
-- publisher-side catalog publication helpers via `publish_catalog/2` and `update_catalog/2`
-- raw catalog retrieval via `fetch_catalog/2` and `await_catalog/2`
+- optional helper-layer catalog publication via `MOQX.Helpers.publish_catalog/2`
+  and `MOQX.Helpers.update_catalog/2`
+- optional helper-layer catalog retrieval via `MOQX.Helpers.fetch_catalog/2`
+  and `MOQX.Helpers.await_catalog/2`
 - CMSF catalog parsing and track discovery via `MOQX.Catalog`
 - relay authentication through the connect URL query, using `?jwt=...`
 - path-rooted relay authorization, where the connect URL path must match the token `root`
@@ -66,7 +68,10 @@ Out of scope for `v0.1`:
 
 ## Public API
 
-The intended API is the single `MOQX` module.
+`moqx` exposes:
+
+- `MOQX` — low-level core message-passing API
+- `MOQX.Helpers` — opt-in convenience helpers built on top of `MOQX`
 
 ### Connect
 
@@ -173,8 +178,8 @@ broadcast =
   end
 
 catalog_json = ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"video","role":"video"}]})
-{:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_json)
-:ok = MOQX.update_catalog(catalog_track, catalog_json)
+{:ok, catalog_track} = MOQX.Helpers.publish_catalog(broadcast, catalog_json)
+:ok = MOQX.Helpers.update_catalog(catalog_track, catalog_json)
 
 {:ok, track} = MOQX.create_track(broadcast, "video")
 :ok = MOQX.write_frame(track, "frame-1")
@@ -182,13 +187,14 @@ catalog_json = ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"v
 :ok = MOQX.finish_track(track)
 
 # lifecycle gating on the same handle:
-{:error, "track_closed"} = MOQX.write_frame(track, "frame-3")
+{:error, %MOQX.RequestError{code: :track_closed}} = MOQX.write_frame(track, "frame-3")
 ```
 
 Write calls are explicitly lifecycle-gated (no silent drops):
 
-- `{:error, "track_not_active"}` before a downstream subscribe activates the track
-- `{:error, "track_closed"}` after `finish_track/1`
+- `{:error, %MOQX.RequestError{code: :track_not_active}}` before downstream
+  subscribe activation
+- `{:error, %MOQX.RequestError{code: :track_closed}}` after `finish_track/1`
 
 ### Publisher-side catalog publication
 
@@ -196,8 +202,8 @@ In moqtail-style relays, the publisher is responsible for publishing the
 `"catalog"` track. The relay then forwards that catalog track downstream to
 subscribers.
 
-Use `publish_catalog/2` for initial publication, then `update_catalog/2` for
-subsequent catalog objects:
+Use `MOQX.Helpers.publish_catalog/2` for initial publication, then
+`MOQX.Helpers.update_catalog/2` for subsequent catalog objects:
 
 ```elixir
 {:ok, publish_ref} = MOQX.publish(publisher, "my-namespace")
@@ -210,8 +216,8 @@ broadcast =
 catalog_json =
   ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"video","role":"video"}]})
 
-{:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_json)
-:ok = MOQX.update_catalog(catalog_track, catalog_json)
+{:ok, catalog_track} = MOQX.Helpers.publish_catalog(broadcast, catalog_json)
+:ok = MOQX.Helpers.update_catalog(catalog_track, catalog_json)
 ```
 
 ### Subscribe
@@ -356,16 +362,16 @@ Options:
 - `start` -- `{group_id, object_id}` (default `{0, 0}`)
 - `end` -- `{group_id, object_id}` (default: open-ended)
 
-`fetch_catalog/2` is a convenience wrapper that fetches the first catalog
-object with sensible defaults (namespace `"moqtail"`, track `"catalog"`,
-range `{0,0}..{0,1}`).
+`MOQX.Helpers.fetch_catalog/2` is a convenience wrapper that fetches the first
+catalog object with sensible defaults (namespace `"moqtail"`, track
+`"catalog"`, range `{0,0}..{0,1}`).
 
-`await_catalog/2` collects the fetch messages and decodes the payload into
-an `MOQX.Catalog` struct in one call:
+`MOQX.Helpers.await_catalog/2` collects the fetch messages and decodes the
+payload into an `MOQX.Catalog` struct in one call:
 
 ```elixir
-{:ok, ref} = MOQX.fetch_catalog(subscriber)
-{:ok, catalog} = MOQX.await_catalog(ref)
+{:ok, ref} = MOQX.Helpers.fetch_catalog(subscriber)
+{:ok, catalog} = MOQX.Helpers.await_catalog(ref)
 
 catalog |> MOQX.Catalog.video_tracks() |> Enum.map(& &1.name)
 #=> ["259", "260"]
