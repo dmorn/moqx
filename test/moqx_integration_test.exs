@@ -4,7 +4,7 @@ defmodule MOQXIntegrationTest do
   @timeout 15_000
 
   defp relay_url do
-    System.get_env("MOQX_EXTERNAL_RELAY_URL", "https://localhost:4433")
+    System.get_env("MOQX_EXTERNAL_RELAY_URL", "https://127.0.0.1:4433")
   end
 
   defp relay_tls_opts do

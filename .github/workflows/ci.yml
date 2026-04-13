@@ -109,7 +109,7 @@ jobs:
 
       - name: Run relay-backed integration tests
         env:
-          MOQX_EXTERNAL_RELAY_URL: https://localhost:4433
+          MOQX_EXTERNAL_RELAY_URL: https://127.0.0.1:4433
           MOQX_RELAY_CACERTFILE: .tmp/integration-certs/ca.pem
         run: |
           sleep 1

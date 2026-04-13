@@ -2,7 +2,7 @@
 set -euo pipefail
 
 CERT_DIR="${MOQX_INTEGRATION_CERT_DIR:-.tmp/integration-certs}"
-RELAY_URL="${MOQX_EXTERNAL_RELAY_URL:-https://localhost:4433}"
+RELAY_URL="${MOQX_EXTERNAL_RELAY_URL:-https://127.0.0.1:4433}"
 CACERTFILE="${MOQX_RELAY_CACERTFILE:-$CERT_DIR/ca.pem}"
 
 mkdir -p "$CERT_DIR"
