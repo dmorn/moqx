@@ -101,6 +101,29 @@ defmodule MOQXIntegrationTest do
     handle
   end
 
+  defp write_frame_when_active!(track, payload, timeout \\ @timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    write_frame_when_active_loop(track, payload, deadline)
+  end
+
+  defp write_frame_when_active_loop(track, payload, deadline) do
+    case MOQX.write_frame(track, payload) do
+      :ok ->
+        :ok
+
+      {:error, "track_not_active"} ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          flunk("timed out waiting for track activation")
+        else
+          Process.sleep(10)
+          write_frame_when_active_loop(track, payload, deadline)
+        end
+
+      {:error, reason} ->
+        flunk("write_frame failed unexpectedly: #{inspect(reason)}")
+    end
+  end
+
   defp await_frame! do
     receive do
       {:moqx_object,
@@ -317,11 +340,13 @@ defmodule MOQXIntegrationTest do
 
           {:ok, handle} = MOQX.subscribe(subscriber, ns, track_name)
 
-          # Intentionally write before waiting for :moqx_subscribe_ok to stress
-          # the local control/data-plane ordering on the subscriber side.
-          :ok = MOQX.write_frame(track, payload)
+          # Start pushing the first frame as soon as the publisher track becomes
+          # active, without waiting for local :moqx_subscribe_ok first. This
+          # stresses control/data-plane ordering on the subscriber side.
+          writer = Task.async(fn -> write_frame_when_active!(track, payload) end)
 
           await_subscribed!(handle, ns, track_name)
+          assert :ok = Task.await(writer, @timeout)
 
           {group_id, got_payload} = await_matching_payload_frame!(payload)
           assert is_integer(group_id)
@@ -402,12 +427,12 @@ defmodule MOQXIntegrationTest do
           ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"#{media_track_name}","role":"video","codec":"avc1.42C01F","packaging":"cmaf"}]})
 
         broadcast = publish_and_await_broadcast!(publisher, ns)
-        {:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_payload)
         {:ok, media_track} = MOQX.create_track(broadcast, media_track_name)
 
         subscribe_and_await!(subscriber, ns, "catalog")
         subscribe_and_await!(subscriber, ns, media_track_name)
 
+        {:ok, catalog_track} = MOQX.publish_catalog(broadcast, catalog_payload)
         :ok = MOQX.update_catalog(catalog_track, catalog_payload)
         :ok = MOQX.write_frame(media_track, media_payload)
 
@@ -599,10 +624,16 @@ defmodule MOQXIntegrationTest do
     @tag :integration
     test "open_subgroup rejects extensions with mismatched type parity" do
       publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
 
       try do
-        broadcast = publish_and_await_broadcast!(publisher, "moqx-ext-reject")
-        {:ok, track} = MOQX.create_track(broadcast, "demo")
+        ns = "moqx-ext-reject-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+
+        broadcast = publish_and_await_broadcast!(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        subscribe_and_await!(subscriber, ns, track_name)
 
         # open_subgroup itself no longer takes :extensions, so parity checks live
         # on write_object. But first open a subgroup so we have a handle.
@@ -620,6 +651,7 @@ defmodule MOQXIntegrationTest do
 
         :ok = MOQX.close_subgroup(sg)
       after
+        :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)
       end
     end
@@ -740,8 +772,12 @@ defmodule MOQXIntegrationTest do
       publisher = connect_publisher!()
 
       try do
-        assert {:error, reason} = MOQX.subscribe(publisher, "test", "track")
-        assert reason =~ "subscribe requires a subscriber session"
+        assert {:error,
+                %MOQX.RequestError{
+                  op: :subscribe,
+                  message:
+                    "subscribe requires a subscriber session; use MOQX.connect_subscriber/1"
+                }} = MOQX.subscribe(publisher, "test", "track")
       after
         :ok = MOQX.close(publisher)
       end
