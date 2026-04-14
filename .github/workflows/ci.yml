@@ -122,8 +122,7 @@ jobs:
               docker logs moqx-relay || true
               exit 1
             fi
-            if docker logs moqx-relay 2>&1 \
-                | grep -qiE 'listen|ready|bound|started|serving'; then
+            if docker logs moqx-relay 2>&1 | grep -qF 'is running at'; then
               echo "relay ready after ${i}s"
               exit 0
             fi
