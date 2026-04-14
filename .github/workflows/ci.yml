@@ -56,6 +56,12 @@ jobs:
         run: mix ci
 
   relay-integration:
+    # The moqtail relay needs TLS cert/key files produced by
+    # scripts/generate_integration_certs.sh. GitHub Actions `services:`
+    # containers start before `actions/checkout` runs, so they cannot mount
+    # repo-generated files — hence we start the relay manually as a step
+    # after checkout + cert generation. See also: host networking is used
+    # to side-step UDP/QUIC port-mapping quirks on the runner.
     name: relay-backed integration tests
     runs-on: ubuntu-latest
 
@@ -107,13 +113,35 @@ jobs:
             "$MOQX_RELAY_IMAGE" \
             --host 0.0.0.0 --port 4433 --cert-file /certs/cert.pem --key-file /certs/key.pem
 
+      - name: Wait for relay to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if ! docker ps --filter name=moqx-relay --filter status=running \
+                --format '{{.Names}}' | grep -q '^moqx-relay$'; then
+              echo "relay container is not running"
+              docker logs moqx-relay || true
+              exit 1
+            fi
+            if docker logs moqx-relay 2>&1 \
+                | grep -qiE 'listen|ready|bound|started|serving'; then
+              echo "relay ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "relay did not report readiness within 30s; last logs:"
+          docker logs moqx-relay || true
+          exit 1
+
       - name: Run relay-backed integration tests
         env:
           MOQX_EXTERNAL_RELAY_URL: https://127.0.0.1:4433
           MOQX_RELAY_CACERTFILE: .tmp/integration-certs/ca.pem
-        run: |
-          sleep 1
-          mix test.integration
+        run: mix test.integration
+
+      - name: Dump relay logs on failure
+        if: failure()
+        run: docker logs moqx-relay || true
 
       - name: Stop relay image
         if: always()
