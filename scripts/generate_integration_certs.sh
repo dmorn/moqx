@@ -35,4 +35,9 @@ openssl x509 -req -in "$SERVER_CSR" -CA "$CA_CERT" -CAkey "$CA_KEY" -CAcreateser
 
 rm -f "$SERVER_CSR" "$SERVER_EXT" "$OUT_DIR/ca.srl"
 
+# openssl genrsa produces 0600 keys; relax so the non-root user inside the
+# moqtail relay container can read the mounted PEM files. These are
+# integration-test-only certs, never used for anything real.
+chmod 0644 "$SERVER_KEY" "$CA_KEY"
+
 echo "Generated integration relay certs in $OUT_DIR"
