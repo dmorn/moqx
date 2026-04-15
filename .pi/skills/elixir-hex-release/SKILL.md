@@ -18,6 +18,7 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
    ```bash
    mix format
    mix test
+   mix test.integration
    mix docs
    mix credo --strict
    ```
@@ -45,17 +46,19 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
    git tag -a vX.Y.Z -m "vX.Y.Z"
    git push origin vX.Y.Z
    ```
-6. Publish to Hex (required):
+6. Publish package to Hex (required):
    ```bash
    mix hex.publish
    ```
    - For first release of a package, this step is the authoritative publication.
    - If Hex publication requires interactive OTP/2FA input, **do not run it automatically**.
      Pause and explicitly ask the user to run `mix hex.publish` themselves.
-7. Publish docs (recommended):
+7. Publish docs to HexDocs (recommended):
    ```bash
-   mix hex.docs
+   mix hex.publish docs
    ```
+   - This is separate from `mix hex.publish`.
+   - If docs publication requires interactive OTP/2FA input, pause and ask the user to run it manually.
 8. Create GitHub release (optional):
    ```bash
    gh release create vX.Y.Z --title "<project> vX.Y.Z" --notes-file /tmp/release-notes.md
@@ -67,7 +70,7 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
 - Keep release notes aligned with `CHANGELOG.md`.
 
 ## Operator interaction directive
-- For any command that requires interactive secrets/2FA (especially `mix hex.publish`), stop and ask the user to execute it manually.
+- For any command that requires interactive secrets/2FA (especially `mix hex.publish` and `mix hex.publish docs`), stop and ask the user to execute it manually.
 - The assistant may prepare everything up to that point (commit, tag, push, docs), then hand off with exact next command(s).
 
 ## Quick operator checklist
@@ -77,5 +80,5 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
 - [ ] Commit pushed
 - [ ] Tag created and pushed
 - [ ] `mix hex.publish` completed
-- [ ] `mix hex.docs` completed (recommended)
+- [ ] `mix hex.publish docs` completed (recommended)
 - [ ] GitHub release created/published (optional)
