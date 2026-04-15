@@ -1340,9 +1340,11 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
             let namespace = sub.track_namespace.to_utf8_path();
 
             let key = format!("{}/{}", namespace.trim_matches('/'), track_name);
-            inner.activate_track(&key, track_alias);
 
-            // Send SubscribeOk back to the relay
+            // Only mark the track locally writable after the SubscribeOk has been
+            // queued onto the control path. This narrows the race where caller code
+            // observes :moqx_track_active and starts writing before the relay has even
+            // seen our track alias announcement.
             let ok = SubscribeOk::new_ascending_no_content(
                 sub.request_id,
                 track_alias,
@@ -1351,10 +1353,14 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
             );
             let inner_clone = inner.clone();
             tokio::spawn(async move {
-                let _ = inner_clone
+                if inner_clone
                     .control_tx
                     .send(ControlMessage::SubscribeOk(Box::new(ok)))
-                    .await;
+                    .await
+                    .is_ok()
+                {
+                    inner_clone.activate_track(&key, track_alias);
+                }
             });
         }
         _ => {
@@ -2604,7 +2610,7 @@ fn subscribe<'a>(
     session: ResourceArc<SessionRes>,
     broadcast_path: String,
     track_name: String,
-    rendezvous_timeout_ms: Option<u64>,
+    delivery_timeout_ms: Option<u64>,
     init_data: Option<Binary>,
     track_meta: rustler::Term,
 ) -> rustler::NifResult<rustler::Term<'a>> {
@@ -2618,11 +2624,11 @@ fn subscribe<'a>(
     let inner = session.inner.clone();
     let namespace = normalize_path(&session.root, &broadcast_path);
 
-    let subscribe_parameters = match rendezvous_timeout_ms {
+    let subscribe_parameters = match delivery_timeout_ms {
         Some(timeout_ms) => {
             vec![KeyValuePair::try_new_varint(0x02, timeout_ms).map_err(|e| {
                 rustler::Error::Term(Box::new(format!(
-                    "invalid rendezvous timeout parameter: {:?}",
+                    "invalid delivery timeout parameter: {:?}",
                     e
                 )))
             })?]

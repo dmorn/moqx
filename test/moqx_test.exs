@@ -86,19 +86,19 @@ defmodule MOQXTest do
                  end
   end
 
-  test "subscribe/4 validates rendezvous_timeout_ms before session inspection" do
+  test "subscribe/4 validates delivery_timeout_ms before session inspection" do
     assert_raise ArgumentError,
-                 "expected :rendezvous_timeout_ms to be a non-negative integer, got: -1",
+                 "expected :delivery_timeout_ms to be a non-negative integer, got: -1",
                  fn ->
-                   MOQX.subscribe(:not_a_session, "ns", "track", rendezvous_timeout_ms: -1)
+                   MOQX.subscribe(:not_a_session, "ns", "track", delivery_timeout_ms: -1)
                  end
   end
 
-  test "subscribe/4 rejects removed delivery_timeout_ms option before session inspection" do
+  test "subscribe/4 rejects mistaken rendezvous_timeout_ms option before session inspection" do
     assert_raise ArgumentError,
-                 ":delivery_timeout_ms has been removed; use :rendezvous_timeout_ms",
+                 ":rendezvous_timeout_ms is not part of MOQT draft-14; use :delivery_timeout_ms",
                  fn ->
-                   MOQX.subscribe(:not_a_session, "ns", "track", delivery_timeout_ms: 1_000)
+                   MOQX.subscribe(:not_a_session, "ns", "track", rendezvous_timeout_ms: 1_000)
                  end
   end
 

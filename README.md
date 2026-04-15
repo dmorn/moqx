@@ -4,10 +4,13 @@
 
 **Status:** early client library with a deliberately narrow, documented support contract.
 
-## Spec references (RFCs and drafts)
+## Spec references
 
-`moqx` (through `moqtail-rs` / moqtail) is aligned with the current MOQ/WebTransport stack.
-At the time of writing, that means a mix of published RFCs and active IETF drafts:
+`moqx` is currently aligned to the **draft-14** MOQ/WebTransport stack exposed by
+`moqtail-rs` / `moqtail`. This project does **not** currently track whatever the
+latest MOQT Internet-Draft happens to be.
+
+The intended protocol baseline today is:
 
 - [RFC 9000 — QUIC: A UDP-Based Multiplexed and Secure Transport](https://www.rfc-editor.org/rfc/rfc9000)
 - [RFC 9001 — Using TLS to Secure QUIC](https://www.rfc-editor.org/rfc/rfc9001)
@@ -15,16 +18,18 @@ At the time of writing, that means a mix of published RFCs and active IETF draft
 - [RFC 9114 — HTTP/3](https://www.rfc-editor.org/rfc/rfc9114)
 - [RFC 9221 — QUIC DATAGRAM](https://www.rfc-editor.org/rfc/rfc9221)
 - [RFC 9297 — HTTP Datagrams and the Capsule Protocol](https://www.rfc-editor.org/rfc/rfc9297)
-- [draft-ietf-webtrans-http3 — WebTransport over HTTP/3](https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/)
-- [draft-ietf-moq-transport — Media over QUIC Transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/)
+- [draft-ietf-webtrans-http3-14 — WebTransport over HTTP/3](https://www.ietf.org/archive/id/draft-ietf-webtrans-http3-14.txt)
+- [draft-ietf-moq-transport-14 — Media over QUIC Transport](https://www.ietf.org/archive/id/draft-ietf-moq-transport-14.txt)
 
-For MOQ-specific behavior, treat the active MOQ transport draft and moqtail interoperability behavior as the practical reference until final RFC publication.
+If the MOQT draft evolves beyond draft-14, `moqx` will only adopt newer wire
+behavior once the project explicitly chooses to move and documents that change
+(e.g. a future draft-17 support effort).
 
 ## Installation
 
 ```elixir
 # mix.exs
-{:moqx, "~> 0.4.1"}
+{:moqx, "~> 0.5.0"}
 ```
 
 Release metadata:
@@ -40,7 +45,7 @@ Today `moqx` supports a single client-side path:
 - explicit split roles only
   - publisher sessions publish only
   - subscriber sessions subscribe only
-- WebTransport over QUIC (Draft 14)
+- WebTransport / MOQT draft-14
 - broadcasts, tracks, and frame delivery
 - live subscription via SUBSCRIBE with `FilterType::LatestObject`
 - raw fetch for retrieving track objects by range (subscriber sessions only)
@@ -73,6 +78,50 @@ Out of scope for `v0.1`:
 
 - `MOQX` — low-level core message-passing API
 - `MOQX.Helpers` — opt-in convenience helpers built on top of `MOQX`
+
+This split is intentional:
+
+- `MOQX` stays explicit, asynchronous, and low-level
+- `MOQX.Helpers` provides small convenience flows built purely on public `MOQX`
+- a future managed/stateful ergonomics layer may be added separately, but it is
+  not part of the `MOQX` core contract
+
+If you want blocking waits, retries, buffering policy, or mailbox demultiplexing,
+build them on top of the public message contracts instead of expecting hidden
+state inside `MOQX` itself.
+
+## 0.5.0 migration notes
+
+`0.5.0` finalizes the low-level async core contract. If you are upgrading from
+older `0.2.x`–`0.4.x` APIs, the main changes are:
+
+- connect is explicitly correlated:
+  - `connect/2`, `connect_publisher/2`, `connect_subscriber/2` now return
+    `{:ok, connect_ref}`
+  - success/failure arrives later via typed async messages
+- publish readiness is explicit:
+  - `publish/2` returns `{:ok, publish_ref}`
+  - the broadcast handle arrives only in `{:moqx_publish_ok, ...}`
+- publisher writes are lifecycle-gated:
+  - writes before downstream activation now return typed sync request errors
+    instead of silently dropping
+- subscribe/fetch lifecycle messages are typed structs now:
+  - old tuple-era contracts like `:moqx_subscribed`, `:moqx_track_ended`,
+    `:moqx_fetch_started`, `:moqx_fetch_error`, and generic async tuple errors
+    have been replaced by typed families such as `:moqx_subscribe_ok`,
+    `:moqx_publish_done`, `:moqx_fetch_ok`, `:moqx_request_error`, and
+    `:moqx_transport_error`
+- catalog helpers moved out of `MOQX` core into `MOQX.Helpers`
+- `unsubscribe/1` now culminates in `{:moqx_publish_done, ...}` rather than the
+  older `:moqx_track_ended` tuple contract
+- subscribe timeout option is `delivery_timeout_ms`:
+  - draft-14 `SUBSCRIBE` uses MOQT `DELIVERY_TIMEOUT` (`0x02`)
+  - the later-draft `RENDEZVOUS_TIMEOUT` parameter is not part of the draft-14 stack used by `moqtail`
+- primary mix task names are now:
+  - `mix moqx.inspect`
+  - `mix moqx.roundtrip`
+
+The examples below reflect the stabilized `0.5.0` contract.
 
 ### Connect
 
@@ -228,8 +277,12 @@ Subscriptions are asynchronous and correlated by subscription handle.
 
 `subscribe/4` options:
 
-- `rendezvous_timeout_ms` -- how long the relay may wait for publisher availability
-  before rejecting subscribe (encoded as MOQT DELIVERY TIMEOUT parameter `0x02`).
+- `delivery_timeout_ms` -- draft-14 MOQT `DELIVERY_TIMEOUT` in milliseconds
+  (encoded as parameter `0x02` on `SUBSCRIBE`).
+
+`moqx` currently targets the draft-14 stack exposed by `moqtail`. Later MOQT
+ drafts introduce a separate `RENDEZVOUS_TIMEOUT` parameter, but that is not a
+ draft-14 wire parameter and is not exposed separately here.
 
 The subscription message contract is:
 
@@ -242,7 +295,7 @@ The subscription message contract is:
 - `{:moqx_transport_error, %MOQX.TransportError{op: :subscribe, handle, ...}}`
 
 ```elixir
-{:ok, handle} = MOQX.subscribe(subscriber, "moqtail", "catalog", rendezvous_timeout_ms: 1_500)
+{:ok, handle} = MOQX.subscribe(subscriber, "moqtail", "catalog", delivery_timeout_ms: 1_500)
 
 receive do
   {:moqx_subscribe_ok, %MOQX.SubscribeOk{handle: ^handle}} -> :ok

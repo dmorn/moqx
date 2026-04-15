@@ -8,19 +8,28 @@ defmodule MOQX do
   `MOQX` is a thin, low-level, functional async API with explicit correlation
   and typed async message families.
 
+  This module is intentionally the low-level core contract:
+
+  - it does not hide protocol state behind blocking calls
+  - it does not add automatic retries or buffering policy
+  - it does not manage caller mailboxes for you
+  - it prefers explicit correlation refs/handles and typed async events
+
+  Convenience helpers such as `publish_catalog/2`, `update_catalog/2`,
+  `fetch_catalog/2`, `await_catalog/2`, and `await_track_active/2` live in
+  `MOQX.Helpers` on top of this contract. A future managed/stateful ergonomics
+  layer can also be built on top, but that is deliberately separate from the
+  `MOQX` core API itself.
+
   Core design points:
 
   - split roles only: publisher sessions publish and subscriber sessions subscribe
-  - WebTransport Draft 14 over moqtail-rs
+  - explicit draft-14 protocol target via moqtail-rs / moqtail
   - async operations are correlated (`connect_ref`, `publish_ref`, `flush_ref`, `fetch_ref`, subscription handle)
   - async outcomes are explicit and typed:
     - lifecycle/success events (e.g. `%MOQX.ConnectOk{}`, `%MOQX.SubscribeOk{}`)
     - request-level failures (`{:moqx_request_error, %MOQX.RequestError{}}`)
     - transport/runtime failures (`{:moqx_transport_error, %MOQX.TransportError{}}`)
-
-  Optional convenience flows (`publish_catalog/2`, `update_catalog/2`,
-  `fetch_catalog/2`, `await_catalog/2`, `await_track_active/2`, etc.) live in
-  `MOQX.Helpers` on top of this core API.
 
   ## Example
 
@@ -163,7 +172,7 @@ defmodule MOQX do
 
   @typedoc "Subscribe options accepted by `subscribe/4` and `subscribe_track/4`."
   @type subscribe_opt ::
-          {:rendezvous_timeout_ms, non_neg_integer()}
+          {:delivery_timeout_ms, non_neg_integer()}
           | {:init_data, binary()}
           | {:track_meta, map()}
           | {:track, Track.t()}
@@ -693,8 +702,8 @@ defmodule MOQX do
 
   Supported options:
 
-  - `:rendezvous_timeout_ms` -- how long the relay may wait for publisher availability
-    before rejecting the request (encoded as MOQT DELIVERY TIMEOUT parameter `0x02`)
+  - `:delivery_timeout_ms` -- draft-14 MOQT DELIVERY_TIMEOUT in milliseconds
+    (encoded as parameter `0x02` on `SUBSCRIBE`)
   - `:init_data` -- binary init segment/configuration to surface in `:moqx_track_init`
   - `:track_meta` -- map surfaced in `:moqx_track_init`
   - `:track` -- `%MOQX.Catalog.Track{}` convenience; fills `:init_data` and `:track_meta`
@@ -716,7 +725,7 @@ defmodule MOQX do
           {:ok, subscription_handle()} | {:error, MOQX.RequestError.t()}
   def subscribe(session, broadcast_path, track_name, opts)
       when is_binary(broadcast_path) and is_binary(track_name) and is_list(opts) do
-    rendezvous_timeout_ms = normalize_rendezvous_timeout_ms!(opts)
+    delivery_timeout_ms = normalize_delivery_timeout_ms!(opts)
 
     {init_data, track_meta} = normalize_subscribe_track_payload!(opts)
 
@@ -726,7 +735,7 @@ defmodule MOQX do
            session,
            broadcast_path,
            track_name,
-           rendezvous_timeout_ms,
+           delivery_timeout_ms,
            init_data,
            track_meta
          ) do
@@ -790,12 +799,12 @@ defmodule MOQX do
   end
 
   defp validate_subscribe_opts_keys!(opts) do
-    if Keyword.has_key?(opts, :delivery_timeout_ms) do
+    if Keyword.has_key?(opts, :rendezvous_timeout_ms) do
       raise ArgumentError,
-            ":delivery_timeout_ms has been removed; use :rendezvous_timeout_ms"
+            ":rendezvous_timeout_ms is not part of MOQT draft-14; use :delivery_timeout_ms"
     end
 
-    allowed_keys = [:rendezvous_timeout_ms, :init_data, :track_meta, :track]
+    allowed_keys = [:delivery_timeout_ms, :init_data, :track_meta, :track]
 
     case Keyword.keys(opts) -- allowed_keys do
       [] -> :ok
@@ -848,10 +857,10 @@ defmodule MOQX do
           "expected :track_meta to be a map, got: #{inspect(track_meta)}"
   end
 
-  defp normalize_rendezvous_timeout_ms!(opts) do
-    case Keyword.get(opts, :rendezvous_timeout_ms) do
+  defp normalize_delivery_timeout_ms!(opts) do
+    case Keyword.get(opts, :delivery_timeout_ms) do
       nil -> nil
-      timeout_ms -> normalize_timeout_ms!(timeout_ms, :rendezvous_timeout_ms)
+      timeout_ms -> normalize_timeout_ms!(timeout_ms, :delivery_timeout_ms)
     end
   end
 

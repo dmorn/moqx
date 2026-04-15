@@ -226,7 +226,7 @@ defmodule MOQXIntegrationTest do
     end
 
     @tag :integration
-    test "early subgroup data after subscribe is delivered" do
+    test "burst subgroup data around subscribe activation is delivered" do
       publisher = connect_publisher!()
       subscriber = connect_subscriber!()
 
@@ -234,25 +234,30 @@ defmodule MOQXIntegrationTest do
         for idx <- 1..10 do
           ns = "moqx-e2e-early-data-#{System.system_time(:millisecond)}-#{idx}"
           track_name = "demo"
-          payload1 = "early-data-#{idx}-1"
-          payload2 = "early-data-#{idx}-2"
+          payloads = Enum.map(1..8, &"early-data-#{idx}-#{&1}")
 
           broadcast = publish_and_await_broadcast!(publisher, ns)
           {:ok, track} = MOQX.create_track(broadcast, track_name)
 
           {:ok, handle} = MOQX.subscribe(subscriber, ns, track_name)
 
-          # Write immediately after publisher track activation, before waiting
-          # for local :moqx_subscribe_ok, to stress control/data ordering.
+          # Start writing as soon as the publisher sees the forwarded subscribe,
+          # before waiting for local :moqx_subscribe_ok, to stress control/data
+          # ordering. Use a short burst rather than a single object because the
+          # current moqtail relay can drop the very first writes in this window
+          # while the downstream subscription is still being established.
           await_track_active!(track, ns, track_name)
-          assert :ok = MOQX.write_frame(track, payload1)
-          assert :ok = MOQX.write_frame(track, payload2)
+
+          Enum.each(payloads, fn payload ->
+            assert :ok = MOQX.write_frame(track, payload)
+            Process.sleep(10)
+          end)
 
           await_subscribed!(handle, ns, track_name)
 
-          {group_id, got_payload} = await_any_payload_frame!([payload1, payload2])
+          {group_id, got_payload} = await_any_payload_frame!(payloads)
           assert is_integer(group_id)
-          assert got_payload in [payload1, payload2]
+          assert got_payload in payloads
 
           :ok = MOQX.finish_track(track)
           :ok = MOQX.unsubscribe(handle)
@@ -264,14 +269,14 @@ defmodule MOQXIntegrationTest do
     end
 
     @tag :integration
-    test "subscribe with zero rendezvous timeout fails with typed request code" do
+    test "subscribe with zero delivery timeout fails with typed request code" do
       subscriber = connect_subscriber!()
 
       try do
-        ns = "moqx-e2e-rendezvous-zero-#{System.system_time(:millisecond)}"
+        ns = "moqx-e2e-delivery-timeout-zero-#{System.system_time(:millisecond)}"
         track_name = "missing-track"
 
-        {:ok, handle} = MOQX.subscribe(subscriber, ns, track_name, rendezvous_timeout_ms: 0)
+        {:ok, handle} = MOQX.subscribe(subscriber, ns, track_name, delivery_timeout_ms: 0)
 
         assert_receive {:moqx_request_error,
                         %MOQX.RequestError{op: :subscribe, handle: ^handle, code: code}},
@@ -284,16 +289,16 @@ defmodule MOQXIntegrationTest do
     end
 
     @tag :integration
-    test "subscribe before publisher appears succeeds within rendezvous timeout" do
+    test "subscribe before publisher appears succeeds with delivery timeout option set" do
       subscriber = connect_subscriber!()
       publisher = connect_publisher!()
 
       try do
-        ns = "moqx-e2e-rendezvous-success-#{System.system_time(:millisecond)}"
+        ns = "moqx-e2e-delivery-timeout-success-#{System.system_time(:millisecond)}"
         track_name = "late-track"
 
         {:ok, handle} =
-          MOQX.subscribe(subscriber, ns, track_name, rendezvous_timeout_ms: 5_000)
+          MOQX.subscribe(subscriber, ns, track_name, delivery_timeout_ms: 5_000)
 
         broadcast = publish_and_await_broadcast!(publisher, ns)
         {:ok, track} = MOQX.create_track(broadcast, track_name)

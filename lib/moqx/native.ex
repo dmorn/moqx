@@ -41,7 +41,7 @@ defmodule MOQX.Native do
         _session,
         _broadcast_path,
         _track_name,
-        _rendezvous_timeout_ms,
+        _delivery_timeout_ms,
         _init_data,
         _track_meta
       ),

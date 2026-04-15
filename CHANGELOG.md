@@ -2,7 +2,30 @@
 
 All notable changes to `moqx` will be documented in this file.
 
-## [Unreleased]
+## [0.5.0] - 2026-04-15
+
+This release finalizes the low-level async core contract that `moqx` exposes.
+`MOQX` is now explicitly documented as the thin async core layer, while
+convenience flows live in `MOQX.Helpers` and future stateful ergonomics remain
+out of the core contract.
+
+### Migration notes
+
+If you are upgrading from older `0.2.x`–`0.4.x` APIs:
+
+- connect is now explicitly correlated by `connect_ref`
+- publish namespace readiness is now explicit and correlated by `publish_ref`
+- publisher writes are lifecycle-gated and no longer silently drop before
+  downstream activation
+- subscribe/fetch lifecycle messages now use typed structs and shared typed
+  async error families
+- helper catalog flows moved from `MOQX` into `MOQX.Helpers`
+- `unsubscribe/1` now culminates in `{:moqx_publish_done, ...}` rather than the
+  old `:moqx_track_ended` tuple contract
+- `delivery_timeout_ms` remains the correct draft-14 subscribe timeout option
+- `rendezvous_timeout_ms` was a mistaken rename based on newer-draft terminology and should not be used on the draft-14 stack
+- local integration guidance now uses `mix test.integration` against a relay you
+  keep running separately
 
 ### Changed
 
@@ -60,15 +83,28 @@ All notable changes to `moqx` will be documented in this file.
   with Docker-based local/CI orchestration as the primary deterministic path.
 - Removed `:public_relay_live` integration tests; public relay interop checks now
   live in manual mix tasks.
-- Subscribe availability timeout is now exposed as `rendezvous_timeout_ms`
-  and subscribe request rejections now carry typed `RequestError.code` values
+- Subscribe request rejections now carry typed `RequestError.code` values
   (for example `:track_does_not_exist` / `:timeout`).
+- Corrected subscribe-timeout naming/docs back to draft-14 `delivery_timeout_ms`
+  after auditing the wire parameter mapping against the spec and `moqtail`.
+- Pinned README spec references to the explicit draft-14 target instead of the
+  moving latest Internet-Draft URL.
+- Hardened the early-subscribe integration coverage to use a short payload burst
+  rather than assuming the very first write always survives the current
+  `moqtail` relay's subscribe-activation race window.
 
 ### Documentation
 
 - Rewrote README and module docs to align with the low-level async contract and
   remove stale tuple-era examples (`:moqx_frame`, `:moqx_subscribed`,
   `:moqx_track_ended`, `:moqx_error`, etc.).
+- Clarified core vs helper-layer responsibilities and the intended separation
+  from any future managed/stateful ergonomics layer.
+- Added `0.5.0` migration guidance covering message-shape, lifecycle, helper,
+  timeout-option, and integration-harness changes.
+- Documented current moqtail standalone fetch behavior more explicitly:
+  relay-backed fetch succeeds from relay cache, while cache misses surface as
+  typed fetch request errors rather than hanging silently.
 - Clarified core async message families and correlation behavior for connect,
   subscribe, fetch, and subgroup flush.
 
