@@ -304,6 +304,9 @@ mix moqx.inspect
 # defaults to https://ord.abr.moqtail.dev and namespace moqtail
 mix moqx.inspect --track 259
 mix moqx.inspect --list-tracks-only
+mix moqx.inspect --list-relay-presets
+mix moqx.inspect --choose-relay --list-tracks-only
+mix moqx.inspect --preset cloudflare-draft14-bbb --list-tracks-only
 
 # Cloudflare moq-rs style catalogs use .catalog
 mix moqx.inspect https://draft-14.cloudflare.mediaoverquic.com --namespace bbb --catalog-track .catalog --list-tracks-only
@@ -314,9 +317,10 @@ The task will:
 
 1. connect as a subscriber,
 2. load catalog via fetch (with live-subscribe fallback when fetch has no objects),
-3. try `"catalog"` and then `".catalog"` unless `--catalog-track` is set,
-4. optionally skip fetch entirely with `--no-fetch` and go straight to live subscribe,
-5. prompt you to choose a track (or use `--track <name>`),
+3. optionally apply a known relay preset (`--preset`) or choose one interactively (`--choose-relay`),
+4. try `"catalog"` and then `".catalog"` unless `--catalog-track` is set,
+5. optionally skip fetch entirely with `--no-fetch` and go straight to live subscribe,
+6. prompt you to choose a track (or use `--track <name>`),
 5. subscribe and print live stats each interval:
    - PRFT latency (or `n/a` if unavailable),
    - bandwidth (`B/s` and `kbps`),
@@ -327,6 +331,8 @@ Use `mix help moqx.inspect` for full options.
 
 Tips:
 - `--list-tracks-only` is handy for scripting/discovery without subscribing.
+- `--list-relay-presets` prints known relay presets and example commands.
+- `--choose-relay` lets you pick a known relay interactively and prints the exact reproduce command.
 - `--no-fetch` is useful for relays that do not implement fetch yet.
 - `--show-raw` prints full per-track raw catalog maps.
 - pass `--timeout <ms>` to auto-stop after a bounded runtime.

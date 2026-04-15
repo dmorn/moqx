@@ -12,12 +12,18 @@ defmodule Mix.Tasks.Moqx.Inspect do
 
       mix moqx.inspect
       mix moqx.inspect --track 259
+      mix moqx.inspect --list-relay-presets
+      mix moqx.inspect --choose-relay --list-tracks-only
+      mix moqx.inspect --preset cloudflare-draft14-bbb --list-tracks-only
       mix moqx.inspect https://ord.abr.moqtail.dev --namespace moqtail
       mix moqx.inspect https://draft-14.cloudflare.mediaoverquic.com --namespace bbb --catalog-track .catalog --list-tracks-only
       mix moqx.inspect https://draft-14.cloudflare.mediaoverquic.com --namespace bbb --no-fetch --list-tracks-only
 
   Options:
 
+    * `--list-relay-presets` - print known relay presets and example commands.
+    * `--choose-relay` - interactively select a known relay preset.
+    * `--preset` - apply a known relay preset by id.
     * `--namespace` - catalog/subscription namespace (default: `"moqtail"`).
     * `--catalog-track` - explicit catalog track name. When omitted, `moqx`
       tries `"catalog"` and then `".catalog"`.
@@ -40,6 +46,26 @@ defmodule Mix.Tasks.Moqx.Inspect do
   @default_relay_url "https://ord.abr.moqtail.dev"
   @default_namespace "moqtail"
   @default_catalog_tracks ["catalog", ".catalog"]
+  @relay_presets [
+    %{
+      id: "moqtail-ord",
+      label: "Moqtail ORD demo relay",
+      url: "https://ord.abr.moqtail.dev",
+      namespace: "moqtail",
+      catalog_tracks: ["catalog"],
+      skip_fetch?: false,
+      notes: "Default moqtail demo relay; catalog fetch may fall back to live subscribe."
+    },
+    %{
+      id: "cloudflare-draft14-bbb",
+      label: "Cloudflare draft-14 Big Buck Bunny",
+      url: "https://draft-14.cloudflare.mediaoverquic.com",
+      namespace: "bbb",
+      catalog_tracks: [".catalog"],
+      skip_fetch?: true,
+      notes: "Cloudflare moq-rs style relay; uses .catalog and typically requires live subscribe."
+    }
+  ]
 
   alias MOQX.Catalog.Track
   alias MOQX.DemoDebugStats
@@ -49,6 +75,9 @@ defmodule Mix.Tasks.Moqx.Inspect do
     case parse_args(args) do
       :help ->
         Mix.shell().info(@moduledoc)
+
+      :list_relay_presets ->
+        print_relay_presets()
 
       {:error, message} ->
         Mix.raise(message)
@@ -62,6 +91,9 @@ defmodule Mix.Tasks.Moqx.Inspect do
     {opts, positional, invalid} =
       OptionParser.parse(args,
         strict: [
+          list_relay_presets: :boolean,
+          choose_relay: :boolean,
+          preset: :string,
           namespace: :string,
           catalog_track: :string,
           no_fetch: :boolean,
@@ -79,6 +111,9 @@ defmodule Mix.Tasks.Moqx.Inspect do
       opts[:help] ->
         :help
 
+      opts[:list_relay_presets] ->
+        :list_relay_presets
+
       invalid != [] ->
         {:error, "invalid options: #{inspect(invalid)}"}
 
@@ -88,15 +123,17 @@ defmodule Mix.Tasks.Moqx.Inspect do
   end
 
   defp build_config(opts, positional) do
-    url = List.first(positional) || @default_relay_url
+    preset = resolve_relay_preset(opts)
+    url = List.first(positional) || preset_value(preset, :url) || @default_relay_url
     timeout = positive_int!(opts[:timeout], :timeout, 10_000)
     run_timeout_ms = if(opts[:timeout], do: positive_int!(opts[:timeout], :timeout, nil))
 
     %{
       url: url,
-      namespace: opts[:namespace] || @default_namespace,
-      catalog_tracks: catalog_tracks(opts),
-      skip_fetch?: opts[:no_fetch] || false,
+      namespace: opts[:namespace] || preset_value(preset, :namespace) || @default_namespace,
+      catalog_tracks: catalog_tracks(opts, preset),
+      skip_fetch?: resolve_skip_fetch(opts, preset),
+      relay_preset: preset,
       track_name: opts[:track],
       list_tracks_only: opts[:list_tracks_only] || false,
       timeout: timeout,
@@ -107,14 +144,30 @@ defmodule Mix.Tasks.Moqx.Inspect do
     }
   end
 
-  defp catalog_tracks(opts) do
+  defp catalog_tracks(opts, preset) do
     case opts[:catalog_track] do
-      nil -> @default_catalog_tracks
+      nil -> preset_value(preset, :catalog_tracks) || @default_catalog_tracks
       track -> [track]
     end
   end
 
+  defp resolve_skip_fetch(opts, preset) do
+    opts[:no_fetch] || preset_value(preset, :skip_fetch?) || false
+  end
+
+  defp resolve_relay_preset(opts) do
+    cond do
+      opts[:choose_relay] -> choose_relay_preset!()
+      is_binary(opts[:preset]) -> fetch_relay_preset!(opts[:preset])
+      true -> nil
+    end
+  end
+
+  defp preset_value(nil, _key), do: nil
+  defp preset_value(preset, key), do: Map.get(preset, key)
+
   defp run_with_config(config) do
+    maybe_print_relay_preset(config)
     Mix.shell().info("connecting to #{config.url} as subscriber...")
     connect_ref = connect_subscriber!(config.url, config.timeout)
     subscriber = await_connected!(connect_ref, config.timeout)
@@ -169,6 +222,19 @@ defmodule Mix.Tasks.Moqx.Inspect do
 
   defp catalog_load_message(namespace, catalog_tracks) do
     "loading catalog (namespace=#{namespace}, tracks=#{Enum.join(catalog_tracks, ", ")})..."
+  end
+
+  defp maybe_print_relay_preset(%{relay_preset: nil}), do: :ok
+
+  defp maybe_print_relay_preset(%{relay_preset: preset} = config) do
+    Mix.shell().info("using relay preset #{preset.id}: #{preset.label}")
+
+    if is_binary(preset.notes) do
+      Mix.shell().info("notes: #{preset.notes}")
+    end
+
+    Mix.shell().info("reproduce with:")
+    Mix.shell().info("  #{reproduction_command(config)}")
   end
 
   defp run_stream_for_track!(subscriber, config, track_name) do
@@ -707,6 +773,130 @@ defmodule Mix.Tasks.Moqx.Inspect do
   defp remaining_runtime_ms(start_mono_ms, now_mono_ms, run_timeout_ms) do
     elapsed_ms = max(now_mono_ms - start_mono_ms, 0)
     max(run_timeout_ms - elapsed_ms, 0)
+  end
+
+  defp print_relay_presets do
+    Mix.shell().info("known relay presets:")
+
+    @relay_presets
+    |> Enum.with_index(1)
+    |> Enum.each(fn {preset, index} ->
+      Mix.shell().info("#{index}. #{preset.id} — #{preset.label}")
+      Mix.shell().info("   url: #{preset.url}")
+      Mix.shell().info("   namespace: #{preset.namespace}")
+      Mix.shell().info("   catalog tracks: #{Enum.join(preset.catalog_tracks, ", ")}")
+      Mix.shell().info("   no-fetch: #{preset.skip_fetch?}")
+
+      if is_binary(preset.notes) do
+        Mix.shell().info("   notes: #{preset.notes}")
+      end
+
+      Mix.shell().info("   example: #{preset_command(preset)} --list-tracks-only")
+    end)
+  end
+
+  defp fetch_relay_preset!(id) do
+    Enum.find(@relay_presets, &(&1.id == id)) ||
+      Mix.raise(
+        "unknown relay preset #{inspect(id)}. Use --list-relay-presets to see available presets."
+      )
+  end
+
+  defp choose_relay_preset! do
+    print_relay_presets()
+
+    case IO.gets("Choose relay preset [1-#{length(@relay_presets)}] (or q): ") do
+      :eof ->
+        Mix.raise("stdin closed")
+
+      nil ->
+        Mix.raise("stdin closed")
+
+      input ->
+        input
+        |> String.trim()
+        |> parse_relay_preset_selection()
+    end
+  end
+
+  defp parse_relay_preset_selection("q"), do: Mix.raise("aborted")
+  defp parse_relay_preset_selection("quit"), do: Mix.raise("aborted")
+
+  defp parse_relay_preset_selection(value) do
+    case Integer.parse(value) do
+      {index, ""} when index >= 1 and index <= length(@relay_presets) ->
+        Enum.at(@relay_presets, index - 1)
+
+      _ ->
+        Mix.shell().error("invalid selection")
+        choose_relay_preset!()
+    end
+  end
+
+  defp preset_command(preset) do
+    parts = [
+      "mix moqx.inspect",
+      shell_escape(preset.url),
+      "--namespace #{shell_escape(preset.namespace)}"
+    ]
+
+    parts =
+      Enum.reduce(preset.catalog_tracks, parts, fn track, acc ->
+        acc ++ ["--catalog-track #{shell_escape(track)}"]
+      end)
+
+    parts = if preset.skip_fetch?, do: parts ++ ["--no-fetch"], else: parts
+
+    Enum.join(parts, " ")
+  end
+
+  defp reproduction_command(config) do
+    [
+      "mix moqx.inspect",
+      shell_escape(config.url),
+      "--namespace #{shell_escape(config.namespace)}"
+    ]
+    |> append_catalog_track_flags(config.catalog_tracks)
+    |> append_flag(config.skip_fetch?, "--no-fetch")
+    |> append_flag(config.list_tracks_only, "--list-tracks-only")
+    |> append_maybe_flag(
+      is_binary(config.track_name),
+      "--track #{shell_escape(config.track_name || "")}"
+    )
+    |> append_flag(config.show_raw, "--show-raw")
+    |> append_timeout_flag(config.run_timeout_ms)
+    |> append_interval_flag(config.interval_ms)
+    |> append_delivery_timeout_flag(Keyword.get(config.subscribe_opts, :delivery_timeout_ms))
+    |> Enum.join(" ")
+  end
+
+  defp append_catalog_track_flags(parts, catalog_tracks) do
+    Enum.reduce(catalog_tracks, parts, fn track, acc ->
+      acc ++ ["--catalog-track #{shell_escape(track)}"]
+    end)
+  end
+
+  defp append_flag(parts, true, flag), do: parts ++ [flag]
+  defp append_flag(parts, false, _flag), do: parts
+
+  defp append_maybe_flag(parts, true, flag), do: parts ++ [flag]
+  defp append_maybe_flag(parts, false, _flag), do: parts
+
+  defp append_timeout_flag(parts, nil), do: parts
+  defp append_timeout_flag(parts, timeout), do: parts ++ ["--timeout #{timeout}"]
+
+  defp append_interval_flag(parts, 1_000), do: parts
+  defp append_interval_flag(parts, interval_ms), do: parts ++ ["--interval-ms #{interval_ms}"]
+
+  defp append_delivery_timeout_flag(parts, nil), do: parts
+
+  defp append_delivery_timeout_flag(parts, timeout) do
+    parts ++ ["--delivery-timeout-ms #{timeout}"]
+  end
+
+  defp shell_escape(value) do
+    escaped = String.replace(value, "'", "'\\''")
+    "'#{escaped}'"
   end
 
   defp positive_int!(nil, _name, default), do: default

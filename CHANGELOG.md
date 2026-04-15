@@ -48,9 +48,10 @@ All notable changes to `moqx` will be documented in this file.
   Legacy aliases `moqx.e2e.pubsub` and `moqx.moqtail.demo` remain available with
   deprecation notices.
 - `moqx.inspect` can probe catalog tracks named either `"catalog"` or
-  `".catalog"` (or an explicit `--catalog-track`), and now supports
-  `--no-fetch` for relays that do not implement fetch yet. This improves interop
-  with Cloudflare `moq-rs` style relays and other early deployments.
+  `".catalog"` (or an explicit `--catalog-track`), supports `--no-fetch` for
+  relays that do not implement fetch yet, and now includes named relay presets
+  plus interactive preset selection. This improves interop with Cloudflare
+  `moq-rs` style relays and other early deployments.
 - `MOQX.Helpers.fetch_catalog/2` now accepts `:track` so callers can override
   the catalog track name when relays do not use `"catalog"`.
 - Mix tasks and integration helpers now follow the typed async contract.
