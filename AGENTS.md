@@ -1,4 +1,4 @@
-- before committing, ensure you `mix format`, run the tests, run `mix credo` (elixir's linter) and refactor accordingly, ensure documentation stays consistent
+- before committing, ensure you `mix format`, run the tests, run `mix test.integration`, run `mix credo` (elixir's linter) and refactor accordingly; always run integration tests as well before committing, and ensure documentation stays consistent
 - for integration tests, prefer `mix test.integration` directly; start the relay yourself with `docker compose -f docker-compose.integration.yml up -d relay` after generating local certs via `scripts/generate_integration_certs.sh`, so the relay can stay up across repeated local test runs
 - if you find stale documentation, point it out: we either have to update or remove it
 - this project is based on moqtail. Before making any design decisions, ensure you check out what has been chosen there

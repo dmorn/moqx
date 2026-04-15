@@ -102,7 +102,6 @@ defmodule Mix.Tasks.Moqx.Inspect do
           timeout: :integer,
           interval_ms: :integer,
           delivery_timeout_ms: :integer,
-          rendezvous_timeout_ms: :integer,
           show_raw: :boolean,
           help: :boolean
         ]
@@ -260,20 +259,12 @@ defmodule Mix.Tasks.Moqx.Inspect do
   end
 
   defp build_subscribe_opts(opts) do
-    cond do
-      opts[:rendezvous_timeout_ms] ->
-        Mix.raise(
-          ":rendezvous_timeout_ms is not part of MOQT draft-14; use --delivery-timeout-ms"
-        )
-
-      opts[:delivery_timeout_ms] ->
-        [
-          delivery_timeout_ms:
-            positive_int!(opts[:delivery_timeout_ms], :delivery_timeout_ms, nil)
-        ]
-
-      true ->
-        []
+    if opts[:delivery_timeout_ms] do
+      [
+        delivery_timeout_ms: positive_int!(opts[:delivery_timeout_ms], :delivery_timeout_ms, nil)
+      ]
+    else
+      []
     end
   end
 

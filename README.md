@@ -66,7 +66,7 @@ Not planned:
 
 - merged publisher/subscriber sessions
 
-Out of scope for `v0.1`:
+Out of scope for the current client contract:
 
 - relay/server listener APIs
 - embedding or managing a relay from Elixir
