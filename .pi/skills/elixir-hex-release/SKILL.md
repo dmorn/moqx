@@ -18,6 +18,7 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
    ```bash
    mix format
    mix test
+   mix docs
    mix credo --strict
    ```
 3. Confirm intended release version (example: `0.1.1`).
@@ -61,7 +62,7 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
    ```
 
 ## Notes for this repo
-- Required before committing: `mix format`, `mix test`, `mix credo`.
+- Required before committing: `mix format`, `mix test`, `mix test.integration`, `mix docs`, `mix credo`.
 - Existing tag/release operations may happen independently, but Hex publication is the critical ship step.
 - Keep release notes aligned with `CHANGELOG.md`.
 
@@ -70,7 +71,7 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
 - The assistant may prepare everything up to that point (commit, tag, push, docs), then hand off with exact next command(s).
 
 ## Quick operator checklist
-- [ ] Preflight checks pass
+- [ ] Preflight checks pass (`mix format`, `mix test`, `mix test.integration`, `mix docs`, `mix credo --strict`)
 - [ ] Changelog updated
 - [ ] `mix.exs` version bumped
 - [ ] Commit pushed
