@@ -508,29 +508,49 @@ For an explicit split between fast checks and integration coverage:
 
 ```bash
 mix ci
-scripts/test_integration.sh
 ```
 
 - `mix ci` runs formatting, Credo, and non-integration tests
-- `scripts/test_integration.sh` starts a pinned relay Docker image with local
-  TLS certs and runs `mix test.integration`
+
+Integration tests are run separately with `mix test.integration`, against a
+relay you start yourself. For local development, the intended workflow is:
+
+```bash
+scripts/generate_integration_certs.sh .tmp/integration-certs
+export MOQX_RELAY_CACERTFILE=.tmp/integration-certs/ca.pem
+export MOQX_EXTERNAL_RELAY_URL=https://127.0.0.1:4433
+docker compose -f docker-compose.integration.yml up -d relay
+mix test.integration
+```
+
+This keeps the relay running across repeated test runs, which is faster and
+simpler during local integration-test loops.
 
 You can override relay version independently from the locally compiled moqtail
 library by setting `MOQX_RELAY_IMAGE`, for example:
 
 ```bash
-MOQX_RELAY_IMAGE=ghcr.io/moqtail/relay:sha-190e502 scripts/test_integration.sh
+MOQX_RELAY_IMAGE=ghcr.io/moqtail/relay:sha-190e502 \
+  docker compose -f docker-compose.integration.yml up -d relay
 ```
 
 Set a digest-pinned reference for strict reproducibility:
 
 ```bash
-MOQX_RELAY_IMAGE='ghcr.io/moqtail/relay:sha-190e502@sha256:36c929b71140a83158da383721f1d59f199a9f643ab5d033910258f5aa2903ee' scripts/test_integration.sh
+MOQX_RELAY_IMAGE='ghcr.io/moqtail/relay:sha-190e502@sha256:36c929b71140a83158da383721f1d59f199a9f643ab5d033910258f5aa2903ee' \
+  docker compose -f docker-compose.integration.yml up -d relay
 ```
 
-`mix test.integration` can still be run directly if you provide a relay URL and
-trusted CA path via environment (`MOQX_EXTERNAL_RELAY_URL`,
-`MOQX_RELAY_CACERTFILE`).
+`mix test.integration` expects a relay URL and trusted CA path via environment.
+By default the tests use `https://127.0.0.1:4433`; set
+`MOQX_EXTERNAL_RELAY_URL` and `MOQX_RELAY_CACERTFILE` if you are using a
+non-default setup.
+
+When finished locally, tear the relay down with:
+
+```bash
+docker compose -f docker-compose.integration.yml down --remove-orphans
+```
 
 ### Local relay TLS
 
