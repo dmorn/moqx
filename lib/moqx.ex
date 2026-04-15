@@ -164,7 +164,6 @@ defmodule MOQX do
   @typedoc "Subscribe options accepted by `subscribe/4` and `subscribe_track/4`."
   @type subscribe_opt ::
           {:rendezvous_timeout_ms, non_neg_integer()}
-          | {:delivery_timeout_ms, non_neg_integer()}
           | {:init_data, binary()}
           | {:track_meta, map()}
           | {:track, Track.t()}
@@ -696,7 +695,6 @@ defmodule MOQX do
 
   - `:rendezvous_timeout_ms` -- how long the relay may wait for publisher availability
     before rejecting the request (encoded as MOQT DELIVERY TIMEOUT parameter `0x02`)
-  - `:delivery_timeout_ms` -- deprecated alias for `:rendezvous_timeout_ms`
   - `:init_data` -- binary init segment/configuration to surface in `:moqx_track_init`
   - `:track_meta` -- map surfaced in `:moqx_track_init`
   - `:track` -- `%MOQX.Catalog.Track{}` convenience; fills `:init_data` and `:track_meta`
@@ -792,7 +790,12 @@ defmodule MOQX do
   end
 
   defp validate_subscribe_opts_keys!(opts) do
-    allowed_keys = [:rendezvous_timeout_ms, :delivery_timeout_ms, :init_data, :track_meta, :track]
+    if Keyword.has_key?(opts, :delivery_timeout_ms) do
+      raise ArgumentError,
+            ":delivery_timeout_ms has been removed; use :rendezvous_timeout_ms"
+    end
+
+    allowed_keys = [:rendezvous_timeout_ms, :init_data, :track_meta, :track]
 
     case Keyword.keys(opts) -- allowed_keys do
       [] -> :ok
@@ -846,22 +849,9 @@ defmodule MOQX do
   end
 
   defp normalize_rendezvous_timeout_ms!(opts) do
-    rendezvous_timeout_ms = Keyword.get(opts, :rendezvous_timeout_ms)
-    delivery_timeout_ms = Keyword.get(opts, :delivery_timeout_ms)
-
-    case {rendezvous_timeout_ms, delivery_timeout_ms} do
-      {nil, nil} ->
-        nil
-
-      {timeout_ms, nil} ->
-        normalize_timeout_ms!(timeout_ms, :rendezvous_timeout_ms)
-
-      {nil, timeout_ms} ->
-        normalize_timeout_ms!(timeout_ms, :delivery_timeout_ms)
-
-      {_rendezvous, _delivery} ->
-        raise ArgumentError,
-              "subscribe/4 accepts only one of :rendezvous_timeout_ms or :delivery_timeout_ms"
+    case Keyword.get(opts, :rendezvous_timeout_ms) do
+      nil -> nil
+      timeout_ms -> normalize_timeout_ms!(timeout_ms, :rendezvous_timeout_ms)
     end
   end
 

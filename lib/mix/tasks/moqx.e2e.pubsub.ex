@@ -5,12 +5,14 @@ defmodule Mix.Tasks.Moqx.E2e.Pubsub do
 
   use Mix.Task
 
+  alias Mix.Tasks.Moqx.Roundtrip
+
   @shortdoc "Deprecated alias for moqx.roundtrip"
   @requirements ["app.start"]
 
   @impl Mix.Task
   def run(args) do
     Mix.shell().info("mix moqx.e2e.pubsub is deprecated; use mix moqx.roundtrip")
-    Mix.Tasks.Moqx.Roundtrip.run(args)
+    Roundtrip.run(args)
   end
 end

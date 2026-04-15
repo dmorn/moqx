@@ -228,6 +228,31 @@ defmodule MOQXIntegrationTest do
     end
 
     @tag :integration
+    test "subscribe before publisher appears succeeds within rendezvous timeout" do
+      subscriber = connect_subscriber!()
+      publisher = connect_publisher!()
+
+      try do
+        ns = "moqx-e2e-rendezvous-success-#{System.system_time(:millisecond)}"
+        track_name = "late-track"
+
+        {:ok, handle} =
+          MOQX.subscribe(subscriber, ns, track_name, rendezvous_timeout_ms: 5_000)
+
+        broadcast = publish_and_await_broadcast!(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        await_subscribed!(handle, ns, track_name)
+
+        :ok = MOQX.finish_track(track)
+        :ok = MOQX.unsubscribe(handle)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
     test "publisher frame is received by subscriber on same relay" do
       publisher = connect_publisher!()
       subscriber = connect_subscriber!()

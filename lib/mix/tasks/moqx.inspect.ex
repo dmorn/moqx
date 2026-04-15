@@ -34,7 +34,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
       When explicitly provided, it is also used as a max stream runtime;
       when it expires, the task exits cleanly.
     * `--interval-ms` - stats print interval in ms (default: `1_000`).
-    * `--delivery-timeout-ms` - passed through to `MOQX.subscribe/4`.
+    * `--rendezvous-timeout-ms` - passed through to `MOQX.subscribe/4`.
     * `--show-raw` - include full per-track raw catalog maps in listing output.
     * `--help` - prints this help.
   """
@@ -101,7 +101,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
           list_tracks_only: :boolean,
           timeout: :integer,
           interval_ms: :integer,
-          delivery_timeout_ms: :integer,
+          rendezvous_timeout_ms: :integer,
           show_raw: :boolean,
           help: :boolean
         ]
@@ -259,9 +259,9 @@ defmodule Mix.Tasks.Moqx.Inspect do
   end
 
   defp build_subscribe_opts(opts) do
-    case opts[:delivery_timeout_ms] do
+    case opts[:rendezvous_timeout_ms] do
       nil -> []
-      ms -> [delivery_timeout_ms: positive_int!(ms, :delivery_timeout_ms, nil)]
+      ms -> [rendezvous_timeout_ms: positive_int!(ms, :rendezvous_timeout_ms, nil)]
     end
   end
 
@@ -866,7 +866,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
     |> append_flag(config.show_raw, "--show-raw")
     |> append_timeout_flag(config.run_timeout_ms)
     |> append_interval_flag(config.interval_ms)
-    |> append_delivery_timeout_flag(Keyword.get(config.subscribe_opts, :delivery_timeout_ms))
+    |> append_rendezvous_timeout_flag(Keyword.get(config.subscribe_opts, :rendezvous_timeout_ms))
     |> Enum.join(" ")
   end
 
@@ -888,10 +888,10 @@ defmodule Mix.Tasks.Moqx.Inspect do
   defp append_interval_flag(parts, 1_000), do: parts
   defp append_interval_flag(parts, interval_ms), do: parts ++ ["--interval-ms #{interval_ms}"]
 
-  defp append_delivery_timeout_flag(parts, nil), do: parts
+  defp append_rendezvous_timeout_flag(parts, nil), do: parts
 
-  defp append_delivery_timeout_flag(parts, timeout) do
-    parts ++ ["--delivery-timeout-ms #{timeout}"]
+  defp append_rendezvous_timeout_flag(parts, timeout) do
+    parts ++ ["--rendezvous-timeout-ms #{timeout}"]
   end
 
   defp shell_escape(value) do

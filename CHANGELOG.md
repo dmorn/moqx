@@ -60,8 +60,7 @@ All notable changes to `moqx` will be documented in this file.
   with Docker-based local/CI orchestration as the primary deterministic path.
 - Removed `:public_relay_live` integration tests; public relay interop checks now
   live in manual mix tasks.
-- Subscribe availability timeout is now exposed as
-  `rendezvous_timeout_ms` (`delivery_timeout_ms` remains as a deprecated alias)
+- Subscribe availability timeout is now exposed as `rendezvous_timeout_ms`
   and subscribe request rejections now carry typed `RequestError.code` values
   (for example `:track_does_not_exist` / `:timeout`).
 

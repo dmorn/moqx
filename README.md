@@ -229,7 +229,6 @@ Subscriptions are asynchronous and correlated by subscription handle.
 
 - `rendezvous_timeout_ms` -- how long the relay may wait for publisher availability
   before rejecting subscribe (encoded as MOQT DELIVERY TIMEOUT parameter `0x02`).
-- `delivery_timeout_ms` -- deprecated alias for `rendezvous_timeout_ms`.
 
 The subscription message contract is:
 
