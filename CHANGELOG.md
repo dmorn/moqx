@@ -135,8 +135,8 @@ If you are upgrading from older `0.2.x`–`0.4.x` APIs:
   `PublishDone` (graceful `TrackEnded` / `SubscriptionEnded` status codes).
   The corresponding local subscription state is removed in the same path,
   fixing a small leak in `active_subscriptions`.
-- `MOQX.publish_catalog/2` helper to create and publish the initial `"catalog"` track object.
-- `MOQX.update_catalog/2` helper to publish subsequent catalog objects.
+- `MOQX.Helpers.publish_catalog/2` helper to create and publish the initial `"catalog"` track object.
+- `MOQX.Helpers.update_catalog/2` helper to publish subsequent catalog objects.
 - Integration E2E coverage that verifies publisher-provided catalog objects are relayed downstream.
 
 ### Changed
