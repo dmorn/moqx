@@ -61,7 +61,7 @@ defmodule MOQX.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md", "docs/relay-experiments.md"]
+      extras: ["README.md", "CHANGELOG.md"]
     ]
   end
 

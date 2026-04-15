@@ -33,21 +33,29 @@ defmodule MOQX.Helpers do
   Fetches the raw catalog track bytes.
 
   Thin wrapper over `MOQX.fetch/4` with catalog defaults.
+
+  ## Options
+
+    * `:namespace` - broadcast namespace. Default: `"moqtail"`.
+    * `:track` - catalog track name. Default: `"catalog"`.
+    * any other options are passed through to `MOQX.fetch/4`.
   """
   @spec fetch_catalog(MOQX.session(), Keyword.t()) ::
           {:ok, MOQX.fetch_ref()} | {:error, MOQX.RequestError.t()}
   def fetch_catalog(session, opts \\ []) when is_list(opts) do
     namespace = opts |> Keyword.get(:namespace, "moqtail") |> normalize_namespace!()
+    track = opts |> Keyword.get(:track, "catalog") |> normalize_track!()
 
     fetch_opts =
       opts
       |> Keyword.delete(:namespace)
+      |> Keyword.delete(:track)
       |> Keyword.put_new(:priority, 0)
       |> Keyword.put_new(:group_order, :original)
       |> Keyword.put_new(:start, {0, 0})
       |> Keyword.put_new(:end, {0, 1})
 
-    MOQX.fetch(session, namespace, "catalog", fetch_opts)
+    MOQX.fetch(session, namespace, track, fetch_opts)
   end
 
   @doc """
@@ -124,5 +132,11 @@ defmodule MOQX.Helpers do
   defp normalize_namespace!(namespace) do
     raise ArgumentError,
           "expected catalog :namespace to be a string, got: #{inspect(namespace)}"
+  end
+
+  defp normalize_track!(track) when is_binary(track), do: track
+
+  defp normalize_track!(track) do
+    raise ArgumentError, "expected catalog :track to be a string, got: #{inspect(track)}"
   end
 end

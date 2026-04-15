@@ -44,8 +44,16 @@ All notable changes to `moqx` will be documented in this file.
 - **Breaking:** helper-level convenience APIs moved out of core `MOQX` into
   `MOQX.Helpers` (`publish_catalog/2`, `update_catalog/2`, `fetch_catalog/2`,
   `await_catalog/2`).
-- Mix tasks (`moqx.e2e.pubsub`, `moqx.moqtail.demo`) and integration helpers now
-  follow the typed async contract.
+- Mix tasks now expose primary names `moqx.roundtrip` and `moqx.inspect`.
+  Legacy aliases `moqx.e2e.pubsub` and `moqx.moqtail.demo` remain available with
+  deprecation notices.
+- `moqx.inspect` can probe catalog tracks named either `"catalog"` or
+  `".catalog"` (or an explicit `--catalog-track`), and now supports
+  `--no-fetch` for relays that do not implement fetch yet. This improves interop
+  with Cloudflare `moq-rs` style relays and other early deployments.
+- `MOQX.Helpers.fetch_catalog/2` now accepts `:track` so callers can override
+  the catalog track name when relays do not use `"catalog"`.
+- Mix tasks and integration helpers now follow the typed async contract.
 - Integration tests now assume a relay endpoint provided by environment
   (`MOQX_EXTERNAL_RELAY_URL`) and trusted CA path (`MOQX_RELAY_CACERTFILE`),
   with Docker-based local/CI orchestration as the primary deterministic path.

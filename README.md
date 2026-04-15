@@ -295,53 +295,63 @@ receive do
 end
 ```
 
-### Mix task: interactive relay debug
+### Mix task: relay inspection and live stats
 
-For quick manual debugging, use the built-in Mix task:
+For quick manual debugging, use the built-in inspection task:
 
 ```bash
-mix moqx.moqtail.demo
+mix moqx.inspect
 # defaults to https://ord.abr.moqtail.dev and namespace moqtail
-mix moqx.moqtail.demo --track 259
-mix moqx.moqtail.demo --list-tracks-only
+mix moqx.inspect --track 259
+mix moqx.inspect --list-tracks-only
+
+# Cloudflare moq-rs style catalogs use .catalog
+mix moqx.inspect https://draft-14.cloudflare.mediaoverquic.com --namespace bbb --catalog-track .catalog --list-tracks-only
+mix moqx.inspect https://draft-14.cloudflare.mediaoverquic.com --namespace bbb --no-fetch --list-tracks-only
 ```
 
 The task will:
 
 1. connect as a subscriber,
 2. load catalog via fetch (with live-subscribe fallback when fetch has no objects),
-3. prompt you to choose a track (or use `--track <name>`),
-4. subscribe and print live stats each interval:
+3. try `"catalog"` and then `".catalog"` unless `--catalog-track` is set,
+4. optionally skip fetch entirely with `--no-fetch` and go straight to live subscribe,
+5. prompt you to choose a track (or use `--track <name>`),
+5. subscribe and print live stats each interval:
    - PRFT latency (or `n/a` if unavailable),
    - bandwidth (`B/s` and `kbps`),
    - groups/sec,
    - objects/sec.
 
-Use `mix help moqx.moqtail.demo` for full options.
+Use `mix help moqx.inspect` for full options.
 
 Tips:
 - `--list-tracks-only` is handy for scripting/discovery without subscribing.
+- `--no-fetch` is useful for relays that do not implement fetch yet.
 - `--show-raw` prints full per-track raw catalog maps.
 - pass `--timeout <ms>` to auto-stop after a bounded runtime.
 - the default relay (`https://ord.abr.moqtail.dev`) has an online demo player at
   `https://abr.moqtail.dev/demo`, which is useful for quickly double-checking
   relay availability outside of `moqx`.
+- legacy aliases `mix moqx.moqtail.demo` and `mix moqx.e2e.pubsub` still work,
+  but now print deprecation notices.
 
-### Mix task: relay pub/sub end-to-end smoke test
+### Mix task: relay roundtrip smoke test
 
 For a quick publisher+subscriber roundtrip against a relay, use:
 
 ```bash
-mix moqx.e2e.pubsub
+mix moqx.roundtrip
 # defaults to https://ord.abr.moqtail.dev
 
 # Cloudflare draft-14 relay endpoints
-mix moqx.e2e.pubsub https://interop-relay.cloudflare.mediaoverquic.com:443 --timeout 20000
-mix moqx.e2e.pubsub https://draft-14.cloudflare.mediaoverquic.com --timeout 20000
+mix moqx.roundtrip https://interop-relay.cloudflare.mediaoverquic.com:443 --timeout 20000
+mix moqx.roundtrip https://draft-14.cloudflare.mediaoverquic.com --timeout 20000
 ```
 
 The task connects as both publisher and subscriber, publishes a test track,
-subscribes to it, and verifies the subscriber receives the expected payload.
+subscribes to it, waits for publisher track activation, and verifies the
+subscriber receives the expected payload.
 
 ### Fetch
 
@@ -366,7 +376,8 @@ Options:
 
 `MOQX.Helpers.fetch_catalog/2` is a convenience wrapper that fetches the first
 catalog object with sensible defaults (namespace `"moqtail"`, track
-`"catalog"`, range `{0,0}..{0,1}`).
+`"catalog"`, range `{0,0}..{0,1}`). Override the catalog track explicitly when
+needed, for example `track: ".catalog"` for Cloudflare `moq-rs` style relays.
 
 `MOQX.Helpers.await_catalog/2` collects the fetch messages and decodes the
 payload into an `MOQX.Catalog` struct in one call:
@@ -374,6 +385,9 @@ payload into an `MOQX.Catalog` struct in one call:
 ```elixir
 {:ok, ref} = MOQX.Helpers.fetch_catalog(subscriber)
 {:ok, catalog} = MOQX.Helpers.await_catalog(ref)
+
+{:ok, cf_ref} = MOQX.Helpers.fetch_catalog(subscriber, namespace: "bbb", track: ".catalog")
+{:ok, cloudflare_catalog} = MOQX.Helpers.await_catalog(cf_ref)
 
 catalog |> MOQX.Catalog.video_tracks() |> Enum.map(& &1.name)
 #=> ["259", "260"]
