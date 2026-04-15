@@ -374,7 +374,9 @@ impl SessionInner {
         track_name: String,
     ) -> (Option<u64>, bool) {
         let mut guard = self.track_lifecycle.lock().unwrap();
-        let entry = guard.entry(key.to_string()).or_insert_with(TrackLifecycle::pending);
+        let entry = guard
+            .entry(key.to_string())
+            .or_insert_with(TrackLifecycle::pending);
         entry.created = true;
         entry.closed = false;
 
@@ -401,7 +403,9 @@ impl SessionInner {
 
     fn activate_track(&self, key: &str, track_alias: u64) {
         let mut guard = self.track_lifecycle.lock().unwrap();
-        let entry = guard.entry(key.to_string()).or_insert_with(TrackLifecycle::pending);
+        let entry = guard
+            .entry(key.to_string())
+            .or_insert_with(TrackLifecycle::pending);
         if entry.closed {
             return;
         }
@@ -435,7 +439,9 @@ impl SessionInner {
 
     fn close_track(&self, key: &str) -> Vec<TrackNotifier> {
         let mut guard = self.track_lifecycle.lock().unwrap();
-        let entry = guard.entry(key.to_string()).or_insert_with(TrackLifecycle::created);
+        let entry = guard
+            .entry(key.to_string())
+            .or_insert_with(TrackLifecycle::created);
 
         if entry.closed {
             return Vec::new();
@@ -919,26 +925,128 @@ async fn control_loop(
     inner: Arc<SessionInner>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) {
-    loop {
+    let exit_reason = loop {
         tokio::select! {
-            _ = shutdown_rx.changed() => break,
+            _ = shutdown_rx.changed() => break None,
             msg = control_rx.recv() => {
                 match msg {
                     Some(msg) => {
-                        if handler.send(&msg).await.is_err() {
-                            break;
+                        if let Err(err) = handler.send(&msg).await {
+                            break Some(format!("control stream send failed: {err:?}"));
                         }
                     }
-                    None => break,
+                    None => break None,
                 }
             }
             result = handler.next_message() => {
                 match result {
                     Ok(msg) => dispatch_control_response(msg, &inner),
-                    Err(_) => break,
+                    Err(err) => break Some(format!("control stream receive failed: {err:?}")),
                 }
             }
         }
+    };
+
+    if let Some(reason) = exit_reason {
+        fail_pending_control_ops(&inner, &reason);
+    }
+}
+
+fn fail_pending_control_ops(inner: &Arc<SessionInner>, reason: &str) {
+    let pending_publishes = {
+        let mut guard = inner.pending_publishes.lock().unwrap();
+        std::mem::take(&mut *guard)
+    };
+
+    for (_, pending) in pending_publishes {
+        let mut msg_env = OwnedEnv::new();
+        let pid = pending.caller_pid;
+        pending.ref_env.run(|ref_env| {
+            let publish_ref = pending.publish_ref_term.load(ref_env);
+            let _ = msg_env.send_and_clear(&pid, |env| {
+                let nil = rustler::types::atom::nil().to_term(env);
+                let payload = TransportErrorOut {
+                    op: atoms::publish(),
+                    message: reason.to_string(),
+                    kind: Some(atoms::runtime()),
+                    r#ref: publish_ref.in_env(env),
+                    handle: nil,
+                };
+                (atoms::moqx_transport_error(), payload).encode(env)
+            });
+        });
+    }
+
+    let pending_subscribes = {
+        let mut guard = inner.pending_subscribes.lock().unwrap();
+        std::mem::take(&mut *guard)
+    };
+
+    for (_, pending) in pending_subscribes {
+        let mut msg_env = OwnedEnv::new();
+        let pid = pending.caller_pid;
+        pending.term_env.run(|term_env| {
+            let sub_ref = pending.subscription_ref_term.load(term_env);
+            let _ = msg_env.send_and_clear(&pid, |env| {
+                let nil = rustler::types::atom::nil().to_term(env);
+                let payload = TransportErrorOut {
+                    op: atoms::subscribe(),
+                    message: reason.to_string(),
+                    kind: Some(atoms::runtime()),
+                    r#ref: nil,
+                    handle: sub_ref.in_env(env),
+                };
+                (atoms::moqx_transport_error(), payload).encode(env)
+            });
+        });
+    }
+
+    let pending_fetches = {
+        let mut guard = inner.pending_fetches.lock().unwrap();
+        std::mem::take(&mut *guard)
+    };
+
+    for (_, pending) in pending_fetches {
+        let mut msg_env = OwnedEnv::new();
+        let pid = pending.caller_pid;
+        pending.ref_env.run(|ref_env| {
+            let fetch_ref = pending.ref_term.load(ref_env);
+            let _ = msg_env.send_and_clear(&pid, |env| {
+                let nil = rustler::types::atom::nil().to_term(env);
+                let payload = TransportErrorOut {
+                    op: atoms::fetch(),
+                    message: reason.to_string(),
+                    kind: Some(atoms::runtime()),
+                    r#ref: fetch_ref.in_env(env),
+                    handle: nil,
+                };
+                (atoms::moqx_transport_error(), payload).encode(env)
+            });
+        });
+    }
+
+    let active_subscriptions = {
+        let mut guard = inner.active_subscriptions.lock().unwrap();
+        std::mem::take(&mut *guard)
+    };
+
+    for (_, active) in active_subscriptions {
+        let mut msg_env = OwnedEnv::new();
+        let pid = active.caller_pid;
+        active.ref_env.run(|ref_env| {
+            let sub_ref = active.subscription_ref_term.load(ref_env);
+            let _ = msg_env.send_and_clear(&pid, |env| {
+                let nil = rustler::types::atom::nil().to_term(env);
+                let payload = TransportErrorOut {
+                    op: atoms::subscribe(),
+                    message: reason.to_string(),
+                    kind: Some(atoms::runtime()),
+                    r#ref: nil,
+                    handle: sub_ref.in_env(env),
+                };
+                (atoms::moqx_transport_error(), payload).encode(env)
+            });
+        });
     }
 }
 
@@ -1424,8 +1532,13 @@ async fn handle_subgroup_stream(
     // Control and data travel on independent streams. A subgroup stream may arrive
     // just before the control loop processes the matching SubscribeOk(track_alias).
     // Wait briefly for local activation before deciding this alias is unknown.
-    let has_subscription =
-        wait_for_active_subscription(inner, track_alias, Duration::from_millis(2_000), Duration::from_millis(5)).await;
+    let has_subscription = wait_for_active_subscription(
+        inner,
+        track_alias,
+        Duration::from_millis(2_000),
+        Duration::from_millis(5),
+    )
+    .await;
 
     if !has_subscription {
         return Ok(());

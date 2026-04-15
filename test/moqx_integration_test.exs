@@ -125,6 +125,62 @@ defmodule MOQXIntegrationTest do
     end
   end
 
+  defp await_fetch_ok!(fetch_ref, namespace, track_name, timeout \\ @timeout) do
+    receive do
+      {:moqx_fetch_ok,
+       %MOQX.FetchOk{ref: ^fetch_ref, namespace: ^namespace, track_name: ^track_name}} ->
+        :ok
+
+      {:moqx_request_error, %MOQX.RequestError{op: :fetch, ref: ^fetch_ref, message: reason}} ->
+        flunk("fetch failed: #{inspect(reason)}")
+
+      {:moqx_transport_error, %MOQX.TransportError{op: :fetch, ref: ^fetch_ref, message: reason}} ->
+        flunk("fetch transport failed: #{inspect(reason)}")
+    after
+      timeout -> flunk("fetch ok timeout for #{namespace}/#{track_name}")
+    end
+  end
+
+  defp await_fetch_object!(fetch_ref, expected_payload, timeout \\ @timeout) do
+    receive do
+      {:moqx_fetch_object,
+       %MOQX.FetchObject{
+         ref: ^fetch_ref,
+         group_id: group_id,
+         object_id: object_id,
+         payload: payload
+       }} ->
+        if payload == expected_payload do
+          {group_id, object_id, payload}
+        else
+          await_fetch_object!(fetch_ref, expected_payload, timeout)
+        end
+
+      {:moqx_request_error, %MOQX.RequestError{op: :fetch, ref: ^fetch_ref, message: reason}} ->
+        flunk("fetch failed: #{inspect(reason)}")
+
+      {:moqx_transport_error, %MOQX.TransportError{op: :fetch, ref: ^fetch_ref, message: reason}} ->
+        flunk("fetch transport failed: #{inspect(reason)}")
+    after
+      timeout -> flunk("fetch object timeout waiting for #{inspect(expected_payload)}")
+    end
+  end
+
+  defp await_fetch_done!(fetch_ref, timeout \\ @timeout) do
+    receive do
+      {:moqx_fetch_done, %MOQX.FetchDone{ref: ^fetch_ref}} ->
+        :ok
+
+      {:moqx_request_error, %MOQX.RequestError{op: :fetch, ref: ^fetch_ref, message: reason}} ->
+        flunk("fetch failed: #{inspect(reason)}")
+
+      {:moqx_transport_error, %MOQX.TransportError{op: :fetch, ref: ^fetch_ref, message: reason}} ->
+        flunk("fetch transport failed: #{inspect(reason)}")
+    after
+      timeout -> flunk("fetch done timeout")
+    end
+  end
+
   describe "integration relay: connect" do
     @tag :integration
     test "subscriber connects and reports draft-14 version" do
@@ -352,6 +408,74 @@ defmodule MOQXIntegrationTest do
         assert got_media_payload == media_payload
 
         :ok = MOQX.finish_track(media_track)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "fetch returns cached object bytes end-to-end on the relay" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-fetch-#{System.system_time(:millisecond)}"
+        track_name = "catalog"
+
+        payload =
+          ~s({"version":1,"supportsDeltaUpdates":false,"tracks":[{"name":"demo","role":"video"}]})
+
+        broadcast = publish_and_await_broadcast!(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        handle = subscribe_and_await_handle!(subscriber, ns, track_name)
+        await_track_active!(track, ns, track_name)
+
+        :ok = MOQX.write_frame(track, payload)
+
+        {live_group_id, live_payload} = await_matching_payload_frame!(payload)
+        assert live_group_id == 0
+        assert live_payload == payload
+
+        :ok = MOQX.unsubscribe(handle)
+        assert_receive {:moqx_publish_done, %MOQX.PublishDone{handle: ^handle}}, @timeout
+
+        {:ok, fetch_ref} = MOQX.fetch(subscriber, ns, track_name, start: {0, 0}, end: {0, 1})
+
+        :ok = await_fetch_ok!(fetch_ref, ns, track_name)
+        {group_id, object_id, fetched_payload} = await_fetch_object!(fetch_ref, payload)
+        :ok = await_fetch_done!(fetch_ref)
+
+        assert group_id == 0
+        assert object_id == 0
+        assert fetched_payload == payload
+
+        :ok = MOQX.finish_track(track)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "fetch cache miss returns typed request error on current moqtail relay" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-fetch-miss-#{System.system_time(:millisecond)}"
+        track_name = "catalog"
+
+        _broadcast = publish_and_await_broadcast!(publisher, ns)
+
+        {:ok, fetch_ref} = MOQX.fetch(subscriber, ns, track_name, start: {0, 0}, end: {0, 1})
+
+        assert_receive {:moqx_request_error,
+                        %MOQX.RequestError{op: :fetch, ref: ^fetch_ref, message: reason}},
+                       @timeout
+
+        assert reason =~ "TrackDoesNotExist"
       after
         :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)

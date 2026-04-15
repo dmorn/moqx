@@ -44,6 +44,7 @@ Today `moqx` supports a single client-side path:
 - broadcasts, tracks, and frame delivery
 - live subscription via SUBSCRIBE with `FilterType::LatestObject`
 - raw fetch for retrieving track objects by range (subscriber sessions only)
+  - on the current moqtail relay, standalone fetch succeeds only for objects the relay already has in cache; upstream relay-to-publisher standalone fetch is not implemented yet
 - optional helper-layer catalog publication via `MOQX.Helpers.publish_catalog/2`
   and `MOQX.Helpers.update_catalog/2`
 - optional helper-layer catalog retrieval via `MOQX.Helpers.fetch_catalog/2`
@@ -315,12 +316,12 @@ mix moqx.inspect https://draft-14.cloudflare.mediaoverquic.com --namespace bbb -
 The task will:
 
 1. connect as a subscriber,
-2. load catalog via fetch (with live-subscribe fallback when fetch has no objects),
+2. load catalog via fetch (with live-subscribe fallback when fetch has no objects or the relay has not cached the track yet),
 3. optionally apply a known relay preset (`--preset`) or choose one interactively (`--choose-relay`),
 4. try `"catalog"` and then `".catalog"` unless `--catalog-track` is set,
 5. optionally skip fetch entirely with `--no-fetch` and go straight to live subscribe,
 6. prompt you to choose a track (or use `--track <name>`),
-5. subscribe and print live stats each interval:
+7. subscribe and print live stats each interval:
    - PRFT latency (or `n/a` if unavailable),
    - bandwidth (`B/s` and `kbps`),
    - groups/sec,
@@ -363,6 +364,14 @@ subscriber receives the expected payload.
 Fetch retrieves raw track objects by range from a subscriber session.
 `fetch/4` returns `{:ok, ref}` immediately, then delivers messages to the
 caller's mailbox correlated by `ref`.
+
+Important moqtail relay note: the current relay only serves standalone fetches
+from its local track cache. In practice that means fetch works end-to-end for
+objects the relay has already seen (for example after live delivery to a
+subscriber), but it does not yet forward standalone fetch upstream to a
+publisher on cache miss. On such a cache miss, `moqx` surfaces the relay reply
+as a typed `{:moqx_request_error, %MOQX.RequestError{op: :fetch, ...}}` rather
+than hanging silently.
 
 The fetch message contract is:
 
