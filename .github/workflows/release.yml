@@ -1,0 +1,144 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  MOQX_RELAY_IMAGE: ghcr.io/moqtail/relay:sha-190e502@sha256:36c929b71140a83158da383721f1d59f199a9f643ab5d033910258f5aa2903ee
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: publish Hex package and GitHub release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.19.0'
+          otp-version: '27.3'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Mix
+        uses: actions/cache@v5
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-
+
+      - name: Cache Cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('mix.lock', 'native/moqx_native/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install Elixir dependencies
+        run: mix deps.get
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Run unit tests
+        run: mix test
+
+      - name: Generate integration relay certificates
+        run: scripts/generate_integration_certs.sh .tmp/integration-certs
+
+      - name: Start pinned relay image
+        run: |
+          docker run -d --name moqx-relay --network host \
+            -v "$PWD/.tmp/integration-certs/cert.pem:/certs/cert.pem:ro" \
+            -v "$PWD/.tmp/integration-certs/key.pem:/certs/key.pem:ro" \
+            "$MOQX_RELAY_IMAGE" \
+            --host 0.0.0.0 --port 4433 --cert-file /certs/cert.pem --key-file /certs/key.pem
+
+      - name: Wait for relay to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if ! docker ps --filter name=moqx-relay --filter status=running \
+                --format '{{.Names}}' | grep -q '^moqx-relay$'; then
+              echo "relay container is not running"
+              docker logs moqx-relay || true
+              exit 1
+            fi
+            if docker logs moqx-relay 2>&1 | grep -qF 'is running at'; then
+              echo "relay ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "relay did not report readiness within 30s; last logs:"
+          docker logs moqx-relay || true
+          exit 1
+
+      - name: Run relay-backed integration tests
+        env:
+          MOQX_EXTERNAL_RELAY_URL: https://127.0.0.1:4433
+          MOQX_RELAY_CACERTFILE: .tmp/integration-certs/ca.pem
+        run: mix test.integration
+
+      - name: Build docs
+        run: mix docs
+
+      - name: Run Credo
+        run: mix credo --strict
+
+      - name: Publish package to Hex.pm
+        env:
+          HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+        run: mix hex.publish --yes
+
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          version="${TAG_NAME#v}"
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          awk -v version="$version" '
+            $0 ~ "^## \\\[" version "\\\]" { printing = 1; next }
+            printing && /^## \[/ { exit }
+            printing { print }
+          ' CHANGELOG.md > "$notes_file"
+
+          if [ ! -s "$notes_file" ]; then
+            echo "Failed to extract release notes for version $version from CHANGELOG.md"
+            exit 1
+          fi
+
+          echo "RELEASE_NOTES_FILE=$notes_file" >> "$GITHUB_ENV"
+
+      - name: Create or update GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release edit "$TAG_NAME" --title "moqx $TAG_NAME" --notes-file "$RELEASE_NOTES_FILE"
+          else
+            gh release create "$TAG_NAME" --title "moqx $TAG_NAME" --notes-file "$RELEASE_NOTES_FILE"
+          fi
+
+      - name: Dump relay logs on failure
+        if: failure()
+        run: docker logs moqx-relay || true
+
+      - name: Stop relay image
+        if: always()
+        run: docker rm -f moqx-relay || true

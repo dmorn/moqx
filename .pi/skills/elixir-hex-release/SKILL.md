@@ -51,13 +51,14 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
    mix hex.publish
    ```
    - For first release of a package, this step is the authoritative publication.
+   - `mix hex.publish` also builds and publishes docs by default.
    - If Hex publication requires interactive OTP/2FA input, **do not run it automatically**.
      Pause and explicitly ask the user to run `mix hex.publish` themselves.
-7. Publish docs to HexDocs (recommended):
+7. Publish docs only when needed (optional recovery/update path):
    ```bash
    mix hex.publish docs
    ```
-   - This is separate from `mix hex.publish`.
+   - Use this when you need to publish or repair docs independently of the package publish.
    - If docs publication requires interactive OTP/2FA input, pause and ask the user to run it manually.
 8. Create GitHub release (optional):
    ```bash
@@ -80,5 +81,5 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
 - [ ] Commit pushed
 - [ ] Tag created and pushed
 - [ ] `mix hex.publish` completed
-- [ ] `mix hex.publish docs` completed (recommended)
+- [ ] `mix hex.publish docs` completed if a docs-only follow-up was needed
 - [ ] GitHub release created/published (optional)
