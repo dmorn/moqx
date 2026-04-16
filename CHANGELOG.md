@@ -2,6 +2,32 @@
 
 All notable changes to `moqx` will be documented in this file.
 
+## [0.6.0] - 2026-04-15
+
+This release automates the tag-driven release path and hardens release metadata
+validation so publishing fails fast if the tag, `mix.exs`, and changelog drift.
+
+### Added
+
+- Added a tag-triggered GitHub Actions release workflow that reruns the full
+  release preflight (`mix format --check-formatted`, `mix test`,
+  `mix test.integration`, `mix docs`, and `mix credo --strict`) before
+  publishing.
+- Added automated Hex publishing on `v*` tags via `mix hex.publish --yes`,
+  using the repository `HEX_API_KEY` secret.
+- Added automated GitHub release creation/update on `v*` tags, with release
+  notes extracted from the matching `CHANGELOG.md` section.
+- Added release-time validation that the pushed tag version matches both
+  `mix.exs` and a `CHANGELOG.md` heading for the same version.
+
+### Documentation
+
+- Clarified project release guidance in `AGENTS.md` and the local release skill,
+  including `mix docs` in pre-release checks.
+- Corrected the local Hex release skill to reflect actual Hex behavior:
+  `mix hex.publish` publishes package + docs by default, while
+  `mix hex.publish docs` remains the docs-only follow-up path.
+
 ## [0.5.0] - 2026-04-15
 
 This release finalizes the low-level async core contract that `moqx` exposes.
