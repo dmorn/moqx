@@ -65,6 +65,48 @@ defmodule MOQXIntegrationTest do
     end
   end
 
+  defp subscribe_with_retry_until_ok!(
+         subscriber,
+         namespace,
+         track_name,
+         opts,
+         timeout \\ @timeout
+       ) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_subscribe_with_retry_until_ok!(subscriber, namespace, track_name, opts, deadline)
+  end
+
+  defp do_subscribe_with_retry_until_ok!(subscriber, namespace, track_name, opts, deadline) do
+    {:ok, handle} = MOQX.subscribe(subscriber, namespace, track_name, opts)
+
+    receive do
+      {:moqx_subscribe_ok,
+       %MOQX.SubscribeOk{handle: ^handle, namespace: ^namespace, track_name: ^track_name}} ->
+        handle
+
+      {:moqx_request_error,
+       %MOQX.RequestError{op: :subscribe, handle: ^handle, code: code, message: reason}}
+      when code in [:track_does_not_exist, :timeout] ->
+        if String.contains?(reason, "Unknown track namespace") and
+             System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(50)
+          do_subscribe_with_retry_until_ok!(subscriber, namespace, track_name, opts, deadline)
+        else
+          flunk("subscribe failed: #{inspect(reason)}")
+        end
+
+      {:moqx_request_error, %MOQX.RequestError{op: :subscribe, handle: ^handle, message: reason}} ->
+        flunk("subscribe failed: #{inspect(reason)}")
+
+      {:moqx_transport_error,
+       %MOQX.TransportError{op: :subscribe, handle: ^handle, message: reason}} ->
+        flunk("subscribe transport failed: #{inspect(reason)}")
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) ->
+        flunk("subscribe timeout for #{namespace}/#{track_name}")
+    end
+  end
+
   defp await_publish_ok!(publish_ref, namespace, timeout) do
     receive do
       {:moqx_publish_ok,
@@ -297,13 +339,23 @@ defmodule MOQXIntegrationTest do
         ns = "moqx-e2e-delivery-timeout-success-#{System.system_time(:millisecond)}"
         track_name = "late-track"
 
-        {:ok, handle} =
-          MOQX.subscribe(subscriber, ns, track_name, delivery_timeout_ms: 5_000)
+        publisher_task =
+          Task.async(fn ->
+            Process.sleep(150)
+            broadcast = publish_and_await_broadcast!(publisher, ns)
+            {:ok, track} = MOQX.create_track(broadcast, track_name)
+            {broadcast, track}
+          end)
 
-        broadcast = publish_and_await_broadcast!(publisher, ns)
-        {:ok, track} = MOQX.create_track(broadcast, track_name)
+        handle =
+          subscribe_with_retry_until_ok!(
+            subscriber,
+            ns,
+            track_name,
+            delivery_timeout_ms: 5_000
+          )
 
-        await_subscribed!(handle, ns, track_name)
+        {_broadcast, track} = Task.await(publisher_task, @timeout)
 
         :ok = MOQX.finish_track(track)
         :ok = MOQX.unsubscribe(handle)

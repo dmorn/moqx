@@ -2,6 +2,20 @@
 
 All notable changes to `moqx` will be documented in this file.
 
+## [0.6.1] - 2026-04-16
+
+### Fixed
+
+- Hardened the relay-backed integration coverage for the late-publisher subscribe
+  path so the suite no longer flakes when the current `moqtail` relay races an
+  early `Unknown track namespace` rejection before the namespace is published.
+  The test now retries the subscribe request within the delivery-timeout window
+  until the late publisher appears, while still failing on unexpected subscribe
+  errors.
+- Fixed the tag-driven release workflow's version guard to read `mix.exs`
+  statically instead of invoking `mix run`, avoiding CI failures caused by
+  compiler output contaminating the captured version string.
+
 ## [0.6.0] - 2026-04-15
 
 This release automates the tag-driven release path and hardens release metadata
