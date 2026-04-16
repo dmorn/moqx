@@ -52,6 +52,23 @@ jobs:
       - name: Install Elixir dependencies
         run: mix deps.get
 
+      - name: Validate tag, mix.exs version, and changelog version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          tag_version="${TAG_NAME#v}"
+          mix_version=$(mix run -e 'IO.write(Mix.Project.config()[:version])')
+
+          if [ "$tag_version" != "$mix_version" ]; then
+            echo "Tag version $tag_version does not match mix.exs version $mix_version"
+            exit 1
+          fi
+
+          if ! grep -q "^## \[$tag_version\]" CHANGELOG.md; then
+            echo "CHANGELOG.md does not contain a section for version $tag_version"
+            exit 1
+          fi
+
       - name: Check formatting
         run: mix format --check-formatted
 
