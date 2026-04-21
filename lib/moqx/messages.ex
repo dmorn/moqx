@@ -19,6 +19,7 @@ defmodule MOQX.RequestError do
           | :fetch
           | :open_subgroup
           | :write_object
+          | :write_datagram
           | :close_subgroup
           | :flush_subgroup
 

@@ -27,6 +27,7 @@ use moqtail::model::control::unsubscribe::Unsubscribe as MoqUnsubscribe;
 use moqtail::model::data::constant::{
     ObjectForwardingPreference, ObjectStatus, SubgroupHeaderType,
 };
+use moqtail::model::data::datagram_object::DatagramObject;
 use moqtail::model::data::fetch_object::FetchObject;
 use moqtail::model::data::subgroup_header::SubgroupHeader;
 use moqtail::transport::control_stream_handler::ControlStreamHandler;
@@ -58,13 +59,17 @@ mod atoms {
         fetch,
         open_subgroup,
         write_object,
+        write_datagram,
         close_subgroup,
         flush_subgroup,
         track_not_active,
         track_closed,
+        payload_too_large,
         runtime,
         publisher,
         subscriber,
+        subgroup,
+        datagram,
         ended,
         unsubscribe_ack,
         expired,
@@ -94,6 +99,7 @@ struct MoqxObjectOut<'a> {
     status: Atom,
     extensions: Vec<rustler::Term<'a>>,
     payload: rustler::Term<'a>,
+    transport: Atom,
 }
 
 #[derive(rustler::NifStruct)]
@@ -907,6 +913,16 @@ async fn do_connect(
         });
     }
 
+    // Spawn datagram receive loop (Task 3)
+    {
+        let inner = inner.clone();
+        let conn = connection.clone();
+        let mut shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            datagram_acceptor(conn, inner, &mut shutdown_rx).await;
+        });
+    }
+
     Ok(SessionRes {
         inner,
         role,
@@ -1421,6 +1437,87 @@ async fn handle_data_stream(
     }
 }
 
+async fn datagram_acceptor(
+    connection: wtransport::Connection,
+    inner: Arc<SessionInner>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown_rx.changed() => break,
+            result = connection.receive_datagram() => {
+                let datagram = match result {
+                    Ok(datagram) => datagram,
+                    Err(_) => break,
+                };
+
+                let inner = inner.clone();
+                tokio::spawn(async move {
+                    let bytes = Bytes::from(datagram.payload().to_vec());
+                    let mut bytes_mut = bytes.clone();
+
+                    match DatagramObject::deserialize(&mut bytes_mut) {
+                        Ok(obj) => {
+                            if let Err(_e) = handle_datagram_object(obj, &inner).await {
+                                // Datagram-level error, not session-fatal.
+                            }
+                        }
+                        Err(_) => {
+                            // Ignore non-object datagrams for now. Status datagrams can be
+                            // added later without making object-datagram support depend on them.
+                        }
+                    }
+                });
+            }
+        }
+    }
+}
+
+async fn handle_datagram_object(
+    obj: DatagramObject,
+    inner: &Arc<SessionInner>,
+) -> anyhow::Result<()> {
+    let track_alias = obj.track_alias;
+    let group_id = obj.group_id;
+    let object_id = obj.object_id;
+    let priority = obj.publisher_priority;
+    let subgroup_id = object_id;
+    let end_of_group = obj.end_of_group;
+    let payload = obj.payload;
+    let extensions = obj.extension_headers.unwrap_or_default();
+
+    let has_subscription = wait_for_active_subscription(
+        inner,
+        track_alias,
+        Duration::from_millis(2_000),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    if !has_subscription {
+        return Ok(());
+    }
+
+    send_object_received(
+        inner,
+        track_alias,
+        group_id,
+        subgroup_id,
+        object_id,
+        priority,
+        &extensions,
+        ObjectStatus::Normal,
+        Some(&payload),
+        atoms::datagram(),
+    );
+
+    if end_of_group {
+        send_end_of_group(inner, track_alias, group_id, subgroup_id);
+    }
+
+    Ok(())
+}
+
 async fn handle_fetch_stream(
     mut recv: wtransport::RecvStream,
     inner: &Arc<SessionInner>,
@@ -1585,7 +1682,7 @@ async fn handle_subgroup_stream(
                     // Normal (data) and DoesNotExist (an informational gap) surface as
                     // :moqx_object. The subscriber can branch on :status if needed.
                     ObjectStatus::Normal | ObjectStatus::DoesNotExist => {
-                        send_subgroup_object(
+                        send_object_received(
                             inner,
                             track_alias,
                             group_id,
@@ -1595,6 +1692,7 @@ async fn handle_subgroup_stream(
                             &obj.extensions,
                             obj.status,
                             obj.payload.as_ref(),
+                            atoms::subgroup(),
                         );
                     }
                 }
@@ -1614,7 +1712,7 @@ async fn handle_subgroup_stream(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn send_subgroup_object(
+fn send_object_received(
     inner: &Arc<SessionInner>,
     track_alias: u64,
     group_id: u64,
@@ -1624,6 +1722,7 @@ fn send_subgroup_object(
     extensions: &[KeyValuePair],
     status: ObjectStatus,
     payload: Option<&Bytes>,
+    transport: Atom,
 ) {
     let guard = inner.active_subscriptions.lock().unwrap();
     let Some(active) = guard.get(&track_alias) else {
@@ -1662,6 +1761,7 @@ fn send_subgroup_object(
                 status: status_to_atom(status),
                 extensions: ext_terms,
                 payload: payload_term,
+                transport,
             };
 
             let payload = ObjectReceivedOut {
@@ -2457,6 +2557,56 @@ fn write_object<'a>(
         },
     );
     Ok(atoms::ok())
+}
+
+#[rustler::nif]
+fn write_datagram<'a>(
+    track: ResourceArc<TrackProducerRes>,
+    group_id: u64,
+    object_id: u64,
+    payload: Binary,
+    priority: u8,
+    extensions: rustler::Term<'a>,
+    end_of_group: bool,
+) -> rustler::NifResult<Atom> {
+    let ext_kv = decode_extensions(extensions)?;
+    let payload_bytes = Bytes::copy_from_slice(payload.as_slice());
+
+    let key = format!("{}/{}", track.namespace.trim_matches('/'), track.track_name);
+    let track_alias = track
+        .session
+        .write_track_alias(&key)
+        .map_err(|reason| rustler::Error::Term(Box::new(reason)))?;
+
+    let datagram = DatagramObject::new_with_options(
+        track_alias,
+        group_id,
+        object_id,
+        priority,
+        if ext_kv.is_empty() {
+            None
+        } else {
+            Some(ext_kv)
+        },
+        payload_bytes,
+        end_of_group,
+    );
+
+    let serialized = datagram
+        .serialize()
+        .map_err(|e| rustler::Error::Term(Box::new(format!("serialize_datagram: {e:?}"))))?;
+
+    match track.session.connection.send_datagram(serialized) {
+        Ok(_) => Ok(atoms::ok()),
+        Err(e) => {
+            let reason = format!("send_datagram: {e:?}");
+            if reason.to_lowercase().contains("too large") {
+                Err(rustler::Error::Term(Box::new(atoms::payload_too_large())))
+            } else {
+                Err(rustler::Error::Term(Box::new(reason)))
+            }
+        }
+    }
 }
 
 #[rustler::nif]

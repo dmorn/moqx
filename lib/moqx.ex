@@ -25,6 +25,7 @@ defmodule MOQX do
 
   - split roles only: publisher sessions publish and subscriber sessions subscribe
   - explicit draft-14 protocol target via moqtail-rs / moqtail
+  - both subgroup-stream and object-datagram delivery are exposed explicitly
   - async operations are correlated (`connect_ref`, `publish_ref`, `flush_ref`, `fetch_ref`, subscription handle)
   - async outcomes are explicit and typed:
     - lifecycle/success events (e.g. `%MOQX.ConnectOk{}`, `%MOQX.SubscribeOk{}`)
@@ -110,6 +111,14 @@ defmodule MOQX do
   @type write_object_opt ::
           {:status, object_status()}
           | {:extensions, [extension()]}
+
+  @typedoc "Options for `write_datagram/3`."
+  @type write_datagram_opt ::
+          {:group_id, non_neg_integer()}
+          | {:object_id, non_neg_integer()}
+          | {:priority, 0..255}
+          | {:extensions, [extension()]}
+          | {:end_of_group, boolean()}
 
   @typedoc "Options for `close_subgroup/2`."
   @type close_subgroup_opt :: {:end_of_group, boolean()}
@@ -397,11 +406,14 @@ defmodule MOQX do
   errors with `code: :track_not_active | :track_closed` when not writable.
 
   Subscribers receive `{:moqx_object, handle, %MOQX.Object{group_id: group_seq,
-  subgroup_id: 0, object_id: 0, status: :normal, payload: data}}`.
+  subgroup_id: 0, object_id: 0, status: :normal, transport: :subgroup,
+  payload: data}}`.
 
-  For fine-grained control over subgroups, priority, extensions, end-of-group
-  markers, or multiple objects per group use `open_subgroup/3` +
+  For fine-grained control over subgroup streams use `open_subgroup/3` +
   `write_object/4` + `close_subgroup/2`.
+
+  For datagram delivery semantics use `write_datagram/3` explicitly; this
+  helper does not auto-route small payloads to datagrams.
   """
   @spec write_frame(track(), binary()) :: :ok | {:error, MOQX.RequestError.t()}
   def write_frame(track, data) when is_binary(data) do
@@ -410,6 +422,57 @@ defmodule MOQX do
     with {:ok, sg} <- open_subgroup(track, group_id, subgroup_id: 0, priority: 0),
          :ok <- write_object(sg, 0, data) do
       close_subgroup(sg)
+    end
+  end
+
+  @doc """
+  Writes one object as a draft-14 MOQT object datagram.
+
+  This is the explicit low-latency, loss-tolerant publish path for small
+  objects. It does not fragment payloads and does not auto-select datagrams
+  based on payload size.
+
+  Required options:
+
+    * `:group_id` — non-negative integer group id
+    * `:object_id` — non-negative integer object id
+
+  Optional options:
+
+    * `:priority` — `0..255` publisher priority (default `0`)
+    * `:extensions` — per-object extension headers (default `[]`)
+    * `:end_of_group` — whether this datagram marks the last object in the
+      group (default `false`)
+
+  Subscribers receive the existing `{:moqx_object, %MOQX.ObjectReceived{...}}`
+  family, with `%MOQX.Object{transport: :datagram}`.
+  """
+  @spec write_datagram(track(), binary(), [write_datagram_opt()]) ::
+          :ok | {:error, MOQX.RequestError.t()}
+  def write_datagram(track, payload, opts \\ [])
+      when is_reference(track) and is_binary(payload) and is_list(opts) do
+    group_id = opts |> fetch_required_opt!(:group_id) |> normalize_non_neg_integer!(:group_id)
+    object_id = opts |> fetch_required_opt!(:object_id) |> normalize_non_neg_integer!(:object_id)
+    priority = opts |> Keyword.get(:priority, 0) |> normalize_priority!()
+    extensions = opts |> Keyword.get(:extensions, []) |> normalize_extensions!()
+    end_of_group = opts |> Keyword.get(:end_of_group, false) |> normalize_boolean!(:end_of_group)
+
+    validate_write_datagram_opts!(opts)
+
+    case MOQX.Native.write_datagram(
+           track,
+           group_id,
+           object_id,
+           payload,
+           priority,
+           extensions,
+           end_of_group
+         ) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, sync_request_error(:write_datagram, reason, handle: track)}
     end
   end
 
@@ -590,6 +653,13 @@ defmodule MOQX do
     end
   end
 
+  defp fetch_required_opt!(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> value
+      :error -> raise ArgumentError, "missing required option #{inspect(key)}"
+    end
+  end
+
   defp normalize_subgroup_id!(nil), do: nil
 
   defp normalize_subgroup_id!(id) when is_integer(id) and id >= 0, do: id
@@ -597,6 +667,13 @@ defmodule MOQX do
   defp normalize_subgroup_id!(id) do
     raise ArgumentError,
           "expected :subgroup_id to be nil or a non-negative integer, got: #{inspect(id)}"
+  end
+
+  defp normalize_non_neg_integer!(value, _name) when is_integer(value) and value >= 0, do: value
+
+  defp normalize_non_neg_integer!(value, name) do
+    raise ArgumentError,
+          "expected #{inspect(name)} to be a non-negative integer, got: #{inspect(value)}"
   end
 
   defp normalize_priority!(p) when is_integer(p) and p in 0..255, do: p
@@ -673,6 +750,15 @@ defmodule MOQX do
     end
   end
 
+  defp validate_write_datagram_opts!(opts) do
+    allowed = [:group_id, :object_id, :priority, :extensions, :end_of_group]
+
+    case Keyword.keys(opts) -- allowed do
+      [] -> :ok
+      [key | _] -> raise ArgumentError, "unexpected write_datagram option #{inspect(key)}"
+    end
+  end
+
   defp validate_close_subgroup_opts!(opts) do
     allowed = [:end_of_group]
 
@@ -695,7 +781,7 @@ defmodule MOQX do
   - `{:moqx_subscribe_ok, %MOQX.SubscribeOk{...}}` when active
   - `{:moqx_track_init, %MOQX.TrackInit{...}}` once per subscription
   - `{:moqx_object, %MOQX.ObjectReceived{...}}` for each delivered object
-  - `{:moqx_end_of_group, %MOQX.EndOfGroup{...}}` when a subgroup signals end-of-group
+  - `{:moqx_end_of_group, %MOQX.EndOfGroup{...}}` when a subgroup or datagram signals end-of-group
   - `{:moqx_publish_done, %MOQX.PublishDone{...}}` on terminal lifecycle
   - `{:moqx_request_error, %MOQX.RequestError{...}}` for request rejection
   - `{:moqx_transport_error, %MOQX.TransportError{...}}` for runtime failures
@@ -990,6 +1076,7 @@ defmodule MOQX do
     case reason do
       "track_not_active" -> {reason, :track_not_active}
       "track_closed" -> {reason, :track_closed}
+      "payload_too_large" -> {reason, :payload_too_large}
       other -> {other, nil}
     end
   end

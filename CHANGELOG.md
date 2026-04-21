@@ -2,6 +2,33 @@
 
 All notable changes to `moqx` will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Added draft-14 object datagram publish/subscribe support to the core client
+  contract via `MOQX.write_datagram/3`.
+- Added a subscriber-side datagram receive loop in the NIF so datagram-delivered
+  objects are surfaced through the same `{:moqx_object, %MOQX.ObjectReceived{...}}`
+  message family used for subgroup delivery.
+- Added `%MOQX.Object{transport: :subgroup | :datagram}` so callers can tell
+  which delivery path produced an object without changing mailbox contracts.
+- Added relay-backed integration coverage for object datagram delivery,
+  including transport metadata, extension round-tripping, and datagram
+  end-of-group signaling.
+
+### Changed
+
+- `:moqx_end_of_group` now explicitly covers end-of-group signaled by either a
+  subgroup or an object datagram.
+- README and module docs now document explicit subgroup-stream vs object-datagram
+  publishing semantics, including the fact that `write_frame/2` does not
+  auto-route to datagrams.
+- Local integration-test guidance now documents the known stale-container cert
+  pitfall: after regenerating integration certs, the relay container must be
+  recreated to avoid TLS handshake failures such as
+  `invalid peer certificate: BadSignature`.
+
 ## [0.6.1] - 2026-04-16
 
 ### Fixed

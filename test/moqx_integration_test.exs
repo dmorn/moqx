@@ -394,6 +394,66 @@ defmodule MOQXIntegrationTest do
     end
 
     @tag :integration
+    test "publisher datagram is received by subscriber with datagram transport metadata" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-e2e-dgram-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+        payload = "hello-datagram"
+        group_id = 42
+        object_id = 7
+        priority = 123
+        extensions = [{2, 123_456}, {13, <<0xDA, 0x7A>>}]
+
+        broadcast = publish_and_await_broadcast!(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        handle = subscribe_and_await_handle!(subscriber, ns, track_name)
+        await_track_active!(track, ns, track_name)
+
+        :ok =
+          MOQX.write_datagram(track, payload,
+            group_id: group_id,
+            object_id: object_id,
+            priority: priority,
+            extensions: extensions,
+            end_of_group: true
+          )
+
+        assert_receive {:moqx_object,
+                        %MOQX.ObjectReceived{
+                          handle: ^handle,
+                          object: %MOQX.Object{
+                            group_id: ^group_id,
+                            subgroup_id: ^object_id,
+                            object_id: ^object_id,
+                            priority: ^priority,
+                            status: :normal,
+                            transport: :datagram,
+                            extensions: ^extensions,
+                            payload: ^payload
+                          }
+                        }},
+                       @timeout
+
+        assert_receive {:moqx_end_of_group,
+                        %MOQX.EndOfGroup{
+                          handle: ^handle,
+                          group_id: ^group_id,
+                          subgroup_id: ^object_id
+                        }},
+                       @timeout
+
+        :ok = MOQX.finish_track(track)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
     test "finish_track closes track handle for future writes" do
       publisher = connect_publisher!()
       subscriber = connect_subscriber!()

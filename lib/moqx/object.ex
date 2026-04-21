@@ -3,8 +3,8 @@ defmodule MOQX.Object do
   A single MoQ object delivered to a subscriber.
 
   Each `t:t/0` corresponds to one object as defined by the MoQ transport
-  specification: a single element within a subgroup stream (or, in a future
-  release, a datagram — see issue #13).
+  specification: a single element delivered either on a subgroup stream or in a
+  datagram.
 
   Pattern-match on the fields you care about:
 
@@ -22,16 +22,30 @@ defmodule MOQX.Object do
       the value is derived from the first object's id
     * `:object_id` — the object's id within the subgroup
     * `:priority` — publisher priority (`0..255`) carried in the subgroup header
+      or datagram header
     * `:status` — `:normal` for data-bearing objects, otherwise a marker status
       (`:does_not_exist`, `:end_of_group`, `:end_of_track`)
     * `:extensions` — list of `{type, value}` extension headers.
       Even `type` carries a varint value (non-negative integer); odd `type`
       carries a binary value. This parity rule is enforced by the MoQ spec
     * `:payload` — object payload bytes. Empty binary for marker statuses
+    * `:transport` — `:subgroup` or `:datagram`, indicating how the object was
+      delivered
   """
 
-  @enforce_keys [:group_id, :subgroup_id, :object_id, :priority, :status, :payload]
-  defstruct [:group_id, :subgroup_id, :object_id, :priority, :status, :payload, extensions: []]
+  @enforce_keys [:group_id, :subgroup_id, :object_id, :priority, :status, :payload, :transport]
+  defstruct [
+    :group_id,
+    :subgroup_id,
+    :object_id,
+    :priority,
+    :status,
+    :payload,
+    :transport,
+    extensions: []
+  ]
+
+  @type transport :: :subgroup | :datagram
 
   @type status :: :normal | :does_not_exist | :end_of_group | :end_of_track
 
@@ -44,6 +58,7 @@ defmodule MOQX.Object do
           priority: 0..255,
           status: status(),
           extensions: [extension()],
-          payload: binary()
+          payload: binary(),
+          transport: transport()
         }
 end

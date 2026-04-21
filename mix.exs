@@ -43,7 +43,7 @@ defmodule MOQX.MixProject do
   end
 
   defp description do
-    "Elixir MOQ client bindings over Rustler NIFs with split publisher/subscriber sessions."
+    "Elixir MOQ client bindings over Rustler NIFs with split publisher/subscriber sessions and draft-14 subgroup/datagram delivery."
   end
 
   defp package do

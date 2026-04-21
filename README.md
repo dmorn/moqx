@@ -46,7 +46,7 @@ Today `moqx` supports a single client-side path:
   - publisher sessions publish only
   - subscriber sessions subscribe only
 - WebTransport / MOQT draft-14
-- broadcasts, tracks, and frame delivery
+- broadcasts, tracks, subgroup-stream frame delivery, and object datagram delivery
 - live subscription via SUBSCRIBE with `FilterType::LatestObject`
 - raw fetch for retrieving track objects by range (subscriber sessions only)
   - on the current moqtail relay, standalone fetch succeeds only for objects the relay already has in cache; upstream relay-to-publisher standalone fetch is not implemented yet
@@ -83,6 +83,7 @@ This split is intentional:
 
 - `MOQX` stays explicit, asynchronous, and low-level
 - `MOQX.Helpers` provides small convenience flows built purely on public `MOQX`
+- both subgroup-stream and object-datagram delivery are exposed explicitly
 - a future managed/stateful ergonomics layer may be added separately, but it is
   not part of the `MOQX` core contract
 
@@ -246,6 +247,31 @@ Write calls are explicitly lifecycle-gated (no silent drops):
   subscribe activation
 - `{:error, %MOQX.RequestError{code: :track_closed}}` after `finish_track/1`
 
+### Publisher-side datagram delivery
+
+For small, latency-sensitive, loss-tolerant objects, use `write_datagram/3`
+explicitly instead of `write_frame/2`:
+
+```elixir
+:ok =
+  MOQX.write_datagram(track, "chunk-1",
+    group_id: 12,
+    object_id: 3,
+    priority: 128,
+    extensions: [],
+    end_of_group: false
+  )
+```
+
+`write_datagram/3` does not fragment payloads and does not auto-route small
+`write_frame/2` payloads to datagrams. On receive, datagram-delivered objects
+arrive via the same `:moqx_object` family with `%MOQX.Object{transport: :datagram}`.
+
+As with subgroup writes, datagram sends are lifecycle-gated by the publishing
+track. Oversized datagrams are rejected rather than fragmented, surfacing a
+typed request error such as `%MOQX.RequestError{code: :payload_too_large}` when
+that condition can be detected synchronously.
+
 ### Publisher-side catalog publication
 
 In moqtail-style relays, the publisher is responsible for publishing the
@@ -289,7 +315,9 @@ The subscription message contract is:
 - `{:moqx_subscribe_ok, %MOQX.SubscribeOk{handle, namespace, track_name}}`
 - `{:moqx_track_init, %MOQX.TrackInit{handle, init_data, track_meta}}`
 - `{:moqx_object, %MOQX.ObjectReceived{handle, object: %MOQX.Object{...}}}`
+  - `%MOQX.Object{transport: :subgroup | :datagram}` indicates the delivery path
 - `{:moqx_end_of_group, %MOQX.EndOfGroup{handle, group_id, subgroup_id}}`
+  - emitted when a subgroup or datagram signals end-of-group
 - `{:moqx_publish_done, %MOQX.PublishDone{handle, status, ...}}`
 - `{:moqx_request_error, %MOQX.RequestError{op: :subscribe, handle, ...}}`
 - `{:moqx_transport_error, %MOQX.TransportError{op: :subscribe, handle, ...}}`
@@ -587,6 +615,16 @@ mix test.integration
 
 This keeps the relay running across repeated test runs, which is faster and
 simpler during local integration-test loops.
+
+If you regenerate the integration certs, or if local runs start failing with
+TLS handshake errors like `invalid peer certificate: BadSignature`, recreate the
+relay container so it remounts the fresh cert files instead of keeping stale
+container state:
+
+```bash
+docker compose -f docker-compose.integration.yml down --remove-orphans
+docker compose -f docker-compose.integration.yml up -d relay
+```
 
 You can override relay version independently from the locally compiled moqtail
 library by setting `MOQX_RELAY_IMAGE`, for example:

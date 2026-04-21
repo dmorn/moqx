@@ -31,6 +31,17 @@ defmodule MOQX.Native do
   def write_object(_subgroup, _object_id, _payload, _extensions, _status),
     do: :erlang.nif_error(:nif_not_loaded)
 
+  def write_datagram(
+        _track,
+        _group_id,
+        _object_id,
+        _payload,
+        _priority,
+        _extensions,
+        _end_of_group
+      ),
+      do: :erlang.nif_error(:nif_not_loaded)
+
   def close_subgroup(_subgroup, _emit_end_of_group_marker),
     do: :erlang.nif_error(:nif_not_loaded)
 
