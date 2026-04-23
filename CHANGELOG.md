@@ -4,6 +4,8 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-04-23
+
 ### Added
 
 - Added draft-14 object datagram publish/subscribe support to the core client

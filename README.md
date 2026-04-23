@@ -29,7 +29,7 @@ behavior once the project explicitly chooses to move and documents that change
 
 ```elixir
 # mix.exs
-{:moqx, "~> 0.6.1"}
+{:moqx, "~> 0.7.0"}
 ```
 
 Release metadata:
