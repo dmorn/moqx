@@ -962,7 +962,10 @@ defmodule MOQXIntegrationTest do
         assert_receive {:moqx_object,
                         %MOQX.ObjectReceived{
                           handle: ^handle,
-                          object: %MOQX.Object{group_id: 0, payload: %MOQX.NativeBinary{} = native_payload}
+                          object: %MOQX.Object{
+                            group_id: 0,
+                            payload: %MOQX.NativeBinary{} = native_payload
+                          }
                         }},
                        @timeout
 
@@ -1010,7 +1013,10 @@ defmodule MOQXIntegrationTest do
         assert_receive {:moqx_object,
                         %MOQX.ObjectReceived{
                           handle: ^handle,
-                          object: %MOQX.Object{group_id: 0, payload: %MOQX.NativeBinary{} = native_payload}
+                          object: %MOQX.Object{
+                            group_id: 0,
+                            payload: %MOQX.NativeBinary{} = native_payload
+                          }
                         }},
                        @timeout
 

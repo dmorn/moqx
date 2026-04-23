@@ -16,6 +16,17 @@ All notable changes to `moqx` will be documented in this file.
 - Added relay-backed integration coverage for object datagram delivery,
   including transport metadata, extension round-tripping, and datagram
   end-of-group signaling.
+- Added `%MOQX.NativeBinary{ref: reference(), size: non_neg_integer()}` — a lazy
+  payload type backed by a Rust `bytes::Bytes` resource. Object and fetch-object
+  payloads now arrive as `%MOQX.NativeBinary{}` instead of BEAM binaries, keeping
+  data on the native heap until the caller explicitly materialises it.
+- Added `MOQX.NativeBinary.load/1` — the single copy point that materialises a
+  `NativeBinary` into a BEAM binary.
+- Added `MOQX.NativeBinary.from_binary/1` — wraps an existing BEAM binary into a
+  `NativeBinary` for use in homogeneous-API or testing contexts.
+- `MOQX.write_object/4` and `MOQX.write_datagram/3` now accept either `binary()`
+  or `%MOQX.NativeBinary{}` as the payload argument, enabling zero-copy
+  subscribe → re-publish pipelines without touching the BEAM heap.
 
 ### Changed
 
@@ -28,6 +39,9 @@ All notable changes to `moqx` will be documented in this file.
   pitfall: after regenerating integration certs, the relay container must be
   recreated to avoid TLS handshake failures such as
   `invalid peer certificate: BadSignature`.
+- **Breaking:** `%MOQX.Object{payload}` and `%MOQX.FetchObject{payload}` are now
+  `MOQX.NativeBinary.t()` instead of `binary()`. Callers that pattern-match or
+  compare the payload field must call `MOQX.NativeBinary.load/1` first.
 
 ## [0.6.1] - 2026-04-16
 
