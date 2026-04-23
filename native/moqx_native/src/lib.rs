@@ -1199,25 +1199,13 @@ fn dispatch_control_response(msg: ControlMessage, inner: &Arc<SessionInner>) {
                 });
             }
         }
-        ControlMessage::FetchOk(ok) => {
-            let guard = inner.pending_fetches.lock().unwrap();
-            if let Some(pf) = guard.get(&ok.request_id) {
-                let ns = pf.namespace.clone();
-                let tn = pf.track_name.clone();
-                let mut msg_env = OwnedEnv::new();
-                let pid = pf.caller_pid;
-                pf.ref_env.run(|ref_env| {
-                    let ref_term = pf.ref_term.load(ref_env);
-                    let _ = msg_env.send_and_clear(&pid, |env| {
-                        let payload = FetchOkOut {
-                            r#ref: ref_term.in_env(env),
-                            namespace: ns,
-                            track_name: tn,
-                        };
-                        (atoms::moqx_fetch_ok(), payload).encode(env)
-                    });
-                });
-            }
+        ControlMessage::FetchOk(_ok) => {
+            // {:moqx_fetch_ok, ...} is delivered from handle_fetch_stream when the
+            // relay-opened data stream is first accepted, before any objects are read.
+            // This relay implementation consistently opens and closes the data stream
+            // before queueing FetchOk on the control stream, so by the time this
+            // control message arrives the pending_fetches entry has already been
+            // removed. Sending from the data stream avoids the race entirely.
         }
         ControlMessage::FetchError(err) => {
             let pending = inner
@@ -1541,6 +1529,32 @@ async fn handle_fetch_stream(
 ) -> anyhow::Result<()> {
     // Read request_id (varint) from stream
     let request_id = read_varint_from_stream(&mut recv).await?;
+
+    // Deliver {:moqx_fetch_ok, ...} here rather than in the ControlMessage::FetchOk
+    // handler. The relay opens and drains the data stream before queueing FetchOk on
+    // the control stream, so the pending_fetches entry is already gone by the time the
+    // control message arrives. Sending from the stream guarantees the caller always
+    // receives fetch_ok before any fetch_object messages.
+    {
+        let guard = inner.pending_fetches.lock().unwrap();
+        if let Some(pf) = guard.get(&request_id) {
+            let ns = pf.namespace.clone();
+            let tn = pf.track_name.clone();
+            let mut msg_env = OwnedEnv::new();
+            let pid = pf.caller_pid;
+            pf.ref_env.run(|ref_env| {
+                let ref_term = pf.ref_term.load(ref_env);
+                let _ = msg_env.send_and_clear(&pid, |env| {
+                    let payload = FetchOkOut {
+                        r#ref: ref_term.in_env(env),
+                        namespace: ns,
+                        track_name: tn,
+                    };
+                    (atoms::moqx_fetch_ok(), payload).encode(env)
+                });
+            });
+        }
+    }
 
     // Read fetch objects until stream ends
     loop {
