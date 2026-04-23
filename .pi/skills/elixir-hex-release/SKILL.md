@@ -32,54 +32,41 @@ description: Run a safe, repeatable Elixir library release flow (changelog, vers
    - If package name already exists and you are not an owner, stop and choose a different package name in `mix.exs` (`package: [name: "..."]`).
 
 ## Release workflow
-1. Update `CHANGELOG.md` with a new version section and release date.
+1. Update `CHANGELOG.md`: move `[Unreleased]` content into a new `## [X.Y.Z] - YYYY-MM-DD`
+   section, then add a fresh empty `## [Unreleased]` above it.
 2. Bump `version` in `mix.exs`.
-3. If README install snippet includes pinned version, update it.
-4. Commit:
+3. If README install snippet includes a pinned version, update it.
+4. Commit and push:
    ```bash
    git add CHANGELOG.md mix.exs README.md
    git commit -m "release: vX.Y.Z"
    git push
    ```
-5. Create and push annotated tag:
+5. Create and push an annotated tag — **this is the only manual trigger needed**:
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z"
    git push origin vX.Y.Z
    ```
-6. Publish package to Hex (required):
-   ```bash
-   mix hex.publish
-   ```
-   - For first release of a package, this step is the authoritative publication.
-   - `mix hex.publish` also builds and publishes docs by default.
-   - If Hex publication requires interactive OTP/2FA input, **do not run it automatically**.
-     Pause and explicitly ask the user to run `mix hex.publish` themselves.
-7. Publish docs only when needed (optional recovery/update path):
-   ```bash
-   mix hex.publish docs
-   ```
-   - Use this when you need to publish or repair docs independently of the package publish.
-   - If docs publication requires interactive OTP/2FA input, pause and ask the user to run it manually.
-8. Create GitHub release (optional):
-   ```bash
-   gh release create vX.Y.Z --title "<project> vX.Y.Z" --notes-file /tmp/release-notes.md
-   ```
+
+The tag push triggers `.github/workflows/release.yml`, which automatically:
+- Validates that the tag, `mix.exs` version, and `CHANGELOG.md` section all agree.
+- Runs `mix format --check-formatted`, `mix test`, relay-backed `mix test.integration`,
+  `mix docs`, and `mix credo --strict`.
+- Publishes the package and docs to Hex.pm via `mix hex.publish --yes` (uses the
+  `HEX_API_KEY` repository secret — no interactive 2FA needed).
+- Creates or updates the GitHub release with notes extracted from `CHANGELOG.md`.
+
+**Do not run `mix hex.publish` manually** — the CI workflow handles it.
 
 ## Notes for this repo
-- Required before committing: `mix format`, `mix test`, `mix test.integration`, `mix docs`, `mix credo`.
-- Existing tag/release operations may happen independently, but Hex publication is the critical ship step.
-- Keep release notes aligned with `CHANGELOG.md`.
-
-## Operator interaction directive
-- For any command that requires interactive secrets/2FA (especially `mix hex.publish` and `mix hex.publish docs`), stop and ask the user to execute it manually.
-- The assistant may prepare everything up to that point (commit, tag, push, docs), then hand off with exact next command(s).
+- Required before committing: `mix format`, `mix test`, `mix test.integration`, `mix docs`, `mix credo --strict`.
+- Keep release notes aligned with `CHANGELOG.md` — the workflow will fail if a matching section is absent.
 
 ## Quick operator checklist
 - [ ] Preflight checks pass (`mix format`, `mix test`, `mix test.integration`, `mix docs`, `mix credo --strict`)
-- [ ] Changelog updated
+- [ ] `CHANGELOG.md` updated (new versioned section + fresh `[Unreleased]` above it)
 - [ ] `mix.exs` version bumped
+- [ ] README install snippet updated
 - [ ] Commit pushed
-- [ ] Tag created and pushed
-- [ ] `mix hex.publish` completed
-- [ ] `mix hex.publish docs` completed if a docs-only follow-up was needed
-- [ ] GitHub release created/published (optional)
+- [ ] Annotated tag created and pushed (`git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`)
+- [ ] CI release workflow passes (Hex publish + GitHub release happen automatically)
