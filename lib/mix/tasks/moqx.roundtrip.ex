@@ -212,12 +212,15 @@ defmodule Mix.Tasks.Moqx.Roundtrip do
       receive do
         {:moqx_object,
          %MOQX.ObjectReceived{
-           object: %MOQX.Object{group_id: group_id, payload: ^expected_payload}
+           object: %MOQX.Object{group_id: group_id, payload: nb}
          }} ->
-          {group_id, expected_payload}
+          loaded = MOQX.NativeBinary.load(nb)
 
-        {:moqx_object, %MOQX.ObjectReceived{}} ->
-          await_matching_payload_frame_loop(expected_payload, deadline)
+          if loaded == expected_payload do
+            {group_id, loaded}
+          else
+            await_matching_payload_frame_loop(expected_payload, deadline)
+          end
 
         {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
           await_matching_payload_frame_loop(expected_payload, deadline)

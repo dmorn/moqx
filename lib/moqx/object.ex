@@ -28,7 +28,10 @@ defmodule MOQX.Object do
     * `:extensions` — list of `{type, value}` extension headers.
       Even `type` carries a varint value (non-negative integer); odd `type`
       carries a binary value. This parity rule is enforced by the MoQ spec
-    * `:payload` — object payload bytes. Empty binary for marker statuses
+    * `:payload` — object payload as a `%MOQX.NativeBinary{}`. The bytes stay in
+      native heap until `MOQX.NativeBinary.load/1` is called or the value is
+      passed directly to `MOQX.write_object/4` / `MOQX.write_datagram/3`.
+      For marker statuses the native binary is empty (size 0).
     * `:transport` — `:subgroup` or `:datagram`, indicating how the object was
       delivered
   """
@@ -58,7 +61,7 @@ defmodule MOQX.Object do
           priority: 0..255,
           status: status(),
           extensions: [extension()],
-          payload: binary(),
+          payload: MOQX.NativeBinary.t(),
           transport: transport()
         }
 end

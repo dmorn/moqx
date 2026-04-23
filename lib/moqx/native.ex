@@ -63,4 +63,8 @@ defmodule MOQX.Native do
   # Fetch
   def fetch(_session, _ref, _namespace, _track_name, _priority, _group_order, _start, _end),
     do: :erlang.nif_error(:nif_not_loaded)
+
+  # NativeBinary — lazy payload materialisation
+  def load_native_binary(_native_ref), do: :erlang.nif_error(:nif_not_loaded)
+  def make_native_binary(_data), do: :erlang.nif_error(:nif_not_loaded)
 end

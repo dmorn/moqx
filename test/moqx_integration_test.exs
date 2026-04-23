@@ -190,10 +190,12 @@ defmodule MOQXIntegrationTest do
          ref: ^fetch_ref,
          group_id: group_id,
          object_id: object_id,
-         payload: payload
+         payload: nb_payload
        }} ->
-        if payload == expected_payload do
-          {group_id, object_id, payload}
+        loaded = MOQX.NativeBinary.load(nb_payload)
+
+        if loaded == expected_payload do
+          {group_id, object_id, loaded}
         else
           await_fetch_object!(fetch_ref, expected_payload, timeout)
         end
@@ -433,10 +435,12 @@ defmodule MOQXIntegrationTest do
                             status: :normal,
                             transport: :datagram,
                             extensions: ^extensions,
-                            payload: ^payload
+                            payload: dgram_nb
                           }
                         }},
                        @timeout
+
+        assert MOQX.NativeBinary.load(dgram_nb) == payload
 
         assert_receive {:moqx_end_of_group,
                         %MOQX.EndOfGroup{
@@ -749,7 +753,8 @@ defmodule MOQXIntegrationTest do
 
         obj =
           receive do
-            {:moqx_object, %MOQX.ObjectReceived{object: %MOQX.Object{payload: ^payload} = obj}} ->
+            {:moqx_object, %MOQX.ObjectReceived{object: %MOQX.Object{payload: nb} = obj}} ->
+              assert MOQX.NativeBinary.load(nb) == payload
               obj
 
             {:moqx_transport_error, %MOQX.TransportError{message: reason}} ->
@@ -837,10 +842,12 @@ defmodule MOQXIntegrationTest do
                             subgroup_id: 0,
                             object_id: 0,
                             status: :normal,
-                            payload: ^payload
+                            payload: eog_nb
                           }
                         }},
                        @timeout
+
+        assert MOQX.NativeBinary.load(eog_nb) == payload
 
         assert_receive {:moqx_end_of_group,
                         %MOQX.EndOfGroup{handle: ^handle, group_id: 0, subgroup_id: 0}},
@@ -891,6 +898,207 @@ defmodule MOQXIntegrationTest do
 
         :ok = MOQX.close_subgroup(sg)
         :ok = MOQX.unsubscribe(handle)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "received object payload is a NativeBinary with correct size" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-native-binary-shape-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+        payload = "hello-from-native-binary"
+
+        broadcast = publish_and_await_broadcast!(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        handle = subscribe_and_await_handle!(subscriber, ns, track_name)
+        await_track_active!(track, ns, track_name)
+
+        :ok = MOQX.write_frame(track, payload)
+
+        assert_receive {:moqx_object,
+                        %MOQX.ObjectReceived{
+                          handle: ^handle,
+                          object: %MOQX.Object{payload: nb}
+                        }},
+                       @timeout
+
+        assert %MOQX.NativeBinary{size: size} = nb
+        assert size == byte_size(payload)
+        assert MOQX.NativeBinary.load(nb) == payload
+
+        :ok = MOQX.finish_track(track)
+      after
+        :ok = MOQX.close(subscriber)
+        :ok = MOQX.close(publisher)
+      end
+    end
+
+    @tag :integration
+    test "NativeBinary passed directly to write_object produces correct roundtrip (zero-copy path)" do
+      pub1 = connect_publisher!()
+      pub2 = connect_publisher!()
+      sub1 = connect_subscriber!()
+      sub2 = connect_subscriber!()
+
+      try do
+        ns1 = "moqx-native-src-#{System.system_time(:millisecond)}"
+        ns2 = "moqx-native-dst-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+        payload = "zero-copy-payload-#{:rand.uniform(100_000)}"
+
+        # Set up source track
+        broadcast1 = publish_and_await_broadcast!(pub1, ns1)
+        {:ok, track1} = MOQX.create_track(broadcast1, track_name)
+
+        # Set up destination track
+        broadcast2 = publish_and_await_broadcast!(pub2, ns2)
+        {:ok, track2} = MOQX.create_track(broadcast2, track_name)
+
+        handle1 = subscribe_and_await_handle!(sub1, ns1, track_name)
+        handle2 = subscribe_and_await_handle!(sub2, ns2, track_name)
+
+        await_track_active!(track1, ns1, track_name)
+        await_track_active!(track2, ns2, track_name)
+
+        # Write to source
+        :ok = MOQX.write_frame(track1, payload)
+
+        # Receive NativeBinary from source subscription
+        assert_receive {:moqx_object,
+                        %MOQX.ObjectReceived{
+                          handle: ^handle1,
+                          object: %MOQX.Object{payload: %MOQX.NativeBinary{} = native_payload}
+                        }},
+                       @timeout
+
+        # Pass NativeBinary directly to write_object — no BEAM copy
+        {:ok, sg} = MOQX.open_subgroup(track2, 0, subgroup_id: 0, priority: 0)
+        :ok = MOQX.write_object(sg, 0, native_payload)
+        :ok = MOQX.close_subgroup(sg)
+
+        # Verify destination subscriber receives correct bytes
+        assert_receive {:moqx_object,
+                        %MOQX.ObjectReceived{
+                          handle: ^handle2,
+                          object: %MOQX.Object{payload: dst_nb}
+                        }},
+                       @timeout
+
+        assert MOQX.NativeBinary.load(dst_nb) == payload
+
+        :ok = MOQX.finish_track(track1)
+        :ok = MOQX.finish_track(track2)
+      after
+        :ok = MOQX.close(sub1)
+        :ok = MOQX.close(sub2)
+        :ok = MOQX.close(pub1)
+        :ok = MOQX.close(pub2)
+      end
+    end
+
+    @tag :integration
+    test "NativeBinary passed to write_datagram produces correct roundtrip (zero-copy path)" do
+      pub1 = connect_publisher!()
+      pub2 = connect_publisher!()
+      sub1 = connect_subscriber!()
+      sub2 = connect_subscriber!()
+
+      try do
+        ns1 = "moqx-native-dgram-src-#{System.system_time(:millisecond)}"
+        ns2 = "moqx-native-dgram-dst-#{System.system_time(:millisecond)}"
+        track_name = "demo"
+        payload = "zero-copy-datagram-#{:rand.uniform(100_000)}"
+
+        broadcast1 = publish_and_await_broadcast!(pub1, ns1)
+        {:ok, track1} = MOQX.create_track(broadcast1, track_name)
+
+        broadcast2 = publish_and_await_broadcast!(pub2, ns2)
+        {:ok, track2} = MOQX.create_track(broadcast2, track_name)
+
+        handle1 = subscribe_and_await_handle!(sub1, ns1, track_name)
+        handle2 = subscribe_and_await_handle!(sub2, ns2, track_name)
+
+        await_track_active!(track1, ns1, track_name)
+        await_track_active!(track2, ns2, track_name)
+
+        # Send via subgroup on source, receive as NativeBinary
+        :ok = MOQX.write_frame(track1, payload)
+
+        assert_receive {:moqx_object,
+                        %MOQX.ObjectReceived{
+                          handle: ^handle1,
+                          object: %MOQX.Object{payload: %MOQX.NativeBinary{} = native_payload}
+                        }},
+                       @timeout
+
+        # Forward via datagram using NativeBinary directly — no BEAM copy
+        :ok =
+          MOQX.write_datagram(track2, native_payload,
+            group_id: 0,
+            object_id: 0,
+            priority: 0
+          )
+
+        assert_receive {:moqx_object,
+                        %MOQX.ObjectReceived{
+                          handle: ^handle2,
+                          object: %MOQX.Object{transport: :datagram, payload: dst_nb}
+                        }},
+                       @timeout
+
+        assert MOQX.NativeBinary.load(dst_nb) == payload
+
+        :ok = MOQX.finish_track(track1)
+        :ok = MOQX.finish_track(track2)
+      after
+        :ok = MOQX.close(sub1)
+        :ok = MOQX.close(sub2)
+        :ok = MOQX.close(pub1)
+        :ok = MOQX.close(pub2)
+      end
+    end
+
+    @tag :integration
+    test "fetch object payload is a NativeBinary" do
+      publisher = connect_publisher!()
+      subscriber = connect_subscriber!()
+
+      try do
+        ns = "moqx-native-fetch-#{System.system_time(:millisecond)}"
+        track_name = "catalog"
+        payload = ~s({"version":1,"tracks":[]})
+
+        broadcast = publish_and_await_broadcast!(publisher, ns)
+        {:ok, track} = MOQX.create_track(broadcast, track_name)
+
+        handle = subscribe_and_await_handle!(subscriber, ns, track_name)
+        await_track_active!(track, ns, track_name)
+
+        :ok = MOQX.write_frame(track, payload)
+        await_matching_payload_frame!(payload)
+        :ok = MOQX.unsubscribe(handle)
+        assert_receive {:moqx_publish_done, %MOQX.PublishDone{handle: ^handle}}, @timeout
+
+        {:ok, fetch_ref} = MOQX.fetch(subscriber, ns, track_name, start: {0, 0}, end: {0, 1})
+        :ok = await_fetch_ok!(fetch_ref, ns, track_name)
+
+        assert_receive {:moqx_fetch_object,
+                        %MOQX.FetchObject{ref: ^fetch_ref, payload: fetch_nb}},
+                       @timeout
+
+        assert %MOQX.NativeBinary{size: size} = fetch_nb
+        assert size == byte_size(payload)
+        assert MOQX.NativeBinary.load(fetch_nb) == payload
+
+        :ok = await_fetch_done!(fetch_ref)
+        :ok = MOQX.finish_track(track)
       after
         :ok = MOQX.close(subscriber)
         :ok = MOQX.close(publisher)
@@ -973,12 +1181,15 @@ defmodule MOQXIntegrationTest do
       receive do
         {:moqx_object,
          %MOQX.ObjectReceived{
-           object: %MOQX.Object{group_id: group_id, payload: ^expected_payload}
+           object: %MOQX.Object{group_id: group_id, payload: nb}
          }} ->
-          {group_id, expected_payload}
+          loaded = MOQX.NativeBinary.load(nb)
 
-        {:moqx_object, %MOQX.ObjectReceived{}} ->
-          await_matching_payload_frame_loop(expected_payload, deadline)
+          if loaded == expected_payload do
+            {group_id, loaded}
+          else
+            await_matching_payload_frame_loop(expected_payload, deadline)
+          end
 
         {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
           await_matching_payload_frame_loop(expected_payload, deadline)
@@ -1006,9 +1217,11 @@ defmodule MOQXIntegrationTest do
     else
       receive do
         {:moqx_object,
-         %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: payload}}} ->
-          if payload in expected_payloads do
-            {group_id, payload}
+         %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: nb}}} ->
+          loaded = MOQX.NativeBinary.load(nb)
+
+          if loaded in expected_payloads do
+            {group_id, loaded}
           else
             await_any_payload_frame_loop(expected_payloads, deadline)
           end
@@ -1042,8 +1255,9 @@ defmodule MOQXIntegrationTest do
         )
       else
         receive do
-          {:moqx_object, %MOQX.ObjectReceived{object: %MOQX.Object{} = obj}} ->
-            collect_objects_until_both_seen_loop(expected_payloads, deadline, [obj | acc])
+          {:moqx_object, %MOQX.ObjectReceived{object: %MOQX.Object{payload: nb} = obj}} ->
+            loaded_obj = %{obj | payload: MOQX.NativeBinary.load(nb)}
+            collect_objects_until_both_seen_loop(expected_payloads, deadline, [loaded_obj | acc])
 
           {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
             collect_objects_until_both_seen_loop(expected_payloads, deadline, acc)

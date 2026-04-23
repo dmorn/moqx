@@ -493,8 +493,8 @@ defmodule Mix.Tasks.Moqx.Inspect do
   defp await_catalog_payload(sub_ref, timeout) do
     receive do
       {:moqx_object,
-       %MOQX.ObjectReceived{handle: ^sub_ref, object: %MOQX.Object{payload: payload}}} ->
-        {:ok, payload}
+       %MOQX.ObjectReceived{handle: ^sub_ref, object: %MOQX.Object{payload: nb}}} ->
+        {:ok, MOQX.NativeBinary.load(nb)}
 
       {:moqx_track_init, %MOQX.TrackInit{handle: ^sub_ref}} ->
         await_catalog_payload(sub_ref, timeout)
@@ -719,10 +719,10 @@ defmodule Mix.Tasks.Moqx.Inspect do
 
         receive do
           {:moqx_object,
-           %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: payload}}} ->
+           %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: nb}}} ->
             stream_stats_loop(
               interval_ms,
-              DemoDebugStats.add_frame(stats, group_id, payload),
+              DemoDebugStats.add_frame(stats, group_id, MOQX.NativeBinary.load(nb)),
               stream_started_mono_ms,
               run_timeout_ms,
               next_tick_mono_ms

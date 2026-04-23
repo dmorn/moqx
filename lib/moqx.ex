@@ -447,10 +447,11 @@ defmodule MOQX do
   Subscribers receive the existing `{:moqx_object, %MOQX.ObjectReceived{...}}`
   family, with `%MOQX.Object{transport: :datagram}`.
   """
-  @spec write_datagram(track(), binary(), [write_datagram_opt()]) ::
+  @spec write_datagram(track(), binary() | MOQX.NativeBinary.t(), [write_datagram_opt()]) ::
           :ok | {:error, MOQX.RequestError.t()}
   def write_datagram(track, payload, opts \\ [])
-      when is_reference(track) and is_binary(payload) and is_list(opts) do
+      when is_reference(track) and
+             (is_binary(payload) or is_struct(payload, MOQX.NativeBinary)) and is_list(opts) do
     group_id = opts |> fetch_required_opt!(:group_id) |> normalize_non_neg_integer!(:group_id)
     object_id = opts |> fetch_required_opt!(:object_id) |> normalize_non_neg_integer!(:object_id)
     priority = opts |> Keyword.get(:priority, 0) |> normalize_priority!()
@@ -463,7 +464,7 @@ defmodule MOQX do
            track,
            group_id,
            object_id,
-           payload,
+           native_ref(payload),
            priority,
            extensions,
            end_of_group
@@ -583,17 +584,21 @@ defmodule MOQX do
 
     * `:extensions` — per-object extension headers (default `[]`).
   """
-  @spec write_object(subgroup_handle(), non_neg_integer(), binary(), [write_object_opt()]) ::
-          :ok | {:error, MOQX.RequestError.t()}
+  @spec write_object(
+          subgroup_handle(),
+          non_neg_integer(),
+          binary() | MOQX.NativeBinary.t(),
+          [write_object_opt()]
+        ) :: :ok | {:error, MOQX.RequestError.t()}
   def write_object(subgroup, object_id, payload, opts \\ [])
       when is_reference(subgroup) and is_integer(object_id) and object_id >= 0 and
-             is_binary(payload) and is_list(opts) do
+             (is_binary(payload) or is_struct(payload, MOQX.NativeBinary)) and is_list(opts) do
     status = opts |> Keyword.get(:status, :normal) |> normalize_status!()
     extensions = opts |> Keyword.get(:extensions, []) |> normalize_extensions!()
 
     validate_write_object_opts!(opts)
 
-    case MOQX.Native.write_object(subgroup, object_id, payload, extensions, status) do
+    case MOQX.Native.write_object(subgroup, object_id, native_ref(payload), extensions, status) do
       :ok ->
         :ok
 
@@ -767,6 +772,9 @@ defmodule MOQX do
       [key | _] -> raise ArgumentError, "unexpected close_subgroup option #{inspect(key)}"
     end
   end
+
+  defp native_ref(%MOQX.NativeBinary{ref: ref}), do: ref
+  defp native_ref(payload), do: payload
 
   # ---------------------------------------------------------------------------
   # Subscribe

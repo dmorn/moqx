@@ -192,6 +192,102 @@ defmodule MOQXTest do
                  end
   end
 
+  describe "MOQX.NativeBinary" do
+    test "is a proper struct with ref and size fields" do
+      ref = make_ref()
+      nb = %MOQX.NativeBinary{ref: ref, size: 42}
+      assert nb.ref == ref
+      assert nb.size == 42
+    end
+
+    test "from_binary/1 produces a NativeBinary with correct size" do
+      data = "hello, native world!"
+      nb = MOQX.NativeBinary.from_binary(data)
+      assert %MOQX.NativeBinary{size: 20} = nb
+    end
+
+    test "load/1 round-trips bytes through native heap" do
+      data = :crypto.strong_rand_bytes(256)
+      nb = MOQX.NativeBinary.from_binary(data)
+      assert MOQX.NativeBinary.load(nb) == data
+    end
+
+    test "load/1 round-trips empty binary" do
+      nb = MOQX.NativeBinary.from_binary(<<>>)
+      assert %MOQX.NativeBinary{size: 0} = nb
+      assert MOQX.NativeBinary.load(nb) == <<>>
+    end
+
+    test "multiple load/1 calls on the same NativeBinary return equal binaries" do
+      data = "repeated"
+      nb = MOQX.NativeBinary.from_binary(data)
+      assert MOQX.NativeBinary.load(nb) == MOQX.NativeBinary.load(nb)
+    end
+
+    test "from_binary/1 rejects non-binary input" do
+      assert_raise FunctionClauseError, fn -> MOQX.NativeBinary.from_binary(123) end
+      assert_raise FunctionClauseError, fn -> MOQX.NativeBinary.from_binary(:atom) end
+    end
+  end
+
+  describe "write_object/4 NativeBinary guard" do
+    # Use make_ref() so the is_reference(subgroup) guard passes; this isolates whether the
+    # payload guard is the source of any FunctionClauseError.
+
+    test "accepts NativeBinary payload — no FunctionClauseError" do
+      nb = MOQX.NativeBinary.from_binary("payload")
+      ref = make_ref()
+
+      try do
+        MOQX.write_object(ref, 0, nb)
+      rescue
+        FunctionClauseError -> flunk("NativeBinary payload must not be rejected by the guard")
+        _ -> :ok
+      end
+    end
+
+    test "rejects integer payload with FunctionClauseError" do
+      assert_raise FunctionClauseError, fn ->
+        MOQX.write_object(make_ref(), 0, 12_345)
+      end
+    end
+
+    test "rejects atom payload with FunctionClauseError" do
+      assert_raise FunctionClauseError, fn ->
+        MOQX.write_object(make_ref(), 0, :not_a_binary)
+      end
+    end
+  end
+
+  describe "write_datagram/3 NativeBinary guard" do
+    # Same isolation strategy: make_ref() passes is_reference(track); group_id/object_id
+    # provided so fetch_required_opt! does not raise before the payload guard is tested.
+
+    test "accepts NativeBinary payload — no FunctionClauseError" do
+      nb = MOQX.NativeBinary.from_binary("payload")
+      ref = make_ref()
+
+      try do
+        MOQX.write_datagram(ref, nb, group_id: 0, object_id: 0)
+      rescue
+        FunctionClauseError -> flunk("NativeBinary payload must not be rejected by the guard")
+        _ -> :ok
+      end
+    end
+
+    test "rejects integer payload with FunctionClauseError" do
+      assert_raise FunctionClauseError, fn ->
+        MOQX.write_datagram(make_ref(), 12_345, group_id: 0, object_id: 0)
+      end
+    end
+
+    test "rejects atom payload with FunctionClauseError" do
+      assert_raise FunctionClauseError, fn ->
+        MOQX.write_datagram(make_ref(), :not_a_binary, group_id: 0, object_id: 0)
+      end
+    end
+  end
+
   test "invalid URLs return a typed request error" do
     assert {:error, %MOQX.RequestError{op: :connect, message: reason}} =
              MOQX.connect_publisher(":::invalid")

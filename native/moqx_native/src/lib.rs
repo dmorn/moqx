@@ -89,6 +89,21 @@ mod atoms {
     }
 }
 
+/// Opaque handle to bytes that remain on the native heap until explicitly loaded.
+/// Wrapped in a ResourceArc so the BEAM garbage-collects it via reference-counting.
+pub struct NativeBinary {
+    pub bytes: Bytes,
+}
+impl Resource for NativeBinary {}
+
+/// Elixir-visible struct: `%MOQX.NativeBinary{ref: resource_ref, size: n}`.
+#[derive(rustler::NifStruct)]
+#[module = "MOQX.NativeBinary"]
+struct NativeBinaryOut<'a> {
+    r#ref: rustler::Term<'a>,
+    size: usize,
+}
+
 #[derive(rustler::NifStruct)]
 #[module = "MOQX.Object"]
 struct MoqxObjectOut<'a> {
@@ -535,6 +550,7 @@ impl Resource for BroadcastProducerRes {}
 impl Resource for TrackProducerRes {}
 impl Resource for SubscriptionHandle {}
 impl Resource for SubgroupRes {}
+// NativeBinary: Resource impl is on the struct definition above.
 
 impl Drop for SubscriptionHandle {
     fn drop(&mut self) {
@@ -1542,9 +1558,7 @@ async fn handle_fetch_stream(
                         pf.ref_env.run(|ref_env| {
                             let ref_term = pf.ref_term.load(ref_env);
                             let _ = msg_env.send_and_clear(&pid, |env| {
-                                let mut bin = NewBinary::new(env, data.len());
-                                bin.as_mut_slice().copy_from_slice(&data);
-                                let bin_term: rustler::Term = bin.into();
+                                let bin_term = make_native_binary_out(env, data.clone());
                                 let payload = FetchObjectOut {
                                     r#ref: ref_term.in_env(env),
                                     group_id: gid,
@@ -1711,6 +1725,33 @@ async fn handle_subgroup_stream(
     Ok(())
 }
 
+/// Wraps `bytes` in a `NativeBinary` resource and encodes it as `%MOQX.NativeBinary{}`.
+/// The bytes stay on native heap; BEAM never copies them unless `load_native_binary` is called.
+fn make_native_binary_out<'a>(env: Env<'a>, bytes: Bytes) -> rustler::Term<'a> {
+    let size = bytes.len();
+    let arc = ResourceArc::new(NativeBinary { bytes });
+    NativeBinaryOut {
+        r#ref: arc.encode(env),
+        size,
+    }
+    .encode(env)
+}
+
+/// Extracts a `Bytes` from a NIF term that is either a `Binary` (BEAM binary) or a
+/// `ResourceArc<NativeBinary>` (lazy native reference). The latter path is O(1) — it
+/// only increments the Arc refcount; no data is copied.
+fn extract_payload_bytes<'a>(payload: rustler::Term<'a>) -> rustler::NifResult<Bytes> {
+    if let Ok(arc) = payload.decode::<ResourceArc<NativeBinary>>() {
+        Ok(arc.bytes.clone())
+    } else if let Ok(bin) = payload.decode::<Binary<'a>>() {
+        Ok(Bytes::copy_from_slice(bin.as_slice()))
+    } else {
+        Err(rustler::Error::Term(Box::new(
+            "payload must be a binary() or a %MOQX.NativeBinary{} ref field".to_string(),
+        )))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn send_object_received(
     inner: &Arc<SessionInner>,
@@ -1736,9 +1777,7 @@ fn send_object_received(
     active.ref_env.run(|ref_env| {
         let sub_ref = active.subscription_ref_term.load(ref_env);
         let _ = msg_env.send_and_clear(&pid, |env| {
-            let mut bin = NewBinary::new(env, payload_bytes.len());
-            bin.as_mut_slice().copy_from_slice(&payload_bytes);
-            let payload_term: rustler::Term = bin.into();
+            let payload_term = make_native_binary_out(env, payload_bytes.clone());
 
             let ext_terms: Vec<rustler::Term> = ext_owned
                 .iter()
@@ -2539,13 +2578,13 @@ async fn subgroup_consumer_loop(
 fn write_object<'a>(
     subgroup: ResourceArc<SubgroupRes>,
     object_id: u64,
-    payload: Binary,
+    payload: rustler::Term<'a>,
     extensions: rustler::Term<'a>,
     status_atom: Atom,
 ) -> rustler::NifResult<Atom> {
     let status = status_from_atom(status_atom).map_err(|e| rustler::Error::Term(Box::new(e)))?;
     let ext_kv = decode_extensions(extensions)?;
-    let payload_bytes = Bytes::copy_from_slice(payload.as_slice());
+    let payload_bytes = extract_payload_bytes(payload)?;
 
     try_send_op(
         &subgroup,
@@ -2564,13 +2603,13 @@ fn write_datagram<'a>(
     track: ResourceArc<TrackProducerRes>,
     group_id: u64,
     object_id: u64,
-    payload: Binary,
+    payload: rustler::Term<'a>,
     priority: u8,
     extensions: rustler::Term<'a>,
     end_of_group: bool,
 ) -> rustler::NifResult<Atom> {
     let ext_kv = decode_extensions(extensions)?;
-    let payload_bytes = Bytes::copy_from_slice(payload.as_slice());
+    let payload_bytes = extract_payload_bytes(payload)?;
 
     let key = format!("{}/{}", track.namespace.trim_matches('/'), track.track_name);
     let track_alias = track
@@ -2607,6 +2646,26 @@ fn write_datagram<'a>(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// NIFs: NativeBinary — lazy payload materialisation
+// ---------------------------------------------------------------------------
+
+/// Copies a `NativeBinary`'s bytes from native heap into a BEAM binary.
+/// This is the only point where the data crosses the C/BEAM boundary.
+#[rustler::nif]
+fn load_native_binary<'a>(env: Env<'a>, native: ResourceArc<NativeBinary>) -> rustler::Term<'a> {
+    let mut bin = NewBinary::new(env, native.bytes.len());
+    bin.as_mut_slice().copy_from_slice(&native.bytes);
+    bin.into()
+}
+
+/// Creates a `NativeBinary` by copying a BEAM binary once into native heap.
+/// Useful for testing and for producing a homogeneous payload type when mixing sources.
+#[rustler::nif]
+fn make_native_binary<'a>(env: Env<'a>, data: Binary<'a>) -> rustler::Term<'a> {
+    make_native_binary_out(env, Bytes::copy_from_slice(data.as_slice()))
 }
 
 #[rustler::nif]
@@ -2999,6 +3058,7 @@ fn load(env: Env, _: rustler::Term) -> bool {
         && env.register::<TrackProducerRes>().is_ok()
         && env.register::<SubscriptionHandle>().is_ok()
         && env.register::<SubgroupRes>().is_ok()
+        && env.register::<NativeBinary>().is_ok()
 }
 
 rustler::init!("Elixir.MOQX.Native", load = load);

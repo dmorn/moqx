@@ -234,7 +234,7 @@ defmodule MOQX.FetchObject do
           ref: reference(),
           group_id: non_neg_integer(),
           object_id: non_neg_integer(),
-          payload: binary()
+          payload: MOQX.NativeBinary.t()
         }
 end
 
