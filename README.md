@@ -20,7 +20,7 @@
 
 ```elixir
 # mix.exs
-{:moqx, "~> 0.7.0"}
+{:moqx, "~> 0.7.1"}
 ```
 
 - source: <https://github.com/dmorn/moqx>

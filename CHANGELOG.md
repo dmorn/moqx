@@ -4,6 +4,15 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-04-23
+
+### Fixed
+
+- Fixed `{:moqx_fetch_ok, ...}` never being delivered to the caller when the
+  relay drains the fetch data stream before queueing `FetchOk` on the control
+  stream. `handle_fetch_stream` now sends `{:moqx_fetch_ok, ...}` immediately
+  after reading the stream's `request_id`, before processing any objects.
+
 ## [0.7.0] - 2026-04-23
 
 ### Added
