@@ -492,8 +492,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
 
   defp await_catalog_payload(sub_ref, timeout) do
     receive do
-      {:moqx_object,
-       %MOQX.ObjectReceived{handle: ^sub_ref, object: %MOQX.Object{payload: nb}}} ->
+      {:moqx_object, %MOQX.ObjectReceived{handle: ^sub_ref, object: %MOQX.Object{payload: nb}}} ->
         {:ok, MOQX.NativeBinary.load(nb)}
 
       {:moqx_track_init, %MOQX.TrackInit{handle: ^sub_ref}} ->
