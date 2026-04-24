@@ -28,6 +28,7 @@ use moqtail::model::data::constant::{
     ObjectForwardingPreference, ObjectStatus, SubgroupHeaderType,
 };
 use moqtail::model::data::datagram_object::DatagramObject;
+use moqtail::model::data::datagram_status::DatagramStatus;
 use moqtail::model::data::fetch_object::FetchObject;
 use moqtail::model::data::subgroup_header::SubgroupHeader;
 use moqtail::transport::control_stream_handler::ControlStreamHandler;
@@ -1460,15 +1461,24 @@ async fn datagram_acceptor(
                     let bytes = Bytes::from(datagram.payload().to_vec());
                     let mut bytes_mut = bytes.clone();
 
-                    match DatagramObject::deserialize(&mut bytes_mut) {
-                        Ok(obj) => {
-                            if let Err(_e) = handle_datagram_object(obj, &inner).await {
+                    let is_status = matches!(bytes.first(), Some(0x20 | 0x21));
+
+                    if is_status {
+                        if let Ok(status) = DatagramStatus::deserialize(&mut bytes_mut) {
+                            if let Err(_e) = handle_datagram_status(status, &inner).await {
                                 // Datagram-level error, not session-fatal.
                             }
                         }
-                        Err(_) => {
-                            // Ignore non-object datagrams for now. Status datagrams can be
-                            // added later without making object-datagram support depend on them.
+                    } else {
+                        match DatagramObject::deserialize(&mut bytes_mut) {
+                            Ok(obj) => {
+                                if let Err(_e) = handle_datagram_object(obj, &inner).await {
+                                    // Datagram-level error, not session-fatal.
+                                }
+                            }
+                            Err(_) => {
+                                // Ignore malformed datagrams here; the connection stays usable.
+                            }
                         }
                     }
                 });
@@ -1517,6 +1527,65 @@ async fn handle_datagram_object(
 
     if end_of_group {
         send_end_of_group(inner, track_alias, group_id, subgroup_id);
+    }
+
+    Ok(())
+}
+
+async fn handle_datagram_status(
+    status: DatagramStatus,
+    inner: &Arc<SessionInner>,
+) -> anyhow::Result<()> {
+    let track_alias = status.track_alias;
+    let group_id = status.group_id;
+    let object_id = status.object_id;
+    let priority = status.publisher_priority;
+    let subgroup_id = object_id;
+    let extensions = status.extension_headers.unwrap_or_default();
+
+    let has_subscription = wait_for_active_subscription(
+        inner,
+        track_alias,
+        Duration::from_millis(2_000),
+        Duration::from_millis(5),
+    )
+    .await;
+
+    if !has_subscription {
+        return Ok(());
+    }
+
+    match status.object_status {
+        ObjectStatus::EndOfGroup => send_end_of_group(inner, track_alias, group_id, subgroup_id),
+        ObjectStatus::EndOfTrack => send_track_ended(inner, track_alias),
+        ObjectStatus::DoesNotExist => {
+            send_object_received(
+                inner,
+                track_alias,
+                group_id,
+                subgroup_id,
+                object_id,
+                priority,
+                &extensions,
+                ObjectStatus::DoesNotExist,
+                None,
+                atoms::datagram(),
+            );
+        }
+        ObjectStatus::Normal => {
+            send_object_received(
+                inner,
+                track_alias,
+                group_id,
+                subgroup_id,
+                object_id,
+                priority,
+                &extensions,
+                ObjectStatus::Normal,
+                None,
+                atoms::datagram(),
+            );
+        }
     }
 
     Ok(())

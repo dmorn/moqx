@@ -27,6 +27,8 @@ All notable changes to `moqx` will be documented in this file.
 - Added relay-backed integration coverage for object datagram delivery,
   including transport metadata, extension round-tripping, and datagram
   end-of-group signaling.
+- Added subscriber-side parsing for draft-14 `ObjectDatagramStatusType`
+  `0x20` / `0x21`.
 - Added `%MOQX.NativeBinary{ref: reference(), size: non_neg_integer()}` — a lazy
   payload type backed by a Rust `bytes::Bytes` resource. Object and fetch-object
   payloads now arrive as `%MOQX.NativeBinary{}` instead of BEAM binaries, keeping

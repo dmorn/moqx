@@ -108,6 +108,9 @@ end
 Subscribe message contract: `:moqx_subscribe_ok`, `:moqx_track_init`, `:moqx_object`, `:moqx_end_of_group`, `:moqx_publish_done`, `:moqx_request_error`, `:moqx_transport_error`.
 
 `%MOQX.Object{transport: :subgroup | :datagram}` indicates the delivery path.
+Incoming draft-14 status datagrams are mapped into the same mailbox contract:
+`:does_not_exist` arrives as an object status, while `:end_of_group` and
+`:end_of_track` collapse to lifecycle/control messages.
 
 ### Fetch
 
