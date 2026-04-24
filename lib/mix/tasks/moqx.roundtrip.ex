@@ -104,12 +104,10 @@ defmodule Mix.Tasks.Moqx.Roundtrip do
       await_subscribed!(sub_ref, cfg.namespace, cfg.track, cfg.timeout)
       await_track_active!(track, cfg.namespace, cfg.track, cfg.timeout)
 
-      Enum.each(1..3, fn _ ->
-        :ok = MOQX.write_frame(track, cfg.payload)
-        Process.sleep(100)
-      end)
-
+      t0 = System.monotonic_time(:millisecond)
+      :ok = MOQX.write_frame(track, cfg.payload)
       {group_id, payload} = await_matching_payload_frame!(cfg.payload, cfg.timeout)
+      latency_ms = System.monotonic_time(:millisecond) - t0
 
       if payload != cfg.payload do
         Mix.raise(
@@ -119,7 +117,9 @@ defmodule Mix.Tasks.Moqx.Roundtrip do
 
       :ok = MOQX.finish_track(track)
 
-      Mix.shell().info("roundtrip OK: group=#{group_id} payload=#{inspect(payload)}")
+      Mix.shell().info(
+        "roundtrip OK: group=#{group_id} payload=#{inspect(payload)} latency=#{latency_ms}ms"
+      )
     after
       :ok = MOQX.close(subscriber)
       :ok = MOQX.close(publisher)
