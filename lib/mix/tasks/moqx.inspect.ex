@@ -64,6 +64,15 @@ defmodule Mix.Tasks.Moqx.Inspect do
       catalog_tracks: [".catalog"],
       skip_fetch?: true,
       notes: "Cloudflare moq-rs style relay; uses .catalog and typically requires live subscribe."
+    },
+    %{
+      id: "moq-dev-anon",
+      label: "moq.dev anonymous relay",
+      url: "https://cdn.moq.dev/anon",
+      namespace: "moqtail",
+      catalog_tracks: ["catalog.json"],
+      skip_fetch?: false,
+      notes: "Public HANG relay at cdn.moq.dev; publishes catalog.json with WebCodecs-shaped tracks."
     }
   ]
 
