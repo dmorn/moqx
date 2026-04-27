@@ -69,9 +69,9 @@ defmodule Mix.Tasks.Moqx.Inspect do
       id: "moq-dev-anon",
       label: "moq.dev anonymous relay",
       url: "https://cdn.moq.dev/anon",
-      namespace: "moqtail",
+      namespace: "la-kvea",
       catalog_tracks: ["catalog.json"],
-      skip_fetch?: false,
+      skip_fetch?: true,
       notes: "Public HANG relay at cdn.moq.dev; publishes catalog.json with WebCodecs-shaped tracks."
     }
   ]
