@@ -72,7 +72,8 @@ defmodule Mix.Tasks.Moqx.Inspect do
       namespace: "la-kvea",
       catalog_tracks: ["catalog.json"],
       skip_fetch?: true,
-      notes: "Public HANG relay at cdn.moq.dev; publishes catalog.json with WebCodecs-shaped tracks."
+      notes:
+        "Public HANG relay at cdn.moq.dev; publishes catalog.json with WebCodecs-shaped tracks."
     }
   ]
 
