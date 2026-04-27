@@ -28,3 +28,4 @@ moqx-*.tar
 priv/native
 .moq-dev/
 .tmp
+.dexter*
