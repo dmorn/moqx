@@ -31,8 +31,16 @@ defmodule MOQX.Catalog.Track do
     "bitrate",
     "width",
     "height",
+    "codedWidth",
+    "codedHeight",
     "framerate",
+    "sampleRate",
+    "numberOfChannels",
     "timescale",
+    "container",
+    "description",
+    "hangSection",
+    "hangSectionMetadata",
     "altGroup",
     "renderGroup",
     "isLive"
@@ -98,8 +106,15 @@ defmodule MOQX.Catalog.Track do
       bitrate: track.raw["bitrate"],
       width: track.raw["width"],
       height: track.raw["height"],
+      coded_width: track.raw["codedWidth"],
+      coded_height: track.raw["codedHeight"],
       framerate: track.raw["framerate"],
+      sample_rate: track.raw["sampleRate"],
+      number_of_channels: track.raw["numberOfChannels"],
       timescale: track.raw["timescale"],
+      container: track.raw["container"],
+      description: track.raw["description"],
+      hang_section: track.raw["hangSection"],
       alt_group: track.raw["altGroup"],
       render_group: track.raw["renderGroup"],
       is_live: track.raw["isLive"]
@@ -173,6 +188,7 @@ defmodule MOQX.Catalog.Track do
   end
 
   defp infer_container_from_packaging("cmaf"), do: {:cmaf, :packaging}
+  defp infer_container_from_packaging("legacy"), do: {:legacy, :packaging}
   defp infer_container_from_packaging(_), do: {nil, :unknown}
 
   defp init_data_major_brand(nil), do: nil

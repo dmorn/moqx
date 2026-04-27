@@ -45,7 +45,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
 
   @default_relay_url "https://ord.abr.moqtail.dev"
   @default_namespace "moqtail"
-  @default_catalog_tracks ["catalog", ".catalog"]
+  @default_catalog_tracks ["catalog", ".catalog", "catalog.json"]
   @relay_presets [
     %{
       id: "moqtail-ord",
@@ -592,8 +592,15 @@ defmodule Mix.Tasks.Moqx.Inspect do
   end
 
   defp pick_track_value(track, key) do
-    track.raw[key] || get_in(track.raw, ["selectionParams", key])
+    track.raw[key] || get_in(track.raw, ["selectionParams", key]) ||
+      pick_compat_track_value(track, key)
   end
+
+  defp pick_compat_track_value(track, "width"), do: track.raw["codedWidth"]
+  defp pick_compat_track_value(track, "height"), do: track.raw["codedHeight"]
+  defp pick_compat_track_value(track, "samplerate"), do: track.raw["sampleRate"]
+  defp pick_compat_track_value(track, "channelConfig"), do: track.raw["numberOfChannels"]
+  defp pick_compat_track_value(_track, _key), do: nil
 
   defp format_track_variant(track) do
     width = pick_track_value(track, "width")

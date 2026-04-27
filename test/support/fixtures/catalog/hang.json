@@ -1,0 +1,45 @@
+{
+  "video": {
+    "renditions": {
+      "video0": {
+        "codec": "avc1.64001f",
+        "description": "0164001f",
+        "codedWidth": 1280,
+        "codedHeight": 720,
+        "framerate": 30.0,
+        "container": {
+          "kind": "legacy"
+        }
+      }
+    },
+    "display": {
+      "width": 1280,
+      "height": 720
+    },
+    "rotation": 0,
+    "flip": false
+  },
+  "audio": {
+    "renditions": {
+      "audio1": {
+        "codec": "mp4a.40.2",
+        "sampleRate": 44100,
+        "numberOfChannels": 2,
+        "bitrate": 283637,
+        "container": {
+          "kind": "cmaf",
+          "timescale": 44100,
+          "trackId": 2
+        }
+      }
+    }
+  },
+  "chat": {
+    "message": {
+      "name": "chat/message"
+    },
+    "typing": {
+      "name": "chat/typing"
+    }
+  }
+}

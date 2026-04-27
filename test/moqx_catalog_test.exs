@@ -25,6 +25,40 @@ defmodule MOQX.CatalogTest do
     assert [%Track{name: "t"}] = catalog.tracks
   end
 
+  test "decodes a HANG catalog into normalized tracks" do
+    assert {:ok, catalog} = Catalog.decode(fixture("hang.json"))
+    assert %Catalog{format: :hang} = catalog
+
+    assert %Track{name: "video0", role: "video", codec: "avc1.64001f", packaging: "legacy"} =
+             Catalog.get_track(catalog, "video0")
+
+    assert %Track{name: "audio1", role: "audio", codec: "mp4a.40.2", packaging: "cmaf"} =
+             Catalog.get_track(catalog, "audio1")
+
+    assert %Track{name: "chat/message", role: "chat.message"} =
+             Catalog.get_track(catalog, "chat/message")
+  end
+
+  test "preserves HANG WebCodecs metadata" do
+    {:ok, catalog} = Catalog.decode(fixture("hang.json"))
+    video = Catalog.get_track(catalog, "video0")
+    audio = Catalog.get_track(catalog, "audio1")
+
+    assert %{
+             coded_width: 1280,
+             coded_height: 720,
+             container: %{"kind" => "legacy"},
+             description: "0164001f",
+             hang_section: "video"
+           } = Track.explicit_metadata(video)
+
+    assert %{
+             sample_rate: 44_100,
+             number_of_channels: 2,
+             container: %{"kind" => "cmaf", "timescale" => 44_100, "trackId" => 2}
+           } = Track.explicit_metadata(audio)
+  end
+
   test "preserves raw map on catalog and tracks" do
     {:ok, catalog} = Catalog.decode(fixture("moqtail.json"))
     assert is_map(catalog.raw)

@@ -35,7 +35,7 @@
 - live subscription via `SUBSCRIBE` with `FilterType::LatestObject`
 - raw fetch for retrieving track objects by range (subscriber only; relay serves from cache only)
 - catalog publication/retrieval helpers via `MOQX.Helpers`
-- CMSF catalog parsing via `MOQX.Catalog`
+- CMSF-style and HANG `catalog.json` parsing via `MOQX.Catalog`
 - relay authentication via `?jwt=...` URL query parameter
 - path-rooted relay authorization (connect URL path must match token `root`)
 - TLS verification on by default; `tls: [verify: :insecure]` and `tls: [cacertfile: "..."]` available
@@ -137,6 +137,7 @@ MOQX.Catalog.get_track(catalog, "259")
 ```
 
 Each track exposes a `raw` map for forward compatibility with unmodeled catalog fields.
+HANG catalogs are normalized from WebCodecs-shaped audio/video rendition maps into the same track helper API.
 
 ## Relay authentication
 
