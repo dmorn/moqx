@@ -1,8 +1,9 @@
 defmodule Mix.Tasks.Moqx.Inspect do
   @moduledoc """
   Connects to a relay, loads a catalog when available, lets you choose a track,
-  then prints live runtime stats (bandwidth, groups/s, objects/s, PRFT latency
-  when present).
+  then either prints live runtime stats (bandwidth, groups/s, objects/s, PRFT
+  latency when present) or a low-level subscription event trace for protocol
+  debugging.
 
   ## Usage
 
@@ -35,6 +36,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
       when it expires, the task exits cleanly.
     * `--interval-ms` - stats print interval in ms (default: `1_000`).
     * `--delivery-timeout-ms` - passed through to `MOQX.subscribe/4`.
+    * `--debug-events` - print low-level subscription events instead of aggregate stats.
     * `--show-raw` - include full per-track raw catalog maps in listing output.
     * `--help` - prints this help.
   """
@@ -112,6 +114,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
           timeout: :integer,
           interval_ms: :integer,
           delivery_timeout_ms: :integer,
+          debug_events: :boolean,
           show_raw: :boolean,
           help: :boolean
         ]
@@ -150,6 +153,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
       run_timeout_ms: run_timeout_ms,
       interval_ms: positive_int!(opts[:interval_ms], :interval_ms, 1_000),
       subscribe_opts: build_subscribe_opts(opts),
+      debug_events?: opts[:debug_events] || false,
       show_raw: opts[:show_raw] || false
     }
   end
@@ -255,18 +259,24 @@ defmodule Mix.Tasks.Moqx.Inspect do
 
     await_subscribed!(sub_ref, config.namespace, track_name, config.timeout)
 
-    print_stream_start(config.interval_ms, config.run_timeout_ms)
-
     now_mono_ms = System.monotonic_time(:millisecond)
 
-    stream_stats_loop(
-      sub_ref,
-      config.interval_ms,
-      DemoDebugStats.new(),
-      now_mono_ms,
-      config.run_timeout_ms,
-      now_mono_ms + config.interval_ms
-    )
+    if config.debug_events? do
+      print_event_trace_start(config.run_timeout_ms)
+      Mix.shell().info("SUB_OK")
+      debug_event_loop(sub_ref, now_mono_ms, config.run_timeout_ms, 0)
+    else
+      print_stream_start(config.interval_ms, config.run_timeout_ms)
+
+      stream_stats_loop(
+        sub_ref,
+        config.interval_ms,
+        DemoDebugStats.new(),
+        now_mono_ms,
+        config.run_timeout_ms,
+        now_mono_ms + config.interval_ms
+      )
+    end
   end
 
   defp build_subscribe_opts(opts) do
@@ -289,8 +299,16 @@ defmodule Mix.Tasks.Moqx.Inspect do
     )
   end
 
+  defp print_event_trace_start(nil) do
+    Mix.shell().info("debug event trace mode (Ctrl+C to stop)")
+  end
+
+  defp print_event_trace_start(run_timeout_ms) do
+    Mix.shell().info("debug event trace mode for #{run_timeout_ms} ms (Ctrl+C to stop early)")
+  end
+
   defp connect_subscriber!(url, _timeout) do
-    case MOQX.connect_subscriber(url) do
+    case MOQX.connect_subscriber(url, tls: relay_tls_opts()) do
       {:ok, connect_ref} ->
         connect_ref
 
@@ -304,6 +322,25 @@ defmodule Mix.Tasks.Moqx.Inspect do
 
         Mix.raise("connect failed: #{reason}#{hint}")
     end
+  end
+
+  # Honor the same env vars the integration suite uses (see
+  # test/moqx_integration_test.exs): MOQX_RELAY_CACERTFILE for a custom CA
+  # bundle, MOQX_TLS_INSECURE=1 to skip verification entirely.
+  defp relay_tls_opts do
+    cacert =
+      case System.get_env("MOQX_RELAY_CACERTFILE") do
+        nil -> []
+        path -> [cacertfile: path]
+      end
+
+    verify =
+      case System.get_env("MOQX_TLS_INSECURE") do
+        v when v in ["1", "true", "TRUE"] -> [verify: :insecure]
+        _ -> []
+      end
+
+    cacert ++ verify
   end
 
   defp await_connected!(connect_ref, timeout) do
@@ -780,6 +817,68 @@ defmodule Mix.Tasks.Moqx.Inspect do
     end
   end
 
+  defp debug_event_loop(sub_ref, started_mono_ms, run_timeout_ms, object_count) do
+    now_mono_ms = System.monotonic_time(:millisecond)
+
+    if stream_timed_out?(started_mono_ms, now_mono_ms, run_timeout_ms) do
+      Mix.shell().info("TIMEOUT after_ms=#{now_mono_ms - started_mono_ms}")
+    else
+      receive do
+        {:moqx_track_init,
+         %MOQX.TrackInit{handle: ^sub_ref, init_data: init_data, track_meta: track_meta}} ->
+          init_len = if is_binary(init_data), do: byte_size(init_data), else: 0
+          Mix.shell().info("TRACK_INIT init_len=#{init_len} meta=#{inspect(track_meta)}")
+          debug_event_loop(sub_ref, started_mono_ms, run_timeout_ms, object_count)
+
+        {:moqx_object,
+         %MOQX.ObjectReceived{
+           handle: ^sub_ref,
+           object: %MOQX.Object{
+             group_id: group_id,
+             subgroup_id: subgroup_id,
+             object_id: object_id,
+             status: status,
+             payload: nb
+           }
+         }} ->
+          loaded = MOQX.NativeBinary.load(nb)
+          next_count = object_count + 1
+
+          Mix.shell().info(
+            "OBJ n=#{next_count} gid=#{group_id} sg=#{subgroup_id} oid=#{object_id} bytes=#{byte_size(loaded)} status=#{status}"
+          )
+
+          debug_event_loop(sub_ref, started_mono_ms, run_timeout_ms, next_count)
+
+        {:moqx_end_of_group,
+         %MOQX.EndOfGroup{handle: ^sub_ref, group_id: group_id, subgroup_id: subgroup_id}} ->
+          Mix.shell().info("END_OF_GROUP gid=#{group_id} sg=#{subgroup_id}")
+          debug_event_loop(sub_ref, started_mono_ms, run_timeout_ms, object_count)
+
+        {:moqx_publish_done,
+         %MOQX.PublishDone{handle: ^sub_ref, status: status, code: code, message: message}} ->
+          elapsed_ms = System.monotonic_time(:millisecond) - started_mono_ms
+
+          Mix.shell().info(
+            "PUBLISH_DONE status=#{inspect(status)} code=#{inspect(code)} msg=#{inspect(message)} after_ms=#{elapsed_ms}"
+          )
+
+        {:moqx_transport_error,
+         %MOQX.TransportError{handle: ^sub_ref, message: reason, kind: kind}} ->
+          Mix.raise("stream error: kind=#{inspect(kind)} message=#{reason}")
+      after
+        debug_receive_after_ms(started_mono_ms, now_mono_ms, run_timeout_ms) ->
+          debug_event_loop(sub_ref, started_mono_ms, run_timeout_ms, object_count)
+      end
+    end
+  end
+
+  defp debug_receive_after_ms(_started_mono_ms, _now_mono_ms, nil), do: 250
+
+  defp debug_receive_after_ms(started_mono_ms, now_mono_ms, run_timeout_ms) do
+    min(250, remaining_runtime_ms(started_mono_ms, now_mono_ms, run_timeout_ms))
+  end
+
   defp receive_after_ms(next_tick_mono_ms, now_mono_ms, stream_started_mono_ms, run_timeout_ms) do
     to_tick_ms = max(next_tick_mono_ms - now_mono_ms, 0)
 
@@ -891,6 +990,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
       is_binary(config.track_name),
       "--track #{shell_escape(config.track_name || "")}"
     )
+    |> append_flag(config.debug_events?, "--debug-events")
     |> append_flag(config.show_raw, "--show-raw")
     |> append_timeout_flag(config.run_timeout_ms)
     |> append_interval_flag(config.interval_ms)
