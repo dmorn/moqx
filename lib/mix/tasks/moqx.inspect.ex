@@ -260,6 +260,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
     now_mono_ms = System.monotonic_time(:millisecond)
 
     stream_stats_loop(
+      sub_ref,
       config.interval_ms,
       DemoDebugStats.new(),
       now_mono_ms,
@@ -704,6 +705,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
   end
 
   defp stream_stats_loop(
+         sub_ref,
          interval_ms,
          stats,
          stream_started_mono_ms,
@@ -722,6 +724,7 @@ defmodule Mix.Tasks.Moqx.Inspect do
         Mix.shell().info(DemoDebugStats.format_snapshot(snapshot))
 
         stream_stats_loop(
+          sub_ref,
           interval_ms,
           DemoDebugStats.new(now_ms),
           stream_started_mono_ms,
@@ -735,8 +738,12 @@ defmodule Mix.Tasks.Moqx.Inspect do
 
         receive do
           {:moqx_object,
-           %MOQX.ObjectReceived{object: %MOQX.Object{group_id: group_id, payload: nb}}} ->
+           %MOQX.ObjectReceived{
+             handle: ^sub_ref,
+             object: %MOQX.Object{group_id: group_id, payload: nb}
+           }} ->
             stream_stats_loop(
+              sub_ref,
               interval_ms,
               DemoDebugStats.add_frame(stats, group_id, MOQX.NativeBinary.load(nb)),
               stream_started_mono_ms,
@@ -744,8 +751,9 @@ defmodule Mix.Tasks.Moqx.Inspect do
               next_tick_mono_ms
             )
 
-          {:moqx_end_of_group, %MOQX.EndOfGroup{}} ->
+          {:moqx_end_of_group, %MOQX.EndOfGroup{handle: ^sub_ref}} ->
             stream_stats_loop(
+              sub_ref,
               interval_ms,
               stats,
               stream_started_mono_ms,
@@ -753,14 +761,15 @@ defmodule Mix.Tasks.Moqx.Inspect do
               next_tick_mono_ms
             )
 
-          {:moqx_transport_error, %MOQX.TransportError{message: reason}} ->
+          {:moqx_transport_error, %MOQX.TransportError{handle: ^sub_ref, message: reason}} ->
             Mix.raise("stream error: #{reason}")
 
-          {:moqx_publish_done, %MOQX.PublishDone{}} ->
+          {:moqx_publish_done, %MOQX.PublishDone{handle: ^sub_ref}} ->
             Mix.shell().info("track ended")
         after
           receive_after_ms ->
             stream_stats_loop(
+              sub_ref,
               interval_ms,
               stats,
               stream_started_mono_ms,
