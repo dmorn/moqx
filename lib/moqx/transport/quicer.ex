@@ -8,14 +8,17 @@ defmodule MOQX.Transport.Quicer do
 
   @behaviour MOQX.Transport
 
+  alias MOQX.Transport.Capabilities
+  alias MOQX.Transport.Quicer.Options
+
   @impl true
   def listen(port, opts) do
-    :quicer.listen(port, opts)
+    :quicer.listen(Options.normalize_text(port), Options.normalize_opts(opts))
   end
 
   @impl true
   def accept(listener, opts, timeout \\ :infinity) do
-    :quicer.accept(listener, opts, timeout)
+    :quicer.accept(listener, Options.normalize_opts(opts), timeout)
   end
 
   @impl true
@@ -25,17 +28,17 @@ defmodule MOQX.Transport.Quicer do
 
   @impl true
   def connect(host, port, opts, timeout \\ 5_000) do
-    :quicer.connect(host, port, opts, timeout)
+    :quicer.connect(Options.normalize_host(host), port, Options.normalize_opts(opts), timeout)
   end
 
   @impl true
   def open_stream(connection, opts \\ []) do
-    :quicer.start_stream(connection, opts)
+    :quicer.start_stream(connection, Options.normalize_opts(opts))
   end
 
   @impl true
   def accept_stream(connection, opts \\ [], timeout \\ :infinity) do
-    :quicer.accept_stream(connection, opts, timeout)
+    :quicer.accept_stream(connection, Options.normalize_opts(opts), timeout)
   end
 
   @impl true
@@ -77,6 +80,15 @@ defmodule MOQX.Transport.Quicer do
   @impl true
   def controlling_process(handle, pid) when is_pid(pid) do
     :quicer.controlling_process(handle, pid)
+  end
+
+  @impl true
+  def capabilities(connection) do
+    Capabilities.from_quicer(
+      :quicer.negotiated_protocol(connection),
+      :quicer.getopt(connection, :datagram_send_enabled),
+      :quicer.getopt(connection, :datagram_receive_enabled)
+    )
   end
 
   @impl true

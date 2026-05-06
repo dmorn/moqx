@@ -1,6 +1,6 @@
 defmodule MOQX.Transport do
   @moduledoc """
-  Minimal QUIC transport boundary for the MOQT draft-14 implementation.
+  Minimal QUIC transport boundary for MOQT-family implementations.
 
   The protocol layer should depend on this behaviour rather than on a concrete
   QUIC library. Tests can provide an in-memory implementation with the same
@@ -57,4 +57,37 @@ defmodule MOQX.Transport do
   @callback controlling_process(connection() | stream(), pid()) :: :ok | {:error, term()}
 
   @callback normalize_message(term()) :: event() | :unknown
+
+  @callback capabilities(connection()) :: MOQX.Transport.Capabilities.t() | {:error, term()}
+
+  @doc """
+  Returns normalized capabilities for a negotiated transport connection.
+  """
+  @spec capabilities(module(), connection()) :: MOQX.Transport.Capabilities.t() | {:error, term()}
+  def capabilities(transport, connection) do
+    transport.capabilities(connection)
+  end
+
+  @doc """
+  Receives one backend message and normalizes it through the given transport.
+
+  Protocol layers should use this helper instead of matching backend-specific
+  messages such as raw `quicer` `{:quic, ...}` tuples.
+  """
+  @spec receive_event(module(), timeout()) :: event() | :unknown | :timeout
+  def receive_event(transport, timeout \\ :infinity)
+
+  def receive_event(transport, :infinity) do
+    receive do
+      message -> transport.normalize_message(message)
+    end
+  end
+
+  def receive_event(transport, timeout) do
+    receive do
+      message -> transport.normalize_message(message)
+    after
+      timeout -> :timeout
+    end
+  end
 end
