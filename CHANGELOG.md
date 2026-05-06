@@ -79,8 +79,7 @@ validation so publishing fails fast if the tag, `mix.exs`, and changelog drift.
 
 - Added a tag-triggered GitHub Actions release workflow that reruns the full
   release preflight (`mix format --check-formatted`, `mix test`,
-  `mix test.integration`, `mix docs`, and `mix credo --strict`) before
-  publishing.
+  `mix docs`, and `mix credo --strict`) before publishing.
 - Added automated Hex publishing on `v*` tags via `mix hex.publish --yes`,
   using the repository `HEX_API_KEY` secret.
 - Added automated GitHub release creation/update on `v*` tags, with release
@@ -118,8 +117,8 @@ If you are upgrading from older `0.2.x`–`0.4.x` APIs:
   old `:moqx_track_ended` tuple contract
 - `delivery_timeout_ms` remains the correct draft-14 subscribe timeout option
 - `rendezvous_timeout_ms` was a mistaken rename based on newer-draft terminology and should not be used on the draft-14 stack
-- local integration guidance now uses `mix test.integration` against a relay you
-  keep running separately
+- local integration guidance now uses a relay-backed test task against a relay
+  you keep running separately
 
 ### Changed
 
@@ -273,7 +272,7 @@ If you are upgrading from older `0.2.x`–`0.4.x` APIs:
 ### Changed
 
 - integration test tagging split to keep CI deterministic (`:integration`) while keeping live public relay coverage opt-in (`:public_relay_live`).
-- `mix test.integration` now excludes `:public_relay_live` tests by default.
+- the relay-backed test task now excludes `:public_relay_live` tests by default.
 
 ## [0.2.0] - 2026-04-08
 

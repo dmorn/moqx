@@ -1,4 +1,4 @@
-- before committing, ensure you `mix format`, run the tests, run `mix test.integration`, run `mix credo` (elixir's linter) and refactor accordingly; always run integration tests/harness as well before committing, and ensure documentation stays consistent
+- before committing, ensure you `mix format`, run the tests, run `mix credo` (elixir's linter) and refactor accordingly; ensure documentation stays consistent
 - this redesign is based on QUIC via quicer and targets MOQT draft-14. Before making transport decisions, inspect quicer and the relevant MOQT draft text; use moqtail as an interop reference where useful, not as an implementation substrate
 - this project is based on a series of MOQT IETF documents (linked in README), which should always be consulted before making decisions
 

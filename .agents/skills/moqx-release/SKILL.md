@@ -19,7 +19,6 @@ GitHub release. **No manual `mix hex.publish` needed.**
 git status --short --branch          # must be clean, on main
 mix format --check-formatted
 mix test
-MOQX_RELAY_CACERTFILE=.tmp/integration-certs/ca.pem mix test.integration
 mix credo --strict
 mix hex.build
 ```
@@ -27,21 +26,6 @@ mix hex.build
 Note: Hex packages cannot depend on Git/path deps. If `quicer` is still sourced
 from the fork by Git, publish the fork as a Hex dependency or switch release-time
 metadata to a Hex-publishable `quicer` package before cutting a release.
-
-If the relay container is not running, start it first:
-
-```bash
-scripts/generate_integration_certs.sh .tmp/integration-certs
-docker compose -f docker-compose.integration.yml up -d relay
-```
-
-If integration tests fail with TLS errors (`BadSignature`, `UnknownIssuer`),
-recreate the relay container — it may have stale certs:
-
-```bash
-docker compose -f docker-compose.integration.yml down --remove-orphans
-docker compose -f docker-compose.integration.yml up -d relay
-```
 
 ### 2. Decide the version
 
@@ -93,7 +77,7 @@ gh release view vX.Y.Z
 ## What CI does (do not do these manually)
 
 - Validates tag == `mix.exs` version == `CHANGELOG.md` section heading
-- Runs `mix format --check-formatted`, unit tests, relay-backed integration harness/tests, and `mix credo --strict`
+- Runs `mix format --check-formatted`, unit tests, and `mix credo --strict`
 - `mix hex.publish --yes`
 - Creates/updates the GitHub release with notes extracted from `CHANGELOG.md`
 
