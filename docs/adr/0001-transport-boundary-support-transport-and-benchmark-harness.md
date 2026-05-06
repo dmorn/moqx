@@ -5,17 +5,18 @@
 
 ## Context
 
-`moqx` is a clean-slate Elixir implementation targeting MOQT draft-14 over QUIC, backed initially by `quicer`.
+`moqx` is a clean-slate Elixir implementation targeting MOQT-family protocols over native QUIC, backed initially by `quicer`.
 
 The current codebase already has a narrow `MOQX.Transport` behaviour and a thin `MOQX.Transport.Quicer` adapter. This boundary is important because MOQT protocol code should be testable without a live QUIC stack and should not depend directly on `quicer` implementation details.
 
 Relevant constraints:
 
 - MOQT draft-14 runs over native QUIC or WebTransport and relies on streams and datagrams.
-- Native QUIC MOQT uses ALPN `moq-00`.
-- QUIC DATAGRAM support must be available for MOQT.
-- The first stream is a client-initiated bidirectional control stream.
-- Object data uses QUIC streams and/or datagrams depending on forwarding preference.
+- Native QUIC MOQT draft-14 uses ALPN `moq-00`.
+- MOQT draft-14 requires QUIC DATAGRAM support.
+- MOQT draft-14's first stream is a client-initiated bidirectional control stream, and object data uses unidirectional streams and/or datagrams depending on forwarding preference.
+- MOQ Lite bare QUIC uses ALPN tokens such as `moq-lite-xx`, has no CLIENT_SETUP/SERVER_SETUP exchange, uses many bidirectional transaction streams, uses unidirectional group streams, and does not use datagrams.
+- Stream rules differ by protocol; the transport layer must expose generic QUIC semantics rather than draft-specific policy.
 - `quicer` is an Erlang library; Erlang `string()` types are charlists, while Elixir callers expect binaries/`String.t()`.
 - Performance and limits need separate research from correctness/integration tests.
 
@@ -50,9 +51,52 @@ The transport API should expose Elixir-friendly types.
 In particular:
 
 - hostnames and textual listener addresses accepted by Elixir code should be binaries/`String.t()` where natural;
+- ALPN values accepted by Elixir code should be binaries/`String.t()` where natural;
 - the `quicer` adapter is responsible for converting to Erlang charlists when calling `:quicer`;
 - binary payloads remain binaries;
 - `quicer` handles remain opaque transport terms.
+
+### Protocol-configurable capabilities
+
+ALPN and transport capabilities are selected by higher protocol/session layers, not hard-coded in `MOQX.Transport`.
+
+The transport layer should support protocol-selected ALPN values such as `moq-00` for MOQT draft-14 and `moq-lite-xx`-style values for MOQ Lite.
+
+Connections should expose normalized capabilities where practical, including:
+
+- negotiated ALPN;
+- datagram availability;
+- max datagram payload size, or `:unknown`/`:unsupported`;
+- bidirectional and unidirectional stream support;
+- stream priority support, or `:unsupported`;
+- optional transport stats such as RTT or send-rate/congestion estimate, or `:unsupported`.
+
+### Stream semantics
+
+`MOQX.Transport` models generic QUIC streams. It does not enforce MOQT draft-14's single bidirectional control-stream policy or MOQ Lite's many bidirectional transaction-stream policy.
+
+Normalized stream events should expose enough metadata for higher layers to enforce protocol rules, especially:
+
+- stream direction: bidirectional or unidirectional;
+- stream initiator: local/client/server or peer where knowable;
+- per-stream ordering of bytes;
+- no cross-stream ordering guarantee.
+
+### Stream and connection shutdown semantics
+
+Stream and connection shutdown must preserve distinctions required by MOQT-family protocols.
+
+The transport API should distinguish:
+
+- graceful stream FIN / send-side finish;
+- RESET_STREAM with application error code/reason;
+- STOP_SENDING / receive-side abort with application error code/reason;
+- peer FIN;
+- peer reset;
+- peer stop-sending;
+- connection close with application error code/reason.
+
+A generic `close_stream/2` that discards the reason is insufficient for the protocol layer.
 
 ### Support transport
 
@@ -70,16 +114,19 @@ MOQX.Transport.Support
 
 It should implement the same `MOQX.Transport` behaviour and simulate enough QUIC-like semantics for protocol tests:
 
-- listen/connect/accept/handshake
-- bidirectional and unidirectional streams
-- stream send/receive
-- datagrams
-- active/passive delivery
-- stream and connection close/reset events
-- `controlling_process/2`
-- deterministic fault injection where useful
+- listen/connect/accept/handshake;
+- protocol-selected ALPN and capability profiles;
+- bidirectional and unidirectional streams;
+- stream direction and initiator metadata;
+- many concurrent bidirectional streams;
+- stream send/receive;
+- optional datagrams;
+- active/passive delivery;
+- graceful stream finish, stream reset, stop-sending, and connection close events;
+- `controlling_process/2`;
+- deterministic fault injection where useful.
 
-This support transport is for correctness and protocol tests, not performance measurement.
+This support transport is for correctness and protocol tests, not performance measurement. It must not model only MOQT draft-14's single-control-stream world; draft-specific stream policies belong above transport.
 
 ### Contract tests
 
@@ -88,7 +135,7 @@ Create shared transport contract tests that can run against both:
 - `MOQX.Transport.Support`
 - `MOQX.Transport.Quicer`
 
-These tests establish baseline semantics for handshakes, stream lifecycle, stream data, datagrams, close events, active/passive receive, and ownership handoff.
+These tests establish baseline semantics for handshakes, ALPN/capability negotiation, stream lifecycle, stream direction/initiator metadata, stream data, optional datagrams, FIN/reset/stop-sending, connection close, active/passive receive, and ownership handoff.
 
 ### Performance and limits research
 
@@ -110,13 +157,14 @@ The harness should eventually compare:
 - reference QUIC client to a `MOQX.Transport` listener;
 - optionally reference client to reference server.
 
-The benchmark harness should measure raw transport characteristics, not MOQT protocol behavior initially.
+The benchmark harness should measure raw transport characteristics, not full MOQT protocol behavior initially. Scripts may still use protocol-like transport profiles, such as draft-14-like ALPN/datagram settings and MOQ Lite-like no-datagram/many-bidirectional-stream settings.
 
 ## Consequences
 
 Positive:
 
-- MOQT protocol code remains independent of `quicer` message shapes and Erlang type quirks.
+- MOQT-family protocol code remains independent of `quicer` message shapes and Erlang type quirks.
+- The same transport foundation can support both MOQT draft-14 and MOQ Lite requirements.
 - Future protocol tests can run deterministically without real QUIC sockets.
 - The real `quicer` adapter can be verified against the same contract as the support transport.
 - Performance research has a clear home and will not make normal tests slow or flaky.
@@ -127,12 +175,14 @@ Tradeoffs:
 - The helper-based `receive_event` approach still allows raw backend messages to enter the process mailbox internally.
 - A future router/owner process may be needed if mailbox isolation or stricter encapsulation becomes necessary.
 - The support transport can validate semantics but cannot predict real QUIC performance.
+- Capability discovery introduces an API surface that must gracefully represent unsupported backend features.
 
 ## Non-goals
 
 This ADR does not decide:
 
-- final MOQT session/control-message implementation;
+- final MOQT draft-14 session/control-message implementation;
+- final MOQ Lite session/message implementation;
 - final benchmark result thresholds;
 - the reference QUIC implementation to use for benchmarking;
 - whether a future dedicated transport-router process should replace the helper-based event API;

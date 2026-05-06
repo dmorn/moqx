@@ -18,7 +18,9 @@ The decision should optimize for useful interop/performance signal, local develo
 - [ ] A reference QUIC implementation is selected for the first benchmark iteration.
 - [ ] The decision records why this implementation was selected over the other candidates.
 - [ ] Installation/setup requirements are documented.
+- [ ] The selected implementation can support configurable ALPN for protocol-like benchmark profiles.
 - [ ] The selected implementation can support a simple stream/datagram measurement protocol or a practical equivalent.
+- [ ] Any missing datagram, priority, or stats capability is documented.
 - [ ] Follow-up benchmark issues can assume this choice without reopening the decision.
 
 ## Blocked by

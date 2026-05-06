@@ -16,6 +16,7 @@ This establishes baseline overhead for the Elixir transport wrapper, `quicer`, a
 ## Acceptance criteria
 
 - [ ] A standalone Elixir script can start a local listener and client using `MOQX.Transport.Quicer`.
+- [ ] The script can run with protocol-like ALPN/capability profiles, at minimum draft-14-like and MOQ Lite-like modes.
 - [ ] The script measures handshake latency and first-byte latency.
 - [ ] The script measures stream throughput for configurable payload size and duration/count.
 - [ ] The script measures datagram send/receive rate where datagrams are available.
@@ -27,5 +28,6 @@ This establishes baseline overhead for the Elixir transport wrapper, `quicer`, a
 - `.scratch/transport-layer-foundation/issues/08-create-transport-benchmark-harness-skeleton.md`
 - `.scratch/transport-layer-foundation/issues/04-add-stream-lifecycle-contract.md`
 - `.scratch/transport-layer-foundation/issues/05-add-datagram-contract.md`
+- `.scratch/transport-layer-foundation/issues/13-add-configurable-alpn-and-capability-surface.md`
 
 ## Comments

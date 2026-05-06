@@ -24,7 +24,7 @@ The `moq-dev/moq` project and related documentation mention WebTransport togethe
 Initial transport scope:
 
 - native QUIC via `quicer`;
-- MOQT ALPN, currently `moq-00` for draft-14;
+- protocol-selected native QUIC ALPN, including `moq-00` for MOQT draft-14 and `moq-lite-xx`-style tokens for MOQ Lite;
 - QUIC streams directly;
 - QUIC datagrams directly;
 - relay-to-relay or server-side deployment use cases.
