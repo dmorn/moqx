@@ -18,6 +18,7 @@ These profiles should be used to prove the support transport and contract tests 
 - [ ] A draft-14-like profile configures native QUIC ALPN `moq-00`, datagram availability, one client-initiated bidirectional control stream expectation at the protocol-test level, and unidirectional data stream support.
 - [ ] A MOQ Lite-like profile configures a `moq-lite-xx`-style ALPN, no datagrams, many bidirectional transaction streams, and unidirectional group stream support.
 - [ ] Tests demonstrate the transport layer supports both profiles without changing transport implementation code.
+- [ ] Tests cover at least draft-14-like and MOQ Lite-like capability profiles in the support transport.
 - [ ] Draft-specific stream validation is kept outside the transport implementation.
 - [ ] Profile documentation clarifies that these are contract fixtures, not full protocol implementations.
 
@@ -28,3 +29,5 @@ These profiles should be used to prove the support transport and contract tests 
 - `.scratch/transport-layer-foundation/issues/05-add-datagram-contract.md`
 
 ## Comments
+
+The support-transport-specific capability-profile criterion was moved here from issue 13 after issue 13 delivered the production capability surface in commit `746257a`.

@@ -1,6 +1,6 @@
 # Establish normalized transport event helper
 
-Status: needs-triage
+Status: closed
 Type: AFK
 
 ## Parent
@@ -15,14 +15,20 @@ The slice should make the helper-based model from ADR-0001 concrete and document
 
 ## Acceptance criteria
 
-- [ ] A public helper exists for receiving/normalizing transport events from a configured transport implementation.
-- [ ] The helper returns normalized transport events, `:unknown`, or a timeout result with documented semantics.
-- [ ] Transport documentation states that protocol code must not match raw `quicer` messages directly.
-- [ ] Tests cover known message normalization and timeout/unknown-message behavior.
-- [ ] The design does not require introducing a dedicated transport-router process.
+- [x] A public helper exists for receiving/normalizing transport events from a configured transport implementation.
+- [x] The helper returns normalized transport events, `:unknown`, or a timeout result with documented semantics.
+- [x] Transport documentation states that protocol code must not match raw `quicer` messages directly.
+- [x] Tests cover known message normalization and timeout/unknown-message behavior.
+- [x] The design does not require introducing a dedicated transport-router process.
 
 ## Blocked by
 
 None - can start immediately
+
+## Resolution
+
+Closed by commit `746257a`.
+
+Implemented `MOQX.Transport.receive_event/2`, documented the normalized event boundary, and added behavior tests for normalized events, unknown backend messages, and timeout behavior.
 
 ## Comments
