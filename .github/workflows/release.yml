@@ -25,8 +25,6 @@ jobs:
           elixir-version: '1.19.0'
           otp-version: '27.3'
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - name: Cache Mix
         uses: actions/cache@v5
         with:
@@ -36,18 +34,6 @@ jobs:
           key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-mix-
-
-      - name: Cache Cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('mix.lock', 'native/moqx_native/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
       - name: Install Elixir dependencies
         run: mix deps.get
@@ -110,14 +96,11 @@ jobs:
           docker logs moqx-relay || true
           exit 1
 
-      - name: Run relay-backed integration tests
+      - name: Run placeholder integration command
         env:
           MOQX_EXTERNAL_RELAY_URL: https://127.0.0.1:4433
           MOQX_RELAY_CACERTFILE: .tmp/integration-certs/ca.pem
         run: mix test.integration
-
-      - name: Build docs
-        run: mix docs
 
       - name: Run Credo
         run: mix credo --strict
@@ -134,7 +117,7 @@ jobs:
           version="${TAG_NAME#v}"
           notes_file="$RUNNER_TEMP/release-notes.md"
           awk -v version="$version" '
-            $0 ~ "^## \\\[" version "\\\]" { printing = 1; next }
+            $0 ~ "^## \\\\[" version "\\\\]" { printing = 1; next }
             printing && /^## \[/ { exit }
             printing { print }
           ' CHANGELOG.md > "$notes_file"

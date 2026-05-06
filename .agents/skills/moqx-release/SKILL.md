@@ -20,9 +20,13 @@ git status --short --branch          # must be clean, on main
 mix format --check-formatted
 mix test
 MOQX_RELAY_CACERTFILE=.tmp/integration-certs/ca.pem mix test.integration
-mix docs
 mix credo --strict
+mix hex.build
 ```
+
+Note: Hex packages cannot depend on Git/path deps. If `quicer` is still sourced
+from the fork by Git, publish the fork as a Hex dependency or switch release-time
+metadata to a Hex-publishable `quicer` package before cutting a release.
 
 If the relay container is not running, start it first:
 
@@ -89,8 +93,8 @@ gh release view vX.Y.Z
 ## What CI does (do not do these manually)
 
 - Validates tag == `mix.exs` version == `CHANGELOG.md` section heading
-- Runs `mix format --check-formatted`, unit tests, relay-backed integration tests, `mix docs`, `mix credo --strict`
-- `mix hex.publish --yes` (publishes package + docs)
+- Runs `mix format --check-formatted`, unit tests, relay-backed integration harness/tests, and `mix credo --strict`
+- `mix hex.publish --yes`
 - Creates/updates the GitHub release with notes extracted from `CHANGELOG.md`
 
 ## Quick checklist

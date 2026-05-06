@@ -7,7 +7,6 @@ defmodule MOQX.MixProject do
       version: "0.7.1",
       description: description(),
       elixir: "~> 1.19",
-      elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       source_url: "https://github.com/dmorn/moqx",
       homepage_url: "https://github.com/dmorn/moqx",
@@ -24,9 +23,6 @@ defmodule MOQX.MixProject do
     ]
   end
 
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
-  defp elixirc_paths(_), do: ["lib"]
-
   def cli do
     [
       preferred_envs: [ci: :test, "test.integration": :test]
@@ -35,15 +31,14 @@ defmodule MOQX.MixProject do
 
   defp deps do
     [
-      {:rustler, "~> 0.37.1", runtime: false},
-      {:jose, "~> 1.11"},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:ex_doc, "~> 0.31", only: :dev, runtime: false}
+      {:quicer,
+       git: "https://github.com/dmorn/quic.git", branch: "fix/macos-cmake-arch-detection"},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 
   defp description do
-    "Elixir MOQ client bindings over Rustler NIFs with split publisher/subscriber sessions and draft-14 subgroup/datagram delivery."
+    "Elixir Media over QUIC transport library targeting MOQT draft-14."
   end
 
   defp package do
@@ -54,7 +49,7 @@ defmodule MOQX.MixProject do
         "Changelog" => "https://github.com/dmorn/moqx/blob/main/CHANGELOG.md",
         "GitHub" => "https://github.com/dmorn/moqx"
       },
-      files: ~w(lib native priv mix.exs mix.lock README.md LICENSE CHANGELOG.md)
+      files: ~w(lib mix.exs mix.lock README.md LICENSE CHANGELOG.md)
     ]
   end
 

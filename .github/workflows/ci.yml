@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   checks:
-    name: format, credo, unit tests
+    name: format and tests
     runs-on: ubuntu-latest
 
     steps:
@@ -25,8 +25,6 @@ jobs:
           elixir-version: '1.19.0'
           otp-version: '27.3'
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - name: Cache Mix
         uses: actions/cache@v5
         with:
@@ -36,18 +34,6 @@ jobs:
           key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-mix-
-
-      - name: Cache Cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('mix.lock', 'native/moqx_native/Cargo.lock', '.moq-dev/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
       - name: Install dependencies
         run: mix deps.get
@@ -55,14 +41,11 @@ jobs:
       - name: Run fast checks
         run: mix ci
 
-  relay-integration:
-    # The moqtail relay needs TLS cert/key files produced by
-    # scripts/generate_integration_certs.sh. GitHub Actions `services:`
-    # containers start before `actions/checkout` runs, so they cannot mount
-    # repo-generated files — hence we start the relay manually as a step
-    # after checkout + cert generation. See also: host networking is used
-    # to side-step UDP/QUIC port-mapping quirks on the runner.
-    name: relay-backed integration tests
+  relay-integration-harness:
+    # Retained from the previous project as setup only. The redesign currently
+    # has no integration tests, but this job verifies the pinned relay harness
+    # can still start for future relay-backed coverage.
+    name: relay integration harness
     runs-on: ubuntu-latest
 
     steps:
@@ -73,8 +56,6 @@ jobs:
           elixir-version: '1.19.0'
           otp-version: '27.3'
 
-      - uses: dtolnay/rust-toolchain@stable
-
       - name: Cache Mix
         uses: actions/cache@v5
         with:
@@ -84,18 +65,6 @@ jobs:
           key: ${{ runner.os }}-mix-${{ hashFiles('mix.lock') }}
           restore-keys: |
             ${{ runner.os }}-mix-
-
-      - name: Cache Cargo
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('mix.lock', 'native/moqx_native/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
       - name: Install Elixir dependencies
         run: mix deps.get
@@ -132,7 +101,7 @@ jobs:
           docker logs moqx-relay || true
           exit 1
 
-      - name: Run relay-backed integration tests
+      - name: Run placeholder integration command
         env:
           MOQX_EXTERNAL_RELAY_URL: https://127.0.0.1:4433
           MOQX_RELAY_CACERTFILE: .tmp/integration-certs/ca.pem
