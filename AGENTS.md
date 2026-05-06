@@ -6,7 +6,7 @@
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues for `dmorn/moqx`. See `docs/agents/issue-tracker.md`.
+Issues are tracked as local markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
