@@ -25,7 +25,7 @@ defmodule MOQX.MixProject do
 
   def cli do
     [
-      preferred_envs: [ci: :test, "test.integration": :test]
+      preferred_envs: [ci: :test]
     ]
   end
 
@@ -62,8 +62,7 @@ defmodule MOQX.MixProject do
 
   defp aliases do
     [
-      ci: ["format --check-formatted", "credo --strict", "test --exclude integration"],
-      "test.integration": ["test --only integration"]
+      ci: ["format --check-formatted", "credo --strict", "test"]
     ]
   end
 end
