@@ -22,11 +22,11 @@ defmodule MOQX.Transport.Quicer.Options do
   end
 
   def normalize_opts(opts) when is_map(opts) do
-    if Map.has_key?(opts, :alpn) do
-      Map.update!(opts, :alpn, &normalize_alpn/1)
-    else
-      opts
-    end
+    opts
+    |> normalize_option(:alpn, &normalize_alpn/1)
+    |> normalize_option(:cacertfile, &normalize_text/1)
+    |> normalize_option(:certfile, &normalize_text/1)
+    |> normalize_option(:keyfile, &normalize_text/1)
   end
 
   @spec normalize_alpn(binary() | charlist() | [binary() | charlist()] | nil) ::
@@ -39,6 +39,14 @@ defmodule MOQX.Transport.Quicer.Options do
       [alpn]
     else
       Enum.map(alpn, &normalize_text/1)
+    end
+  end
+
+  defp normalize_option(opts, key, normalizer) do
+    if Map.has_key?(opts, key) do
+      Map.update!(opts, key, normalizer)
+    else
+      opts
     end
   end
 end

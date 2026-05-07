@@ -57,17 +57,34 @@ services:
       - .:/workspace
       - ./.tmp/integration-certs:/certs:ro
     command:
-      - go
-      - run
-      - ./tools/quicprobe
-      - server
-      - --addr
-      - :4433
-      - --cert
-      - /certs/server.pem
-      - --key
-      - /certs/server-key.pem
-      - --alpn
-      - moqx-test
+      - sh
+      - -eu
+      - -c
+      - |
+        go build -o /tmp/quicprobe ./tools/quicprobe
+        exec /tmp/quicprobe server \
+          --addr :4433 \
+          --cert /certs/server.pem \
+          --key /certs/server-key.pem \
+          --alpn moqx-test
     ports:
       - "4433:4433/udp"
+    healthcheck:
+      test:
+        - CMD
+        - /tmp/quicprobe
+        - client
+        - --addr
+        - 127.0.0.1:4433
+        - --ca
+        - /certs/ca.pem
+        - --servername
+        - localhost
+        - --alpn
+        - moqx-test
+        - --bidi-echo
+        - health
+      interval: 2s
+      timeout: 10s
+      retries: 30
+      start_period: 5s

@@ -1,6 +1,6 @@
 # Add quicer client to reference server integration
 
-Status: needs-triage
+Status: closed
 Type: AFK
 
 ## Parent
@@ -15,13 +15,13 @@ This covers the “calling” direction of the real transport boundary.
 
 ## Acceptance criteria
 
-- [ ] The test module is tagged `:integration` and excluded by default.
-- [ ] The test reads static endpoint/cert/ALPN configuration from `config/test.exs` without mutating `Application` env.
-- [ ] The test connects to the reference QUIC server using `MOQX.Transport.Quicer`.
-- [ ] The test verifies handshake and negotiated capabilities where available.
-- [ ] The test opens a bidirectional stream and verifies stream data send/receive behavior.
-- [ ] The test can reuse shared stream contract expectations where practical.
-- [ ] Failure output clearly says Docker Compose must be running if the reference endpoint is unavailable.
+- [x] The test module is tagged `:integration` and excluded by default.
+- [x] The test reads static endpoint/cert/ALPN configuration from `config/test.exs` without mutating `Application` env.
+- [x] The test connects to the reference QUIC server using `MOQX.Transport.Quicer`.
+- [x] The test verifies handshake and negotiated capabilities where available.
+- [x] The test opens a bidirectional stream and verifies stream data send/receive behavior.
+- [x] The test can reuse shared stream contract expectations where practical.
+- [x] Failure output clearly says Docker Compose must be running if the reference endpoint is unavailable.
 
 ## Blocked by
 
@@ -30,3 +30,5 @@ This covers the “calling” direction of the real transport boundary.
 - `.scratch/transport-layer-foundation/issues/18-add-integration-test-configuration.md`
 
 ## Comments
+
+- 2026-05-07: Added an integration-tagged parameterized transport contract scenario for `MOQX.Transport.Quicer` as a client to the Compose-managed `quicprobe` reference server. The shared client echo behavior now runs through `test/support/transport_contract.ex`, with fixtures providing setup glue for support and reference-server topologies.

@@ -34,6 +34,18 @@ defmodule MOQX.Transport.Quicer.OptionsTest do
       assert Options.normalize_opts(%{alpn: ~c"moq-00"}) == %{alpn: [~c"moq-00"]}
     end
 
+    test "converts certificate path options to charlists" do
+      assert Options.normalize_opts(
+               cacertfile: ".tmp/integration-certs/ca.pem",
+               certfile: ".tmp/integration-certs/server.pem",
+               keyfile: ".tmp/integration-certs/server-key.pem"
+             ) == %{
+               cacertfile: ~c".tmp/integration-certs/ca.pem",
+               certfile: ~c".tmp/integration-certs/server.pem",
+               keyfile: ~c".tmp/integration-certs/server-key.pem"
+             }
+    end
+
     test "does not add ALPN when absent" do
       assert Options.normalize_opts(active: false) == %{active: false}
     end

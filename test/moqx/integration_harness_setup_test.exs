@@ -32,6 +32,7 @@ defmodule MOQX.IntegrationHarnessSetupTest do
     assert compose =~ ".tmp/integration-certs"
     assert compose =~ "quic-ref-server"
     assert compose =~ "4433:4433/udp"
+    assert compose =~ "healthcheck:"
     assert compose =~ "tools/quicprobe"
     assert compose =~ "DNS.1 = localhost"
     assert compose =~ "IP.1 = 127.0.0.1"

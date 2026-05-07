@@ -173,13 +173,14 @@ func handleConnection(ctx context.Context, conn quic.Connection) {
 }
 
 func handleBidiEchoStream(stream quic.Stream) {
-	payload, err := io.ReadAll(stream)
-	if err != nil {
+	buffer := make([]byte, 64*1024)
+	n, err := stream.Read(buffer)
+	if err != nil && err != io.EOF {
 		stream.CancelWrite(1)
 		return
 	}
 
-	if _, err := stream.Write(payload); err != nil {
+	if _, err := stream.Write(buffer[:n]); err != nil {
 		stream.CancelWrite(1)
 		return
 	}
