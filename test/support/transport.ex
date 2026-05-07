@@ -28,6 +28,12 @@ defmodule MOQX.Transport.Support do
     defstruct [:pid]
   end
 
+  defmodule Stream do
+    @moduledoc false
+    @opaque t :: %__MODULE__{pid: pid()}
+    defstruct [:pid]
+  end
+
   @draft14 %Capabilities{
     alpn: "moq-00",
     datagrams: true,
@@ -78,8 +84,9 @@ defmodule MOQX.Transport.Support do
          {:ok, requested_capabilities} <- profile_capabilities(option(opts, :profile, :draft14)),
          {:ok, listener} <- lookup_listener(network, port, timeout),
          :ok <- compatible_capabilities(listener.capabilities, requested_capabilities) do
-      client = start_connection(requested_capabilities)
-      server = start_connection(listener.capabilities)
+      client = start_connection(requested_capabilities, self())
+      server = start_connection(listener.capabilities, nil)
+      pair_connections(client, server)
 
       ref = make_ref()
       send(listener.pid, {:new_connection, self(), ref, server})
@@ -106,6 +113,7 @@ defmodule MOQX.Transport.Support do
 
     receive do
       {^ref, {:ok, connection}} ->
+        set_connection_owner(connection, self())
         capabilities = capabilities(connection)
 
         send(
@@ -149,16 +157,49 @@ defmodule MOQX.Transport.Support do
   def normalize_message(_message), do: :unknown
 
   @impl true
-  def open_stream(_connection, _opts), do: {:error, :not_implemented}
+  def open_stream(%Connection{} = connection, opts) do
+    direction = option(opts, :direction, :bidirectional)
+    ref = make_ref()
+    send(connection.pid, {:open_stream, self(), ref, direction})
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
 
   @impl true
-  def accept_stream(_connection, _opts, _timeout), do: {:error, :not_implemented}
+  def accept_stream(%Connection{} = connection, _opts, timeout) do
+    ref = make_ref()
+    send(connection.pid, {:accept_stream, self(), ref})
+
+    receive do
+      {^ref, result} -> result
+    after
+      timeout ->
+        send(connection.pid, {:cancel_accept_stream, ref})
+        {:error, :timeout}
+    end
+  end
 
   @impl true
-  def send_stream(_stream, _data, _opts), do: {:error, :not_implemented}
+  def send_stream(%Stream{} = stream, data, _opts) do
+    ref = make_ref()
+    send(stream.pid, {:send_data, self(), ref, IO.iodata_to_binary(data)})
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
 
   @impl true
-  def recv_stream(_stream, _byte_count), do: {:error, :not_implemented}
+  def recv_stream(%Stream{} = stream, byte_count) do
+    ref = make_ref()
+    send(stream.pid, {:recv_data, self(), ref, byte_count})
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
 
   @impl true
   def send_datagram(_connection, _data), do: {:error, :not_implemented}
@@ -170,7 +211,14 @@ defmodule MOQX.Transport.Support do
   def close_connection(_connection, _reason), do: {:error, :not_implemented}
 
   @impl true
-  def set_active(_stream, _active), do: {:error, :not_implemented}
+  def set_active(%Stream{} = stream, active) do
+    ref = make_ref()
+    send(stream.pid, {:set_active, self(), ref, active})
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
 
   @impl true
   def controlling_process(_handle, _pid), do: {:error, :not_implemented}
@@ -181,8 +229,26 @@ defmodule MOQX.Transport.Support do
 
   def port(%Listener{port: port}), do: port
 
-  defp start_connection(capabilities) do
-    %Connection{pid: spawn(fn -> connection_loop(capabilities, false) end)}
+  defp start_connection(capabilities, owner) do
+    state = %{
+      capabilities: capabilities,
+      handshaken?: false,
+      owner: owner,
+      peer: nil,
+      pending_streams: :queue.new(),
+      stream_acceptors: :queue.new()
+    }
+
+    %Connection{pid: spawn(fn -> connection_loop(state) end)}
+  end
+
+  defp pair_connections(%Connection{} = left, %Connection{} = right) do
+    send(left.pid, {:set_peer, right})
+    send(right.pid, {:set_peer, left})
+  end
+
+  defp set_connection_owner(%Connection{} = connection, owner) do
+    send(connection.pid, {:set_owner, owner})
   end
 
   defp network_loop(listeners, next_port) do
@@ -252,17 +318,159 @@ defmodule MOQX.Transport.Support do
     |> :queue.from_list()
   end
 
-  defp connection_loop(capabilities, handshaken?) do
+  defp connection_loop(state) do
     receive do
+      {:set_peer, peer} ->
+        connection_loop(%{state | peer: peer})
+
+      {:set_owner, owner} ->
+        connection_loop(%{state | owner: owner})
+
       {:handshake, caller, ref} ->
         send(caller, {ref, :ok})
-        connection_loop(capabilities, true)
+        connection_loop(%{state | handshaken?: true})
 
       {:capabilities, caller, ref} ->
-        send(caller, {ref, capabilities})
-        connection_loop(capabilities, handshaken?)
+        send(caller, {ref, state.capabilities})
+        connection_loop(state)
+
+      {:open_stream, caller, ref, direction} ->
+        local_stream = start_stream(caller)
+        remote_stream = start_stream(nil)
+        pair_streams(local_stream, remote_stream)
+
+        send(state.peer.pid, {:incoming_stream, remote_stream, direction})
+        send(caller, {ref, {:ok, local_stream}})
+
+        send(
+          caller,
+          {:moqx_transport,
+           {:stream_event, local_stream, :start_completed,
+            %{direction: direction, initiator: :local}}}
+        )
+
+        connection_loop(state)
+
+      {:incoming_stream, stream, direction} ->
+        case :queue.out(state.stream_acceptors) do
+          {{:value, {accept_ref, acceptor}}, remaining_acceptors} ->
+            set_stream_owner(stream, acceptor)
+            send(acceptor, {accept_ref, {:ok, stream}})
+
+            send(
+              acceptor,
+              {:moqx_transport,
+               {:stream_event, stream, :new_stream, %{direction: direction, initiator: :peer}}}
+            )
+
+            connection_loop(%{state | stream_acceptors: remaining_acceptors})
+
+          {:empty, _acceptors} ->
+            pending = :queue.in({stream, direction}, state.pending_streams)
+            connection_loop(%{state | pending_streams: pending})
+        end
+
+      {:accept_stream, caller, ref} ->
+        case :queue.out(state.pending_streams) do
+          {{:value, {stream, direction}}, remaining_pending} ->
+            set_stream_owner(stream, caller)
+            send(caller, {ref, {:ok, stream}})
+
+            send(
+              caller,
+              {:moqx_transport,
+               {:stream_event, stream, :new_stream, %{direction: direction, initiator: :peer}}}
+            )
+
+            connection_loop(%{state | pending_streams: remaining_pending})
+
+          {:empty, _pending} ->
+            acceptors = :queue.in({ref, caller}, state.stream_acceptors)
+            connection_loop(%{state | stream_acceptors: acceptors})
+        end
+
+      {:cancel_accept_stream, ref} ->
+        connection_loop(%{state | stream_acceptors: reject_acceptor(state.stream_acceptors, ref)})
     end
   end
+
+  defp start_stream(owner) do
+    state = %{owner: owner, peer: nil, buffer: <<>>, recvs: :queue.new(), active: false}
+    %Stream{pid: spawn(fn -> stream_loop(state) end)}
+  end
+
+  defp pair_streams(%Stream{} = left, %Stream{} = right) do
+    send(left.pid, {:set_peer, right})
+    send(right.pid, {:set_peer, left})
+  end
+
+  defp set_stream_owner(%Stream{} = stream, owner) do
+    send(stream.pid, {:set_owner, owner})
+  end
+
+  defp stream_loop(state) do
+    receive do
+      {:set_peer, peer} ->
+        stream_loop(%{state | peer: peer})
+
+      {:set_owner, owner} ->
+        stream_loop(%{state | owner: owner})
+
+      {:send_data, caller, ref, data} ->
+        send(state.peer.pid, {:incoming_data, data})
+        send(caller, {ref, :ok})
+        stream_loop(state)
+
+      {:incoming_data, data} ->
+        if state.active && state.owner do
+          send(state.owner, {:moqx_transport, {:stream_data, %Stream{pid: self()}, data, %{}}})
+          stream_loop(state)
+        else
+          stream_loop(deliver_passive_data(%{state | buffer: state.buffer <> data}))
+        end
+
+      {:set_active, caller, ref, active} ->
+        send(caller, {ref, :ok})
+        stream_loop(%{state | active: active})
+
+      {:recv_data, caller, ref, byte_count} ->
+        case take_bytes(state.buffer, byte_count) do
+          {:ok, data, remaining} ->
+            send(caller, {ref, {:ok, data}})
+            stream_loop(%{state | buffer: remaining})
+
+          :not_enough_data ->
+            stream_loop(%{state | recvs: :queue.in({caller, ref, byte_count}, state.recvs)})
+        end
+
+      {:stop, _reason} ->
+        :ok
+    end
+  end
+
+  defp deliver_passive_data(state) do
+    case :queue.out(state.recvs) do
+      {{:value, {caller, ref, byte_count}}, remaining_recvs} ->
+        case take_bytes(state.buffer, byte_count) do
+          {:ok, data, remaining_buffer} ->
+            send(caller, {ref, {:ok, data}})
+            deliver_passive_data(%{state | buffer: remaining_buffer, recvs: remaining_recvs})
+
+          :not_enough_data ->
+            state
+        end
+
+      {:empty, _recvs} ->
+        state
+    end
+  end
+
+  defp take_bytes(buffer, byte_count) when byte_size(buffer) >= byte_count do
+    <<data::binary-size(byte_count), remaining::binary>> = buffer
+    {:ok, data, remaining}
+  end
+
+  defp take_bytes(_buffer, _byte_count), do: :not_enough_data
 
   defp lookup_listener(network, port, timeout) do
     ref = make_ref()

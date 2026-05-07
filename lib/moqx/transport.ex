@@ -5,6 +5,10 @@ defmodule MOQX.Transport do
   The protocol layer should depend on this behaviour rather than on a concrete
   QUIC library. Tests can provide an in-memory implementation with the same
   connection, stream, datagram, and event semantics.
+
+  Stream data is ordered within a stream. The transport contract does not
+  promise ordering across different streams; draft-specific schedulers must
+  handle cross-stream arrival order themselves.
   """
 
   @type listener :: term()

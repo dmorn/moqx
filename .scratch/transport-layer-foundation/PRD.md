@@ -126,6 +126,10 @@ Initial test coverage should include:
 
 The support transport must not model only MOQT draft-14's single-control-stream world. It should model generic QUIC-like streams so draft-14 and MOQ Lite protocol rules can be enforced above it.
 
+Real QUIC verification belongs in an explicit Docker Compose driven integration harness, not default tests. Integration tests should be tagged `:integration`, excluded by default, and run after the caller starts `docker compose -f docker-compose.integration.yml up -d --wait`.
+
+The integration harness should cover both directions: `MOQX.Transport.Quicer` client to a reference QUIC server, and a reference QUIC client to a `MOQX.Transport.Quicer` listener. Static endpoint and certificate paths belong in `config/test.exs`; tests must not mutate `Application` env.
+
 The benchmark harness should eventually compare raw network/host baselines, self-pair `MOQX.Transport.Quicer` performance, our client against a reference QUIC server, and a reference QUIC client against our listener.
 
 `iperf3` is a baseline tool for host/network capacity, not a QUIC benchmark. QUIC performance measurements should be interpreted relative to that baseline.
