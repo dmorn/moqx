@@ -9,6 +9,11 @@ defmodule MOQX.Transport do
   Stream data is ordered within a stream. The transport contract does not
   promise ordering across different streams; draft-specific schedulers must
   handle cross-stream arrival order themselves.
+
+  Datagrams are capability-gated, unreliable, and not fragmented by the
+  transport layer. MOQT object delivery code must query capabilities and keep
+  each datagram payload within the advertised max size or a conservative
+  protocol limit when the backend reports `:unknown`.
   """
 
   @type listener :: term()

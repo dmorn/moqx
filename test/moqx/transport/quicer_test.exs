@@ -13,7 +13,7 @@ defmodule MOQX.Transport.QuicerTest do
 
     test "normalizes datagram messages" do
       assert Quicer.normalize_message({:quic, "payload", :connection, :flags}) ==
-               {:datagram, :connection, "payload", :flags}
+               {:datagram, :connection, "payload", %{flags: :flags}}
     end
 
     test "returns unknown for unrecognized backend messages" do

@@ -22,6 +22,7 @@ defmodule MOQX.TransportContract do
       unquote(client_echo_tests(contracts))
       unquote(listener_echo_tests(contracts))
       unquote(self_pair_tests(contracts))
+      unquote(datagram_tests(contracts))
 
       defp connect_pair(fixture, profile) do
         {:ok, pair} = fixture.connect_pair(profile)
@@ -37,6 +38,27 @@ defmodule MOQX.TransportContract do
 
       defp cleanup_pair(%{cleanup: cleanup}) when is_function(cleanup, 0), do: cleanup.()
       defp cleanup_pair(_pair), do: :ok
+
+      defp await_stream_event(transport, stream, event, timeout) do
+        case MOQX.Transport.receive_event(transport, timeout) do
+          {:stream_event, ^stream, ^event, metadata} -> metadata
+          :timeout -> :timeout
+          _event -> await_stream_event(transport, stream, event, 0)
+        end
+      end
+
+      defp await_datagram(transport, connection, payload, timeout) do
+        case MOQX.Transport.receive_event(transport, timeout) do
+          {:datagram, ^connection, ^payload, metadata} when is_map(metadata) ->
+            metadata
+
+          :timeout ->
+            :timeout
+
+          _event ->
+            await_datagram(transport, connection, payload, 0)
+        end
+      end
     end
   end
 
@@ -100,6 +122,69 @@ defmodule MOQX.TransportContract do
     end
   end
 
+  defp datagram_tests(contracts) do
+    if :datagram in contracts do
+      quote do
+        test "reports datagram capability by transport profile", %{fixture: fixture} do
+          draft14_pair = connect_pair(fixture, :draft14)
+
+          try do
+            %{transport: transport, client: client} = draft14_pair
+
+            assert %MOQX.Transport.Capabilities{datagrams: true, max_datagram_size: max_size} =
+                     transport.capabilities(client)
+
+            assert is_integer(max_size) or max_size in [:unknown, :unsupported]
+          after
+            cleanup_pair(draft14_pair)
+          end
+
+          moq_lite_pair = connect_pair(fixture, :moq_lite)
+
+          try do
+            %{transport: transport, client: client} = moq_lite_pair
+
+            assert %MOQX.Transport.Capabilities{datagrams: false, max_datagram_size: max_size} =
+                     transport.capabilities(client)
+
+            assert max_size in [:unknown, :unsupported]
+          after
+            cleanup_pair(moq_lite_pair)
+          end
+        end
+
+        test "sends a binary datagram as a normalized peer event when available", %{
+          fixture: fixture
+        } do
+          pair = connect_pair(fixture, :draft14)
+
+          try do
+            %{transport: transport, client: client, server: server} = pair
+            payload = <<"draft14 datagram">>
+
+            assert :ok = transport.send_datagram(client, payload)
+            assert %{} = await_datagram(transport, server, payload, 100)
+          after
+            cleanup_pair(pair)
+          end
+        end
+
+        test "rejects datagrams when profile disables them", %{fixture: fixture} do
+          pair = connect_pair(fixture, :moq_lite)
+
+          try do
+            %{transport: transport, client: client} = pair
+
+            assert {:error, :datagrams_unavailable} = transport.send_datagram(client, "moq-lite")
+            assert :timeout = MOQX.Transport.receive_event(transport, 0)
+          after
+            cleanup_pair(pair)
+          end
+        end
+      end
+    end
+  end
+
   defp self_pair_tests(contracts) do
     if :self_pair in contracts do
       quote do
@@ -112,13 +197,11 @@ defmodule MOQX.TransportContract do
             assert {:ok, client_stream} = transport.open_stream(client, direction: :bidirectional)
             assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
 
-            assert {:stream_event, ^client_stream, :start_completed,
-                    %{direction: :bidirectional, initiator: :local}} =
-                     MOQX.Transport.receive_event(transport, 0)
+            assert %{direction: :bidirectional, initiator: :local} =
+                     await_stream_event(transport, client_stream, :start_completed, 100)
 
-            assert {:stream_event, ^server_stream, :new_stream,
-                    %{direction: :bidirectional, initiator: :peer}} =
-                     MOQX.Transport.receive_event(transport, 0)
+            assert %{direction: :bidirectional, initiator: :peer} =
+                     await_stream_event(transport, server_stream, :new_stream, 100)
           after
             cleanup_pair(pair)
           end
@@ -135,13 +218,11 @@ defmodule MOQX.TransportContract do
 
             assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
 
-            assert {:stream_event, ^client_stream, :start_completed,
-                    %{direction: :unidirectional, initiator: :local}} =
-                     MOQX.Transport.receive_event(transport, 0)
+            assert %{direction: :unidirectional, initiator: :local} =
+                     await_stream_event(transport, client_stream, :start_completed, 100)
 
-            assert {:stream_event, ^server_stream, :new_stream,
-                    %{direction: :unidirectional, initiator: :peer}} =
-                     MOQX.Transport.receive_event(transport, 0)
+            assert %{direction: :unidirectional, initiator: :peer} =
+                     await_stream_event(transport, server_stream, :new_stream, 100)
           after
             cleanup_pair(pair)
           end
@@ -474,18 +555,18 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
 
   @stream_limit 10
 
-  def connect_pair(_profile) do
+  def connect_pair(profile) do
     config = Application.fetch_env!(:moqx, :integration)
     listener_config = Keyword.fetch!(config, :local_listener)
 
-    case start_listener(listener_config) do
-      {:ok, listener} -> connect_pair_with_cleanup(listener, listener_config)
+    case start_listener(listener_config, profile) do
+      {:ok, listener} -> connect_pair_with_cleanup(listener, listener_config, profile)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp connect_pair_with_cleanup(listener, listener_config) do
-    case connect_pair(listener, listener_config) do
+  defp connect_pair_with_cleanup(listener, listener_config, profile) do
+    case connect_pair(listener, listener_config, profile) do
       {:ok, client, server} ->
         flush_transport_events()
 
@@ -503,28 +584,32 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
     end
   end
 
-  defp start_listener(listener_config) do
+  defp start_listener(listener_config, profile) do
     host = Keyword.fetch!(listener_config, :host)
 
-    Quicer.listen("#{host}:0",
-      alpn: Keyword.fetch!(listener_config, :alpn),
-      certfile: Keyword.fetch!(listener_config, :certfile),
-      keyfile: Keyword.fetch!(listener_config, :keyfile),
-      peer_bidi_stream_count: @stream_limit,
-      peer_unidi_stream_count: @stream_limit
+    Quicer.listen(
+      "#{host}:0",
+      datagram_opts(profile) ++
+        [
+          alpn: Keyword.fetch!(listener_config, :alpn),
+          certfile: Keyword.fetch!(listener_config, :certfile),
+          keyfile: Keyword.fetch!(listener_config, :keyfile),
+          peer_bidi_stream_count: @stream_limit,
+          peer_unidi_stream_count: @stream_limit
+        ]
     )
   end
 
-  defp connect_pair(listener, listener_config) do
+  defp connect_pair(listener, listener_config, profile) do
     with {:ok, {_ip, port}} <- Quicer.local_address(listener) do
       owner = self()
       accept_task = Task.async(fn -> accept_server(listener, owner) end)
-      connect_client_and_await_server(listener_config, port, accept_task)
+      connect_client_and_await_server(listener_config, port, accept_task, profile)
     end
   end
 
-  defp connect_client_and_await_server(listener_config, port, accept_task) do
-    case connect_client(listener_config, port) do
+  defp connect_client_and_await_server(listener_config, port, accept_task, profile) do
+    case connect_client(listener_config, port, profile) do
       {:ok, client} -> await_server_for_client(client, accept_task)
       {:error, reason} -> stop_accept_task(accept_task, reason)
     end
@@ -554,18 +639,26 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
     end
   end
 
-  defp connect_client(listener_config, port) do
+  defp connect_client(listener_config, port, profile) do
     host = Keyword.fetch!(listener_config, :host)
 
-    Quicer.connect(host, port,
-      alpn: Keyword.fetch!(listener_config, :alpn),
-      cacertfile: Keyword.fetch!(listener_config, :cacertfile),
-      verify: :verify_peer,
-      server_name: "localhost",
-      peer_bidi_stream_count: @stream_limit,
-      peer_unidi_stream_count: @stream_limit
+    Quicer.connect(
+      host,
+      port,
+      datagram_opts(profile) ++
+        [
+          alpn: Keyword.fetch!(listener_config, :alpn),
+          cacertfile: Keyword.fetch!(listener_config, :cacertfile),
+          verify: :verify_peer,
+          server_name: "localhost",
+          peer_bidi_stream_count: @stream_limit,
+          peer_unidi_stream_count: @stream_limit
+        ]
     )
   end
+
+  defp datagram_opts(:draft14), do: [datagram_receive_enabled: 1]
+  defp datagram_opts(_profile), do: []
 
   defp await_accept_server(task) do
     case Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill) do

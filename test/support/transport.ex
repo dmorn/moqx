@@ -202,7 +202,14 @@ defmodule MOQX.Transport.Support do
   end
 
   @impl true
-  def send_datagram(_connection, _data), do: {:error, :not_implemented}
+  def send_datagram(%Connection{} = connection, data) when is_binary(data) do
+    ref = make_ref()
+    send(connection.pid, {:send_datagram, self(), ref, data})
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
 
   @impl true
   def close_stream(_stream, _reason), do: {:error, :not_implemented}
@@ -332,6 +339,28 @@ defmodule MOQX.Transport.Support do
 
       {:capabilities, caller, ref} ->
         send(caller, {ref, state.capabilities})
+        connection_loop(state)
+
+      {:send_datagram, caller, ref, data} ->
+        if state.capabilities.datagrams == true do
+          send(state.peer.pid, {:incoming_datagram, caller, ref, data})
+        else
+          send(caller, {ref, {:error, :datagrams_unavailable}})
+        end
+
+        connection_loop(state)
+
+      {:incoming_datagram, sender, ref, data} ->
+        if state.capabilities.datagrams == true do
+          if state.owner do
+            send(state.owner, {:moqx_transport, {:datagram, %Connection{pid: self()}, data, %{}}})
+          end
+
+          send(sender, {ref, :ok})
+        else
+          send(sender, {ref, {:error, :datagrams_unavailable}})
+        end
+
         connection_loop(state)
 
       {:open_stream, caller, ref, direction} ->

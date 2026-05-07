@@ -88,7 +88,9 @@ defmodule MOQX.Transport.Quicer do
   def send_datagram(connection, data) when is_binary(data) do
     case :quicer.send_dgram(connection, data) do
       {:ok, _bytes} -> :ok
+      {:error, :dgram_send_error, :invalid_state} -> {:error, :datagrams_unavailable}
       {:error, _reason} = error -> error
+      {:error, reason, details} -> {:error, {reason, details}}
     end
   end
 
@@ -130,7 +132,7 @@ defmodule MOQX.Transport.Quicer do
   end
 
   def normalize_message({:quic, data, connection, flags}) when is_binary(data) do
-    {:datagram, connection, data, flags}
+    {:datagram, connection, data, %{flags: flags}}
   end
 
   def normalize_message({:quic, :new_conn, connection, props}) do
