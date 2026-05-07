@@ -13,7 +13,8 @@ defmodule MOQX.MixProject do
       package: package(),
       docs: docs(),
       aliases: aliases(),
-      deps: deps()
+      deps: deps(),
+      elixirc_paths: elixirc_paths(Mix.env())
     ]
   end
 
@@ -28,6 +29,9 @@ defmodule MOQX.MixProject do
       preferred_envs: [ci: :test]
     ]
   end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_env), do: ["lib"]
 
   defp deps do
     [
