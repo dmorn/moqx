@@ -19,6 +19,36 @@ defmodule MOQX.Transport.Quicer.OptionsTest do
     end
   end
 
+  describe "normalize_stream_opts/1" do
+    test "maps transport stream direction to quicer open/start flags" do
+      assert Options.normalize_stream_opts(direction: :unidirectional) == %{
+               active: false,
+               quic_event_mask: 1,
+               open_flag: 1,
+               start_flag: 1
+             }
+    end
+
+    test "starts bidirectional streams immediately without quicer-only direction metadata" do
+      assert Options.normalize_stream_opts(direction: :bidirectional, active: true) == %{
+               active: true,
+               quic_event_mask: 1,
+               open_flag: 0,
+               start_flag: 1
+             }
+    end
+  end
+
+  describe "normalize_accept_stream_opts/1" do
+    test "defaults accepted streams to passive receive" do
+      assert Options.normalize_accept_stream_opts([]) == %{active: false}
+    end
+
+    test "preserves explicit active receive mode" do
+      assert Options.normalize_accept_stream_opts(active: true) == %{active: true}
+    end
+  end
+
   describe "normalize_opts/1" do
     test "converts Elixir ALPN strings to quicer charlists" do
       assert Options.normalize_opts(%{alpn: ["moq-00", "moq-lite-04"]}) == %{

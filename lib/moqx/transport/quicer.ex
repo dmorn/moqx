@@ -8,6 +8,8 @@ defmodule MOQX.Transport.Quicer do
 
   @behaviour MOQX.Transport
 
+  import Bitwise, only: [&&&: 2]
+
   alias MOQX.Transport.Capabilities
   alias MOQX.Transport.Quicer.Options
 
@@ -50,12 +52,23 @@ defmodule MOQX.Transport.Quicer do
 
   @impl true
   def open_stream(connection, opts \\ []) do
-    :quicer.start_stream(connection, Options.normalize_opts(opts))
+    :quicer.start_stream(connection, Options.normalize_stream_opts(opts))
   end
 
   @impl true
   def accept_stream(connection, opts \\ [], timeout \\ :infinity) do
-    :quicer.accept_stream(connection, Options.normalize_opts(opts), timeout)
+    case :quicer.accept_stream(connection, Options.normalize_accept_stream_opts(opts), timeout) do
+      {:ok, stream} ->
+        send(
+          self(),
+          {:moqx_transport, {:stream_event, stream, :new_stream, peer_stream_metadata(stream)}}
+        )
+
+        {:ok, stream}
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @impl true
@@ -109,6 +122,8 @@ defmodule MOQX.Transport.Quicer do
   end
 
   @impl true
+  def normalize_message({:moqx_transport, event}), do: event
+
   def normalize_message({:quic, data, stream, %{absolute_offset: _, len: _, flags: _} = props})
       when is_binary(data) do
     {:stream_data, stream, data, props}
@@ -155,7 +170,7 @@ defmodule MOQX.Transport.Quicer do
              :continue,
              :passive
            ] do
-    {:stream_event, stream, event, props}
+    {:stream_event, stream, event, normalize_stream_event_metadata(event, props)}
   end
 
   def normalize_message({:quic, :listener_stopped, listener, props}) do
@@ -167,6 +182,35 @@ defmodule MOQX.Transport.Quicer do
   end
 
   def normalize_message(_message), do: :unknown
+
+  defp peer_stream_metadata(stream) do
+    case :quicer.get_stream_id(stream) do
+      {:ok, stream_id} -> %{direction: direction_from_stream_id(stream_id), initiator: :peer}
+      {:error, reason} -> %{direction: :unknown, initiator: :peer, metadata_error: reason}
+    end
+  end
+
+  defp normalize_stream_event_metadata(:new_stream, %{flags: flags} = props) do
+    props
+    |> Map.put(:direction, direction_from_open_flags(flags))
+    |> Map.put(:initiator, :peer)
+  end
+
+  defp normalize_stream_event_metadata(:start_completed, %{stream_id: stream_id} = props) do
+    props
+    |> Map.put(:direction, direction_from_stream_id(stream_id))
+    |> Map.put(:initiator, :local)
+  end
+
+  defp normalize_stream_event_metadata(_event, props), do: props
+
+  defp direction_from_open_flags(flags) when is_integer(flags) do
+    if (flags &&& 1) == 1, do: :unidirectional, else: :bidirectional
+  end
+
+  defp direction_from_stream_id(stream_id) when is_integer(stream_id) do
+    if (stream_id &&& 2) == 2, do: :unidirectional, else: :bidirectional
+  end
 
   defp option(opts, key, default) when is_map(opts), do: Map.get(opts, key, default)
   defp option(opts, key, default) when is_list(opts), do: Keyword.get(opts, key, default)

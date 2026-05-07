@@ -34,6 +34,9 @@ defmodule MOQX.TransportContract do
           _event -> flush_transport_events(transport)
         end
       end
+
+      defp cleanup_pair(%{cleanup: cleanup}) when is_function(cleanup, 0), do: cleanup.()
+      defp cleanup_pair(_pair), do: :ok
     end
   end
 
@@ -101,85 +104,112 @@ defmodule MOQX.TransportContract do
     if :self_pair in contracts do
       quote do
         test "opens and accepts a bidirectional stream with metadata", %{fixture: fixture} do
-          %{transport: transport, client: client, server: server} =
-            connect_pair(fixture, :moq_lite)
+          pair = connect_pair(fixture, :moq_lite)
 
-          assert {:ok, client_stream} = transport.open_stream(client, direction: :bidirectional)
-          assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
+          try do
+            %{transport: transport, client: client, server: server} = pair
 
-          assert {:stream_event, ^client_stream, :start_completed,
-                  %{direction: :bidirectional, initiator: :local}} =
-                   MOQX.Transport.receive_event(transport, 0)
+            assert {:ok, client_stream} = transport.open_stream(client, direction: :bidirectional)
+            assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
 
-          assert {:stream_event, ^server_stream, :new_stream,
-                  %{direction: :bidirectional, initiator: :peer}} =
-                   MOQX.Transport.receive_event(transport, 0)
+            assert {:stream_event, ^client_stream, :start_completed,
+                    %{direction: :bidirectional, initiator: :local}} =
+                     MOQX.Transport.receive_event(transport, 0)
+
+            assert {:stream_event, ^server_stream, :new_stream,
+                    %{direction: :bidirectional, initiator: :peer}} =
+                     MOQX.Transport.receive_event(transport, 0)
+          after
+            cleanup_pair(pair)
+          end
         end
 
         test "opens and accepts a unidirectional stream with metadata", %{fixture: fixture} do
-          %{transport: transport, client: client, server: server} =
-            connect_pair(fixture, :draft14)
+          pair = connect_pair(fixture, :draft14)
 
-          assert {:ok, client_stream} = transport.open_stream(client, direction: :unidirectional)
-          assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
+          try do
+            %{transport: transport, client: client, server: server} = pair
 
-          assert {:stream_event, ^client_stream, :start_completed,
-                  %{direction: :unidirectional, initiator: :local}} =
-                   MOQX.Transport.receive_event(transport, 0)
+            assert {:ok, client_stream} =
+                     transport.open_stream(client, direction: :unidirectional)
 
-          assert {:stream_event, ^server_stream, :new_stream,
-                  %{direction: :unidirectional, initiator: :peer}} =
-                   MOQX.Transport.receive_event(transport, 0)
+            assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
+
+            assert {:stream_event, ^client_stream, :start_completed,
+                    %{direction: :unidirectional, initiator: :local}} =
+                     MOQX.Transport.receive_event(transport, 0)
+
+            assert {:stream_event, ^server_stream, :new_stream,
+                    %{direction: :unidirectional, initiator: :peer}} =
+                     MOQX.Transport.receive_event(transport, 0)
+          after
+            cleanup_pair(pair)
+          end
         end
 
         test "supports many concurrent bidirectional streams", %{fixture: fixture} do
-          %{transport: transport, client: client, server: server} =
-            connect_pair(fixture, :moq_lite)
+          pair = connect_pair(fixture, :moq_lite)
 
-          client_streams =
-            for _index <- 1..5 do
-              assert {:ok, stream} = transport.open_stream(client, direction: :bidirectional)
-              stream
-            end
+          try do
+            %{transport: transport, client: client, server: server} = pair
 
-          server_streams =
-            for _index <- 1..5 do
-              assert {:ok, stream} = transport.accept_stream(server, [], 100)
-              stream
-            end
+            client_streams =
+              for _index <- 1..5 do
+                assert {:ok, stream} = transport.open_stream(client, direction: :bidirectional)
+                stream
+              end
 
-          assert length(Enum.uniq(client_streams)) == 5
-          assert length(Enum.uniq(server_streams)) == 5
+            server_streams =
+              for _index <- 1..5 do
+                assert {:ok, stream} = transport.accept_stream(server, [], 100)
+                stream
+              end
+
+            assert length(Enum.uniq(client_streams)) == 5
+            assert length(Enum.uniq(server_streams)) == 5
+          after
+            cleanup_pair(pair)
+          end
         end
 
         test "sends stream data to passive receive in order", %{fixture: fixture} do
-          %{transport: transport, client: client, server: server} =
-            connect_pair(fixture, :moq_lite)
+          pair = connect_pair(fixture, :moq_lite)
 
-          assert {:ok, client_stream} = transport.open_stream(client, direction: :bidirectional)
-          assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
-          flush_transport_events(transport)
+          try do
+            %{transport: transport, client: client, server: server} = pair
 
-          assert :ok = transport.send_stream(client_stream, ["one", "two"], [])
-          assert :ok = transport.send_stream(client_stream, "three", [])
+            assert {:ok, client_stream} = transport.open_stream(client, direction: :bidirectional)
+            assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
+            flush_transport_events(transport)
 
-          assert {:ok, "onetwo"} = transport.recv_stream(server_stream, 6)
-          assert {:ok, "three"} = transport.recv_stream(server_stream, 5)
+            assert :ok = transport.send_stream(client_stream, ["one", "two"], [])
+            assert :ok = transport.send_stream(client_stream, "three", [])
+
+            assert {:ok, "onetwo"} = transport.recv_stream(server_stream, 6)
+            assert {:ok, "three"} = transport.recv_stream(server_stream, 5)
+          after
+            cleanup_pair(pair)
+          end
         end
 
         test "delivers active stream data as normalized events", %{fixture: fixture} do
-          %{transport: transport, client: client, server: server} =
-            connect_pair(fixture, :moq_lite)
+          pair = connect_pair(fixture, :moq_lite)
 
-          assert {:ok, client_stream} = transport.open_stream(client, direction: :bidirectional)
-          assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
-          flush_transport_events(transport)
+          try do
+            %{transport: transport, client: client, server: server} = pair
 
-          assert :ok = transport.set_active(server_stream, true)
-          assert :ok = transport.send_stream(client_stream, "active-data", [])
+            assert {:ok, client_stream} = transport.open_stream(client, direction: :bidirectional)
+            assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
+            flush_transport_events(transport)
 
-          assert {:stream_data, ^server_stream, "active-data", %{}} =
-                   MOQX.Transport.receive_event(transport, 100)
+            assert :ok = transport.set_active(server_stream, true)
+            assert :ok = transport.send_stream(client_stream, "active-data", [])
+
+            assert {:stream_data, ^server_stream, "active-data", %{}} =
+                     MOQX.Transport.receive_event(transport, 100)
+          after
+            cleanup_pair(pair)
+          end
         end
       end
     end
@@ -435,4 +465,126 @@ defmodule MOQX.TransportContract.QuicerListenerFixture do
   end
 
   defp format_result(result), do: inspect(result)
+end
+
+defmodule MOQX.TransportContract.QuicerSelfPairFixture do
+  @moduledoc false
+
+  alias MOQX.Transport.Quicer
+
+  @stream_limit 10
+
+  def connect_pair(_profile) do
+    config = Application.fetch_env!(:moqx, :integration)
+    listener_config = Keyword.fetch!(config, :local_listener)
+
+    case start_listener(listener_config) do
+      {:ok, listener} -> connect_pair_with_cleanup(listener, listener_config)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp connect_pair_with_cleanup(listener, listener_config) do
+    case connect_pair(listener, listener_config) do
+      {:ok, client, server} ->
+        flush_transport_events()
+
+        {:ok,
+         %{
+           transport: Quicer,
+           client: client,
+           server: server,
+           cleanup: fn -> cleanup(listener, client, server) end
+         }}
+
+      {:error, reason} ->
+        _result = Quicer.close_listener(listener, 0)
+        {:error, reason}
+    end
+  end
+
+  defp start_listener(listener_config) do
+    host = Keyword.fetch!(listener_config, :host)
+
+    Quicer.listen("#{host}:0",
+      alpn: Keyword.fetch!(listener_config, :alpn),
+      certfile: Keyword.fetch!(listener_config, :certfile),
+      keyfile: Keyword.fetch!(listener_config, :keyfile),
+      peer_bidi_stream_count: @stream_limit,
+      peer_unidi_stream_count: @stream_limit
+    )
+  end
+
+  defp connect_pair(listener, listener_config) do
+    with {:ok, {_ip, port}} <- Quicer.local_address(listener) do
+      owner = self()
+      accept_task = Task.async(fn -> accept_server(listener, owner) end)
+      connect_client_and_await_server(listener_config, port, accept_task)
+    end
+  end
+
+  defp connect_client_and_await_server(listener_config, port, accept_task) do
+    case connect_client(listener_config, port) do
+      {:ok, client} -> await_server_for_client(client, accept_task)
+      {:error, reason} -> stop_accept_task(accept_task, reason)
+    end
+  end
+
+  defp await_server_for_client(client, accept_task) do
+    case await_accept_server(accept_task) do
+      {:ok, server} ->
+        {:ok, client, server}
+
+      {:error, reason} ->
+        _result = Quicer.close_connection(client, :normal)
+        {:error, reason}
+    end
+  end
+
+  defp stop_accept_task(accept_task, reason) do
+    Task.shutdown(accept_task, :brutal_kill)
+    {:error, reason}
+  end
+
+  defp accept_server(listener, owner) do
+    with {:ok, server} <- Quicer.accept(listener, [], 5_000),
+         {:ok, server} <- Quicer.handshake(server, 5_000),
+         :ok <- Quicer.controlling_process(server, owner) do
+      {:ok, server}
+    end
+  end
+
+  defp connect_client(listener_config, port) do
+    host = Keyword.fetch!(listener_config, :host)
+
+    Quicer.connect(host, port,
+      alpn: Keyword.fetch!(listener_config, :alpn),
+      cacertfile: Keyword.fetch!(listener_config, :cacertfile),
+      verify: :verify_peer,
+      server_name: "localhost",
+      peer_bidi_stream_count: @stream_limit,
+      peer_unidi_stream_count: @stream_limit
+    )
+  end
+
+  defp await_accept_server(task) do
+    case Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      nil -> {:error, :accept_timeout}
+    end
+  end
+
+  defp cleanup(listener, client, server) do
+    _client_result = Quicer.close_connection(client, :normal)
+    _server_result = Quicer.close_connection(server, :normal)
+    _listener_result = Quicer.close_listener(listener, 0)
+    :ok
+  end
+
+  defp flush_transport_events do
+    case MOQX.Transport.receive_event(Quicer, 0) do
+      :timeout -> :ok
+      _event -> flush_transport_events()
+    end
+  end
 end
