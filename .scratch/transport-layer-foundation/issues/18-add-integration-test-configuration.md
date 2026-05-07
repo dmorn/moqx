@@ -1,6 +1,6 @@
 # Add integration test configuration
 
-Status: needs-triage
+Status: closed
 Type: AFK
 
 ## Parent
@@ -15,16 +15,18 @@ Configuration belongs in `config/test.exs` and should describe externally manage
 
 ## Acceptance criteria
 
-- [ ] `config/test.exs` exists with integration endpoint configuration.
-- [ ] Configuration includes reference QUIC server host, port, ALPN, and CA certificate path.
-- [ ] Configuration includes local listener certificate/key/CA paths and ALPN defaults.
-- [ ] Configuration includes reference CLI command/arguments or path for listener-side tests.
-- [ ] `test/test_helper.exs` excludes `:integration` by default.
-- [ ] Documentation explains how to run tagged integration tests with ExUnit tag filtering.
-- [ ] No test mutates `Application` env.
+- [x] `config/test.exs` exists with integration endpoint configuration.
+- [x] Configuration includes reference QUIC server host, port, ALPN, and CA certificate path.
+- [x] Configuration includes local listener certificate/key/CA paths and ALPN defaults.
+- [x] Configuration includes reference CLI command/arguments or path for listener-side tests.
+- [x] `test/test_helper.exs` excludes `:integration` by default.
+- [x] Documentation explains how to run tagged integration tests with ExUnit tag filtering.
+- [x] No test mutates `Application` env.
 
 ## Blocked by
 
 None - can start immediately
 
 ## Comments
+
+- 2026-05-07: Added static `config/test.exs` integration endpoint configuration, default ExUnit exclusion for `:integration`, and setup tests that read config without mutating `Application` env.
