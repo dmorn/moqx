@@ -20,6 +20,7 @@ defmodule MOQX.TransportContract do
       )
 
       unquote(client_echo_tests(contracts))
+      unquote(listener_echo_tests(contracts))
       unquote(self_pair_tests(contracts))
 
       defp connect_pair(fixture, profile) do
@@ -78,6 +79,19 @@ defmodule MOQX.TransportContract do
           after
             echo_peer.cleanup.()
           end
+        end
+      end
+    end
+  end
+
+  defp listener_echo_tests(contracts) do
+    if :listener_echo in contracts do
+      quote do
+        test "accepts an echo client over a bidirectional stream", %{fixture: fixture} do
+          payload = "moqx listener echo"
+
+          assert {:ok, ^payload} = fixture.run_listener_echo(payload),
+                 fixture.unavailable_message()
         end
       end
     end
@@ -277,4 +291,148 @@ defmodule MOQX.TransportContract.QuicerReferenceServerFixture do
     "Docker Compose QUIC integration harness must be running: " <>
       "docker compose -f docker-compose.integration.yml up -d --wait"
   end
+end
+
+defmodule MOQX.TransportContract.QuicerListenerFixture do
+  @moduledoc false
+
+  alias MOQX.Transport.Quicer
+
+  def run_listener_echo(payload) do
+    config = Application.fetch_env!(:moqx, :integration)
+    listener_config = Keyword.fetch!(config, :local_listener)
+    probe_cli = Keyword.fetch!(config, :probe_cli)
+
+    with {:ok, listener} <- start_listener(listener_config),
+         {:ok, {_ip, port}} <- Quicer.local_address(listener) do
+      client_task = start_probe_client(probe_cli, listener_config, port, payload)
+
+      try do
+        with {:ok, connection} <- accept_probe_client(listener, client_task),
+             {:ok, stream} <- accept_probe_stream(connection),
+             {:ok, ^payload} <- receive_stream_data(Quicer, stream, payload),
+             :ok <- Quicer.send_stream(stream, payload, []),
+             {:ok, ^payload} <- await_probe_client(client_task) do
+          {:ok, payload}
+        end
+      after
+        cleanup(listener, client_task)
+      end
+    end
+  end
+
+  def unavailable_message do
+    "QUIC listener integration prerequisites are missing. Ensure Go is installed " <>
+      "and Docker Compose has provisioned .tmp/integration-certs/."
+  end
+
+  defp start_listener(listener_config) do
+    host = Keyword.fetch!(listener_config, :host)
+
+    Quicer.listen("#{host}:0",
+      alpn: Keyword.fetch!(listener_config, :alpn),
+      certfile: Keyword.fetch!(listener_config, :certfile),
+      keyfile: Keyword.fetch!(listener_config, :keyfile),
+      peer_bidi_stream_count: 10
+    )
+  end
+
+  defp start_probe_client(probe_cli, listener_config, port, payload) do
+    host = Keyword.fetch!(listener_config, :host)
+
+    Task.async(fn ->
+      run_probe_client(probe_cli, listener_config, host, port, payload)
+    end)
+  end
+
+  defp accept_probe_client(listener, client_task) do
+    case Quicer.accept(listener, [], 30_000) do
+      {:ok, connection} ->
+        Quicer.handshake(connection, 5_000)
+
+      {:error, reason} ->
+        with {:ok, client_result} <- completed_task_result(client_task) do
+          {:error,
+           "listener did not accept quicprobe client: #{inspect(reason)}; #{format_result(client_result)}"}
+        end
+    end
+  end
+
+  defp completed_task_result(task) do
+    case Task.yield(task, 0) do
+      {:ok, result} -> {:ok, result}
+      nil -> {:error, "listener did not accept quicprobe client before timeout"}
+    end
+  end
+
+  defp accept_probe_stream(connection) do
+    Quicer.accept_stream(connection, [], 5_000)
+  end
+
+  defp receive_stream_data(transport, stream, payload) do
+    case transport.recv_stream(stream, byte_size(payload)) do
+      {:ok, data} ->
+        {:ok, data}
+
+      {:error, :einval} ->
+        receive_active_stream_data(transport, stream)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp receive_active_stream_data(transport, stream) do
+    case MOQX.Transport.receive_event(transport, 5_000) do
+      {:stream_data, ^stream, data, _metadata} -> {:ok, data}
+      :timeout -> {:error, :timeout}
+      event -> {:error, {:unexpected_transport_event, event}}
+    end
+  end
+
+  defp await_probe_client(task) do
+    case Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, result} -> result
+      nil -> {:error, "quicprobe client timed out waiting for echo"}
+    end
+  end
+
+  defp run_probe_client(probe_cli, listener_config, host, port, payload) do
+    command = Keyword.fetch!(probe_cli, :command)
+
+    args =
+      Keyword.fetch!(probe_cli, :args_prefix) ++
+        [
+          "client",
+          "--addr",
+          "#{host}:#{port}",
+          "--ca",
+          Keyword.fetch!(listener_config, :cacertfile),
+          "--servername",
+          "localhost",
+          "--alpn",
+          Keyword.fetch!(listener_config, :alpn),
+          "--bidi-echo",
+          payload
+        ]
+
+    case System.cmd(command, args, stderr_to_stdout: true) do
+      {^payload, 0} -> {:ok, payload}
+      {output, status} -> {:error, "quicprobe client exited #{status}: #{output}"}
+    end
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  end
+
+  defp cleanup(listener, task) do
+    _result = Quicer.close_listener(listener, 0)
+
+    if Process.alive?(task.pid) do
+      Task.shutdown(task, :brutal_kill)
+    end
+
+    :ok
+  end
+
+  defp format_result(result), do: inspect(result)
 end

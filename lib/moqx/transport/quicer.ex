@@ -31,6 +31,23 @@ defmodule MOQX.Transport.Quicer do
     :quicer.connect(Options.normalize_host(host), port, Options.normalize_opts(opts), timeout)
   end
 
+  @doc """
+  Returns the local address bound to a listener or connection.
+  """
+  @spec local_address(MOQX.Transport.listener() | MOQX.Transport.connection()) ::
+          {:ok, {:inet.ip_address(), :inet.port_number()}} | {:error, term()}
+  def local_address(handle) do
+    :quicer.getopt(handle, :local_address)
+  end
+
+  @doc """
+  Closes a listener handle.
+  """
+  @spec close_listener(MOQX.Transport.listener(), timeout()) :: :ok | {:error, term()}
+  def close_listener(listener, timeout \\ 0) do
+    :quicer.close_listener(listener, timeout)
+  end
+
   @impl true
   def open_stream(connection, opts \\ []) do
     :quicer.start_stream(connection, Options.normalize_opts(opts))

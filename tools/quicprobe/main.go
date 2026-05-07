@@ -227,8 +227,8 @@ func runClient(ctx context.Context, cfg clientConfig, stdout io.Writer) error {
 		return fmt.Errorf("close stream write side: %w", err)
 	}
 
-	echo, err := io.ReadAll(stream)
-	if err != nil {
+	echo := make([]byte, len(cfg.bidiEcho))
+	if _, err := io.ReadFull(stream, echo); err != nil {
 		return fmt.Errorf("read echo payload: %w", err)
 	}
 	if string(echo) != cfg.bidiEcho {

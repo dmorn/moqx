@@ -1,6 +1,6 @@
 # Add reference client to quicer listener integration
 
-Status: needs-triage
+Status: closed
 Type: AFK
 
 ## Parent
@@ -15,14 +15,14 @@ This covers the “listening” direction of the real transport boundary.
 
 ## Acceptance criteria
 
-- [ ] The test module is tagged `:integration` and excluded by default.
-- [ ] The test reads static local listener certificate/key/ALPN and CLI configuration from `config/test.exs` without mutating `Application` env.
-- [ ] The test starts a `MOQX.Transport.Quicer` listener on localhost.
-- [ ] The test invokes the reference CLI client via `System.cmd/3` or equivalent.
-- [ ] The `MOQX.Transport.Quicer` listener accepts and handshakes the connection.
-- [ ] The test accepts a bidirectional stream and verifies stream data behavior.
-- [ ] The test can reuse shared stream contract expectations where practical.
-- [ ] Failure output clearly identifies missing CLI/cert/harness prerequisites.
+- [x] The test module is tagged `:integration` and excluded by default.
+- [x] The test reads static local listener certificate/key/ALPN and CLI configuration from `config/test.exs` without mutating `Application` env.
+- [x] The test starts a `MOQX.Transport.Quicer` listener on localhost.
+- [x] The test invokes the reference CLI client via `System.cmd/3` or equivalent.
+- [x] The `MOQX.Transport.Quicer` listener accepts and handshakes the connection.
+- [x] The test accepts a bidirectional stream and verifies stream data behavior.
+- [x] The test can reuse shared stream contract expectations where practical.
+- [x] Failure output clearly identifies missing CLI/cert/harness prerequisites.
 
 ## Blocked by
 
@@ -30,3 +30,5 @@ This covers the “listening” direction of the real transport boundary.
 - `.scratch/transport-layer-foundation/issues/18-add-integration-test-configuration.md`
 
 ## Comments
+
+- 2026-05-07: Added an integration-tagged parameterized transport contract scenario for `quicprobe` as a reference client to a test-started `MOQX.Transport.Quicer` listener. The fixture reads static listener and CLI config, invokes the CLI with `System.cmd/3`, and verifies listener accept/handshake plus bidirectional stream echo behavior.

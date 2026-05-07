@@ -9,6 +9,11 @@ services:
       - -eu
       - -c
       - |
+        if [ -s ca.pem ] && [ -s server.pem ] && [ -s server-key.pem ]; then
+          echo "Using existing integration certificates in /certs"
+          exit 0
+        fi
+
         apk add --no-cache openssl >/dev/null
 
         cat > openssl.cnf <<'EOF'
