@@ -30,7 +30,7 @@ defmodule MOQX.TransportContract do
       end
 
       defp flush_transport_events(transport) do
-        case MOQX.Transport.receive_event(transport, 0) do
+        case receive_backend_event(transport, 0) do
           :timeout -> :ok
           _event -> flush_transport_events(transport)
         end
@@ -40,7 +40,7 @@ defmodule MOQX.TransportContract do
       defp cleanup_pair(_pair), do: :ok
 
       defp await_stream_event(transport, stream, event, timeout) do
-        case MOQX.Transport.receive_event(transport, timeout) do
+        case receive_backend_event(transport, timeout) do
           {:stream_event, ^stream, ^event, metadata} -> metadata
           :timeout -> :timeout
           _event -> await_stream_event(transport, stream, event, 0)
@@ -48,7 +48,7 @@ defmodule MOQX.TransportContract do
       end
 
       defp await_datagram(transport, connection, payload, timeout) do
-        case MOQX.Transport.receive_event(transport, timeout) do
+        case receive_backend_event(transport, timeout) do
           {:datagram, ^connection, ^payload, metadata} when is_map(metadata) ->
             metadata
 
@@ -57,6 +57,14 @@ defmodule MOQX.TransportContract do
 
           _event ->
             await_datagram(transport, connection, payload, 0)
+        end
+      end
+
+      defp receive_backend_event(transport, timeout) do
+        receive do
+          message -> transport.normalize_message(message)
+        after
+          timeout -> :timeout
         end
       end
     end
@@ -176,7 +184,7 @@ defmodule MOQX.TransportContract do
             %{transport: transport, client: client} = pair
 
             assert {:error, :datagrams_unavailable} = transport.send_datagram(client, "moq-lite")
-            assert :timeout = MOQX.Transport.receive_event(transport, 0)
+            assert :timeout = receive_backend_event(transport, 0)
           after
             cleanup_pair(pair)
           end
@@ -287,7 +295,7 @@ defmodule MOQX.TransportContract do
             assert :ok = transport.send_stream(client_stream, "active-data", [])
 
             assert {:stream_data, ^server_stream, "active-data", %{}} =
-                     MOQX.Transport.receive_event(transport, 100)
+                     receive_backend_event(transport, 100)
           after
             cleanup_pair(pair)
           end
@@ -347,9 +355,17 @@ defmodule MOQX.TransportContract.SupportFixture do
   def unavailable_message, do: "support transport echo peer should always be available"
 
   defp flush_transport_events do
-    case MOQX.Transport.receive_event(Support, 0) do
+    case receive_backend_event(Support, 0) do
       :timeout -> :ok
       _event -> flush_transport_events()
+    end
+  end
+
+  defp receive_backend_event(transport, timeout) do
+    receive do
+      message -> transport.normalize_message(message)
+    after
+      timeout -> :timeout
     end
   end
 
@@ -494,10 +510,18 @@ defmodule MOQX.TransportContract.QuicerListenerFixture do
   end
 
   defp receive_active_stream_data(transport, stream) do
-    case MOQX.Transport.receive_event(transport, 5_000) do
+    case receive_backend_event(transport, 5_000) do
       {:stream_data, ^stream, data, _metadata} -> {:ok, data}
       :timeout -> {:error, :timeout}
       event -> {:error, {:unexpected_transport_event, event}}
+    end
+  end
+
+  defp receive_backend_event(transport, timeout) do
+    receive do
+      message -> transport.normalize_message(message)
+    after
+      timeout -> :timeout
     end
   end
 
@@ -675,9 +699,17 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
   end
 
   defp flush_transport_events do
-    case MOQX.Transport.receive_event(Quicer, 0) do
+    case receive_backend_event(Quicer, 0) do
       :timeout -> :ok
       _event -> flush_transport_events()
+    end
+  end
+
+  defp receive_backend_event(transport, timeout) do
+    receive do
+      message -> transport.normalize_message(message)
+    after
+      timeout -> :timeout
     end
   end
 end

@@ -212,10 +212,41 @@ defmodule MOQX.Transport.Support do
   end
 
   @impl true
-  def close_stream(_stream, _reason), do: {:error, :not_implemented}
+  def finish_sending(%Stream{} = stream) do
+    stream_command(stream, :finish_sending, [])
+  end
 
   @impl true
-  def close_connection(_connection, _reason), do: {:error, :not_implemented}
+  def abort_sending(%Stream{} = stream, error_code)
+      when is_integer(error_code) and error_code >= 0 do
+    stream_command(stream, :abort_sending, [error_code])
+  end
+
+  @impl true
+  def abort_receiving(%Stream{} = stream, error_code)
+      when is_integer(error_code) and error_code >= 0 do
+    stream_command(stream, :abort_receiving, [error_code])
+  end
+
+  defp stream_command(%Stream{} = stream, command, args) do
+    ref = make_ref()
+    send(stream.pid, {command, self(), ref, args})
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
+
+  @impl true
+  def close_connection(%Connection{} = connection, reason)
+      when is_integer(reason) and reason >= 0 do
+    ref = make_ref()
+    send(connection.pid, {:close_connection, self(), ref, reason})
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
 
   @impl true
   def set_active(%Stream{} = stream, active) do
@@ -228,7 +259,32 @@ defmodule MOQX.Transport.Support do
   end
 
   @impl true
-  def controlling_process(_handle, _pid), do: {:error, :not_implemented}
+  def controlling_process(%Listener{} = listener, pid) when is_pid(pid) do
+    ref = make_ref()
+    send(listener.pid, {:set_owner, self(), ref, pid})
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
+
+  def controlling_process(%Connection{} = connection, pid) when is_pid(pid) do
+    ref = make_ref()
+    send(connection.pid, {:set_owner, self(), ref, pid})
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
+
+  def controlling_process(%Stream{} = stream, pid) when is_pid(pid) do
+    ref = make_ref()
+    send(stream.pid, {:set_owner, self(), ref, pid})
+
+    receive do
+      {^ref, result} -> result
+    end
+  end
 
   def start_network do
     {:ok, %Network{pid: spawn(fn -> network_loop(%{}, 49_152) end)}}
@@ -287,6 +343,10 @@ defmodule MOQX.Transport.Support do
       {:configure, new_owner, new_listener} ->
         listener_loop(pending, acceptors, new_owner, new_listener)
 
+      {:set_owner, caller, ref, new_owner} ->
+        send(caller, {ref, :ok})
+        listener_loop(pending, acceptors, new_owner, listener)
+
       {:new_connection, caller, ref, connection} ->
         if owner && listener do
           send(owner, {:moqx_transport, {:listener_event, listener, :new_conn, %{}}})
@@ -333,6 +393,10 @@ defmodule MOQX.Transport.Support do
       {:set_owner, owner} ->
         connection_loop(%{state | owner: owner})
 
+      {:set_owner, caller, ref, owner} ->
+        send(caller, {ref, :ok})
+        connection_loop(%{state | owner: owner})
+
       {:handshake, caller, ref} ->
         send(caller, {ref, :ok})
         connection_loop(%{state | handshaken?: true})
@@ -346,6 +410,23 @@ defmodule MOQX.Transport.Support do
           send(state.peer.pid, {:incoming_datagram, caller, ref, data})
         else
           send(caller, {ref, {:error, :datagrams_unavailable}})
+        end
+
+        connection_loop(state)
+
+      {:close_connection, caller, ref, error_code} ->
+        send(state.peer.pid, {:peer_closed_connection, error_code})
+        send(caller, {ref, :ok})
+        connection_loop(state)
+
+      {:peer_closed_connection, error_code} ->
+        if state.owner do
+          send(
+            state.owner,
+            {:moqx_transport,
+             {:connection_event, %Connection{pid: self()}, :closed,
+              %{error_code: error_code, initiator: :peer}}}
+          )
         end
 
         connection_loop(state)
@@ -445,6 +526,10 @@ defmodule MOQX.Transport.Support do
       {:set_owner, owner} ->
         stream_loop(%{state | owner: owner})
 
+      {:set_owner, caller, ref, owner} ->
+        send(caller, {ref, :ok})
+        stream_loop(%{state | owner: owner})
+
       {:send_data, caller, ref, data} ->
         send(state.peer.pid, {:incoming_data, data})
         send(caller, {ref, :ok})
@@ -457,6 +542,33 @@ defmodule MOQX.Transport.Support do
         else
           stream_loop(deliver_passive_data(%{state | buffer: state.buffer <> data}))
         end
+
+      {:finish_sending, caller, ref, []} ->
+        send(state.peer.pid, {:peer_finished_sending})
+        send(caller, {ref, :ok})
+        stream_loop(state)
+
+      {:abort_sending, caller, ref, [error_code]} ->
+        send(state.peer.pid, {:peer_aborted_sending, error_code})
+        send(caller, {ref, :ok})
+        stream_loop(state)
+
+      {:abort_receiving, caller, ref, [error_code]} ->
+        send(state.peer.pid, {:peer_aborted_receiving, error_code})
+        send(caller, {ref, :ok})
+        stream_loop(state)
+
+      {:peer_finished_sending} ->
+        send_stream_event(state, :peer_finished_sending, %{})
+        stream_loop(state)
+
+      {:peer_aborted_sending, error_code} ->
+        send_stream_event(state, :peer_aborted_sending, %{error_code: error_code})
+        stream_loop(state)
+
+      {:peer_aborted_receiving, error_code} ->
+        send_stream_event(state, :peer_aborted_receiving, %{error_code: error_code})
+        stream_loop(state)
 
       {:set_active, caller, ref, active} ->
         send(caller, {ref, :ok})
@@ -474,6 +586,12 @@ defmodule MOQX.Transport.Support do
 
       {:stop, _reason} ->
         :ok
+    end
+  end
+
+  defp send_stream_event(state, event, metadata) do
+    if state.owner do
+      send(state.owner, {:moqx_transport, {:stream_event, %Stream{pid: self()}, event, metadata}})
     end
   end
 

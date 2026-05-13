@@ -95,13 +95,23 @@ defmodule MOQX.Transport.Quicer do
   end
 
   @impl true
-  def close_stream(stream, _reason \\ :normal) do
-    :quicer.close_stream(stream)
+  def finish_sending(stream) do
+    :quicer.async_shutdown_stream(stream, 1, 0)
   end
 
   @impl true
-  def close_connection(connection, _reason \\ :normal) do
-    :quicer.close_connection(connection)
+  def abort_sending(stream, error_code) when is_integer(error_code) and error_code >= 0 do
+    :quicer.async_shutdown_stream(stream, 2, error_code)
+  end
+
+  @impl true
+  def abort_receiving(stream, error_code) when is_integer(error_code) and error_code >= 0 do
+    :quicer.async_shutdown_stream(stream, 4, error_code)
+  end
+
+  @impl true
+  def close_connection(connection, error_code) when is_integer(error_code) and error_code >= 0 do
+    :quicer.async_close_connection(connection, 0, error_code)
   end
 
   @impl true
@@ -139,6 +149,10 @@ defmodule MOQX.Transport.Quicer do
     {:listener_event, connection, :new_conn, props}
   end
 
+  def normalize_message({:quic, :shutdown, connection, error_code}) when is_integer(error_code) do
+    {:connection_event, connection, :closed, %{error_code: error_code, initiator: :peer}}
+  end
+
   def normalize_message({:quic, event, connection, props})
       when event in [
              :connected,
@@ -172,7 +186,8 @@ defmodule MOQX.Transport.Quicer do
              :continue,
              :passive
            ] do
-    {:stream_event, stream, event, normalize_stream_event_metadata(event, props)}
+    {event, metadata} = normalize_stream_event(event, props)
+    {:stream_event, stream, event, metadata}
   end
 
   def normalize_message({:quic, :listener_stopped, listener, props}) do
@@ -184,6 +199,21 @@ defmodule MOQX.Transport.Quicer do
   end
 
   def normalize_message(_message), do: :unknown
+
+  defp normalize_stream_event(:peer_send_shutdown, _props), do: {:peer_finished_sending, %{}}
+
+  defp normalize_stream_event(:peer_send_aborted, error_code),
+    do: {:peer_aborted_sending, %{error_code: error_code}}
+
+  defp normalize_stream_event(:peer_receive_aborted, error_code),
+    do: {:peer_aborted_receiving, %{error_code: error_code}}
+
+  defp normalize_stream_event(:send_shutdown_complete, true), do: {:sending_finished, %{}}
+  defp normalize_stream_event(:send_shutdown_complete, false), do: {:sending_aborted, %{}}
+  defp normalize_stream_event(:stream_closed, props), do: {:closed, props}
+
+  defp normalize_stream_event(event, props),
+    do: {event, normalize_stream_event_metadata(event, props)}
 
   defp peer_stream_metadata(stream) do
     case :quicer.get_stream_id(stream) do

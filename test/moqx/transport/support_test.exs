@@ -34,8 +34,8 @@ defmodule MOQX.Transport.SupportTest do
       )
 
     client_events = [
-      MOQX.Transport.receive_event(Support, 0),
-      MOQX.Transport.receive_event(Support, 0)
+      receive_backend_event(Support, 0),
+      receive_backend_event(Support, 0)
     ]
 
     assert {:listener_event, listener, :new_conn, %{}} in client_events
@@ -44,7 +44,15 @@ defmodule MOQX.Transport.SupportTest do
     {:ok, server} = Support.accept(listener, [], 100)
 
     assert {:connection_event, ^server, :connected, %{alpn: "moq-00"}} =
-             MOQX.Transport.receive_event(Support, 0)
+             receive_backend_event(Support, 0)
+  end
+
+  defp receive_backend_event(transport, timeout) do
+    receive do
+      message -> transport.normalize_message(message)
+    after
+      timeout -> :timeout
+    end
   end
 
   test "reports draft-14-like negotiated capabilities" do
