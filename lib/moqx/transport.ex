@@ -444,8 +444,23 @@ defmodule MOQX.Transport do
 
         {:ok, stream, put_resource(ctx, :streams, raw_stream, stream)}
 
-      {:error, reason, ctx} ->
-        {:error, reason, ctx}
+      {:error, _reason, ctx} ->
+        accept_stream_from_backend_info(ctx, backend, connection, raw_stream)
+    end
+  end
+
+  defp accept_stream_from_backend_info(ctx, backend, connection, raw_stream) do
+    if function_exported?(backend, :stream_info, 3) do
+      case backend.stream_info(raw_stream, connection.local_role, :peer) do
+        {:ok, info} ->
+          stream = %Stream{backend: %BackendRef{module: backend, data: raw_stream}, info: info}
+          {:ok, stream, put_resource(ctx, :streams, raw_stream, stream)}
+
+        {:error, reason} ->
+          {:error, reason, ctx}
+      end
+    else
+      {:error, {:unknown_transport_handle, raw_stream}, ctx}
     end
   end
 
@@ -610,14 +625,21 @@ defmodule MOQX.Transport do
     end
   end
 
-  defp wrap_event(ctx, {:listener_event, raw_listener, event, metadata}) do
-    case Map.fetch(ctx.backend.data.listeners, raw_listener) do
-      {:ok, listener} -> {:ok, {:listener_event, listener, event, metadata}}
-      :error -> {:error, {:unknown_transport_handle, raw_listener}}
+  defp wrap_event(ctx, {:listener_event, raw_handle, event, metadata}) do
+    case fetch_listener_event_handle(ctx, raw_handle) do
+      {:ok, handle} -> {:ok, {:listener_event, handle, event, metadata}}
+      :error -> {:error, {:unknown_transport_handle, raw_handle}}
     end
   end
 
   defp wrap_event(_ctx, event), do: {:ok, event}
+
+  defp fetch_listener_event_handle(ctx, raw_handle) do
+    case Map.fetch(ctx.backend.data.listeners, raw_handle) do
+      {:ok, listener} -> {:ok, listener}
+      :error -> Map.fetch(ctx.backend.data.connections, raw_handle)
+    end
+  end
 
   defp allocate_stream_id(ctx, initiator_role, direction) do
     key = {initiator_role, direction}

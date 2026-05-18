@@ -613,7 +613,7 @@ defmodule MOQX.Transport.Support do
   end
 
   defp take_bytes(buffer, byte_count) when byte_size(buffer) >= byte_count do
-    <<data::binary-size(byte_count), remaining::binary>> = buffer
+    <<data::binary-size(^byte_count), remaining::binary>> = buffer
     {:ok, data, remaining}
   end
 

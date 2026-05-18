@@ -34,6 +34,7 @@ defmodule MOQX.TransportContract do
           {:timeout, ctx} -> ctx
           {:ok, _event, ctx} -> flush_transport_events(ctx)
           {:unknown, _message, ctx} -> flush_transport_events(ctx)
+          {:error, _reason, ctx} -> flush_transport_events(ctx)
         end
       end
 
@@ -371,6 +372,7 @@ defmodule MOQX.TransportContract.SupportFixture do
       {:timeout, ctx} -> ctx
       {:ok, _event, ctx} -> flush_transport_events(ctx)
       {:unknown, _message, ctx} -> flush_transport_events(ctx)
+      {:error, _reason, ctx} -> flush_transport_events(ctx)
     end
   end
 end
@@ -615,7 +617,8 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
   defp connect_pair(ctx, listener, listener_config, profile) do
     with {:ok, {_ip, port}} <- MOQX.Transport.local_address(ctx, listener) do
       owner = self()
-      accept_task = Task.async(fn -> accept_server(ctx, listener, owner) end)
+      accept_ctx = drop_listeners(ctx)
+      accept_task = Task.async(fn -> accept_server(accept_ctx, listener, owner) end)
       connect_client_and_await_server(ctx, listener_config, port, accept_task, profile)
     end
   end
@@ -637,6 +640,10 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
         _result = MOQX.Transport.close_connection(ctx, client, 0)
         {:error, reason}
     end
+  end
+
+  defp drop_listeners(ctx) do
+    update_in(ctx.backend.data.listeners, fn _listeners -> %{} end)
   end
 
   defp stop_accept_task(accept_task, reason) do
@@ -702,6 +709,7 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
       {:timeout, ctx} -> ctx
       {:ok, _event, ctx} -> flush_transport_events(ctx)
       {:unknown, _message, ctx} -> flush_transport_events(ctx)
+      {:error, _reason, ctx} -> flush_transport_events(ctx)
     end
   end
 end
