@@ -111,6 +111,33 @@ defmodule MOQX.Transport do
   end
 
   @doc """
+  Returns local address for listener or connection where backend supports it.
+  """
+  def local_address(%Context{} = ctx, %Listener{} = listener) do
+    require_same_backend(ctx, listener, fn ->
+      ctx.backend.module.local_address(listener.backend.data)
+    end)
+  end
+
+  def local_address(%Context{} = ctx, %Connection{} = connection) do
+    require_same_backend(ctx, connection, fn ->
+      ctx.backend.module.local_address(connection.backend.data)
+    end)
+  end
+
+  @doc """
+  Closes listener where backend supports it.
+  """
+  def close_listener(%Context{} = ctx, %Listener{} = listener, timeout \\ 0) do
+    require_same_backend(ctx, listener, fn ->
+      case ctx.backend.module.close_listener(listener.backend.data, timeout) do
+        :ok -> {:ok, ctx}
+        {:error, reason} -> {:error, reason, ctx}
+      end
+    end)
+  end
+
+  @doc """
   Connects client connection through context backend.
   """
   def connect(%Context{} = ctx, host, port, opts \\ [], timeout \\ 5_000) do
@@ -125,6 +152,9 @@ defmodule MOQX.Transport do
 
         {:error, reason} ->
           {:error, reason, ctx}
+
+        {:error, reason, details} ->
+          {:error, {reason, details}, ctx}
       end
     end
   end
@@ -386,7 +416,9 @@ defmodule MOQX.Transport do
     {stream_id, ctx} = allocate_stream_id(ctx, connection.local_role, direction)
 
     info =
-      stream_info_from_parts(
+      stream_info_for_backend(
+        backend,
+        raw_stream,
         stream_id,
         direction,
         :local,
@@ -419,9 +451,39 @@ defmodule MOQX.Transport do
 
   defp accepted_stream(backend, raw_stream, stream_id, direction, initiator_role, connection) do
     info =
-      stream_info_from_parts(stream_id, direction, :peer, initiator_role, connection.local_role)
+      stream_info_for_backend(
+        backend,
+        raw_stream,
+        stream_id,
+        direction,
+        :peer,
+        initiator_role,
+        connection.local_role
+      )
 
     %Stream{backend: %BackendRef{module: backend, data: raw_stream}, info: info}
+  end
+
+  defp stream_info_for_backend(
+         backend,
+         raw_stream,
+         stream_id,
+         direction,
+         initiator,
+         initiator_role,
+         local_role
+       ) do
+    if function_exported?(backend, :stream_info, 3) do
+      case backend.stream_info(raw_stream, local_role, initiator) do
+        {:ok, info} ->
+          info
+
+        {:error, _reason} ->
+          stream_info_from_parts(stream_id, direction, initiator, initiator_role, local_role)
+      end
+    else
+      stream_info_from_parts(stream_id, direction, initiator, initiator_role, local_role)
+    end
   end
 
   defp ensure_support_network(%Context{backend: %BackendRef{module: Support}} = ctx) do
@@ -488,8 +550,14 @@ defmodule MOQX.Transport do
 
   defp normalize_context_message(ctx, message) do
     case ctx.backend.module.normalize_message(message) do
-      :unknown -> {:unknown, message, ctx}
-      event -> {:ok, event, ctx}
+      :unknown ->
+        {:unknown, message, ctx}
+
+      event ->
+        case wrap_event(ctx, event) do
+          {:ok, event} -> {:ok, event, ctx}
+          {:error, reason} -> {:error, reason, ctx}
+        end
     end
   end
 

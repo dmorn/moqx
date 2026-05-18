@@ -29,43 +29,56 @@ defmodule MOQX.TransportContract do
         pair
       end
 
-      defp flush_transport_events(transport) do
-        case receive_backend_event(transport, 0) do
-          :timeout -> :ok
-          _event -> flush_transport_events(transport)
+      defp flush_transport_events(ctx) do
+        case MOQX.Transport.receive_event(ctx, 0) do
+          {:timeout, ctx} -> ctx
+          {:ok, _event, ctx} -> flush_transport_events(ctx)
+          {:unknown, _message, ctx} -> flush_transport_events(ctx)
         end
       end
 
       defp cleanup_pair(%{cleanup: cleanup}) when is_function(cleanup, 0), do: cleanup.()
       defp cleanup_pair(_pair), do: :ok
 
-      defp await_stream_event(transport, stream, event, timeout) do
-        case receive_backend_event(transport, timeout) do
-          {:stream_event, ^stream, ^event, metadata} -> metadata
-          :timeout -> :timeout
-          _event -> await_stream_event(transport, stream, event, 0)
+      defp await_stream_event(ctx, stream, event, timeout) do
+        case MOQX.Transport.receive_event(ctx, timeout) do
+          {:ok, {:stream_event, ^stream, ^event, metadata}, ctx} -> {metadata, ctx}
+          {:timeout, ctx} -> {:timeout, ctx}
+          {:ok, _event, ctx} -> await_stream_event(ctx, stream, event, 0)
+          {:unknown, _message, ctx} -> await_stream_event(ctx, stream, event, 0)
         end
       end
 
-      defp await_datagram(transport, connection, payload, timeout) do
-        case receive_backend_event(transport, timeout) do
-          {:datagram, ^connection, ^payload, metadata} when is_map(metadata) ->
-            metadata
+      defp await_datagram(ctx, connection, payload, timeout) do
+        case MOQX.Transport.receive_event(ctx, timeout) do
+          {:ok, {:datagram, ^connection, ^payload, metadata}, ctx} when is_map(metadata) ->
+            {metadata, ctx}
 
-          :timeout ->
-            :timeout
+          {:timeout, ctx} ->
+            {:timeout, ctx}
 
-          _event ->
-            await_datagram(transport, connection, payload, 0)
+          {:ok, _event, ctx} ->
+            await_datagram(ctx, connection, payload, 0)
+
+          {:unknown, _message, ctx} ->
+            await_datagram(ctx, connection, payload, 0)
         end
       end
 
-      defp receive_backend_event(transport, timeout) do
-        receive do
-          message -> transport.normalize_message(message)
-        after
-          timeout -> :timeout
-        end
+      defp maybe_accept_support_echo_stream(%{server: server}, ctx, client_stream) do
+        {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 1_000)
+        ctx = flush_transport_events(ctx)
+        {ctx, client_stream, server_stream}
+      end
+
+      defp maybe_accept_support_echo_stream(_echo_peer, ctx, stream), do: {ctx, stream, nil}
+
+      defp maybe_echo_support_payload(_echo_peer, ctx, _payload, nil), do: ctx
+
+      defp maybe_echo_support_payload(_echo_peer, ctx, payload, server_stream) do
+        {:ok, ^payload, ctx} = MOQX.Transport.recv_stream(ctx, server_stream, byte_size(payload))
+        {:ok, ctx} = MOQX.Transport.send_stream(ctx, server_stream, payload, [])
+        ctx
       end
     end
   end
@@ -99,16 +112,20 @@ defmodule MOQX.TransportContract do
                  fixture.unavailable_message()
 
           try do
-            transport = echo_peer.transport
+            ctx = echo_peer.ctx
             connection = echo_peer.connection
             expected_alpn = echo_peer.expected_alpn
 
             assert %MOQX.Transport.Capabilities{alpn: ^expected_alpn} =
-                     transport.capabilities(connection)
+                     MOQX.Transport.capabilities(ctx, connection)
 
-            assert {:ok, stream} = transport.open_stream(connection, active: false)
-            assert :ok = transport.send_stream(stream, payload, [])
-            assert {:ok, ^payload} = transport.recv_stream(stream, byte_size(payload))
+            assert {:ok, stream, ctx} = MOQX.Transport.open_stream(ctx, connection, active: false)
+            {ctx, stream, echo_stream} = maybe_accept_support_echo_stream(echo_peer, ctx, stream)
+            assert {:ok, ctx} = MOQX.Transport.send_stream(ctx, stream, payload, [])
+            ctx = maybe_echo_support_payload(echo_peer, ctx, payload, echo_stream)
+
+            assert {:ok, ^payload, _ctx} =
+                     MOQX.Transport.recv_stream(ctx, stream, byte_size(payload))
           after
             echo_peer.cleanup.()
           end
@@ -137,10 +154,10 @@ defmodule MOQX.TransportContract do
           draft14_pair = connect_pair(fixture, :draft14)
 
           try do
-            %{transport: transport, client: client} = draft14_pair
+            %{ctx: ctx, client: client} = draft14_pair
 
             assert %MOQX.Transport.Capabilities{datagrams: true, max_datagram_size: max_size} =
-                     transport.capabilities(client)
+                     MOQX.Transport.capabilities(ctx, client)
 
             assert is_integer(max_size) or max_size in [:unknown, :unsupported]
           after
@@ -150,10 +167,10 @@ defmodule MOQX.TransportContract do
           moq_lite_pair = connect_pair(fixture, :moq_lite)
 
           try do
-            %{transport: transport, client: client} = moq_lite_pair
+            %{ctx: ctx, client: client} = moq_lite_pair
 
             assert %MOQX.Transport.Capabilities{datagrams: false, max_datagram_size: max_size} =
-                     transport.capabilities(client)
+                     MOQX.Transport.capabilities(ctx, client)
 
             assert max_size in [:unknown, :unsupported]
           after
@@ -167,11 +184,11 @@ defmodule MOQX.TransportContract do
           pair = connect_pair(fixture, :draft14)
 
           try do
-            %{transport: transport, client: client, server: server} = pair
+            %{ctx: ctx, client: client, server: server} = pair
             payload = <<"draft14 datagram">>
 
-            assert :ok = transport.send_datagram(client, payload)
-            assert %{} = await_datagram(transport, server, payload, 100)
+            assert {:ok, ctx} = MOQX.Transport.send_datagram(ctx, client, payload)
+            assert {%{}, _ctx} = await_datagram(ctx, server, payload, 100)
           after
             cleanup_pair(pair)
           end
@@ -181,10 +198,12 @@ defmodule MOQX.TransportContract do
           pair = connect_pair(fixture, :moq_lite)
 
           try do
-            %{transport: transport, client: client} = pair
+            %{ctx: ctx, client: client} = pair
 
-            assert {:error, :datagrams_unavailable} = transport.send_datagram(client, "moq-lite")
-            assert :timeout = receive_backend_event(transport, 0)
+            assert {:error, :datagrams_unavailable, ctx} =
+                     MOQX.Transport.send_datagram(ctx, client, "moq-lite")
+
+            assert {:timeout, _ctx} = MOQX.Transport.receive_event(ctx, 0)
           after
             cleanup_pair(pair)
           end
@@ -200,16 +219,18 @@ defmodule MOQX.TransportContract do
           pair = connect_pair(fixture, :moq_lite)
 
           try do
-            %{transport: transport, client: client, server: server} = pair
+            %{ctx: ctx, client: client, server: server} = pair
 
-            assert {:ok, client_stream} = transport.open_stream(client, direction: :bidirectional)
-            assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
+            assert {:ok, client_stream, ctx} =
+                     MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
 
-            assert %{direction: :bidirectional, initiator: :local} =
-                     await_stream_event(transport, client_stream, :start_completed, 100)
+            assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
 
-            assert %{direction: :bidirectional, initiator: :peer} =
-                     await_stream_event(transport, server_stream, :new_stream, 100)
+            assert {:ok, %{direction: :bidirectional, initiator: :local}, ctx} =
+                     MOQX.Transport.stream_info(ctx, client_stream)
+
+            assert {:ok, %{direction: :bidirectional, initiator: :peer}, _ctx} =
+                     MOQX.Transport.stream_info(ctx, server_stream)
           after
             cleanup_pair(pair)
           end
@@ -219,18 +240,18 @@ defmodule MOQX.TransportContract do
           pair = connect_pair(fixture, :draft14)
 
           try do
-            %{transport: transport, client: client, server: server} = pair
+            %{ctx: ctx, client: client, server: server} = pair
 
-            assert {:ok, client_stream} =
-                     transport.open_stream(client, direction: :unidirectional)
+            assert {:ok, client_stream, ctx} =
+                     MOQX.Transport.open_stream(ctx, client, direction: :unidirectional)
 
-            assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
+            assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
 
-            assert %{direction: :unidirectional, initiator: :local} =
-                     await_stream_event(transport, client_stream, :start_completed, 100)
+            assert {:ok, %{direction: :unidirectional, initiator: :local}, ctx} =
+                     MOQX.Transport.stream_info(ctx, client_stream)
 
-            assert %{direction: :unidirectional, initiator: :peer} =
-                     await_stream_event(transport, server_stream, :new_stream, 100)
+            assert {:ok, %{direction: :unidirectional, initiator: :peer}, _ctx} =
+                     MOQX.Transport.stream_info(ctx, server_stream)
           after
             cleanup_pair(pair)
           end
@@ -240,19 +261,21 @@ defmodule MOQX.TransportContract do
           pair = connect_pair(fixture, :moq_lite)
 
           try do
-            %{transport: transport, client: client, server: server} = pair
+            %{ctx: ctx, client: client, server: server} = pair
 
-            client_streams =
-              for _index <- 1..5 do
-                assert {:ok, stream} = transport.open_stream(client, direction: :bidirectional)
-                stream
-              end
+            {client_streams, ctx} =
+              Enum.map_reduce(1..5, ctx, fn _index, ctx ->
+                assert {:ok, stream, ctx} =
+                         MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
 
-            server_streams =
-              for _index <- 1..5 do
-                assert {:ok, stream} = transport.accept_stream(server, [], 100)
-                stream
-              end
+                {stream, ctx}
+              end)
+
+            {server_streams, _ctx} =
+              Enum.map_reduce(1..5, ctx, fn _index, ctx ->
+                assert {:ok, stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+                {stream, ctx}
+              end)
 
             assert length(Enum.uniq(client_streams)) == 5
             assert length(Enum.uniq(server_streams)) == 5
@@ -265,17 +288,19 @@ defmodule MOQX.TransportContract do
           pair = connect_pair(fixture, :moq_lite)
 
           try do
-            %{transport: transport, client: client, server: server} = pair
+            %{ctx: ctx, client: client, server: server} = pair
 
-            assert {:ok, client_stream} = transport.open_stream(client, direction: :bidirectional)
-            assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
-            flush_transport_events(transport)
+            assert {:ok, client_stream, ctx} =
+                     MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
 
-            assert :ok = transport.send_stream(client_stream, ["one", "two"], [])
-            assert :ok = transport.send_stream(client_stream, "three", [])
+            assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+            ctx = flush_transport_events(ctx)
 
-            assert {:ok, "onetwo"} = transport.recv_stream(server_stream, 6)
-            assert {:ok, "three"} = transport.recv_stream(server_stream, 5)
+            assert {:ok, ctx} = MOQX.Transport.send_stream(ctx, client_stream, ["one", "two"], [])
+            assert {:ok, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "three", [])
+
+            assert {:ok, "onetwo", ctx} = MOQX.Transport.recv_stream(ctx, server_stream, 6)
+            assert {:ok, "three", _ctx} = MOQX.Transport.recv_stream(ctx, server_stream, 5)
           after
             cleanup_pair(pair)
           end
@@ -285,17 +310,19 @@ defmodule MOQX.TransportContract do
           pair = connect_pair(fixture, :moq_lite)
 
           try do
-            %{transport: transport, client: client, server: server} = pair
+            %{ctx: ctx, client: client, server: server} = pair
 
-            assert {:ok, client_stream} = transport.open_stream(client, direction: :bidirectional)
-            assert {:ok, server_stream} = transport.accept_stream(server, [], 100)
-            flush_transport_events(transport)
+            assert {:ok, client_stream, ctx} =
+                     MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
 
-            assert :ok = transport.set_active(server_stream, true)
-            assert :ok = transport.send_stream(client_stream, "active-data", [])
+            assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+            ctx = flush_transport_events(ctx)
 
-            assert {:stream_data, ^server_stream, "active-data", %{}} =
-                     receive_backend_event(transport, 100)
+            assert {:ok, ctx} = MOQX.Transport.set_active(ctx, server_stream, true)
+            assert {:ok, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "active-data", [])
+
+            assert {:ok, {:stream_data, ^server_stream, "active-data", %{}}, _ctx} =
+                     MOQX.Transport.receive_event(ctx, 100)
           after
             cleanup_pair(pair)
           end
@@ -308,71 +335,42 @@ end
 defmodule MOQX.TransportContract.SupportFixture do
   @moduledoc false
 
-  alias MOQX.Transport.Support
-
   def connect_pair(profile) do
-    {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: profile)
+    {:ok, ctx} = MOQX.Transport.new(MOQX.Transport.Support)
+    {:ok, listener, ctx} = MOQX.Transport.listen(ctx, 0, profile: profile)
 
-    {:ok, client} =
-      Support.connect(
-        "localhost",
-        Support.port(listener),
-        [network: network, profile: profile],
-        100
-      )
+    {:ok, client, ctx} =
+      MOQX.Transport.connect(ctx, "localhost", listener.port, [profile: profile], 100)
 
-    {:ok, server} = Support.accept(listener, [], 100)
-    {:ok, client} = Support.handshake(client, 100)
-    {:ok, server} = Support.handshake(server, 100)
+    {:ok, server, ctx} = MOQX.Transport.accept(ctx, listener, [], 100)
+    {:ok, client, ctx} = MOQX.Transport.handshake(ctx, client, 100)
+    {:ok, server, ctx} = MOQX.Transport.handshake(ctx, server, 100)
 
-    flush_transport_events()
+    ctx = flush_transport_events(ctx)
 
-    {:ok, %{transport: Support, client: client, server: server}}
+    {:ok, %{ctx: ctx, client: client, server: server}}
   end
 
-  def connect_client_echo_peer(payload) do
-    {:ok, %{transport: transport, client: client, server: server}} = connect_pair(:moq_lite)
-    owner = self()
-
-    echo_pid =
-      spawn_link(fn ->
-        {:ok, stream} = transport.accept_stream(server, [], 1_000)
-        {:ok, data} = transport.recv_stream(stream, byte_size(payload))
-        :ok = transport.send_stream(stream, data, [])
-        send(owner, {self(), :echoed})
-      end)
+  def connect_client_echo_peer(_payload) do
+    {:ok, %{ctx: ctx, client: client, server: server}} = connect_pair(:moq_lite)
 
     {:ok,
      %{
-       transport: transport,
+       ctx: ctx,
        connection: client,
+       server: server,
        expected_alpn: "moq-lite-04",
-       cleanup: fn -> stop_echo_process(echo_pid) end
+       cleanup: fn -> :ok end
      }}
   end
 
   def unavailable_message, do: "support transport echo peer should always be available"
 
-  defp flush_transport_events do
-    case receive_backend_event(Support, 0) do
-      :timeout -> :ok
-      _event -> flush_transport_events()
-    end
-  end
-
-  defp receive_backend_event(transport, timeout) do
-    receive do
-      message -> transport.normalize_message(message)
-    after
-      timeout -> :timeout
-    end
-  end
-
-  defp stop_echo_process(pid) do
-    if Process.alive?(pid) do
-      Process.unlink(pid)
-      Process.exit(pid, :kill)
+  defp flush_transport_events(ctx) do
+    case MOQX.Transport.receive_event(ctx, 0) do
+      {:timeout, ctx} -> ctx
+      {:ok, _event, ctx} -> flush_transport_events(ctx)
+      {:unknown, _message, ctx} -> flush_transport_events(ctx)
     end
   end
 end
@@ -396,21 +394,18 @@ defmodule MOQX.TransportContract.QuicerReferenceServerFixture do
       verify: :verify_peer
     ]
 
-    case Quicer.connect(host, port, opts, 5_000) do
-      {:ok, connection} ->
-        {:ok,
-         %{
-           transport: Quicer,
-           connection: connection,
-           expected_alpn: alpn,
-           cleanup: fn -> Quicer.close_connection(connection, :normal) end
-         }}
-
-      {:error, reason} ->
-        {:error, reason}
-
-      {:error, reason, details} ->
-        {:error, {reason, details}}
+    with {:ok, ctx} <- MOQX.Transport.new(Quicer),
+         {:ok, connection, ctx} <- MOQX.Transport.connect(ctx, host, port, opts, 5_000) do
+      {:ok,
+       %{
+         ctx: ctx,
+         connection: connection,
+         expected_alpn: alpn,
+         cleanup: fn -> MOQX.Transport.close_connection(ctx, connection, 0) end
+       }}
+    else
+      {:error, reason, _ctx} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -430,20 +425,21 @@ defmodule MOQX.TransportContract.QuicerListenerFixture do
     listener_config = Keyword.fetch!(config, :local_listener)
     probe_cli = Keyword.fetch!(config, :probe_cli)
 
-    with {:ok, listener} <- start_listener(listener_config),
-         {:ok, {_ip, port}} <- Quicer.local_address(listener) do
+    with {:ok, ctx} <- MOQX.Transport.new(Quicer),
+         {:ok, listener, ctx} <- start_listener(ctx, listener_config),
+         {:ok, {_ip, port}} <- MOQX.Transport.local_address(ctx, listener) do
       client_task = start_probe_client(probe_cli, listener_config, port, payload)
 
       try do
-        with {:ok, connection} <- accept_probe_client(listener, client_task),
-             {:ok, stream} <- accept_probe_stream(connection),
-             {:ok, ^payload} <- receive_stream_data(Quicer, stream, payload),
-             :ok <- Quicer.send_stream(stream, payload, []),
+        with {:ok, connection, ctx} <- accept_probe_client(ctx, listener, client_task),
+             {:ok, stream, ctx} <- MOQX.Transport.accept_stream(ctx, connection, [], 5_000),
+             {:ok, ^payload, ctx} <- receive_stream_data(ctx, stream, payload),
+             {:ok, _ctx} <- MOQX.Transport.send_stream(ctx, stream, payload, []),
              {:ok, ^payload} <- await_probe_client(client_task) do
           {:ok, payload}
         end
       after
-        cleanup(listener, client_task)
+        cleanup(ctx, listener, client_task)
       end
     end
   end
@@ -453,10 +449,10 @@ defmodule MOQX.TransportContract.QuicerListenerFixture do
       "and Docker Compose has provisioned .tmp/integration-certs/."
   end
 
-  defp start_listener(listener_config) do
+  defp start_listener(ctx, listener_config) do
     host = Keyword.fetch!(listener_config, :host)
 
-    Quicer.listen("#{host}:0",
+    MOQX.Transport.listen(ctx, "#{host}:0",
       alpn: Keyword.fetch!(listener_config, :alpn),
       certfile: Keyword.fetch!(listener_config, :certfile),
       keyfile: Keyword.fetch!(listener_config, :keyfile),
@@ -472,12 +468,12 @@ defmodule MOQX.TransportContract.QuicerListenerFixture do
     end)
   end
 
-  defp accept_probe_client(listener, client_task) do
-    case Quicer.accept(listener, [], 30_000) do
-      {:ok, connection} ->
-        Quicer.handshake(connection, 5_000)
+  defp accept_probe_client(ctx, listener, client_task) do
+    case MOQX.Transport.accept(ctx, listener, [], 30_000) do
+      {:ok, connection, ctx} ->
+        MOQX.Transport.handshake(ctx, connection, 5_000)
 
-      {:error, reason} ->
+      {:error, reason, _ctx} ->
         with {:ok, client_result} <- completed_task_result(client_task) do
           {:error,
            "listener did not accept quicprobe client: #{inspect(reason)}; #{format_result(client_result)}"}
@@ -492,36 +488,25 @@ defmodule MOQX.TransportContract.QuicerListenerFixture do
     end
   end
 
-  defp accept_probe_stream(connection) do
-    Quicer.accept_stream(connection, [], 5_000)
-  end
+  defp receive_stream_data(ctx, stream, payload) do
+    case MOQX.Transport.recv_stream(ctx, stream, byte_size(payload)) do
+      {:ok, data, ctx} ->
+        {:ok, data, ctx}
 
-  defp receive_stream_data(transport, stream, payload) do
-    case transport.recv_stream(stream, byte_size(payload)) do
-      {:ok, data} ->
-        {:ok, data}
+      {:error, :einval, ctx} ->
+        receive_active_stream_data(ctx, stream)
 
-      {:error, :einval} ->
-        receive_active_stream_data(transport, stream)
-
-      {:error, _reason} = error ->
+      {:error, _reason, _ctx} = error ->
         error
     end
   end
 
-  defp receive_active_stream_data(transport, stream) do
-    case receive_backend_event(transport, 5_000) do
-      {:stream_data, ^stream, data, _metadata} -> {:ok, data}
-      :timeout -> {:error, :timeout}
-      event -> {:error, {:unexpected_transport_event, event}}
-    end
-  end
-
-  defp receive_backend_event(transport, timeout) do
-    receive do
-      message -> transport.normalize_message(message)
-    after
-      timeout -> :timeout
+  defp receive_active_stream_data(ctx, stream) do
+    case MOQX.Transport.receive_event(ctx, 5_000) do
+      {:ok, {:stream_data, ^stream, data, _metadata}, ctx} -> {:ok, data, ctx}
+      {:timeout, ctx} -> {:error, :timeout, ctx}
+      {:ok, event, ctx} -> {:error, {:unexpected_transport_event, event}, ctx}
+      {:unknown, message, ctx} -> {:error, {:unexpected_transport_message, message}, ctx}
     end
   end
 
@@ -559,8 +544,8 @@ defmodule MOQX.TransportContract.QuicerListenerFixture do
     exception -> {:error, Exception.message(exception)}
   end
 
-  defp cleanup(listener, task) do
-    _result = Quicer.close_listener(listener, 0)
+  defp cleanup(ctx, listener, task) do
+    _result = MOQX.Transport.close_listener(ctx, listener, 0)
 
     if Process.alive?(task.pid) do
       Task.shutdown(task, :brutal_kill)
@@ -583,35 +568,38 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
     config = Application.fetch_env!(:moqx, :integration)
     listener_config = Keyword.fetch!(config, :local_listener)
 
-    case start_listener(listener_config, profile) do
-      {:ok, listener} -> connect_pair_with_cleanup(listener, listener_config, profile)
-      {:error, reason} -> {:error, reason}
+    {:ok, ctx} = MOQX.Transport.new(Quicer)
+
+    case start_listener(ctx, listener_config, profile) do
+      {:ok, listener, ctx} -> connect_pair_with_cleanup(ctx, listener, listener_config, profile)
+      {:error, reason, _ctx} -> {:error, reason}
     end
   end
 
-  defp connect_pair_with_cleanup(listener, listener_config, profile) do
-    case connect_pair(listener, listener_config, profile) do
-      {:ok, client, server} ->
-        flush_transport_events()
+  defp connect_pair_with_cleanup(ctx, listener, listener_config, profile) do
+    case connect_pair(ctx, listener, listener_config, profile) do
+      {:ok, ctx, client, server} ->
+        ctx = flush_transport_events(ctx)
 
         {:ok,
          %{
-           transport: Quicer,
+           ctx: ctx,
            client: client,
            server: server,
-           cleanup: fn -> cleanup(listener, client, server) end
+           cleanup: fn -> cleanup(ctx, listener, client, server) end
          }}
 
       {:error, reason} ->
-        _result = Quicer.close_listener(listener, 0)
+        _result = MOQX.Transport.close_listener(ctx, listener, 0)
         {:error, reason}
     end
   end
 
-  defp start_listener(listener_config, profile) do
+  defp start_listener(ctx, listener_config, profile) do
     host = Keyword.fetch!(listener_config, :host)
 
-    Quicer.listen(
+    MOQX.Transport.listen(
+      ctx,
       "#{host}:0",
       datagram_opts(profile) ++
         [
@@ -624,28 +612,29 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
     )
   end
 
-  defp connect_pair(listener, listener_config, profile) do
-    with {:ok, {_ip, port}} <- Quicer.local_address(listener) do
+  defp connect_pair(ctx, listener, listener_config, profile) do
+    with {:ok, {_ip, port}} <- MOQX.Transport.local_address(ctx, listener) do
       owner = self()
-      accept_task = Task.async(fn -> accept_server(listener, owner) end)
-      connect_client_and_await_server(listener_config, port, accept_task, profile)
+      accept_task = Task.async(fn -> accept_server(ctx, listener, owner) end)
+      connect_client_and_await_server(ctx, listener_config, port, accept_task, profile)
     end
   end
 
-  defp connect_client_and_await_server(listener_config, port, accept_task, profile) do
-    case connect_client(listener_config, port, profile) do
-      {:ok, client} -> await_server_for_client(client, accept_task)
-      {:error, reason} -> stop_accept_task(accept_task, reason)
+  defp connect_client_and_await_server(ctx, listener_config, port, accept_task, profile) do
+    case connect_client(ctx, listener_config, port, profile) do
+      {:ok, client, ctx} -> await_server_for_client(ctx, client, accept_task)
+      {:error, reason, _ctx} -> stop_accept_task(accept_task, reason)
     end
   end
 
-  defp await_server_for_client(client, accept_task) do
+  defp await_server_for_client(ctx, client, accept_task) do
     case await_accept_server(accept_task) do
-      {:ok, server} ->
-        {:ok, client, server}
+      {:ok, server, accept_ctx} ->
+        ctx = merge_contexts(ctx, accept_ctx)
+        {:ok, ctx, client, server}
 
       {:error, reason} ->
-        _result = Quicer.close_connection(client, :normal)
+        _result = MOQX.Transport.close_connection(ctx, client, 0)
         {:error, reason}
     end
   end
@@ -655,18 +644,19 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
     {:error, reason}
   end
 
-  defp accept_server(listener, owner) do
-    with {:ok, server} <- Quicer.accept(listener, [], 5_000),
-         {:ok, server} <- Quicer.handshake(server, 5_000),
-         :ok <- Quicer.controlling_process(server, owner) do
-      {:ok, server}
+  defp accept_server(ctx, listener, owner) do
+    with {:ok, server, ctx} <- MOQX.Transport.accept(ctx, listener, [], 5_000),
+         {:ok, server, ctx} <- MOQX.Transport.handshake(ctx, server, 5_000),
+         {:ok, ctx} <- MOQX.Transport.controlling_process(ctx, owner) do
+      {:ok, server, ctx}
     end
   end
 
-  defp connect_client(listener_config, port, profile) do
+  defp connect_client(ctx, listener_config, port, profile) do
     host = Keyword.fetch!(listener_config, :host)
 
-    Quicer.connect(
+    MOQX.Transport.connect(
+      ctx,
       host,
       port,
       datagram_opts(profile) ++
@@ -691,25 +681,27 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
     end
   end
 
-  defp cleanup(listener, client, server) do
-    _client_result = Quicer.close_connection(client, :normal)
-    _server_result = Quicer.close_connection(server, :normal)
-    _listener_result = Quicer.close_listener(listener, 0)
+  defp merge_contexts(ctx, accepted_ctx) do
+    update_in(ctx.backend.data, fn data ->
+      data
+      |> Map.update!(:listeners, &Map.merge(&1, accepted_ctx.backend.data.listeners))
+      |> Map.update!(:connections, &Map.merge(&1, accepted_ctx.backend.data.connections))
+      |> Map.update!(:streams, &Map.merge(&1, accepted_ctx.backend.data.streams))
+    end)
+  end
+
+  defp cleanup(ctx, listener, client, server) do
+    _client_result = MOQX.Transport.close_connection(ctx, client, 0)
+    _server_result = MOQX.Transport.close_connection(ctx, server, 0)
+    _listener_result = MOQX.Transport.close_listener(ctx, listener, 0)
     :ok
   end
 
-  defp flush_transport_events do
-    case receive_backend_event(Quicer, 0) do
-      :timeout -> :ok
-      _event -> flush_transport_events()
-    end
-  end
-
-  defp receive_backend_event(transport, timeout) do
-    receive do
-      message -> transport.normalize_message(message)
-    after
-      timeout -> :timeout
+  defp flush_transport_events(ctx) do
+    case MOQX.Transport.receive_event(ctx, 0) do
+      {:timeout, ctx} -> ctx
+      {:ok, _event, ctx} -> flush_transport_events(ctx)
+      {:unknown, _message, ctx} -> flush_transport_events(ctx)
     end
   end
 end

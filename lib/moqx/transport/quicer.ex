@@ -43,6 +43,39 @@ defmodule MOQX.Transport.Quicer do
   end
 
   @doc """
+  Returns exact stream info for a quicer stream handle.
+  """
+  @spec stream_info(MOQX.Transport.stream(), :client | :server, :local | :peer) ::
+          {:ok, MOQX.Transport.StreamInfo.t()} | {:error, term()}
+  def stream_info(stream, local_role, initiator) do
+    case :quicer.get_stream_id(stream) do
+      {:ok, stream_id} -> {:ok, stream_info_from_id(stream_id, local_role, initiator)}
+      {:error, reason} -> {:error, reason}
+      not_found -> {:error, not_found}
+    end
+  end
+
+  @doc """
+  Builds exact stream info from QUIC stream ID and local endpoint role.
+  """
+  @spec stream_info_from_id(non_neg_integer(), :client | :server, :local | :peer) ::
+          MOQX.Transport.StreamInfo.t()
+  def stream_info_from_id(stream_id, local_role, initiator) do
+    initiator_role = initiator_role_from_stream_id(stream_id)
+    direction = direction_from_stream_id(stream_id)
+
+    %MOQX.Transport.StreamInfo{
+      stream_id: stream_id,
+      direction: direction,
+      initiator: initiator,
+      initiator_role: initiator_role,
+      local_role: local_role,
+      send_side?: send_side?(direction, initiator),
+      receive_side?: receive_side?(direction, initiator)
+    }
+  end
+
+  @doc """
   Closes a listener handle.
   """
   @spec close_listener(MOQX.Transport.listener(), timeout()) :: :ok | {:error, term()}
@@ -243,6 +276,18 @@ defmodule MOQX.Transport.Quicer do
   defp direction_from_stream_id(stream_id) when is_integer(stream_id) do
     if (stream_id &&& 2) == 2, do: :unidirectional, else: :bidirectional
   end
+
+  defp initiator_role_from_stream_id(stream_id) when is_integer(stream_id) do
+    if (stream_id &&& 1) == 1, do: :server, else: :client
+  end
+
+  defp send_side?(:bidirectional, _initiator), do: true
+  defp send_side?(:unidirectional, :local), do: true
+  defp send_side?(:unidirectional, :peer), do: false
+
+  defp receive_side?(:bidirectional, _initiator), do: true
+  defp receive_side?(:unidirectional, :local), do: false
+  defp receive_side?(:unidirectional, :peer), do: true
 
   defp option(opts, key, default) when is_map(opts), do: Map.get(opts, key, default)
   defp option(opts, key, default) when is_list(opts), do: Keyword.get(opts, key, default)

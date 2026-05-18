@@ -3,6 +3,32 @@ defmodule MOQX.Transport.QuicerTest do
 
   alias MOQX.Transport.Quicer
 
+  describe "stream_info_from_id/3" do
+    test "derives exact local and peer role metadata from QUIC stream IDs" do
+      assert Quicer.stream_info_from_id(0, :client, :local) ==
+               %MOQX.Transport.StreamInfo{
+                 stream_id: 0,
+                 direction: :bidirectional,
+                 initiator: :local,
+                 initiator_role: :client,
+                 local_role: :client,
+                 send_side?: true,
+                 receive_side?: true
+               }
+
+      assert Quicer.stream_info_from_id(2, :server, :peer) ==
+               %MOQX.Transport.StreamInfo{
+                 stream_id: 2,
+                 direction: :unidirectional,
+                 initiator: :peer,
+                 initiator_role: :client,
+                 local_role: :server,
+                 send_side?: false,
+                 receive_side?: true
+               }
+    end
+  end
+
   describe "normalize_message/1" do
     test "normalizes stream data messages" do
       props = %{absolute_offset: 0, len: 7, flags: 0}
