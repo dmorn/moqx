@@ -1,6 +1,6 @@
 # Redesign transport context, shutdown, and ownership contract
 
-Status: ready-for-agent
+Status: closed
 Type: AFK
 
 ## Parent
@@ -223,30 +223,30 @@ Semantics:
 
 ## Acceptance criteria
 
-- [ ] `MOQX.Transport` exposes `new/2` and context-threaded façade functions with context-last tuples.
-- [ ] Public protocol-facing tests use `MOQX.Transport.*` façade calls rather than direct backend calls, except backend-specific adapter/unit tests.
-- [ ] Public wrapper structs exist for `Context`, `BackendRef`, `Listener`, `Connection`, `Stream`, and `StreamInfo`.
-- [ ] Wrapper handles carry backend module plus backend-opaque data; protocol-visible fields expose only stable transport metadata.
-- [ ] The façade validates backend/context mismatches and returns a stable error.
-- [ ] `StreamInfo` includes exact `stream_id`, `direction`, `initiator`, `initiator_role`, `local_role`, `send_side?`, and `receive_side?` fields.
-- [ ] Support transport assigns QUIC-shaped stream IDs and exact stream info for local/peer, bidirectional/unidirectional streams.
-- [ ] `close_stream/2` is removed from the public transport behaviour/API.
-- [ ] `finish_sending/2`, `abort_sending/3`, and `abort_receiving/3` exist and are documented with intent, QUIC mapping, peer observation, completion semantics, and directionality.
-- [ ] Shutdown functions accept only `non_neg_integer()` application error codes where codes are required.
-- [ ] Invalid send-side or receive-side shutdown operations return stable direction errors.
-- [ ] `close_connection/3` initiates connection close with a `non_neg_integer()` application error code.
-- [ ] Shared contract tests cover graceful finish-sending and normalized peer/local completion events.
-- [ ] Shared contract tests cover abort-sending and preserve the application error code in normalized peer events where available.
-- [ ] Shared contract tests cover abort-receiving / STOP_SENDING semantics and preserve the application error code in normalized peer events where available.
-- [ ] Shared contract tests cover connection close behavior and normalized connection close events.
-- [ ] Shared contract tests cover `Transport.stream_info/2` for bidirectional, local unidirectional, and peer unidirectional streams.
-- [ ] Shared contract tests cover stale/unknown handle normalization errors instead of silently returning uncertain stream info.
-- [ ] Whole-context `controlling_process/2` transfers all known listener/connection/stream handles or returns an all-or-error failure.
-- [ ] The support transport updates ownership and message delivery according to the context handoff contract.
-- [ ] The `quicer` adapter passes the same close/reset/ownership contract tests where local environment support is available.
-- [ ] Any unsupported or backend-limited ownership, close, reset, or receive-abort behavior is explicitly documented.
-- [ ] `MOQX.Transport` callback/function documentation is expanded generally so each public transport operation states caller intent, backend/QUIC mapping where relevant, event/peer observation, and ownership/context expectations.
-- [ ] No `Application` env or mutable global registry is introduced as a test seam or transport state store.
+- [x] `MOQX.Transport` exposes `new/2` and context-threaded façade functions with context-last tuples.
+- [x] Public protocol-facing tests use `MOQX.Transport.*` façade calls rather than direct backend calls, except backend-specific adapter/unit tests.
+- [x] Public wrapper structs exist for `Context`, `BackendRef`, `Listener`, `Connection`, `Stream`, and `StreamInfo`.
+- [x] Wrapper handles carry backend module plus backend-opaque data; protocol-visible fields expose only stable transport metadata.
+- [x] The façade validates backend/context mismatches and returns a stable error.
+- [x] `StreamInfo` includes exact `stream_id`, `direction`, `initiator`, `initiator_role`, `local_role`, `send_side?`, and `receive_side?` fields.
+- [x] Support transport assigns QUIC-shaped stream IDs and exact stream info for local/peer, bidirectional/unidirectional streams.
+- [x] `close_stream/2` is removed from the public transport behaviour/API.
+- [x] `finish_sending/2`, `abort_sending/3`, and `abort_receiving/3` exist and are documented with intent, QUIC mapping, peer observation, completion semantics, and directionality.
+- [x] Shutdown functions accept only `non_neg_integer()` application error codes where codes are required.
+- [x] Invalid send-side or receive-side shutdown operations return stable direction errors.
+- [x] `close_connection/3` initiates connection close with a `non_neg_integer()` application error code.
+- [x] Shared contract tests cover graceful finish-sending and normalized peer/local completion events.
+- [x] Shared contract tests cover abort-sending and preserve the application error code in normalized peer events where available.
+- [x] Shared contract tests cover abort-receiving / STOP_SENDING semantics and preserve the application error code in normalized peer events where available.
+- [x] Shared contract tests cover connection close behavior and normalized connection close events.
+- [x] Shared contract tests cover `Transport.stream_info/2` for bidirectional, local unidirectional, and peer unidirectional streams.
+- [x] Shared contract tests cover stale/unknown handle normalization errors instead of silently returning uncertain stream info.
+- [x] Whole-context `controlling_process/2` transfers all known listener/connection/stream handles or returns an all-or-error failure.
+- [x] The support transport updates ownership and message delivery according to the context handoff contract.
+- [x] The `quicer` adapter passes the same close/reset/ownership contract tests where local environment support is available.
+- [x] Any unsupported or backend-limited ownership, close, reset, or receive-abort behavior is explicitly documented.
+- [x] `MOQX.Transport` callback/function documentation is expanded generally so each public transport operation states caller intent, backend/QUIC mapping where relevant, event/peer observation, and ownership/context expectations.
+- [x] No `Application` env or mutable global registry is introduced as a test seam or transport state store.
 
 ## Blocked by
 
@@ -260,5 +260,24 @@ Semantics:
 - Context is a caller-owned state value, not a process/router. A future router remains possible if mailbox isolation or concurrent ownership becomes necessary.
 - Unknown role/direction metadata is not acceptable for stream info; fail loudly instead.
 - Whole-context handoff is intentionally stricter than per-handle handoff until a router or more advanced ownership model exists.
+
+## Resolution
+
+Closed by commits `99687ac`, `1ba41ea`, `bff2099`, and the follow-up shared shutdown contract work.
+
+Implemented caller-owned context façade, opaque wrapper handles, exact stream info, local-intent shutdown APIs, normalized shutdown events, whole-context handoff, support transport shutdown behavior, and quicer shutdown normalization. Shared contracts now exercise context façade behavior for support and real quicer self-pair integration, including finish-sending, abort-sending, abort-receiving, connection close, stream info, and unknown-handle failures.
+
+Validation:
+
+- `mix format`
+- `mix test` — 54 passing, 15 integration excluded
+- `mix credo --strict`
+- `mise exec -- mix test --only integration` — 15 passing
+
+Notes:
+
+- `quicer` ownership handoff is backend-limited for listener handles once ownership differs; self-pair integration uses a separate accept-task context without listener transfer, then merges accepted connection state back into the caller-owned context.
+- `quicer.accept_stream/3` may consume raw `new_stream` messages internally; context façade derives exact peer stream info from the accepted stream handle and QUIC stream ID when no pending peer stream metadata exists.
+- No `Application` env or mutable global registry was introduced.
 
 ## Comments

@@ -144,6 +144,19 @@ defmodule MOQX.TransportTest do
       assert {:unknown, {:not_transport, :message}, ctx} == MOQX.Transport.receive_event(ctx, 0)
       assert {:timeout, ctx} == MOQX.Transport.receive_event(ctx, 0)
     end
+
+    test "receive_event fails loudly for transport event with unknown handle" do
+      {:ok, ctx} = MOQX.Transport.new(MOQX.Transport.Support)
+      unknown_stream = %MOQX.Transport.Support.Stream{pid: self()}
+
+      send(
+        self(),
+        {:moqx_transport, {:stream_event, unknown_stream, :peer_finished_sending, %{}}}
+      )
+
+      assert {:error, {:unknown_transport_handle, ^unknown_stream}, ^ctx} =
+               MOQX.Transport.receive_event(ctx, 0)
+    end
   end
 
   defp flush_context_events(ctx) do
