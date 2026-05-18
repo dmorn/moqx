@@ -26,4 +26,19 @@ This should remain deterministic by default and configurable per test.
 
 - `.scratch/transport-layer-foundation/issues/06-add-close-and-ownership-contract.md`
 
+## Progress
+
+Issue 06 is closed, so this issue is no longer structurally blocked.
+
+Design direction:
+
+- Configure support-transport impairments through backend-specific options on `MOQX.Transport.new(MOQX.Transport.Support, opts)`.
+- Keep protocol/session choices such as `profile: :draft14` and `profile: :moq_lite` on `listen/connect`, not in the impairment config.
+- Treat impairments as support-backend test machinery, not production transport semantics.
+- Keep the default support transport reliable and deterministic when no impairment options are provided.
+- Use explicit deterministic plans, counters, or fixed delays; do not add random loss unless a future design adds an explicit seeded mode.
+- Do not use `Application` env or mutable global configuration as the test seam.
+
+Implementation is intentionally deferred until a higher-level MOQT or MOQ Lite protocol test needs a concrete failure path. That should keep the first impairment API narrow and grounded in real caller needs instead of introducing a broad DSL prematurely.
+
 ## Comments

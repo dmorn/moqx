@@ -139,7 +139,7 @@ These tests establish baseline semantics for handshakes, ALPN/capability negotia
 
 ### Performance and limits research
 
-Transport performance and limit analysis belongs in a separate benchmark/research harness, not in the regular test suite.
+Transport performance and limit analysis belongs in a separate benchmark/research harness, not in the regular test suite. The harness is for discovering real QUIC path limits and protocol pressure points: how hard a link can be pushed before it degrades or fails, and how much of the path `moqx` can fill under stream, datagram, and mixed MOQT-shaped load.
 
 Use:
 
@@ -147,17 +147,22 @@ Use:
 bench/transport/
 ```
 
-Benchmark scripts should be independent Elixir scripts using `Mix.install([])` for their own dependencies.
+Benchmark scripts should be independent Elixir scripts using `Mix.install([])` for their own dependencies. Scripts should accept caller-provided endpoints so the same harness can run against same-region server pairs, cross-region server pairs, and asymmetric edge-to-server paths.
 
 The harness should eventually compare:
 
-- raw host/network baseline via `iperf3` TCP/UDP;
-- `MOQX.Transport.Quicer` client to `MOQX.Transport.Quicer` server;
-- `MOQX.Transport` client to a reference QUIC server;
-- reference QUIC client to a `MOQX.Transport` listener;
-- optionally reference client to reference server.
+- raw host/network baseline via `iperf3` TCP/UDP on the exact path under test;
+- `MOQX.Transport.Quicer` client to `MOQX.Transport.Quicer` server as local/self-pair calibration;
+- `MOQX.Transport` client to a remote reference QUIC server;
+- remote reference QUIC client to a `MOQX.Transport` listener;
+- reference client to reference server across the same path;
+- datagram pressure, stream pressure, and mixed control-plus-object traffic patterns.
 
-The benchmark harness should measure raw transport characteristics, not full MOQT protocol behavior initially. Scripts may still use protocol-like transport profiles, such as draft-14-like ALPN/datagram settings and MOQ Lite-like no-datagram/many-bidirectional-stream settings.
+The benchmark harness should measure raw transport characteristics and MOQT-shaped pressure patterns, not full MOQT protocol behavior initially. Scripts may still use protocol-like transport profiles, such as draft-14-like ALPN/datagram settings and MOQ Lite-like no-datagram/many-bidirectional-stream settings.
+
+Local loopback and same-host self-pair runs are calibration only. They are useful for proving the harness works and estimating local BEAM/quicer overhead, but they are not evidence about real network saturation. Public relays can be used for interop and smoke probes, but not as controlled benchmark baselines because relay load, namespace behavior, and network path are outside the harness' control.
+
+Each benchmark run should emit machine-readable results with enough metadata to compare runs: run id, timestamp, git SHA, host identifiers, region/provider, instance/network class, OS/kernel, CPU/memory, quicer/msquic versions where available, protocol profile, ALPN, congestion-control/pacing/settings, command parameters, offered load, goodput, latency percentiles, datagram delivery/loss/late counts, stream count, payload size, CPU, memory, mailbox depth, backpressure/stall time, and close/error reason.
 
 ## Consequences
 
@@ -167,7 +172,7 @@ Positive:
 - The same transport foundation can support both MOQT draft-14 and MOQ Lite requirements.
 - Future protocol tests can run deterministically without real QUIC sockets.
 - The real `quicer` adapter can be verified against the same contract as the support transport.
-- Performance research has a clear home and will not make normal tests slow or flaky.
+- Performance research has a clear home and can explore real path behavior without making normal tests slow or flaky.
 
 Tradeoffs:
 
@@ -176,6 +181,7 @@ Tradeoffs:
 - A future router/owner process may be needed if mailbox isolation or stricter encapsulation becomes necessary.
 - The support transport can validate semantics but cannot predict real QUIC performance.
 - Capability discovery introduces an API surface that must gracefully represent unsupported backend features.
+- Real-path benchmarks require externally managed hosts or networks; results depend on path conditions and must record enough metadata to be interpretable.
 
 ## Non-goals
 
@@ -184,6 +190,8 @@ This ADR does not decide:
 - final MOQT draft-14 session/control-message implementation;
 - final MOQ Lite session/message implementation;
 - final benchmark result thresholds;
+- cloud/server provisioning automation for benchmark endpoints;
+- public relay performance baselines;
 - the reference QUIC implementation to use for benchmarking;
 - whether a future dedicated transport-router process should replace the helper-based event API;
 - any future integration-test strategy.

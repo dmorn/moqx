@@ -1,6 +1,6 @@
-# Create transport benchmark harness skeleton
+# Define real-path transport benchmark harness contract
 
-Status: needs-triage
+Status: closed
 Type: AFK
 
 ## Parent
@@ -9,22 +9,51 @@ Type: AFK
 
 ## What to build
 
-Create the dedicated transport research harness structure for measuring raw transport performance and limits outside the normal test suite.
+Create the dedicated transport research harness contract for measuring QUIC path limits and protocol pressure points outside the normal test suite.
 
-The harness should establish conventions for standalone Elixir scripts that use `Mix.install([])`, metric reporting, and repeatable benchmark execution.
+The purpose is to learn how hard a real QUIC link can be pushed before it degrades or fails, and how much of a real network path `moqx` can fill under MOQT-shaped traffic. Local loopback is useful only as calibration that the harness works and to estimate local BEAM/quicer overhead; it must not be treated as evidence about real network behavior.
+
+This issue should create the benchmark directory and README contract before implementing the individual scripts. The contract must define what later benchmark scripts measure, how they describe the path under test, and how results can be compared across runs.
 
 ## Acceptance criteria
 
-- [ ] A benchmark directory exists for transport research.
-- [ ] A README explains the purpose of the harness and states that it is not part of normal tests.
-- [ ] The README defines expected metrics such as handshake latency, throughput, first-byte latency, datagram rate/loss, concurrent streams, memory, and mailbox growth.
-- [ ] The README explains the benchmark matrix: raw baseline, MOQX self-pair, our client to reference server, reference client to our listener, and optional reference-to-reference.
-- [ ] The README explains how benchmark scripts select protocol-like transport profiles, including ALPN and datagram capability choices.
-- [ ] Script conventions use standalone Elixir scripts with `Mix.install([])`.
-- [ ] No benchmark-only dependencies are added to the library dependency graph.
+- [x] A `bench/transport/` directory exists for transport research.
+- [x] `bench/transport/README.md` states that benchmark work is not part of normal tests or integration tests.
+- [x] The README defines the core question: path saturation, degradation, and failure behavior for QUIC streams/datagrams under real network conditions.
+- [x] The README distinguishes evidence tiers: local loopback calibration, same-region server pair, cross-region server pair, asymmetric edge/home-to-server path, and public relay interop probes.
+- [x] The README states that public relays are for interop/smoke probing only, not controlled benchmark baselines.
+- [x] The README defines the required run metadata schema: run id, timestamp, git SHA, host identifiers, regions/providers, instance/network class, OS/kernel, CPU/memory, quicer/msquic versions where available, protocol profile, ALPN, congestion-control settings, pacing/settings, certificate mode, and command parameters.
+- [x] The README defines the result schema and units for handshake latency, first-byte latency, offered load, goodput, packet/datagram send rate, delivered datagram rate, loss/drop/late counts, stream count, payload size, p50/p95/p99 latency, CPU, memory, mailbox depth, send backpressure/stall time, and close/error reason.
+- [x] The README defines "breaks apart" symptoms: connection close/protocol error, send failure, stream stall, datagram delivery collapse, latency explosion, throughput plateau despite higher offered load, mailbox growth without recovery, CPU/memory saturation, and control traffic delayed behind media/object traffic.
+- [x] The README explains the benchmark matrix: `iperf3` TCP/UDP path baseline, MOQX quicer self-pair calibration, MOQX client to remote reference server, remote reference client to MOQX listener, reference-to-reference comparison, datagram pressure, stream pressure, and mixed MOQT-shaped control-plus-object load.
+- [x] The README explains how scripts select protocol-like transport profiles, including draft-14-like ALPN/datagram settings and MOQ Lite-like no-datagram/many-stream settings.
+- [x] The README defines ramp methodology: fixed-duration warmup, stepped offered load, steady-state sample window, cooldown, and stop conditions.
+- [x] The README requires benchmark scripts to produce machine-readable JSON or JSONL with the shared metadata/result schema.
+- [x] Script conventions use standalone Elixir scripts with `Mix.install([])` unless a non-Elixir reference tool is explicitly part of the benchmark.
+- [x] No benchmark-only dependencies are added to the library dependency graph.
 
 ## Blocked by
 
 None - can start immediately
+
+## Design decisions
+
+- Real server paths are the primary evidence for performance and limit claims.
+- Loopback and same-host self-pair runs are calibration, not proof that a network path can be filled.
+- `iperf3` establishes the host/path ceiling; it is not a QUIC or MOQT benchmark.
+- Benchmark scripts should support caller-provided endpoints so the same harness can run on same-region, cross-region, and edge-to-server paths.
+- The first harness contract should specify measurement and output shape before adding pressure scripts.
+- MOQT-shaped pressure should be represented as transport-level patterns for now: control trickle plus object streams/datagrams, not full MOQT session semantics.
+- Results should be comparable across runs, but #08 does not set pass/fail thresholds.
+
+## Resolution
+
+Implemented by `bench/transport/README.md`.
+
+The contract defines evidence tiers, path metadata, benchmark families, protocol-like profiles, ramp methodology, stop conditions, "breaks apart" symptoms, JSON/JSONL output records, required metadata/result fields, units, script conventions, result storage, and the intended follow-up issue order.
+
+Validation:
+
+- `git diff --check`
 
 ## Comments

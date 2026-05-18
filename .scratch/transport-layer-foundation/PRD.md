@@ -13,7 +13,7 @@ New protocol research shows the transport foundation must support more than one 
 
 Without a protocol-neutral QUIC foundation, higher layers could accidentally bake draft-14-only assumptions into the transport layer, depend on raw `quicer` messages, inherit Erlang charlist string semantics, or require live QUIC sockets for ordinary protocol tests.
 
-Performance and limit analysis is also needed, but it should be explicit research under a benchmark harness rather than normal integration testing.
+Performance and limit analysis is also needed, but it should be explicit real-path research under a benchmark harness rather than normal integration testing or loopback-only microbenchmarks.
 
 ## Solution
 
@@ -27,7 +27,7 @@ Establish a protocol-neutral QUIC transport foundation around `MOQX.Transport`:
 - stream FIN, RESET_STREAM, and STOP_SENDING semantics are first-class;
 - a deterministic in-memory support transport provides QUIC-like semantics for future protocol tests;
 - shared contract tests verify the support transport and `quicer` adapter against the same behavior;
-- transport performance and limits research lives under a separate benchmark harness.
+- transport performance and limits research lives under a separate benchmark harness focused on real server paths, with local runs used only for calibration.
 
 The architectural baseline is recorded in:
 
@@ -55,10 +55,10 @@ The architectural baseline is recorded in:
 16. As a maintainer, I want the support transport and `quicer` adapter to share contract tests, so that both implementations stay aligned.
 17. As a maintainer, I want active, passive, and ownership handoff behavior covered by tests, so that process ownership boundaries are explicit.
 18. As a protocol implementer, I want deterministic failure injection in the support transport, so that timeout, close, reset, and datagram-loss paths can be tested without flakiness.
-19. As a performance researcher, I want a dedicated transport benchmark harness, so that performance work does not slow or destabilize the normal test suite.
-20. As a performance researcher, I want raw `iperf3` TCP/UDP baselines, so that QUIC measurements can be compared against host/network limits.
-21. As a performance researcher, I want a `MOQX.Transport.Quicer` client/server self-pair benchmark, so that wrapper and BEAM overhead can be measured directly.
-22. As a performance researcher, I want reference QUIC client/server comparisons, so that client-side and listener-side behavior can be evaluated independently.
+19. As a performance researcher, I want a dedicated real-path transport benchmark harness, so that performance work can explore path saturation, degradation, and failure behavior without slowing or destabilizing the normal test suite.
+20. As a performance researcher, I want raw `iperf3` TCP/UDP baselines for the exact server path under test, so that QUIC measurements can be compared against host/network limits.
+21. As a performance researcher, I want a `MOQX.Transport.Quicer` client/server self-pair calibration benchmark, so that wrapper and BEAM overhead can be measured without mistaking loopback behavior for network behavior.
+22. As a performance researcher, I want reference QUIC client/server comparisons across real server paths, so that client-side and listener-side behavior can be evaluated independently under actual RTT, loss, buffering, and congestion-control conditions.
 23. As a maintainer, I want benchmark scripts to be standalone Elixir scripts, so that research dependencies do not leak into the library dependency graph.
 24. As a future implementer of MOQT draft-14 or MOQ Lite, I want transport semantics to be documented and tested, so that protocol-specific work starts from solid ground.
 
@@ -78,8 +78,9 @@ The architectural baseline is recorded in:
 - Binary stream and datagram payloads remain binaries.
 - A deterministic support transport will implement the transport behaviour for tests.
 - Shared contract tests will verify handshake, stream, datagram, active/passive, close/reset, capabilities, and ownership semantics across transport implementations.
-- Performance research uses standalone Elixir scripts with `Mix.install([])` under a benchmark harness.
+- Performance research uses standalone Elixir scripts with `Mix.install([])` under a benchmark harness, with caller-provided endpoints for same-region, cross-region, and edge-to-server paths.
 - The benchmark harness is not part of normal unit tests and is not represented as `mix test.integration`.
+- Local loopback and same-host self-pair benchmark runs are calibration only; real server paths provide the evidence for network saturation and degradation claims.
 
 ## Testing Decisions
 
@@ -118,6 +119,8 @@ Initial test coverage should include:
 - WebTransport-over-HTTP/3 support
 - Final benchmark thresholds or pass/fail criteria
 - Selecting a permanent reference QUIC implementation
+- Automating cloud/server provisioning for benchmark endpoints
+- Treating public relays as controlled benchmark baselines
 - Adding a `mix test.integration` task
 - Replacing the helper-based event API with a dedicated router process
 - Implementing protocol-specific schedulers above the transport layer
@@ -130,8 +133,10 @@ Real QUIC verification belongs in an explicit Docker Compose driven integration 
 
 The integration harness should cover both directions: `MOQX.Transport.Quicer` client to a reference QUIC server, and a reference QUIC client to a `MOQX.Transport.Quicer` listener. Static endpoint and certificate paths belong in `config/test.exs`; tests must not mutate `Application` env.
 
-The benchmark harness should eventually compare raw network/host baselines, self-pair `MOQX.Transport.Quicer` performance, our client against a reference QUIC server, and a reference QUIC client against our listener.
+The benchmark harness should eventually compare raw network/host baselines, self-pair `MOQX.Transport.Quicer` calibration, our client against a reference QUIC server, a reference QUIC client against our listener, and reference-to-reference behavior across real server paths.
 
 `iperf3` is a baseline tool for host/network capacity, not a QUIC benchmark. QUIC performance measurements should be interpreted relative to that baseline.
+
+The primary benchmark question is how far a real QUIC link can be pushed before it degrades or fails, and how much of a real network path `moqx` can fill under stream, datagram, and mixed MOQT-shaped load. "Breaks apart" means observable symptoms such as connection close, protocol error, stream stall, datagram delivery collapse, latency explosion, throughput plateau despite higher offered load, mailbox growth without recovery, CPU or memory saturation, or control traffic delayed behind media/object traffic.
 
 ## Comments
