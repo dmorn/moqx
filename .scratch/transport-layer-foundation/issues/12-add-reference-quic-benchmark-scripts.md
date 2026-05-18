@@ -27,7 +27,6 @@ This isolates client-side and listener-side behavior while measuring raw transpo
 ## Blocked by
 
 - `.scratch/transport-layer-foundation/issues/10-add-moqx-quicer-self-pair-benchmark.md`
-- `.scratch/transport-layer-foundation/issues/11-select-reference-quic-implementation.md`
 
 ## Design decisions
 
@@ -38,6 +37,6 @@ This isolates client-side and listener-side behavior while measuring raw transpo
 
 ## Progress
 
-Issue 08 is closed. This issue remains blocked by the self-pair calibration script in issue 10 and the reference/topology decision in issue 11.
+Issue 08 and issue 11 are closed. This issue remains blocked by the self-pair calibration script in issue 10.
 
 ## Comments
