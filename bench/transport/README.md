@@ -85,6 +85,29 @@ Use `iperf3` to establish raw host/path capacity:
 `iperf3` is not a QUIC or MOQT benchmark. It is the path ceiling used to
 interpret QUIC results.
 
+The repo-owned script is:
+
+```bash
+elixir bench/transport/scripts/iperf3_baseline.exs --server <host-or-ip>
+```
+
+It expects the caller to provide an `iperf3` server endpoint. For local smoke
+validation only, it can start a temporary loopback server:
+
+```bash
+elixir bench/transport/scripts/iperf3_baseline.exs \
+  --server 127.0.0.1 \
+  --port 55201 \
+  --local-server \
+  --tcp-duration 1 \
+  --udp-duration 1 \
+  --udp-bitrates 1M
+```
+
+For remote controlled paths, start `iperf3 --server` on the server host
+yourself and pass the public or private endpoint explicitly. The script does
+not provision infrastructure, start Terraform, or assume loopback.
+
 ### Self-Pair Calibration
 
 Run `MOQX.Transport.Quicer` client and listener on the same host or loopback.
