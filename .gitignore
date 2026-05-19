@@ -16,6 +16,9 @@
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
 
+# Local secrets.
+.env
+
 # Also ignore archive artifacts (built via "mix archive.build").
 *.ez
 
@@ -30,6 +33,7 @@ priv/native
 .tmp
 .dexter*
 bench/transport/results/
+bench/transport/.keys/
 bench/transport/infra/**/.terraform/
 bench/transport/infra/**/*.tfstate
 bench/transport/infra/**/*.tfstate.*

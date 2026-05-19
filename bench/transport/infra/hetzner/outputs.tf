@@ -78,6 +78,6 @@ output "toolchain_check_commands" {
   description = "Read-only commands to confirm cloud-init and toolchain readiness after apply."
   value = {
     for role, server in hcloud_server.node : role =>
-    "ssh root@${server.ipv4_address} 'cloud-init status --wait && cd /opt/moqx-bench && mise exec -- go version && mise exec -- elixir --version && iperf3 --version | head -1'"
+    "ssh root@${server.ipv4_address} 'cloud-init status --wait && go version && elixir --version && iperf3 --version | head -1'"
   }
 }

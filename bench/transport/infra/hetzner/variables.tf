@@ -31,7 +31,7 @@ variable "server_type" {
 variable "image" {
   description = "Hetzner Cloud image for both benchmark endpoints."
   type        = string
-  default     = "debian-12"
+  default     = "ubuntu-24.04"
 }
 
 variable "client_location" {
@@ -106,20 +106,20 @@ variable "server_private_ip" {
   default     = "10.88.0.12"
 }
 
-variable "erlang_version" {
-  description = "Erlang/OTP version installed by mise."
+variable "otp_version" {
+  description = "Erlang/OTP version installed by the official Elixir install script."
   type        = string
-  default     = "28.4"
+  default     = "28.1"
 }
 
 variable "elixir_version" {
-  description = "Elixir version installed by mise."
+  description = "Elixir version installed by the official Elixir install script."
   type        = string
-  default     = "1.20.0-rc.3-otp-28"
+  default     = "1.19.5"
 }
 
 variable "go_version" {
-  description = "Go version installed by mise."
+  description = "Go version installed from go.dev. Use \"stable\" for the latest stable Linux archive."
   type        = string
-  default     = "1.23"
+  default     = "stable"
 }

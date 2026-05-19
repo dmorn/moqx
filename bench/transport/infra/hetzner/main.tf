@@ -122,11 +122,12 @@ resource "hcloud_firewall" "operator" {
 resource "hcloud_server" "node" {
   for_each = local.nodes
 
-  name        = "${local.name_prefix}-${each.key}"
-  image       = var.image
-  server_type = var.server_type
-  location    = each.value.location
-  ssh_keys    = concat([hcloud_ssh_key.operator.name], var.extra_ssh_keys)
+  name                       = "${local.name_prefix}-${each.key}"
+  image                      = var.image
+  server_type                = var.server_type
+  location                   = each.value.location
+  ssh_keys                   = concat([hcloud_ssh_key.operator.name], var.extra_ssh_keys)
+  ignore_remote_firewall_ids = true
   labels = merge(local.common_labels, {
     role     = each.key
     location = each.value.location
@@ -135,7 +136,7 @@ resource "hcloud_server" "node" {
   user_data = templatefile("${path.module}/cloud-init.yaml.tftpl", {
     profile_name   = var.profile_name
     role           = each.key
-    erlang_version = var.erlang_version
+    otp_version    = var.otp_version
     elixir_version = var.elixir_version
     go_version     = var.go_version
   })

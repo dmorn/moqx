@@ -7,8 +7,7 @@ controlled transport benchmark runs. It does not start benchmark traffic.
 
 - Terraform.
 - A Hetzner Cloud API token in `HCLOUD_TOKEN`.
-- A local SSH public key readable by Terraform. The default is
-  `~/.ssh/id_ed25519.pub`.
+- A per-run SSH public key readable by Terraform.
 
 ## Profiles
 
@@ -16,7 +15,7 @@ Use profile files to choose the server type and locations:
 
 | Profile | Type | Locations | Use |
 | --- | --- | --- | --- |
-| `profiles/arm-smoke.tfvars` | `cax21` | `fsn1` to `hel1` | Provisioning and build smoke. |
+| `profiles/arm-smoke.tfvars` | `cax21` | `fsn1` to `nbg1` | Provisioning and build smoke. |
 | `profiles/arm-default.tfvars` | `cax31` | `fsn1` to `hel1` | Default ARM benchmark pair. |
 | `profiles/arm-stress.tfvars` | `cax41` | `fsn1` to `hel1` | Larger shared-ARM stress pair. |
 | `profiles/arm-low-rtt.tfvars` | `cax31` | `fsn1` to `nbg1` | Lower-RTT EU path. |
@@ -27,8 +26,14 @@ Use profile files to choose the server type and locations:
 ```bash
 cd bench/transport/infra/hetzner
 export HCLOUD_TOKEN=...
+mkdir -p ../../.keys/20260519-a
+ssh-keygen -t ed25519 -N '' -C moqx-transport-bench-20260519-a \
+  -f ../../.keys/20260519-a/id_ed25519
 terraform init
-terraform apply -var-file=profiles/arm-default.tfvars
+terraform apply \
+  -var-file=profiles/arm-default.tfvars \
+  -var='run_id=20260519-a' \
+  -var='ssh_public_key_path=../../.keys/20260519-a/id_ed25519.pub'
 terraform output
 ```
 
@@ -52,6 +57,11 @@ terraform apply \
   -var='run_id=20260519-a'
 ```
 
+Generate a fresh SSH keypair for each run instead of reusing an operator key.
+Terraform uploads the public key to Hetzner Cloud and records it as an
+ephemeral `hcloud_ssh_key` resource; the private key stays local and out of
+Terraform state.
+
 ## Access Model
 
 The module creates two firewalls:
@@ -73,14 +83,14 @@ allowed.
 
 Cloud-init intentionally does little:
 
-- installs build tools and `iperf3`;
-- installs `mise` at `/usr/local/bin/mise`;
-- installs the pinned Go, Erlang, and Elixir versions;
+- installs build tools, `iperf3`, and small shell utilities;
+- installs Go from the official Linux archive at `go.dev/dl`;
+- installs Erlang/OTP and Elixir with the official Elixir install script;
 - writes a short note under `/opt/moqx-bench/`.
 
 The benchmark repo is not cloned automatically, and no benchmark process is
 started automatically. Run `elixir`, `mix`, and `go` directly after cloud-init
-finishes, or use `mise exec -- ...` for explicit tool selection.
+finishes.
 
 ## Result Metadata
 
