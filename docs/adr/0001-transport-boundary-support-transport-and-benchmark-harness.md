@@ -60,7 +60,10 @@ In particular:
 
 ALPN and transport capabilities are selected by higher protocol/session layers, not hard-coded in `MOQX.Transport`.
 
-The transport layer should support protocol-selected ALPN values such as `moq-00` for MOQT draft-14 and `moq-lite-xx`-style values for MOQ Lite.
+The transport layer should support protocol-selected ALPN values such as
+`moq-00` for MOQT draft-14 and `moq-lite-xx`-style values for MOQ Lite.
+Repo-owned transport profile fixtures use canonical atoms such as `:draft_14`
+and `:moq_lite_04` to name the draft version they model.
 
 Connections should expose normalized capabilities where practical, including:
 
@@ -162,7 +165,11 @@ The harness should eventually compare:
 - reference client to reference server across the same path;
 - datagram pressure, stream pressure, and mixed control-plus-object traffic patterns.
 
-The benchmark harness should measure raw transport characteristics and MOQT-shaped pressure patterns, not full MOQT protocol behavior initially. Scripts may still use protocol-like transport profiles, such as draft-14-like ALPN/datagram settings and MOQ Lite-like no-datagram/many-bidirectional-stream settings.
+The benchmark harness should measure raw transport characteristics and
+MOQT-shaped pressure patterns, not full MOQT protocol behavior initially.
+Scripts may still use protocol transport profiles, such as `:draft_14`
+ALPN/datagram settings and `:moq_lite_04` no-datagram/many-bidirectional-stream
+settings.
 
 Local loopback and same-host self-pair runs are calibration only. They are useful for proving the harness works and estimating local BEAM/quicer overhead, but they are not evidence about real network saturation. Public relays can be used for interop and smoke probes, but not as controlled benchmark baselines because relay load, namespace behavior, and network path are outside the harness' control.
 

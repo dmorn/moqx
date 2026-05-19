@@ -24,6 +24,11 @@ _Avoid_: disconnect, socket close
 An unsigned integer selected by the protocol layer and carried by QUIC stream or connection shutdown signals.
 _Avoid_: reason atom, exception reason
 
+**Transport Profile**:
+A named fixture that records protocol-selected ALPN, transport capabilities, and protocol-level stream expectations for tests and benchmarks.
+Current profiles are `:draft_14` and `:moq_lite_04`.
+_Avoid_: protocol implementation, session implementation
+
 **Stream Side**:
 One directional half of a stream, either local sending or local receiving.
 _Avoid_: half-connection, close direction
@@ -35,6 +40,9 @@ _Avoid_: half-connection, close direction
 - **Abort Receiving** affects the local receiving **Stream Side** of exactly one stream and maps to QUIC STOP_SENDING.
 - A **Connection Close** ends the connection and may implicitly close all streams on that connection.
 - An **Application Error Code** is interpreted by protocol modules, not by the raw transport boundary.
+- A **Transport Profile** can describe protocol-specific stream expectations,
+  but the raw transport boundary still exposes generic QUIC streams and does
+  not enforce those protocol rules.
 
 ## Example dialogue
 

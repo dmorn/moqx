@@ -1,26 +1,42 @@
 defmodule MOQX.TransportTest do
   use ExUnit.Case, async: true
 
+  alias MOQX.Transport.Profile
+
   describe "context API" do
     test "creates caller-owned context and opens support transport connection pair through facade" do
-      {_ctx, _client, _server} = support_pair(:moq_lite)
+      {_ctx, _client, _server} = support_pair(:moq_lite_04)
     end
 
     test "returns capabilities through context connection" do
-      {ctx, client, _server} = support_pair(:draft14)
+      {ctx, client, _server} = support_pair(:draft_14)
 
-      assert %MOQX.Transport.Capabilities{
-               alpn: "moq-00",
-               datagrams: true,
-               max_datagram_size: 1200,
-               stream_directions: [:bidirectional, :unidirectional],
-               stream_priority: :supported,
-               transport_stats: :unsupported
-             } = MOQX.Transport.capabilities(ctx, client)
+      assert Profile.capabilities!(:draft_14) == MOQX.Transport.capabilities(ctx, client)
+    end
+
+    test "does not enforce draft-14 control-stream count in the transport layer" do
+      {ctx, client, server} = support_pair(:draft_14)
+
+      {client_streams, ctx} =
+        Enum.map_reduce(1..2, ctx, fn _index, ctx ->
+          assert {:ok, stream, ctx} =
+                   MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
+
+          {stream, ctx}
+        end)
+
+      {server_streams, _ctx} =
+        Enum.map_reduce(1..2, ctx, fn _index, ctx ->
+          assert {:ok, stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+          {stream, ctx}
+        end)
+
+      assert length(Enum.uniq(client_streams)) == 2
+      assert length(Enum.uniq(server_streams)) == 2
     end
 
     test "returns exact stream info for support bidirectional streams" do
-      {ctx, client, server} = support_pair(:moq_lite)
+      {ctx, client, server} = support_pair(:moq_lite_04)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -51,7 +67,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "finish_sending emits normalized peer event with wrapped stream" do
-      {ctx, client, server} = support_pair(:moq_lite)
+      {ctx, client, server} = support_pair(:moq_lite_04)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -66,7 +82,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "abort_sending and abort_receiving preserve app error codes in peer events" do
-      {ctx, client, server} = support_pair(:moq_lite)
+      {ctx, client, server} = support_pair(:moq_lite_04)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -87,7 +103,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "unidirectional streams reject unavailable side operations" do
-      {ctx, client, server} = support_pair(:draft14)
+      {ctx, client, server} = support_pair(:draft_14)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :unidirectional)
@@ -105,7 +121,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "sends stream data through facade and wraps active receive event" do
-      {ctx, client, server} = support_pair(:moq_lite)
+      {ctx, client, server} = support_pair(:moq_lite_04)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -121,13 +137,13 @@ defmodule MOQX.TransportTest do
     end
 
     test "controlling_process transfers whole context handles" do
-      {ctx, _client, _server} = support_pair(:moq_lite)
+      {ctx, _client, _server} = support_pair(:moq_lite_04)
 
       assert {:ok, ^ctx} = MOQX.Transport.controlling_process(ctx, self())
     end
 
     test "close_connection emits normalized peer close event" do
-      {ctx, client, server} = support_pair(:moq_lite)
+      {ctx, client, server} = support_pair(:moq_lite_04)
       ctx = flush_context_events(ctx)
 
       assert {:ok, ctx} = MOQX.Transport.close_connection(ctx, client, 3)

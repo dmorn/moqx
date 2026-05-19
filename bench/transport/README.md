@@ -152,18 +152,20 @@ Benchmark scripts should accept a protocol-like profile argument.
 
 Initial profiles:
 
-- `draft14_like`
+- `draft_14`
   - ALPN: `moq-00` unless overridden.
   - QUIC DATAGRAM: enabled.
   - Workloads may use one control-like bidirectional stream plus
     unidirectional object streams and/or datagrams.
-- `moq_lite_like`
+- `moq_lite_04`
   - ALPN: `moq-lite-04` unless overridden.
   - QUIC DATAGRAM: disabled.
   - Workloads may use many bidirectional transaction-like streams and
     unidirectional group-like streams.
 
-Profiles are transport fixtures. They do not implement full protocol rules.
+Profiles are transport fixtures. They do not implement full protocol rules, and
+the transport layer does not enforce protocol-specific stream counts or message
+types.
 
 ## Ramp Methodology
 
@@ -299,7 +301,7 @@ Required `profile` fields:
 ```json
 {
   "profile": {
-    "name": "draft14_like",
+    "name": "draft_14",
     "alpn": "moq-00",
     "datagrams": true,
     "congestion_control": null,

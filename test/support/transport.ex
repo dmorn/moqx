@@ -3,7 +3,7 @@ defmodule MOQX.Transport.Support do
 
   @behaviour MOQX.Transport
 
-  alias MOQX.Transport.Capabilities
+  alias MOQX.Transport.{Capabilities, Profile}
 
   defmodule Network do
     @moduledoc false
@@ -34,28 +34,10 @@ defmodule MOQX.Transport.Support do
     defstruct [:pid]
   end
 
-  @draft14 %Capabilities{
-    alpn: "moq-00",
-    datagrams: true,
-    max_datagram_size: 1200,
-    stream_directions: [:bidirectional, :unidirectional],
-    stream_priority: :supported,
-    transport_stats: :unsupported
-  }
-
-  @moq_lite %Capabilities{
-    alpn: "moq-lite-04",
-    datagrams: false,
-    max_datagram_size: :unsupported,
-    stream_directions: [:bidirectional, :unidirectional],
-    stream_priority: :supported,
-    transport_stats: :unsupported
-  }
-
   @impl true
   def listen(port, opts) do
     with {:ok, network} <- fetch_network(opts),
-         {:ok, capabilities} <- profile_capabilities(option(opts, :profile, :draft14)) do
+         {:ok, capabilities} <- profile_capabilities(option(opts, :profile, :draft_14)) do
       listener_pid = spawn(fn -> listener_loop(:queue.new(), :queue.new(), nil, nil) end)
       ref = make_ref()
       send(network.pid, {:listen, self(), ref, port, listener_pid, capabilities})
@@ -81,7 +63,7 @@ defmodule MOQX.Transport.Support do
   @impl true
   def connect(_host, port, opts, timeout) do
     with {:ok, network} <- fetch_network(opts),
-         {:ok, requested_capabilities} <- profile_capabilities(option(opts, :profile, :draft14)),
+         {:ok, requested_capabilities} <- profile_capabilities(option(opts, :profile, :draft_14)),
          {:ok, listener} <- lookup_listener(network, port, timeout),
          :ok <- compatible_capabilities(listener.capabilities, requested_capabilities) do
       client = start_connection(requested_capabilities, self())
@@ -641,10 +623,13 @@ defmodule MOQX.Transport.Support do
     end
   end
 
-  defp profile_capabilities(:draft14), do: {:ok, @draft14}
-  defp profile_capabilities(:moq_lite), do: {:ok, @moq_lite}
   defp profile_capabilities(%Capabilities{} = capabilities), do: {:ok, capabilities}
-  defp profile_capabilities(_profile), do: {:error, :unknown_profile}
+
+  defp profile_capabilities(profile) do
+    with {:ok, profile} <- Profile.fetch(profile) do
+      {:ok, profile.capabilities}
+    end
+  end
 
   defp option(opts, key, default) when is_map(opts), do: Map.get(opts, key, default)
   defp option(opts, key, default) when is_list(opts), do: Keyword.get(opts, key, default)

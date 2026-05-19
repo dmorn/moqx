@@ -1,17 +1,17 @@
 defmodule MOQX.Transport.SupportTest do
   use ExUnit.Case, async: true
 
-  alias MOQX.Transport.Support
+  alias MOQX.Transport.{Profile, Support}
 
   test "establishes a deterministic client/server connection lifecycle" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :draft14)
+    {:ok, listener} = Support.listen(0, network: network, profile: :draft_14)
 
     {:ok, client} =
       Support.connect(
         "localhost",
         Support.port(listener),
-        [network: network, profile: :draft14],
+        [network: network, profile: :draft_14],
         100
       )
 
@@ -23,13 +23,13 @@ defmodule MOQX.Transport.SupportTest do
 
   test "emits normalized connection events for established peers" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :draft14)
+    {:ok, listener} = Support.listen(0, network: network, profile: :draft_14)
 
     {:ok, client} =
       Support.connect(
         "localhost",
         Support.port(listener),
-        [network: network, profile: :draft14],
+        [network: network, profile: :draft_14],
         100
       )
 
@@ -55,65 +55,67 @@ defmodule MOQX.Transport.SupportTest do
     end
   end
 
-  test "reports draft-14-like negotiated capabilities" do
+  test "reports draft_14 negotiated capabilities" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :draft14)
+    {:ok, listener} = Support.listen(0, network: network, profile: :draft_14)
 
     {:ok, client} =
       Support.connect(
         "localhost",
         Support.port(listener),
-        [network: network, profile: :draft14],
+        [network: network, profile: :draft_14],
         100
       )
 
-    assert Support.capabilities(client) == %MOQX.Transport.Capabilities{
-             alpn: "moq-00",
-             datagrams: true,
-             max_datagram_size: 1200,
-             stream_directions: [:bidirectional, :unidirectional],
-             stream_priority: :supported,
-             transport_stats: :unsupported
-           }
+    assert Support.capabilities(client) == Profile.capabilities!(:draft_14)
   end
 
-  test "reports MOQ Lite-like negotiated capabilities" do
+  test "accepts first-class profile fixtures" do
+    profile = Profile.fetch!(:draft_14)
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :moq_lite)
+    {:ok, listener} = Support.listen(0, network: network, profile: profile)
 
     {:ok, client} =
       Support.connect(
         "localhost",
         Support.port(listener),
-        [network: network, profile: :moq_lite],
+        [network: network, profile: profile],
         100
       )
 
-    assert Support.capabilities(client) == %MOQX.Transport.Capabilities{
-             alpn: "moq-lite-04",
-             datagrams: false,
-             max_datagram_size: :unsupported,
-             stream_directions: [:bidirectional, :unidirectional],
-             stream_priority: :supported,
-             transport_stats: :unsupported
-           }
+    assert Support.capabilities(client) == profile.capabilities
+  end
+
+  test "reports moq_lite_04 negotiated capabilities" do
+    {:ok, network} = Support.start_network()
+    {:ok, listener} = Support.listen(0, network: network, profile: :moq_lite_04)
+
+    {:ok, client} =
+      Support.connect(
+        "localhost",
+        Support.port(listener),
+        [network: network, profile: :moq_lite_04],
+        100
+      )
+
+    assert Support.capabilities(client) == Profile.capabilities!(:moq_lite_04)
   end
 
   test "accept times out deterministically when no peer connects" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :draft14)
+    {:ok, listener} = Support.listen(0, network: network, profile: :draft_14)
 
     assert Support.accept(listener, [], 0) == {:error, :timeout}
   end
 
   test "connect rejects incompatible ALPN profiles" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :draft14)
+    {:ok, listener} = Support.listen(0, network: network, profile: :draft_14)
 
     assert Support.connect(
              "localhost",
              Support.port(listener),
-             [network: network, profile: :moq_lite],
+             [network: network, profile: :moq_lite_04],
              100
            ) ==
              {:error, :alpn_mismatch}
