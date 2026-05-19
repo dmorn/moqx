@@ -1,0 +1,71 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+
+write_files:
+  - path: /root/.config/mise/config.toml
+    permissions: "0644"
+    content: |
+      [tools]
+      erlang = "${erlang_version}"
+      elixir = "${elixir_version}"
+      go = "${go_version}"
+  - path: /etc/profile.d/mise.sh
+    permissions: "0644"
+    content: |
+      export PATH="/usr/local/bin:$PATH"
+      if command -v mise >/dev/null 2>&1; then
+        eval "$(mise activate bash)"
+      fi
+  - path: /opt/moqx-bench/mise.toml
+    permissions: "0644"
+    content: |
+      [tools]
+      erlang = "${erlang_version}"
+      elixir = "${elixir_version}"
+      go = "${go_version}"
+  - path: /opt/moqx-bench/README.md
+    permissions: "0644"
+    content: |
+      # MOQX transport benchmark node
+
+      profile: ${profile_name}
+      role: ${role}
+
+      Provisioning installs only the base build toolchain, iperf3, mise, Go,
+      Erlang, and Elixir. Clone the repo or copy scripts manually when you are
+      ready to run a benchmark.
+
+runcmd:
+  - |
+      set -eu
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y \
+        autoconf \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        fop \
+        git \
+        iperf3 \
+        jq \
+        libgl1-mesa-dev \
+        libglu1-mesa-dev \
+        libncurses-dev \
+        libpng-dev \
+        libssl-dev \
+        libssh-dev \
+        libwxgtk3.2-dev \
+        libxml2-utils \
+        m4 \
+        ninja-build \
+        pkg-config \
+        unixodbc-dev \
+        xsltproc
+      curl -fsSL https://mise.run | MISE_INSTALL_PATH=/usr/local/bin/mise sh
+      export PATH="/usr/local/bin:$PATH"
+      mise install --yes
+      mise exec -- go version
+      mise exec -- elixir --version

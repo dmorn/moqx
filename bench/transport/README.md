@@ -19,7 +19,7 @@ about real network behavior.
 - Full MOQT draft-14 session behavior.
 - Full MOQ Lite behavior.
 - Pass/fail performance thresholds.
-- Cloud/server provisioning automation.
+- Production deployment automation or long-lived cloud environments.
 - Public relay performance baselines.
 - New benchmark-only dependencies in the library dependency graph.
 
@@ -480,13 +480,43 @@ bench/transport/results/<run_id>.json
 bench/transport/results/<run_id>.jsonl
 ```
 
+## Ephemeral Infrastructure
+
+Controlled server-pair benchmarks may use repo-owned Terraform under
+`bench/transport/infra/` when the infrastructure is short-lived, explicit, and
+destroyed by the caller after the run. Provisioning is separate from benchmark
+scripts: scripts must accept endpoints and must not call Terraform themselves.
+
+The first supported target is Hetzner Cloud:
+
+```text
+bench/transport/infra/hetzner/
+```
+
+That setup creates two benchmark endpoints with profile `.tfvars` files for
+ARM CAX and x86 CCX variants. It keeps cloud-init deliberately small: base build
+tools, `iperf3`, `mise`, Go, Erlang, and Elixir. It does not clone this repo or
+start any benchmark process.
+
+Firewall policy for the Hetzner setup:
+
+- allow the operator CIDR to reach all TCP ports, all UDP ports, and ICMP;
+- allow peer-to-peer benchmark traffic between the two endpoints;
+- allow private-network traffic when the private network is enabled;
+- deny other inbound traffic;
+- allow outbound TCP, UDP, and ICMP.
+
+Terraform outputs include path metadata for public IPv4 and private-network
+runs. Benchmark scripts should merge those outputs with live host inventory and
+run-specific metrics.
+
 ## Implementation Order
 
 The intended issue order is:
 
 1. Define this contract (#08).
-2. Add raw path baseline scripts (#09).
-3. Add self-pair calibration scripts (#10).
-4. Select the first reference QUIC implementation and topology (#11).
-5. Add real-path reference benchmark scripts (#12).
-
+2. Add ephemeral controlled-server infrastructure (#22).
+3. Add raw path baseline scripts (#09).
+4. Add self-pair calibration scripts (#10).
+5. Select the first reference QUIC implementation and topology (#11).
+6. Add real-path reference benchmark scripts (#12).

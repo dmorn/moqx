@@ -33,9 +33,10 @@ None - issue 08 is closed.
 - Treat loopback `iperf3` only as calibration for local host limits.
 - Capture TCP and UDP results separately because UDP loss/jitter is part of the path context for QUIC DATAGRAM pressure tests.
 - Do not compare QUIC goodput without the corresponding raw path baseline.
+- The first controlled non-production server topology is the Hetzner Terraform setup in `bench/transport/infra/hetzner/`. The script should still accept endpoints rather than invoking Terraform.
 
 ## Progress
 
-Issue 08 is closed, so this issue is ready for an agent to implement against the benchmark contract in `bench/transport/README.md`.
+Issue 08 is closed, and issue 22 provides optional controlled server infrastructure. This issue is ready for an agent to implement against the benchmark contract in `bench/transport/README.md`.
 
 ## Comments

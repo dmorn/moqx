@@ -57,3 +57,8 @@ Validation:
 - `git diff --check`
 
 ## Comments
+
+- 2026-05-19: Contract amended by issue 22 to allow explicit, short-lived,
+  caller-operated benchmark infrastructure under `bench/transport/infra/`.
+  Benchmark scripts still must accept endpoints and must not start cloud
+  infrastructure implicitly.

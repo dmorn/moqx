@@ -27,7 +27,8 @@ Establish a protocol-neutral QUIC transport foundation around `MOQX.Transport`:
 - stream FIN, RESET_STREAM, and STOP_SENDING semantics are first-class;
 - a deterministic in-memory support transport provides QUIC-like semantics for future protocol tests;
 - shared contract tests verify the support transport and `quicer` adapter against the same behavior;
-- transport performance and limits research lives under a separate benchmark harness focused on real server paths, with local runs used only for calibration.
+- transport performance and limits research lives under a separate benchmark harness focused on real server paths, with local runs used only for calibration;
+- short-lived Terraform profiles may provision controlled benchmark server pairs when the caller explicitly starts and destroys them.
 
 The architectural baseline is recorded in:
 
@@ -81,6 +82,7 @@ The architectural baseline is recorded in:
 - Performance research uses standalone Elixir scripts with `Mix.install([])` under a benchmark harness, with caller-provided endpoints for same-region, cross-region, and edge-to-server paths.
 - The benchmark harness is not part of normal unit tests and is not represented as `mix test.integration`.
 - Local loopback and same-host self-pair benchmark runs are calibration only; real server paths provide the evidence for network saturation and degradation claims.
+- Ephemeral benchmark infrastructure may live under `bench/transport/infra/` when it is explicit, caller-operated, and separated from benchmark scripts. Scripts must still accept endpoints and must not start or destroy infrastructure implicitly.
 
 ## Testing Decisions
 
@@ -119,7 +121,7 @@ Initial test coverage should include:
 - WebTransport-over-HTTP/3 support
 - Final benchmark thresholds or pass/fail criteria
 - Selecting a permanent reference QUIC implementation
-- Automating cloud/server provisioning for benchmark endpoints
+- Production deployment automation or long-lived benchmark environments
 - Treating public relays as controlled benchmark baselines
 - Adding a `mix test.integration` task
 - Replacing the helper-based event API with a dedicated router process

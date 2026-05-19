@@ -164,6 +164,13 @@ Local loopback and same-host self-pair runs are calibration only. They are usefu
 
 Each benchmark run should emit machine-readable results with enough metadata to compare runs: run id, timestamp, git SHA, host identifiers, region/provider, instance/network class, OS/kernel, CPU/memory, quicer/msquic versions where available, protocol profile, ALPN, congestion-control/pacing/settings, command parameters, offered load, goodput, latency percentiles, datagram delivery/loss/late counts, stream count, payload size, CPU, memory, mailbox depth, backpressure/stall time, and close/error reason.
 
+2026-05-19 amendment: the harness may include short-lived, caller-operated
+cloud infrastructure under `bench/transport/infra/` for controlled server-pair
+benchmarks. This does not change the script contract: benchmark scripts accept
+endpoints and must not start or destroy infrastructure implicitly. The first
+such setup targets Hetzner Cloud with profile-based Terraform variants, minimal
+cloud-init, and strict benchmark firewalls.
+
 ## Consequences
 
 Positive:
@@ -190,7 +197,7 @@ This ADR does not decide:
 - final MOQT draft-14 session/control-message implementation;
 - final MOQ Lite session/message implementation;
 - final benchmark result thresholds;
-- cloud/server provisioning automation for benchmark endpoints;
+- production deployment automation or long-lived benchmark environments;
 - public relay performance baselines;
 - the reference QUIC implementation to use for benchmarking;
 - whether a future dedicated transport-router process should replace the helper-based event API;

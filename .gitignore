@@ -29,3 +29,11 @@ priv/native
 .moq-dev/
 .tmp
 .dexter*
+bench/transport/results/
+bench/transport/infra/**/.terraform/
+bench/transport/infra/**/*.tfstate
+bench/transport/infra/**/*.tfstate.*
+bench/transport/infra/**/*.tfvars.local
+bench/transport/infra/**/*.tfplan
+bench/transport/infra/**/crash.log
+bench/transport/infra/**/crash.*.log
