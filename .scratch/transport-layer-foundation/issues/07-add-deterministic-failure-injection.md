@@ -24,7 +24,7 @@ This should remain deterministic by default and configurable per test.
 
 ## Blocked by
 
-- `.scratch/transport-layer-foundation/issues/06-add-close-and-ownership-contract.md`
+None - issue 06 is closed.
 
 ## Progress
 

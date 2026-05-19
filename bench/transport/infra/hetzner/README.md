@@ -46,7 +46,10 @@ terraform output -json toolchain_check_commands
 Destroy the pair when the run is finished:
 
 ```bash
-terraform destroy -var-file=profiles/arm-default.tfvars
+terraform destroy \
+  -var-file=profiles/arm-default.tfvars \
+  -var='run_id=20260519-a' \
+  -var='ssh_public_key_path=../../.keys/20260519-a/id_ed25519.pub'
 ```
 
 Use a stable `run_id` when multiple pairs may exist at once:
@@ -54,13 +57,18 @@ Use a stable `run_id` when multiple pairs may exist at once:
 ```bash
 terraform apply \
   -var-file=profiles/arm-default.tfvars \
-  -var='run_id=20260519-a'
+  -var='run_id=20260519-a' \
+  -var='ssh_public_key_path=../../.keys/20260519-a/id_ed25519.pub'
 ```
 
 Generate a fresh SSH keypair for each run instead of reusing an operator key.
 Terraform uploads the public key to Hetzner Cloud and records it as an
 ephemeral `hcloud_ssh_key` resource; the private key stays local and out of
 Terraform state.
+
+Use the same `run_id`, profile, and SSH public key path for `apply`, `destroy`,
+and any saved plan. The run key can be deleted locally after Terraform destroy
+has completed and provider resources have been verified absent.
 
 ## Access Model
 

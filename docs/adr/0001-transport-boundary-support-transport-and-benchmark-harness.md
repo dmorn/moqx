@@ -147,7 +147,11 @@ Use:
 bench/transport/
 ```
 
-Benchmark scripts should be independent Elixir scripts using `Mix.install([])` for their own dependencies. Scripts should accept caller-provided endpoints so the same harness can run against same-region server pairs, cross-region server pairs, and asymmetric edge-to-server paths.
+Benchmark scripts should be independent Elixir scripts. They may use
+`Mix.install/1` for explicit script-local dependencies, but no-dependency
+scripts should stay plain `.exs` files. Scripts should accept caller-provided
+endpoints so the same harness can run against same-region server pairs,
+cross-region server pairs, and asymmetric edge-to-server paths.
 
 The harness should eventually compare:
 

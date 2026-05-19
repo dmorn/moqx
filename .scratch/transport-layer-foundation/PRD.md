@@ -79,7 +79,11 @@ The architectural baseline is recorded in:
 - Binary stream and datagram payloads remain binaries.
 - A deterministic support transport will implement the transport behaviour for tests.
 - Shared contract tests will verify handshake, stream, datagram, active/passive, close/reset, capabilities, and ownership semantics across transport implementations.
-- Performance research uses standalone Elixir scripts with `Mix.install([])` under a benchmark harness, with caller-provided endpoints for same-region, cross-region, and edge-to-server paths.
+- Performance research uses standalone Elixir scripts under a benchmark harness,
+  with caller-provided endpoints for same-region, cross-region, and
+  edge-to-server paths. Scripts may use `Mix.install/1` only when they have
+  explicit script-local dependencies; no-dependency scripts should stay plain
+  `.exs` files.
 - The benchmark harness is not part of normal unit tests and is not represented as `mix test.integration`.
 - Local loopback and same-host self-pair benchmark runs are calibration only; real server paths provide the evidence for network saturation and degradation claims.
 - Ephemeral benchmark infrastructure may live under `bench/transport/infra/` when it is explicit, caller-operated, and separated from benchmark scripts. Scripts must still accept endpoints and must not start or destroy infrastructure implicitly.

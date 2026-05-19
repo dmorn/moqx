@@ -29,7 +29,9 @@ This issue should create the benchmark directory and README contract before impl
 - [x] The README explains how scripts select protocol-like transport profiles, including draft-14-like ALPN/datagram settings and MOQ Lite-like no-datagram/many-stream settings.
 - [x] The README defines ramp methodology: fixed-duration warmup, stepped offered load, steady-state sample window, cooldown, and stop conditions.
 - [x] The README requires benchmark scripts to produce machine-readable JSON or JSONL with the shared metadata/result schema.
-- [x] Script conventions use standalone Elixir scripts with `Mix.install([])` unless a non-Elixir reference tool is explicitly part of the benchmark.
+- [x] Script conventions use standalone Elixir scripts; `Mix.install/1` is
+      allowed for explicit script-local dependencies, but no-dependency scripts
+      can remain plain `.exs` files.
 - [x] No benchmark-only dependencies are added to the library dependency graph.
 
 ## Blocked by
@@ -62,3 +64,6 @@ Validation:
   caller-operated benchmark infrastructure under `bench/transport/infra/`.
   Benchmark scripts still must accept endpoints and must not start cloud
   infrastructure implicitly.
+- 2026-05-19: Script convention clarified after the first iperf3 script:
+  `Mix.install/1` is optional and should be used only for explicit script-local
+  dependencies. Plain stdlib-only `.exs` scripts are valid benchmark scripts.

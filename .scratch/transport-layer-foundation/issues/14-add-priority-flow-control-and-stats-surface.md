@@ -25,7 +25,11 @@ MOQT draft-14 expects the control stream to be prioritized over data and warns a
 
 ## Blocked by
 
-- `.scratch/transport-layer-foundation/issues/13-add-configurable-alpn-and-capability-surface.md`
-- `.scratch/transport-layer-foundation/issues/04-add-stream-lifecycle-contract.md`
+None - issues 13 and 04 are closed.
 
 ## Comments
+
+- 2026-05-19: Structural blockers are closed, but this remains
+  `needs-triage`. The surface should be designed against a concrete benchmark
+  or protocol caller so transport stats, priority hints, and flow-control
+  pressure are not over-generalized.

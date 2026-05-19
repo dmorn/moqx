@@ -29,8 +29,9 @@ the resources when finished.
 - [x] Benchmark peers can contact each other over public IPv4.
 - [x] The module can create a private network for private-path comparison.
 - [x] Inbound traffic from other public sources is denied.
-- [x] Cloud-init installs only base build tooling, `iperf3`, `mise`, Go,
-      Erlang, and Elixir.
+- [x] Cloud-init installs only base build tooling, `iperf3`, Go from the
+      official Linux archive, and Erlang/Elixir from the official Elixir
+      install script.
 - [x] Cloud-init does not clone the repo or start benchmark traffic.
 - [x] Terraform outputs include SSH commands and benchmark path metadata.
 - [x] Documentation explains apply, readiness check, and destroy flow.
@@ -47,8 +48,10 @@ None.
 - Keep one Terraform module and multiple profile `.tfvars` files rather than
   copying infrastructure configurations.
 - Keep cloud-init short to reduce provisioning rabbit holes.
-- Install toolchain versions through `mise`, matching the repo-pinned
-  Elixir/Erlang/Go versions.
+- Keep `mise` as a development-machine concern, not a disposable-server
+  provisioning dependency.
+- Install Go from the official Linux archive and Erlang/Elixir with the
+  official Elixir install script. The server image defaults to Ubuntu 24.04.
 - Allow the operator CIDR to all ports so edge-to-server client tests from the
   operator machine do not require repeated firewall edits.
 - Keep provisioning separate from benchmark scripts. Scripts must still accept
@@ -71,5 +74,16 @@ Validation:
 - `terraform fmt -check -recursive bench/transport/infra/hetzner`
 - `terraform init -backend=false`
 - `terraform validate`
+- First live smoke, run `20260519-smoke`, using `profiles/arm-smoke.tfvars`
+  with `cax21` endpoints in `fsn1` and `nbg1`:
+  - cloud-init completed on both endpoints;
+  - installed toolchain check passed for Go `1.26.3`, Erlang/OTP `28`,
+    Elixir `1.19.5`, and `iperf3` `3.16`;
+  - private-path `iperf3` baseline emitted three JSONL records under
+    `bench/transport/results/20260519-smoke/iperf3-private.jsonl`;
+  - Terraform drift was zero before destroy;
+  - Terraform state was empty after destroy;
+  - provider resources labelled `purpose=moqx-transport-bench` were verified
+    absent after destroy.
 
 ## Comments

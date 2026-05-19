@@ -1,6 +1,6 @@
 # Model draft-14 and MOQ Lite transport profiles
 
-Status: needs-triage
+Status: ready-for-agent
 Type: AFK
 
 ## Parent
@@ -24,14 +24,18 @@ These profiles should be used to prove the support transport and contract tests 
 
 ## Blocked by
 
-- `.scratch/transport-layer-foundation/issues/13-add-configurable-alpn-and-capability-surface.md`
-- `.scratch/transport-layer-foundation/issues/04-add-stream-lifecycle-contract.md`
-- `.scratch/transport-layer-foundation/issues/05-add-datagram-contract.md`
+None - issues 13, 04, and 05 are closed.
 
 ## Progress
 
 The support-transport-specific capability-profile criterion was moved here from issue 13 after issue 13 delivered the production capability surface in commit `746257a`.
 
-Issue 03 added support transport profile coverage for draft-14-like and MOQ Lite-like capabilities. Remaining work still depends on stream/datagram contracts so profile fixtures can express stream expectations without implementing full protocols.
+Issue 03 added support transport profile coverage for draft-14-like and MOQ
+Lite-like capabilities. Issues 04, 05, and 13 are now closed, so the remaining
+profile fixture/documentation work is structurally unblocked.
 
 ## Comments
+
+- 2026-05-19: Marked ready after stale blockers were cleared. This can be
+  implemented before or alongside issue 10 because the self-pair calibration
+  benchmark needs the same draft-14-like and MOQ Lite-like profile vocabulary.

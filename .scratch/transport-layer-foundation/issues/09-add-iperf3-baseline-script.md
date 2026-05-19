@@ -51,3 +51,11 @@ Local validation:
 - Result: 2 JSONL records, TCP and UDP, both `iperf3_exit_status = 0`; UDP parsed goodput, delivery ratio, and jitter.
 
 ## Comments
+
+- 2026-05-19: First controlled Hetzner smoke used `profiles/arm-smoke.tfvars`
+  on the private `fsn1` to `nbg1` path. Result artifacts are local and ignored
+  under `bench/transport/results/20260519-smoke/`: `path-metadata-private.json`,
+  `terraform-output.json`, and `iperf3-private.jsonl`. The run produced three
+  JSONL `step_summary` records: TCP, UDP at 10M, and UDP at 50M. All iperf3
+  steps exited 0; TCP goodput was about 5.37 Gbps, and the 10M/50M UDP smoke
+  steps reported full delivery for the short smoke window.

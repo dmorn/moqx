@@ -468,9 +468,10 @@ Use these units unless a field name states otherwise:
 
 ## Script Conventions
 
-Elixir benchmark scripts should be standalone `.exs` files using
-`Mix.install([])` unless they need the repo application loaded. Non-Elixir tools
-are allowed when they are the benchmark subject or selected reference tool.
+Elixir benchmark scripts should be standalone `.exs` files. Use
+`Mix.install/1` only when a script has explicit script-local dependencies; a
+no-dependency script should stay a plain `.exs` file. Non-Elixir tools are
+allowed when they are the benchmark subject or selected reference tool.
 
 Scripts must:
 
@@ -517,9 +518,11 @@ bench/transport/infra/hetzner/
 ```
 
 That setup creates two benchmark endpoints with profile `.tfvars` files for
-ARM CAX and x86 CCX variants. It keeps cloud-init deliberately small: base build
-tools, `iperf3`, `mise`, Go, Erlang, and Elixir. It does not clone this repo or
-start any benchmark process.
+ARM CAX and x86 CCX variants. It keeps cloud-init deliberately small on Ubuntu:
+base build tools, `iperf3`, Go from the official Linux archive, and
+Erlang/Elixir from the official Elixir install script. It does not install
+development-only version managers, clone this repo, or start any benchmark
+process.
 
 Firewall policy for the Hetzner setup:
 
