@@ -131,6 +131,14 @@ It should implement the same `MOQX.Transport` behaviour and simulate enough QUIC
 
 This support transport is for correctness and protocol tests, not performance measurement. It must not model only MOQT draft-14's single-control-stream world; draft-specific stream policies belong above transport.
 
+2026-05-20 amendment: the production `MOQX.Transport` facade must not know or
+name `MOQX.Transport.Support`. Backend-specific setup belongs either inside the
+backend implementation or in caller-provided backend defaults passed to
+`MOQX.Transport.new(backend, opts)`. The facade may merge those defaults into
+backend `listen/2` and `connect/4` calls, but test-only support state such as an
+in-memory network process is created by test fixtures, not by production
+transport code.
+
 ### Contract tests
 
 Create shared transport contract tests that can run against both:

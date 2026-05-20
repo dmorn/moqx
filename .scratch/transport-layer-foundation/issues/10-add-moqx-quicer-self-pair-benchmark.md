@@ -1,6 +1,6 @@
 # Add MOQX quicer self-pair calibration benchmark
 
-Status: ready-for-agent
+Status: closed
 Type: AFK
 
 ## Parent
@@ -15,14 +15,14 @@ This establishes calibration data for the Elixir transport wrapper, `quicer`, an
 
 ## Acceptance criteria
 
-- [ ] A standalone Elixir script can start a local listener and client using `MOQX.Transport.Quicer`.
-- [ ] The script can run with protocol-like ALPN/capability profiles, at minimum draft-14-like and MOQ Lite-like modes.
-- [ ] The script measures handshake latency and first-byte latency.
-- [ ] The script measures stream throughput for configurable payload size and duration/count.
-- [ ] The script measures datagram send/receive rate where datagrams are available.
-- [ ] Output follows the shared benchmark metadata/result schema defined by issue 08.
-- [ ] Documentation labels self-pair and loopback results as calibration only.
-- [ ] The script does not require adding benchmark dependencies to the library dependency graph.
+- [x] A standalone Elixir script can start a local listener and client using `MOQX.Transport.Quicer`.
+- [x] The script can run with protocol-like ALPN/capability profiles, at minimum draft-14-like and MOQ Lite-like modes.
+- [x] The script measures handshake latency and first-byte latency.
+- [x] The script measures stream throughput for configurable payload size and duration/count.
+- [x] The script measures datagram send/receive rate where datagrams are available.
+- [x] Output follows the shared benchmark metadata/result schema defined by issue 08.
+- [x] Documentation labels self-pair and loopback results as calibration only.
+- [x] The script does not require adding benchmark dependencies to the library dependency graph.
 
 ## Blocked by
 
@@ -37,6 +37,36 @@ None - issue 08 is closed.
 
 ## Progress
 
-Issue 08 is closed, so this issue is ready for an agent to implement against the benchmark contract in `bench/transport/README.md`.
+Implemented by `bench/transport/scripts/quicer_self_pair.exs`.
+
+The script runs a `MOQX.Transport.Quicer` listener/client pair in one Mix-loaded
+process, emits JSONL `step_summary` records with
+`evidence_tier = "loopback_calibration"`, and uses explicit CLI options instead
+of `Application` env as a benchmark seam.
+
+Implemented steps:
+
+- `handshake_first_byte`
+- `stream_pressure`
+- `datagram_pressure` for profiles where QUIC DATAGRAM is available
+
+Supported profiles:
+
+- `draft_14`: ALPN `moq-00`, datagrams enabled, unidirectional stream pressure by default
+- `moq_lite_04`: ALPN `moq-lite-04`, datagrams disabled, bidirectional stream pressure by default
+
+Documentation was added to `bench/transport/README.md`.
+
+Local validation:
+
+- `mix run bench/transport/scripts/quicer_self_pair.exs -- --profile draft_14 --payload-count 2 --datagram-count 2 --stream-count 1 --output /private/tmp/moqx-quicer-self-pair-smoke.jsonl`
+  - Result: 3 JSONL `step_summary` records: handshake/first-byte, stream pressure, datagram pressure.
+- `mix run bench/transport/scripts/quicer_self_pair.exs -- --profile moq_lite_04 --payload-count 2 --stream-count 1 --output /private/tmp/moqx-quicer-self-pair-moq-lite-smoke.jsonl`
+  - Result: 2 JSONL `step_summary` records: handshake/first-byte and stream pressure; datagram step skipped by profile capability.
 
 ## Comments
+
+- 2026-05-20: Closed with a Mix-runnable quicer self-pair calibration script.
+  The output is intentionally loopback-only calibration evidence; real network
+  capacity claims still require controlled server-pair runs after an `iperf3`
+  path baseline.

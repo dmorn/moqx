@@ -89,6 +89,10 @@ defmodule MOQX.Transport.Support do
   end
 
   @impl true
+  def local_address(%Listener{port: port}), do: {:ok, {{127, 0, 0, 1}, port}}
+  def local_address(%Connection{}), do: {:error, :unsupported}
+
+  @impl true
   def accept(%Listener{} = listener, _opts, timeout) do
     ref = make_ref()
     send(listener.pid, {:accept, self(), ref})

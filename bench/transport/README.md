@@ -121,6 +121,33 @@ This measures local overhead:
 
 Self-pair results must be labeled `loopback_calibration`.
 
+The repo-owned script is:
+
+```bash
+mix run bench/transport/scripts/quicer_self_pair.exs -- --profile draft_14
+```
+
+It accepts `draft_14` and `moq_lite_04` profiles. The `draft_14` profile runs
+handshake/first-byte, stream-pressure, and datagram-pressure steps; the
+`moq_lite_04` profile runs handshake/first-byte and stream-pressure steps
+because that profile disables QUIC DATAGRAM.
+
+For quick local validation, keep counts deliberately small and write JSONL to a
+temporary path:
+
+```bash
+mix run bench/transport/scripts/quicer_self_pair.exs -- \
+  --profile draft_14 \
+  --stream-count 1 \
+  --payload-count 2 \
+  --datagram-count 2 \
+  --output /private/tmp/moqx-quicer-self-pair-smoke.jsonl
+```
+
+By default the script creates short-lived localhost certificates under ignored
+`.tmp/transport-bench-certs/`. Pass `--certfile`, `--keyfile`, and
+`--cacertfile` together to use existing certificates explicitly.
+
 ### Reference Comparison
 
 Run the selected reference QUIC implementation on controlled server paths:

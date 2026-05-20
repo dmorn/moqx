@@ -2,6 +2,7 @@ defmodule MOQX.TransportTest do
   use ExUnit.Case, async: true
 
   alias MOQX.Transport.Profile
+  alias MOQX.Transport.Support
 
   describe "context API" do
     test "creates caller-owned context and opens support transport connection pair through facade" do
@@ -12,6 +13,34 @@ defmodule MOQX.TransportTest do
       {ctx, client, _server} = support_pair(:draft_14)
 
       assert Profile.capabilities!(:draft_14) == MOQX.Transport.capabilities(ctx, client)
+    end
+
+    test "applies backend defaults from context to listener and client calls" do
+      {ctx, client, server} = support_pair_from_defaults(:moq_lite_04)
+
+      assert Profile.capabilities!(:moq_lite_04) == MOQX.Transport.capabilities(ctx, client)
+      assert Profile.capabilities!(:moq_lite_04) == MOQX.Transport.capabilities(ctx, server)
+    end
+
+    test "per-call backend options override context defaults" do
+      assert {:ok, network} = Support.start_network()
+      assert {:ok, ctx} = MOQX.Transport.new(Support, network: network, profile: :draft_14)
+
+      assert {:ok, listener, ctx} = MOQX.Transport.listen(ctx, 0, profile: :moq_lite_04)
+      assert {:ok, {_ip, port}} = MOQX.Transport.local_address(ctx, listener)
+
+      assert {:error, :alpn_mismatch, ^ctx} =
+               MOQX.Transport.connect(ctx, "localhost", port, [], 100)
+
+      assert {:ok, client, ctx} =
+               MOQX.Transport.connect(ctx, "localhost", port, [profile: :moq_lite_04], 100)
+
+      assert {:ok, server, ctx} = MOQX.Transport.accept(ctx, listener, [], 100)
+      assert {:ok, client, ctx} = MOQX.Transport.handshake(ctx, client, 100)
+      assert {:ok, server, ctx} = MOQX.Transport.handshake(ctx, server, 100)
+
+      assert Profile.capabilities!(:moq_lite_04) == MOQX.Transport.capabilities(ctx, client)
+      assert Profile.capabilities!(:moq_lite_04) == MOQX.Transport.capabilities(ctx, server)
     end
 
     test "does not enforce draft-14 control-stream count in the transport layer" do
@@ -184,25 +213,40 @@ defmodule MOQX.TransportTest do
   end
 
   defp support_pair(profile) do
-    assert {:ok, ctx} = MOQX.Transport.new(MOQX.Transport.Support)
+    assert {:ok, network} = Support.start_network()
+    assert {:ok, ctx} = MOQX.Transport.new(Support, network: network)
 
     assert %MOQX.Transport.Context{
-             backend: %MOQX.Transport.BackendRef{module: MOQX.Transport.Support}
+             backend: %MOQX.Transport.BackendRef{module: Support}
            } = ctx
 
     assert {:ok, listener, ctx} = MOQX.Transport.listen(ctx, 0, profile: profile)
 
     assert %MOQX.Transport.Listener{
-             backend: %MOQX.Transport.BackendRef{module: MOQX.Transport.Support},
+             backend: %MOQX.Transport.BackendRef{module: Support},
              local_role: :server
            } = listener
 
+    assert {:ok, {_ip, port}} = MOQX.Transport.local_address(ctx, listener)
+
     assert {:ok, client, ctx} =
-             MOQX.Transport.connect(ctx, "localhost", listener.port, [profile: profile], 100)
+             MOQX.Transport.connect(ctx, "localhost", port, [profile: profile], 100)
 
     assert %MOQX.Transport.Connection{local_role: :client} = client
     assert {:ok, server, ctx} = MOQX.Transport.accept(ctx, listener, [], 100)
     assert %MOQX.Transport.Connection{local_role: :server} = server
+    assert {:ok, client, ctx} = MOQX.Transport.handshake(ctx, client, 100)
+    assert {:ok, server, ctx} = MOQX.Transport.handshake(ctx, server, 100)
+    {ctx, client, server}
+  end
+
+  defp support_pair_from_defaults(profile) do
+    assert {:ok, network} = Support.start_network()
+    assert {:ok, ctx} = MOQX.Transport.new(Support, network: network, profile: profile)
+    assert {:ok, listener, ctx} = MOQX.Transport.listen(ctx, 0)
+    assert {:ok, {_ip, port}} = MOQX.Transport.local_address(ctx, listener)
+    assert {:ok, client, ctx} = MOQX.Transport.connect(ctx, "localhost", port, [], 100)
+    assert {:ok, server, ctx} = MOQX.Transport.accept(ctx, listener, [], 100)
     assert {:ok, client, ctx} = MOQX.Transport.handshake(ctx, client, 100)
     assert {:ok, server, ctx} = MOQX.Transport.handshake(ctx, server, 100)
     {ctx, client, server}

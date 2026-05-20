@@ -8,7 +8,6 @@ defmodule MOQX.Transport do
   """
 
   alias MOQX.Transport.{BackendRef, Connection, Context, Listener, Stream, StreamInfo}
-  alias MOQX.Transport.Support
 
   @type listener :: term()
   @type connection :: term()
@@ -22,6 +21,11 @@ defmodule MOQX.Transport do
 
   @callback listen(port :: non_neg_integer() | String.t(), opts :: keyword() | map()) ::
               {:ok, listener()} | {:error, term()}
+
+  @callback local_address(listener() | connection()) ::
+              {:ok, {:inet.ip_address(), :inet.port_number()}} | {:error, term()}
+
+  @callback close_listener(listener(), timeout()) :: :ok | {:error, term()}
 
   @callback accept(listener(), opts :: keyword() | map(), timeout()) ::
               {:ok, connection()} | {:error, term()}
@@ -66,7 +70,12 @@ defmodule MOQX.Transport do
 
   @callback normalize_message(term()) :: event() | :unknown
 
+  @callback stream_info(stream(), :client | :server, :local | :peer) ::
+              {:ok, StreamInfo.t()} | {:error, term()}
+
   @callback capabilities(connection()) :: MOQX.Transport.Capabilities.t() | {:error, term()}
+
+  @optional_callbacks close_listener: 2, local_address: 1, stream_info: 3
 
   @doc """
   Creates caller-owned transport context for backend module.
@@ -75,7 +84,6 @@ defmodule MOQX.Transport do
   def new(backend, opts \\ []) when is_atom(backend) do
     data = %{
       opts: opts,
-      network: nil,
       listeners: %{},
       connections: %{},
       streams: %{},
@@ -90,23 +98,21 @@ defmodule MOQX.Transport do
   Starts listener through context backend.
   """
   def listen(%Context{} = ctx, port, opts \\ []) do
-    with {:ok, ctx} <- ensure_support_network(ctx) do
-      backend = ctx.backend.module
-      call_opts = inject_support_network(ctx, opts)
+    backend = ctx.backend.module
+    call_opts = merge_backend_opts(ctx, opts)
 
-      case backend.listen(port, call_opts) do
-        {:ok, raw_listener} ->
-          listener = %Listener{
-            backend: %BackendRef{module: backend, data: raw_listener},
-            local_role: :server,
-            port: listener_port(backend, raw_listener)
-          }
+    case backend.listen(port, call_opts) do
+      {:ok, raw_listener} ->
+        listener = %Listener{
+          backend: %BackendRef{module: backend, data: raw_listener},
+          local_role: :server,
+          port: listener_port(backend, raw_listener)
+        }
 
-          {:ok, listener, put_resource(ctx, :listeners, raw_listener, listener)}
+        {:ok, listener, put_resource(ctx, :listeners, raw_listener, listener)}
 
-        {:error, reason} ->
-          {:error, reason, ctx}
-      end
+      {:error, reason} ->
+        {:error, reason, ctx}
     end
   end
 
@@ -115,13 +121,13 @@ defmodule MOQX.Transport do
   """
   def local_address(%Context{} = ctx, %Listener{} = listener) do
     require_same_backend(ctx, listener, fn ->
-      ctx.backend.module.local_address(listener.backend.data)
+      backend_local_address(ctx.backend.module, listener.backend.data)
     end)
   end
 
   def local_address(%Context{} = ctx, %Connection{} = connection) do
     require_same_backend(ctx, connection, fn ->
-      ctx.backend.module.local_address(connection.backend.data)
+      backend_local_address(ctx.backend.module, connection.backend.data)
     end)
   end
 
@@ -130,10 +136,7 @@ defmodule MOQX.Transport do
   """
   def close_listener(%Context{} = ctx, %Listener{} = listener, timeout \\ 0) do
     require_same_backend(ctx, listener, fn ->
-      case ctx.backend.module.close_listener(listener.backend.data, timeout) do
-        :ok -> {:ok, ctx}
-        {:error, reason} -> {:error, reason, ctx}
-      end
+      close_backend_listener(ctx, listener.backend.data, timeout)
     end)
   end
 
@@ -141,21 +144,19 @@ defmodule MOQX.Transport do
   Connects client connection through context backend.
   """
   def connect(%Context{} = ctx, host, port, opts \\ [], timeout \\ 5_000) do
-    with {:ok, ctx} <- ensure_support_network(ctx) do
-      backend = ctx.backend.module
-      call_opts = inject_support_network(ctx, opts)
+    backend = ctx.backend.module
+    call_opts = merge_backend_opts(ctx, opts)
 
-      case backend.connect(host, port, call_opts, timeout) do
-        {:ok, raw_connection} ->
-          connection = wrap_connection(backend, raw_connection, :client)
-          {:ok, connection, put_resource(ctx, :connections, raw_connection, connection)}
+    case backend.connect(host, port, call_opts, timeout) do
+      {:ok, raw_connection} ->
+        connection = wrap_connection(backend, raw_connection, :client)
+        {:ok, connection, put_resource(ctx, :connections, raw_connection, connection)}
 
-        {:error, reason} ->
-          {:error, reason, ctx}
+      {:error, reason} ->
+        {:error, reason, ctx}
 
-        {:error, reason, details} ->
-          {:error, {reason, details}, ctx}
-      end
+      {:error, reason, details} ->
+        {:error, {reason, details}, ctx}
     end
   end
 
@@ -501,32 +502,55 @@ defmodule MOQX.Transport do
     end
   end
 
-  defp ensure_support_network(%Context{backend: %BackendRef{module: Support}} = ctx) do
-    case ctx.backend.data.network do
-      nil ->
-        {:ok, network} = Support.start_network()
-        {:ok, update_backend_data(ctx, &Map.put(&1, :network, network))}
+  defp merge_backend_opts(%Context{backend: %BackendRef{data: %{opts: default_opts}}}, opts) do
+    merge_opts(default_opts, opts)
+  end
 
-      _network ->
-        {:ok, ctx}
+  defp merge_opts(default_opts, opts) when is_list(default_opts) and is_list(opts),
+    do: Keyword.merge(default_opts, opts)
+
+  defp merge_opts(default_opts, opts) when is_map(default_opts) and is_map(opts),
+    do: Map.merge(default_opts, opts)
+
+  defp merge_opts(default_opts, opts) when is_list(default_opts) and is_map(opts),
+    do: Map.merge(Map.new(default_opts), opts)
+
+  defp merge_opts(default_opts, opts) when is_map(default_opts) and is_list(opts),
+    do: Map.merge(default_opts, Map.new(opts))
+
+  defp listener_port(backend, raw_listener) do
+    case backend_local_address(backend, raw_listener) do
+      {:ok, {_ip, port}} -> port
+      {:error, _reason} -> nil
     end
   end
 
-  defp ensure_support_network(ctx), do: {:ok, ctx}
-
-  defp inject_support_network(%Context{backend: %BackendRef{module: Support, data: data}}, opts) do
-    if option(opts, :network, nil) do
-      opts
+  defp backend_local_address(backend, raw_handle) do
+    if backend_exports?(backend, :local_address, 1) do
+      backend.local_address(raw_handle)
     else
-      put_option(opts, :network, data.network)
+      {:error, :unsupported}
     end
   end
 
-  defp inject_support_network(_ctx, opts), do: opts
+  defp backend_exports?(backend, function, arity) do
+    Code.ensure_loaded?(backend) and function_exported?(backend, function, arity)
+  end
 
-  defp listener_port(Support, raw_listener), do: Support.port(raw_listener)
+  defp close_backend_listener(ctx, raw_listener, timeout) do
+    if backend_exports?(ctx.backend.module, :close_listener, 2) do
+      close_exported_listener(ctx, raw_listener, timeout)
+    else
+      {:error, :unsupported, ctx}
+    end
+  end
 
-  defp listener_port(_backend, _raw_listener), do: nil
+  defp close_exported_listener(ctx, raw_listener, timeout) do
+    case ctx.backend.module.close_listener(raw_listener, timeout) do
+      :ok -> {:ok, ctx}
+      {:error, reason} -> {:error, reason, ctx}
+    end
+  end
 
   defp wrap_connection(backend, raw_connection, role) do
     %Connection{backend: %BackendRef{module: backend, data: raw_connection}, local_role: role}
@@ -722,7 +746,4 @@ defmodule MOQX.Transport do
 
   defp option(opts, key, default) when is_map(opts), do: Map.get(opts, key, default)
   defp option(opts, key, default) when is_list(opts), do: Keyword.get(opts, key, default)
-
-  defp put_option(opts, key, value) when is_map(opts), do: Map.put(opts, key, value)
-  defp put_option(opts, key, value) when is_list(opts), do: Keyword.put(opts, key, value)
 end

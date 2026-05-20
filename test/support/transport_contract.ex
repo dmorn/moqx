@@ -470,16 +470,21 @@ end
 defmodule MOQX.TransportContract.SupportFixture do
   @moduledoc false
 
+  alias MOQX.Transport
+  alias MOQX.Transport.Support
+
   def connect_pair(profile) do
-    {:ok, ctx} = MOQX.Transport.new(MOQX.Transport.Support)
-    {:ok, listener, ctx} = MOQX.Transport.listen(ctx, 0, profile: profile)
+    {:ok, network} = Support.start_network()
+    {:ok, ctx} = Transport.new(Support, network: network)
+    {:ok, listener, ctx} = Transport.listen(ctx, 0, profile: profile)
+    {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
 
     {:ok, client, ctx} =
-      MOQX.Transport.connect(ctx, "localhost", listener.port, [profile: profile], 100)
+      Transport.connect(ctx, "localhost", port, [profile: profile], 100)
 
-    {:ok, server, ctx} = MOQX.Transport.accept(ctx, listener, [], 100)
-    {:ok, client, ctx} = MOQX.Transport.handshake(ctx, client, 100)
-    {:ok, server, ctx} = MOQX.Transport.handshake(ctx, server, 100)
+    {:ok, server, ctx} = Transport.accept(ctx, listener, [], 100)
+    {:ok, client, ctx} = Transport.handshake(ctx, client, 100)
+    {:ok, server, ctx} = Transport.handshake(ctx, server, 100)
 
     ctx = flush_transport_events(ctx)
 
@@ -502,7 +507,7 @@ defmodule MOQX.TransportContract.SupportFixture do
   def unavailable_message, do: "support transport echo peer should always be available"
 
   defp flush_transport_events(ctx) do
-    case MOQX.Transport.receive_event(ctx, 0) do
+    case Transport.receive_event(ctx, 0) do
       {:timeout, ctx} -> ctx
       {:ok, _event, ctx} -> flush_transport_events(ctx)
       {:unknown, _message, ctx} -> flush_transport_events(ctx)

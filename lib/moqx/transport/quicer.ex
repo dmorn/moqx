@@ -38,6 +38,7 @@ defmodule MOQX.Transport.Quicer do
   """
   @spec local_address(MOQX.Transport.listener() | MOQX.Transport.connection()) ::
           {:ok, {:inet.ip_address(), :inet.port_number()}} | {:error, term()}
+  @impl true
   def local_address(handle) do
     :quicer.getopt(handle, :local_address)
   end
@@ -47,6 +48,7 @@ defmodule MOQX.Transport.Quicer do
   """
   @spec stream_info(MOQX.Transport.stream(), :client | :server, :local | :peer) ::
           {:ok, MOQX.Transport.StreamInfo.t()} | {:error, term()}
+  @impl true
   def stream_info(stream, local_role, initiator) do
     case :quicer.get_stream_id(stream) do
       {:ok, stream_id} -> {:ok, stream_info_from_id(stream_id, local_role, initiator)}
@@ -79,6 +81,7 @@ defmodule MOQX.Transport.Quicer do
   Closes a listener handle.
   """
   @spec close_listener(MOQX.Transport.listener(), timeout()) :: :ok | {:error, term()}
+  @impl true
   def close_listener(listener, timeout \\ 0) do
     :quicer.close_listener(listener, timeout)
   end
