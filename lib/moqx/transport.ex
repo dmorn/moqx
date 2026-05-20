@@ -283,7 +283,10 @@ defmodule MOQX.Transport do
   end
 
   @doc """
-  Sends unreliable datagram on connection.
+  Schedules an unreliable datagram on connection.
+
+  Completion, loss, or cancellation is reported asynchronously by backend
+  connection events where available.
   """
   def send_datagram(%Context{} = ctx, %Connection{} = connection, data) when is_binary(data) do
     require_same_backend(ctx, connection, fn ->

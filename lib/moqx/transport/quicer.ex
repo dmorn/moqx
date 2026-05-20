@@ -122,7 +122,7 @@ defmodule MOQX.Transport.Quicer do
 
   @impl true
   def send_datagram(connection, data) when is_binary(data) do
-    case :quicer.send_dgram(connection, data) do
+    case :quicer.async_send_dgram(connection, data) do
       {:ok, _bytes} -> :ok
       {:error, :dgram_send_error, :invalid_state} -> {:error, :datagrams_unavailable}
       {:error, _reason} = error -> error

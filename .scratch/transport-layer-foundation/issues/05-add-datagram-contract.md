@@ -32,3 +32,8 @@ MOQT draft-14 requires QUIC DATAGRAM support and uses object datagrams. MOQ Lite
 ## Comments
 
 - 2026-05-07: Added centralized `:datagram` transport contract. Support transport now delivers binary datagrams as normalized `{:datagram, connection, payload, metadata}` events when the profile enables datagrams, and returns `{:error, :datagrams_unavailable}` when disabled. Quicer self-pair integration runs the same contract with draft14-style datagrams enabled via connection/listener opts. Quicer datagram flags are normalized into metadata maps; max datagram size remains `:unknown` where quicer does not expose it through the current capability query.
+- 2026-05-20: Tightened the quicer adapter semantics so
+  `MOQX.Transport.send_datagram/3` schedules DATAGRAM sends with quicer's async
+  send API instead of waiting for each `dgram_send_state`. Send completion/loss
+  remains observable through normalized `:dgram_send_state` connection events;
+  the send call itself reports whether scheduling succeeded.

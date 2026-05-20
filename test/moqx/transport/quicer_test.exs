@@ -42,6 +42,14 @@ defmodule MOQX.Transport.QuicerTest do
                {:datagram, :connection, "payload", %{flags: :flags}}
     end
 
+    test "normalizes datagram send-state messages as connection events" do
+      assert Quicer.normalize_message(
+               {:quic, :dgram_send_state, :connection, %{state: :dgram_send_acknowledged}}
+             ) ==
+               {:connection_event, :connection, :dgram_send_state,
+                %{state: :dgram_send_acknowledged}}
+    end
+
     test "normalizes quicer shutdown stream events into MOQX event vocabulary" do
       assert Quicer.normalize_message({:quic, :peer_send_shutdown, :stream, :undefined}) ==
                {:stream_event, :stream, :peer_finished_sending, %{}}

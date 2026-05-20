@@ -52,7 +52,14 @@ defmodule MOQX.TransportContract do
       end
 
       defp await_datagram(ctx, connection, payload, timeout) do
-        case MOQX.Transport.receive_event(ctx, timeout) do
+        deadline = System.monotonic_time(:millisecond) + timeout
+        await_datagram_until(ctx, connection, payload, deadline)
+      end
+
+      defp await_datagram_until(ctx, connection, payload, deadline) do
+        remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+        case MOQX.Transport.receive_event(ctx, remaining) do
           {:ok, {:datagram, ^connection, ^payload, metadata}, ctx} when is_map(metadata) ->
             {metadata, ctx}
 
@@ -60,10 +67,10 @@ defmodule MOQX.TransportContract do
             {:timeout, ctx}
 
           {:ok, _event, ctx} ->
-            await_datagram(ctx, connection, payload, 0)
+            await_datagram_until(ctx, connection, payload, deadline)
 
           {:unknown, _message, ctx} ->
-            await_datagram(ctx, connection, payload, 0)
+            await_datagram_until(ctx, connection, payload, deadline)
         end
       end
 

@@ -148,6 +148,13 @@ Create shared transport contract tests that can run against both:
 
 These tests establish baseline semantics for handshakes, ALPN/capability negotiation, stream lifecycle, stream direction/initiator metadata, stream data, optional datagrams, FIN/reset/stop-sending, connection close, active/passive receive, and ownership handoff.
 
+2026-05-20 amendment: transport DATAGRAM sends schedule unreliable delivery and
+return once the backend accepts the send request. Backend send-state completion,
+loss, or cancellation is an asynchronous transport event, not something
+`send_datagram/3` waits for. This keeps DATAGRAM pressure from being serialized
+by per-datagram send-state waits and matches the rest of the native QUIC async
+transport operations.
+
 ### Performance and limits research
 
 Transport performance and limit analysis belongs in a separate benchmark/research harness, not in the regular test suite. The harness is for discovering real QUIC path limits and protocol pressure points: how hard a link can be pushed before it degrades or fails, and how much of the path `moqx` can fill under stream, datagram, and mixed MOQT-shaped load.
