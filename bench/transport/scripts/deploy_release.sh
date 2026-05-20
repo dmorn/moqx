@@ -11,7 +11,7 @@ Environment:
 
 Example:
   scripts/deploy_release.sh \
-    --artifact build/artifacts/moqx-transport-bench-0.1.0-553d2c6-linux-arm64.tar.gz \
+    --artifact build/artifacts/moqx-transport-bench-0.1.0-<git>-linux-arm64.tar.gz \
     --remote-dir /opt/moqx-bench/moqx-transport-bench \
     --smoke \
     -- root@203.0.113.10 root@203.0.113.11

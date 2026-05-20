@@ -585,8 +585,7 @@ OS/architecture/ABI as the remote benchmark node or in a matching container.
 For Hetzner ARM nodes, build the Linux/ARM64 artifact with Docker:
 
 ```bash
-cd bench/transport
-make docker-release
+just bench-transport-build-release
 ```
 
 The default artifact path is:
@@ -598,16 +597,31 @@ bench/transport/build/artifacts/moqx-transport-bench-<version>-<git>-linux-arm64
 The Docker build uses `elixir:1.19.5-otp-28` by default and can be overridden:
 
 ```bash
-make docker-release ELIXIR_IMAGE=elixir:1.19.5-otp-28 TARGET_ARCH=arm64
+ELIXIR_IMAGE=elixir:1.19.5-otp-28 TARGET_ARCH=arm64 \
+  just bench-transport-build-release
 ```
 
-Deploy a built artifact to caller-provided SSH targets:
+Deploy a built artifact to the Terraform `client` and `server` roles in
+parallel:
 
 ```bash
-cd bench/transport
-make deploy-release \
-  ARTIFACT=build/artifacts/moqx-transport-bench-0.1.0-553d2c6-linux-arm64.tar.gz \
-  TARGETS="root@203.0.113.10 root@203.0.113.11"
+just bench-transport-deploy
+```
+
+The deploy recipe reads the current run id from
+`bench/transport/.run/current`, resolves public SSH targets from Terraform
+outputs, and writes one log per target under
+`bench/transport/results/<run_id>/`. Each role is a separate deploy unit; the
+top-level deploy fails if either role fails.
+
+For manual one-off targets, use the lower-level target recipe. The artifact
+path is relative to `bench/transport/` unless absolute:
+
+```bash
+just bench-transport-deploy-target \
+  root@203.0.113.10 \
+  20260520T134420Z-smoke \
+  build/artifacts/moqx-transport-bench-0.1.0-<git>-linux-arm64.tar.gz
 ```
 
 Deployment copies the tarball, extracts it under
@@ -618,8 +632,9 @@ Deployment copies the tarball, extracts it under
 /opt/moqx-bench/moqx-transport-bench/current/bin/moqx-transport-bench help
 ```
 
-The deploy target does not read Terraform state, provision infrastructure, or
-run benchmark traffic. Use Terraform outputs to choose the explicit SSH targets.
+The deploy target does not provision infrastructure or run benchmark traffic.
+The role-based recipe reads Terraform outputs only to resolve the already
+provisioned `client` and `server` public SSH targets.
 
 ## Result Storage
 

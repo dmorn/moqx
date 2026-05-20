@@ -34,6 +34,7 @@ priv/native
 .dexter*
 bench/transport/results/
 bench/transport/build/
+bench/transport/.run/
 bench/transport/.keys/
 bench/transport/_build/
 bench/transport/cover/

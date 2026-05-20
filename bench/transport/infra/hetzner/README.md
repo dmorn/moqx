@@ -24,18 +24,15 @@ Use profile files to choose the server type and locations:
 ## Usage
 
 ```bash
-cd bench/transport/infra/hetzner
-export HCLOUD_TOKEN=...
-mkdir -p ../../.keys/20260519-a
-ssh-keygen -t ed25519 -N '' -C moqx-transport-bench-20260519-a \
-  -f ../../.keys/20260519-a/id_ed25519
-terraform init
-terraform apply \
-  -var-file=profiles/arm-default.tfvars \
-  -var='run_id=20260519-a' \
-  -var='ssh_public_key_path=../../.keys/20260519-a/id_ed25519.pub'
-terraform output
+just bench-transport-new-run
+just bench-transport-plan
+just bench-transport-apply-plan
+just bench-transport-outputs
 ```
+
+The `just` recipes load `.env` automatically when present. Cloud-mutating
+recipes still require `HCLOUD_TOKEN` to be available from `.env` or the
+environment.
 
 Check cloud-init and the installed tools before running benchmarks:
 
@@ -46,19 +43,15 @@ terraform output -json toolchain_check_commands
 Destroy the pair when the run is finished:
 
 ```bash
-terraform destroy \
-  -var-file=profiles/arm-default.tfvars \
-  -var='run_id=20260519-a' \
-  -var='ssh_public_key_path=../../.keys/20260519-a/id_ed25519.pub'
+just bench-transport-destroy
+just bench-transport-verify-clean
 ```
 
 Use a stable `run_id` when multiple pairs may exist at once:
 
 ```bash
-terraform apply \
-  -var-file=profiles/arm-default.tfvars \
-  -var='run_id=20260519-a' \
-  -var='ssh_public_key_path=../../.keys/20260519-a/id_ed25519.pub'
+just bench-transport-plan 20260519-a arm-default
+just bench-transport-apply-plan 20260519-a
 ```
 
 Generate a fresh SSH keypair for each run instead of reusing an operator key.
@@ -106,23 +99,21 @@ finishes.
 Build the Linux/ARM64 release artifact locally with Docker:
 
 ```bash
-cd bench/transport
-make docker-release
+just bench-transport-build-release
 ```
 
-After Terraform apply and cloud-init readiness checks, pass explicit SSH
-targets from Terraform output to the deploy target:
+After Terraform apply and cloud-init readiness checks, deploy the release to
+the Terraform `client` and `server` roles:
 
 ```bash
-cd bench/transport
-make deploy-release \
-  ARTIFACT=build/artifacts/moqx-transport-bench-0.1.0-553d2c6-linux-arm64.tar.gz \
-  TARGETS="root@<sender-ip> root@<receiver-ip>"
+just bench-transport-deploy
 ```
 
-The deploy step only copies/extracts the release and runs
-`moqx-transport-bench help` remotely. It does not call Terraform and does not
-start benchmark traffic.
+The deploy step only resolves already-provisioned Terraform outputs,
+copies/extracts the release, and runs `moqx-transport-bench help` remotely.
+It does not provision infrastructure and does not start benchmark traffic.
+Client and server deploys run as separate parallel units; the top-level recipe
+fails if either role fails.
 
 ## Result Metadata
 

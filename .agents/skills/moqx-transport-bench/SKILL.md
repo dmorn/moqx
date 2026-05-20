@@ -28,8 +28,9 @@ Source of truth:
   tasks under `mix moqx.transport.*` are development wrappers over the same
   runtime command modules.
 - Build Linux/ARM64 remote release artifacts with Docker via
-  `cd bench/transport && make docker-release`; deploy them only to explicit SSH
-  targets with `make deploy-release TARGETS="root@... root@..."`.
+  `just bench-transport-build-release`; deploy them to Terraform `client` and
+  `server` roles with `just bench-transport-deploy`, or to one explicit target
+  with `just bench-transport-deploy-target`.
 - Destroy disposable infrastructure immediately after validation or data
   capture, then verify no provider resources remain.
 - For transport decisions, consult quicer and the relevant MOQT draft text
@@ -51,23 +52,14 @@ Source of truth:
 3. Prepare a run id and per-run SSH key:
 
    ```bash
-   mkdir -p bench/transport/.keys/<run-id>
-   ssh-keygen -t ed25519 -N '' -C moqx-transport-bench-<run-id> \
-     -f bench/transport/.keys/<run-id>/id_ed25519
+   just bench-transport-new-run
+   just bench-transport-current-run
    ```
 
 4. Validate Terraform before creating resources:
 
    ```bash
-   cd bench/transport/infra/hetzner
-   terraform init
-   terraform fmt -check -recursive .
-   terraform validate
-   terraform plan \
-     -var-file=profiles/arm-smoke.tfvars \
-     -var='run_id=<run-id>' \
-     -var='ssh_public_key_path=../../.keys/<run-id>/id_ed25519.pub' \
-     -out=/private/tmp/moqx-<run-id>.tfplan
+   just bench-transport-plan
    ```
 
 5. Apply only the reviewed plan, verify cloud-init/toolchain, and save outputs
@@ -76,9 +68,9 @@ Source of truth:
 6. Build and deploy the benchmark CLI release:
 
    ```bash
-   cd bench/transport
-   make docker-release
-   make deploy-release TARGETS="root@<sender-ip> root@<receiver-ip>"
+   just bench-transport-apply-plan
+   just bench-transport-build-release
+   just bench-transport-deploy
    ```
 
 7. Run the path baseline:
@@ -94,11 +86,8 @@ Source of truth:
 9. Tear down and verify:
 
    ```bash
-   terraform destroy \
-     -var-file=profiles/arm-smoke.tfvars \
-     -var='run_id=<run-id>' \
-     -var='ssh_public_key_path=../../.keys/<run-id>/id_ed25519.pub'
-   terraform state list
+   just bench-transport-destroy
+   just bench-transport-verify-clean
    ```
 
    Check provider resources by `purpose=moqx-transport-bench` when credentials
