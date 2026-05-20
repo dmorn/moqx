@@ -26,7 +26,7 @@ This isolates client-side and listener-side behavior while measuring raw transpo
 
 ## Blocked by
 
-- `.scratch/transport-layer-foundation/issues/10-add-moqx-quicer-self-pair-benchmark.md`
+None - issues 10 and 23 are closed.
 
 ## Design decisions
 
@@ -37,6 +37,34 @@ This isolates client-side and listener-side behavior while measuring raw transpo
 
 ## Progress
 
-Issue 08 and issue 11 are closed. This issue remains blocked by the self-pair calibration script in issue 10.
+Issue 08, issue 10, issue 11, and issue 23 are closed, so this issue is no
+longer structurally blocked.
+
+Current status:
+
+- The selected reference implementation path is `tools/quicprobe`.
+- The canonical operator surface should be runtime
+  `moqx-transport-bench` commands, not standalone `.exs` scripts.
+- The first implementation pass should define explicit command contracts for:
+  - `moqx` client to reference server;
+  - reference client to `moqx` listener;
+  - reference client to reference server where practical.
+- Output must remain `transport-bench-v1` JSONL and comparable with
+  `self-pair` and `iperf3-baseline`.
+- The next useful dependency is an end-to-end Hetzner smoke that proves
+  provisioning, release deploy, remote command execution, result capture, and
+  teardown work before reference-comparison commands are added.
+
+Keep this issue at `needs-triage` until the runtime command shape is designed
+from that smoke-test experience.
 
 ## Comments
+
+- 2026-05-20: Hetzner ARM smoke `20260520T134420Z-smoke` proved the
+  operator path for public IPv4: Terraform apply, cloud-init readiness, Docker
+  release deploy, remote `moqx-transport-bench help`, public `iperf3-baseline`
+  JSONL capture, report validation, destroy, empty Terraform state, and empty
+  provider label query all succeeded. Before implementing this issue, address
+  or consciously scope around follow-ups 24 and 25: failed path attempts should
+  not hang indefinitely, and private-network readiness needs a deterministic
+  answer if reference comparisons are expected to use private paths.

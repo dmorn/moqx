@@ -92,3 +92,14 @@ Validation:
   `moqx-transport-bench` runtime CLI onto caller-provisioned Hetzner endpoints.
   Issue 22 remains limited to infrastructure provisioning, readiness, and
   destroy verification.
+- 2026-05-20: Smoke run `20260520T134420Z-smoke` with
+  `profiles/arm-smoke.tfvars` provisioned `cax21` endpoints in `fsn1` and
+  `nbg1`, deployed `moqx-transport-bench-0.1.0-20c2019-linux-arm64.tar.gz`,
+  and produced a valid public IPv4 `iperf3-baseline` report:
+  TCP goodput 5.27 Gbps for a 1-second step; UDP 1.01 Mbps at 1M offered load,
+  100.00% delivery, 0 drops. Results were fetched under ignored
+  `bench/transport/results/20260520T134420Z-smoke/`. Terraform destroy removed
+  all 8 resources; `terraform state list` was empty; `hcloud` queries for
+  `purpose=moqx-transport-bench` returned no servers, firewalls, networks, or
+  SSH keys. The same smoke exposed follow-ups 24 and 25: failed paths need
+  timeout handling, and private-network readiness is not deterministic yet.
