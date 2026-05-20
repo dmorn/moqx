@@ -1,0 +1,16 @@
+#!/usr/bin/env sh
+set -eu
+
+bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+argv_b64=""
+
+for arg do
+  encoded="$(printf '%s' "$arg" | base64 | tr -d '\n')"
+  argv_b64="${argv_b64}${encoded}
+"
+done
+
+export MOQX_TRANSPORT_BENCH_ARGV_B64="$argv_b64"
+export MOQX_TRANSPORT_BENCH_RELEASE_CLI=1
+export RELEASE_NODE="${RELEASE_NODE:-moqx_transport_bench_cli_$$}"
+exec "$bin_dir/moqx_transport_bench" start

@@ -15,7 +15,10 @@ defmodule MOQX.Transport.Quicer do
 
   @impl true
   def listen(port, opts) do
-    :quicer.listen(Options.normalize_text(port), Options.normalize_opts(opts))
+    port
+    |> Options.normalize_text()
+    |> :quicer.listen(Options.normalize_opts(opts))
+    |> normalize_result()
   end
 
   @impl true
@@ -291,6 +294,10 @@ defmodule MOQX.Transport.Quicer do
   defp receive_side?(:bidirectional, _initiator), do: true
   defp receive_side?(:unidirectional, :local), do: false
   defp receive_side?(:unidirectional, :peer), do: true
+
+  defp normalize_result({:ok, _value} = ok), do: ok
+  defp normalize_result({:error, _reason} = error), do: error
+  defp normalize_result({:error, reason, details}), do: {:error, {reason, details}}
 
   defp option(opts, key, default) when is_map(opts), do: Map.get(opts, key, default)
   defp option(opts, key, default) when is_list(opts), do: Keyword.get(opts, key, default)

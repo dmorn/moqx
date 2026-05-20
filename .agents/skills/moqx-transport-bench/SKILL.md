@@ -24,6 +24,9 @@ Source of truth:
 - Run `iperf3` first to establish the raw path ceiling before QUIC or
   MOQT-shaped pressure tests.
 - Record machine-readable JSONL and path metadata for every benchmark run.
+- Prefer the runtime `moqx-transport-bench` CLI on remote nodes. Local Mix
+  tasks under `mix moqx.transport.*` are development wrappers over the same
+  runtime command modules.
 - Destroy disposable infrastructure immediately after validation or data
   capture, then verify no provider resources remain.
 - For transport decisions, consult quicer and the relevant MOQT draft text
@@ -69,10 +72,11 @@ Source of truth:
 
 6. Run the path baseline:
    start `iperf3 --server` on the receiver, run
-   `bench/transport/scripts/iperf3_baseline.exs` on the sender with
-   `--path-json`, then fetch the JSONL results.
+   `moqx-transport-bench iperf3-baseline --path-json ...` on the sender, then
+   fetch the JSONL results. During local development, the equivalent wrapper is
+   `mix moqx.transport.iperf3_baseline` from `bench/transport/`.
 
-7. Only after a valid path baseline, run QUIC or MOQT-shaped pressure scripts.
+7. Only after a valid path baseline, run QUIC or MOQT-shaped pressure tasks.
    Keep workloads explicit: profile, direction, stream/datagram counts, payload
    size, offered load, duration, repetitions, and stop conditions.
 
@@ -95,5 +99,9 @@ Source of truth:
   whether infrastructure was destroyed.
 - Keep one-off IPs, run ids, and measured values out of this skill. Put them in
   result artifacts, issue comments, or PR notes.
+- Use `moqx-transport-bench report <jsonl>` or the local
+  `mix moqx.transport.report <jsonl>` wrapper to inspect JSONL artifacts
+  without changing the canonical machine-readable format.
 - Before committing repo changes, run the project gate from `AGENTS.md`:
-  `mix format`, tests, `mix credo --strict`, plus relevant Terraform checks.
+  `mix format`, tests, `mix credo --strict`, plus the nested benchmark project
+  gate when changing `bench/transport/`, and relevant Terraform checks.

@@ -1,8 +1,9 @@
 # Transport Benchmark Harness
 
-This directory is for transport performance and limit research. It is not part
-of normal tests, ExUnit integration tests, or the commit-time correctness
-checklist.
+This directory is a standalone Mix project for transport performance and limit
+research. It depends on the root `moqx` project by path and exercises it through
+public APIs. It is not part of normal library tests, ExUnit integration tests,
+or the root commit-time correctness checklist.
 
 The harness answers one question:
 
@@ -71,7 +72,7 @@ Unknown values should be recorded as `null`, not omitted.
 
 ## Benchmark Matrix
 
-The harness supports these benchmark families. Individual scripts may implement
+The harness supports these benchmark families. Individual tools may implement
 them incrementally, but they must use the shared output schema.
 
 ### Path Baseline
@@ -85,17 +86,25 @@ Use `iperf3` to establish raw host/path capacity:
 `iperf3` is not a QUIC or MOQT benchmark. It is the path ceiling used to
 interpret QUIC results.
 
-The repo-owned script is:
+The repo-owned runtime command is:
 
 ```bash
-elixir bench/transport/scripts/iperf3_baseline.exs --server <host-or-ip>
+moqx-transport-bench iperf3-baseline --server <host-or-ip>
+```
+
+The local Mix wrapper is:
+
+```bash
+cd bench/transport
+mix moqx.transport.iperf3_baseline --server <host-or-ip>
 ```
 
 It expects the caller to provide an `iperf3` server endpoint. For local smoke
 validation only, it can start a temporary loopback server:
 
 ```bash
-elixir bench/transport/scripts/iperf3_baseline.exs \
+cd bench/transport
+mix moqx.transport.iperf3_baseline \
   --server 127.0.0.1 \
   --port 55201 \
   --local-server \
@@ -105,8 +114,8 @@ elixir bench/transport/scripts/iperf3_baseline.exs \
 ```
 
 For remote controlled paths, start `iperf3 --server` on the server host
-yourself and pass the public or private endpoint explicitly. The script does
-not provision infrastructure, start Terraform, or assume loopback.
+yourself and pass the public or private endpoint explicitly. The task does not
+provision infrastructure, start Terraform, or assume loopback.
 
 ### Self-Pair Calibration
 
@@ -121,10 +130,17 @@ This measures local overhead:
 
 Self-pair results must be labeled `loopback_calibration`.
 
-The repo-owned script is:
+The repo-owned runtime command is:
 
 ```bash
-mix run bench/transport/scripts/quicer_self_pair.exs -- --profile draft_14
+moqx-transport-bench self-pair --profile draft_14
+```
+
+The local Mix wrapper is:
+
+```bash
+cd bench/transport
+mix moqx.transport.self_pair --profile draft_14
 ```
 
 It accepts `draft_14` and `moq_lite_04` profiles. The `draft_14` profile runs
@@ -136,7 +152,8 @@ For quick local validation, keep counts deliberately small and write JSONL to a
 temporary path:
 
 ```bash
-mix run bench/transport/scripts/quicer_self_pair.exs -- \
+cd bench/transport
+mix moqx.transport.self_pair \
   --profile draft_14 \
   --stream-count 1 \
   --payload-count 2 \
@@ -144,7 +161,7 @@ mix run bench/transport/scripts/quicer_self_pair.exs -- \
   --output /private/tmp/moqx-quicer-self-pair-smoke.jsonl
 ```
 
-By default the script creates short-lived localhost certificates under ignored
+By default the task creates short-lived localhost certificates under ignored
 `.tmp/transport-bench-certs/`. Pass `--certfile`, `--keyfile`, and
 `--cacertfile` together to use existing certificates explicitly.
 
@@ -161,7 +178,7 @@ limits.
 
 ### Pressure Patterns
 
-Scripts should model transport-level pressure patterns before full protocol
+Tools should model transport-level pressure patterns before full protocol
 semantics exist:
 
 - stream pressure: one stream, many streams, bidirectional streams,
@@ -175,7 +192,7 @@ like MOQT data-plane pressure.
 
 ## Protocol Profiles
 
-Benchmark scripts should accept a protocol-like profile argument.
+Benchmark tools should accept a protocol-like profile argument.
 
 Initial profiles:
 
@@ -236,7 +253,7 @@ Common stop conditions:
 - memory grows past configured limit;
 - control traffic is delayed behind media/object traffic.
 
-Stop thresholds are script parameters. #08 defines the shape, not universal
+Stop thresholds are tool parameters. #08 defines the shape, not universal
 pass/fail thresholds.
 
 ## "Breaks Apart" Symptoms
@@ -256,12 +273,12 @@ breaking apart when one or more of these symptoms appear:
 - memory saturation;
 - control traffic delayed behind media/object traffic.
 
-Scripts should record the first observed symptom and any final close/error
+Tools should record the first observed symptom and any final close/error
 reason.
 
 ## Output Format
 
-Benchmark scripts must emit machine-readable JSON or JSONL. JSONL is preferred
+Benchmark tools must emit machine-readable JSON or JSONL. JSONL is preferred
 for ramps because each step can be one record.
 
 All records must include:
@@ -279,6 +296,25 @@ All records must include:
 - `errors`
 
 Use `null` for unknown values and keep units in field names.
+
+The benchmark project includes a human-readable report command for JSONL
+artifacts:
+
+```bash
+moqx-transport-bench report /path/to/run.jsonl
+moqx-transport-bench report /path/to/run.jsonl --strict
+```
+
+The local Mix wrapper is:
+
+```bash
+cd bench/transport
+mix moqx.transport.report /path/to/run.jsonl
+mix moqx.transport.report /path/to/run.jsonl --strict
+```
+
+The report command is a reader and validator only. JSONL remains the canonical
+benchmark artifact.
 
 ### Record Types
 
@@ -299,9 +335,9 @@ Required `run` fields:
     "started_at": "2026-05-18T12:00:00Z",
     "finished_at": "2026-05-18T12:05:00Z",
     "git_sha": "abcdef0",
-    "script": "bench/transport/scripts/example.exs",
+    "script": "moqx-transport-bench example",
     "script_version": "v1",
-    "command": "mix run bench/transport/scripts/example.exs -- ...",
+    "command": "moqx-transport-bench example ...",
     "notes": null
   }
 }
@@ -495,30 +531,55 @@ Use these units unless a field name states otherwise:
 - CPU: percentage of one host's total CPU capacity;
 - timestamps: ISO 8601 UTC strings.
 
-## Script Conventions
+## Tool Conventions
 
-Elixir benchmark scripts should be standalone `.exs` files. Use
-`Mix.install/1` only when a script has explicit script-local dependencies; a
-no-dependency script should stay a plain `.exs` file. Non-Elixir tools are
-allowed when they are the benchmark subject or selected reference tool.
+Elixir benchmark tools live in this nested Mix project. The runtime CLI is
+`moqx-transport-bench`; local Mix tasks under `moqx.transport.*` are wrappers
+over the same command modules. Legacy `.exs` paths under
+`bench/transport/scripts/` are compatibility delegates into the nested project.
+The project depends on root `moqx` by path so the library dependency graph stays
+free of benchmark-only code. Non-Elixir tools are allowed when they are the
+benchmark subject or selected reference tool.
 
-Scripts must:
+Tools must:
 
 - accept caller-provided endpoints;
 - avoid mutating `Application` env as a test seam;
-- avoid adding benchmark-only dependencies to `mix.exs`;
+- avoid adding benchmark-only dependencies to the root `mix.exs`;
 - print JSON or JSONL to stdout;
 - write optional artifacts under `bench/transport/results/` or a caller-provided
   output directory;
 - include enough command parameters in output to reproduce the run.
 
-Scripts should not:
+Tools should not:
 
 - start cloud/server infrastructure implicitly;
-- start Docker implicitly unless the script is explicitly a local calibration
+- start Docker implicitly unless the tool is explicitly a local calibration
   helper;
 - treat public relay results as controlled performance baselines;
 - hide failed runs by omitting output.
+
+## Release Packaging
+
+The benchmark project can be packaged as an Elixir release:
+
+```bash
+cd bench/transport
+MIX_ENV=prod mix release --overwrite
+_build/prod/rel/moqx_transport_bench/bin/moqx-transport-bench help
+```
+
+The user-facing release wrapper is:
+
+```text
+bin/moqx-transport-bench
+```
+
+It delegates to the release management script internally and boots the full
+release once per command with a short-lived release node name, so operators do
+not need to call release internals manually. Release artifacts are
+target-specific because the project includes the `quicer` NIF; build the release on the same
+OS/architecture/ABI as the remote benchmark node or in a matching container.
 
 ## Result Storage
 
@@ -538,7 +599,8 @@ bench/transport/results/<run_id>.jsonl
 Controlled server-pair benchmarks may use repo-owned Terraform under
 `bench/transport/infra/` when the infrastructure is short-lived, explicit, and
 destroyed by the caller after the run. Provisioning is separate from benchmark
-scripts: scripts must accept endpoints and must not call Terraform themselves.
+tools: benchmark tasks must accept endpoints and must not call Terraform
+themselves.
 
 The first supported target is Hetzner Cloud:
 
@@ -562,7 +624,7 @@ Firewall policy for the Hetzner setup:
 - allow outbound TCP, UDP, and ICMP.
 
 Terraform outputs include path metadata for public IPv4 and private-network
-runs. Benchmark scripts should merge those outputs with live host inventory and
+runs. Benchmark tools should merge those outputs with live host inventory and
 run-specific metrics.
 
 ## Implementation Order
@@ -571,7 +633,7 @@ The intended issue order is:
 
 1. Define this contract (#08).
 2. Add ephemeral controlled-server infrastructure (#22).
-3. Add raw path baseline scripts (#09).
-4. Add self-pair calibration scripts (#10).
+3. Add raw path baseline tools (#09).
+4. Add self-pair calibration tools (#10).
 5. Select the first reference QUIC implementation and topology (#11).
-6. Add real-path reference benchmark scripts (#12).
+6. Add real-path reference benchmark tools (#12).

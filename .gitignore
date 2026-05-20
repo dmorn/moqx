@@ -34,6 +34,13 @@ priv/native
 .dexter*
 bench/transport/results/
 bench/transport/.keys/
+bench/transport/_build/
+bench/transport/cover/
+bench/transport/deps/
+bench/transport/doc/
+bench/transport/tmp/
+bench/transport/.tmp/
+bench/transport/*.srl
 bench/transport/infra/**/.terraform/
 bench/transport/infra/**/*.tfstate
 bench/transport/infra/**/*.tfstate.*

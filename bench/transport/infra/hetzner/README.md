@@ -97,7 +97,8 @@ Cloud-init intentionally does little:
 - writes a short note under `/opt/moqx-bench/`.
 
 The benchmark repo is not cloned automatically, and no benchmark process is
-started automatically. Run `elixir`, `mix`, and `go` directly after cloud-init
+started automatically. Deploy a `moqx-transport-bench` release artifact or use
+the installed Elixir/Mix toolchain for development-only checks after cloud-init
 finishes.
 
 ## Result Metadata
