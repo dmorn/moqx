@@ -165,11 +165,12 @@ Use:
 bench/transport/
 ```
 
-Benchmark scripts should be independent Elixir scripts. They may use
-`Mix.install/1` for explicit script-local dependencies, but no-dependency
-scripts should stay plain `.exs` files. Scripts should accept caller-provided
-endpoints so the same harness can run against same-region server pairs,
-cross-region server pairs, and asymmetric edge-to-server paths.
+Benchmark tooling should live in a standalone `bench/transport` Mix project
+with root `moqx` consumed as a path dependency. The canonical operator surface
+is the `moqx-transport-bench` runtime CLI; legacy `.exs` paths may remain as
+compatibility delegates. Tools should accept caller-provided endpoints so the
+same harness can run against same-region server pairs, cross-region server
+pairs, and asymmetric edge-to-server paths.
 
 The harness should eventually compare:
 
@@ -196,6 +197,12 @@ benchmarks. This does not change the script contract: benchmark scripts accept
 endpoints and must not start or destroy infrastructure implicitly. The first
 such setup targets Hetzner Cloud with profile-based Terraform variants, minimal
 cloud-init, and strict benchmark firewalls.
+
+2026-05-20 amendment: remote benchmark nodes should receive a target-specific
+`moqx-transport-bench` release artifact built with Docker for the target
+OS/architecture. Deployment tooling may copy and smoke-test that release over
+SSH, but must receive explicit targets and must not call Terraform or start
+benchmark traffic implicitly.
 
 ## Consequences
 

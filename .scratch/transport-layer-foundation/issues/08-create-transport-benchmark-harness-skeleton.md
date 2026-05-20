@@ -75,3 +75,6 @@ Validation:
   modules; remote nodes should run the release wrapper instead of Mix tasks.
 - 2026-05-20: Kept the old `bench/transport/scripts/*.exs` entrypoints as
   compatibility delegates into the nested Mix project.
+- 2026-05-20: Added follow-up issue 23 for Docker-built release artifacts and
+  explicit SSH deploy/smoke tooling. The benchmark contract still keeps
+  provisioning and benchmark execution separate.

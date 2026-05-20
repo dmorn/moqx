@@ -60,8 +60,9 @@ The architectural baseline is recorded in:
 20. As a performance researcher, I want raw `iperf3` TCP/UDP baselines for the exact server path under test, so that QUIC measurements can be compared against host/network limits.
 21. As a performance researcher, I want a `MOQX.Transport.Quicer` client/server self-pair calibration benchmark, so that wrapper and BEAM overhead can be measured without mistaking loopback behavior for network behavior.
 22. As a performance researcher, I want reference QUIC client/server comparisons across real server paths, so that client-side and listener-side behavior can be evaluated independently under actual RTT, loss, buffering, and congestion-control conditions.
-23. As a maintainer, I want benchmark scripts to be standalone Elixir scripts, so that research dependencies do not leak into the library dependency graph.
-24. As a future implementer of MOQT draft-14 or MOQ Lite, I want transport semantics to be documented and tested, so that protocol-specific work starts from solid ground.
+23. As a maintainer, I want benchmark tooling isolated in its own Mix project, so that research dependencies and release packaging do not leak into the library dependency graph.
+24. As an operator, I want a Docker-built benchmark CLI release that can be copied to controlled servers, so that real-path experiments do not require cloning the repository on disposable hosts.
+25. As a future implementer of MOQT draft-14 or MOQ Lite, I want transport semantics to be documented and tested, so that protocol-specific work starts from solid ground.
 
 ## Implementation Decisions
 
@@ -79,14 +80,16 @@ The architectural baseline is recorded in:
 - Binary stream and datagram payloads remain binaries.
 - A deterministic support transport will implement the transport behaviour for tests.
 - Shared contract tests will verify handshake, stream, datagram, active/passive, close/reset, capabilities, and ownership semantics across transport implementations.
-- Performance research uses standalone Elixir scripts under a benchmark harness,
-  with caller-provided endpoints for same-region, cross-region, and
-  edge-to-server paths. Scripts may use `Mix.install/1` only when they have
-  explicit script-local dependencies; no-dependency scripts should stay plain
-  `.exs` files.
+- Performance research uses a standalone `bench/transport` Mix project with
+  caller-provided endpoints for same-region, cross-region, and edge-to-server
+  paths. Legacy `.exs` entrypoints may remain as compatibility delegates, but
+  the canonical operator surface is the `moqx-transport-bench` runtime CLI.
 - The benchmark harness is not part of normal unit tests and is not represented as `mix test.integration`.
 - Local loopback and same-host self-pair benchmark runs are calibration only; real server paths provide the evidence for network saturation and degradation claims.
 - Ephemeral benchmark infrastructure may live under `bench/transport/infra/` when it is explicit, caller-operated, and separated from benchmark scripts. Scripts must still accept endpoints and must not start or destroy infrastructure implicitly.
+- Remote benchmark hosts should receive Docker-built release artifacts for the
+  target OS/architecture. Deploy tooling must accept explicit SSH targets and
+  must not call Terraform or start benchmark traffic implicitly.
 
 ## Testing Decisions
 

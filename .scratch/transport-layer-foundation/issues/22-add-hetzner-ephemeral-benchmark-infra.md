@@ -87,3 +87,8 @@ Validation:
     absent after destroy.
 
 ## Comments
+
+- 2026-05-20: Added follow-up issue 23 for deploying the packaged
+  `moqx-transport-bench` runtime CLI onto caller-provisioned Hetzner endpoints.
+  Issue 22 remains limited to infrastructure provisioning, readiness, and
+  destroy verification.

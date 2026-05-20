@@ -27,6 +27,9 @@ Source of truth:
 - Prefer the runtime `moqx-transport-bench` CLI on remote nodes. Local Mix
   tasks under `mix moqx.transport.*` are development wrappers over the same
   runtime command modules.
+- Build Linux/ARM64 remote release artifacts with Docker via
+  `cd bench/transport && make docker-release`; deploy them only to explicit SSH
+  targets with `make deploy-release TARGETS="root@... root@..."`.
 - Destroy disposable infrastructure immediately after validation or data
   capture, then verify no provider resources remain.
 - For transport decisions, consult quicer and the relevant MOQT draft text
@@ -70,17 +73,25 @@ Source of truth:
 5. Apply only the reviewed plan, verify cloud-init/toolchain, and save outputs
    under `bench/transport/results/<run-id>/`.
 
-6. Run the path baseline:
+6. Build and deploy the benchmark CLI release:
+
+   ```bash
+   cd bench/transport
+   make docker-release
+   make deploy-release TARGETS="root@<sender-ip> root@<receiver-ip>"
+   ```
+
+7. Run the path baseline:
    start `iperf3 --server` on the receiver, run
    `moqx-transport-bench iperf3-baseline --path-json ...` on the sender, then
    fetch the JSONL results. During local development, the equivalent wrapper is
    `mix moqx.transport.iperf3_baseline` from `bench/transport/`.
 
-7. Only after a valid path baseline, run QUIC or MOQT-shaped pressure tasks.
+8. Only after a valid path baseline, run QUIC or MOQT-shaped pressure tasks.
    Keep workloads explicit: profile, direction, stream/datagram counts, payload
    size, offered load, duration, repetitions, and stop conditions.
 
-8. Tear down and verify:
+9. Tear down and verify:
 
    ```bash
    terraform destroy \

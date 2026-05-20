@@ -561,7 +561,8 @@ Tools should not:
 
 ## Release Packaging
 
-The benchmark project can be packaged as an Elixir release:
+The benchmark project can be packaged as an Elixir release on the local
+machine:
 
 ```bash
 cd bench/transport
@@ -580,6 +581,45 @@ release once per command with a short-lived release node name, so operators do
 not need to call release internals manually. Release artifacts are
 target-specific because the project includes the `quicer` NIF; build the release on the same
 OS/architecture/ABI as the remote benchmark node or in a matching container.
+
+For Hetzner ARM nodes, build the Linux/ARM64 artifact with Docker:
+
+```bash
+cd bench/transport
+make docker-release
+```
+
+The default artifact path is:
+
+```text
+bench/transport/build/artifacts/moqx-transport-bench-<version>-<git>-linux-arm64.tar.gz
+```
+
+The Docker build uses `elixir:1.19.5-otp-28` by default and can be overridden:
+
+```bash
+make docker-release ELIXIR_IMAGE=elixir:1.19.5-otp-28 TARGET_ARCH=arm64
+```
+
+Deploy a built artifact to caller-provided SSH targets:
+
+```bash
+cd bench/transport
+make deploy-release \
+  ARTIFACT=build/artifacts/moqx-transport-bench-0.1.0-553d2c6-linux-arm64.tar.gz \
+  TARGETS="root@203.0.113.10 root@203.0.113.11"
+```
+
+Deployment copies the tarball, extracts it under
+`/opt/moqx-bench/moqx-transport-bench/releases/<artifact-name>/`, updates the
+`current` symlink, and runs:
+
+```bash
+/opt/moqx-bench/moqx-transport-bench/current/bin/moqx-transport-bench help
+```
+
+The deploy target does not read Terraform state, provision infrastructure, or
+run benchmark traffic. Use Terraform outputs to choose the explicit SSH targets.
 
 ## Result Storage
 
@@ -636,4 +676,5 @@ The intended issue order is:
 3. Add raw path baseline tools (#09).
 4. Add self-pair calibration tools (#10).
 5. Select the first reference QUIC implementation and topology (#11).
-6. Add real-path reference benchmark tools (#12).
+6. Add Docker release build/deploy tooling (#23).
+7. Add real-path reference benchmark tools (#12).

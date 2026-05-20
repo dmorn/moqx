@@ -101,6 +101,29 @@ started automatically. Deploy a `moqx-transport-bench` release artifact or use
 the installed Elixir/Mix toolchain for development-only checks after cloud-init
 finishes.
 
+## Deploy Benchmark CLI
+
+Build the Linux/ARM64 release artifact locally with Docker:
+
+```bash
+cd bench/transport
+make docker-release
+```
+
+After Terraform apply and cloud-init readiness checks, pass explicit SSH
+targets from Terraform output to the deploy target:
+
+```bash
+cd bench/transport
+make deploy-release \
+  ARTIFACT=build/artifacts/moqx-transport-bench-0.1.0-553d2c6-linux-arm64.tar.gz \
+  TARGETS="root@<sender-ip> root@<receiver-ip>"
+```
+
+The deploy step only copies/extracts the release and runs
+`moqx-transport-bench help` remotely. It does not call Terraform and does not
+start benchmark traffic.
+
 ## Result Metadata
 
 The outputs include `path_metadata_public` and `path_metadata_private` values
