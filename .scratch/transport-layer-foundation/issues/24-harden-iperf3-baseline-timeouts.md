@@ -1,6 +1,6 @@
 # Harden iperf3 baseline timeout and failure handling
 
-Status: needs-triage
+Status: closed
 Type: AFK
 
 ## Parent
@@ -19,16 +19,16 @@ private interface was down.
 
 ## Acceptance criteria
 
-- [ ] Each `iperf3` step has a configurable timeout greater than its requested
+- [x] Each `iperf3` step has a configurable timeout greater than its requested
       duration.
-- [ ] A timed-out `iperf3` process is terminated and does not leave child
+- [x] A timed-out `iperf3` process is terminated and does not leave child
       processes running.
-- [ ] Timeout/failure is emitted as a valid `transport-bench-v1` JSONL record
+- [x] Timeout/failure is emitted as a valid `transport-bench-v1` JSONL record
       with clear `limits` and `errors` fields.
-- [ ] The report command renders timed-out steps clearly.
-- [ ] Tests cover a fake or controlled `iperf3` command that exceeds the
+- [x] The report command renders timed-out steps clearly.
+- [x] Tests cover a fake or controlled `iperf3` command that exceeds the
       timeout.
-- [ ] Documentation explains how timeout values relate to TCP/UDP step
+- [x] Documentation explains how timeout values relate to TCP/UDP step
       duration.
 
 ## Blocked by
@@ -43,8 +43,41 @@ tests and future reference-comparison experiments.
 The first implementation should stay local to the benchmark subproject. Do not
 add retry orchestration, Terraform coupling, or global configuration.
 
+## Resolution
+
+Implemented in the benchmark subproject:
+
+- `moqx-transport-bench iperf3-baseline` now runs each `iperf3` step through a
+  supervised port with a timeout instead of blocking indefinitely in
+  `System.cmd/3`.
+- `--timeout-margin-seconds` controls the timeout as
+  `step_duration + margin`; the default margin is 5 seconds.
+- Timed-out records remain valid `transport-bench-v1` JSONL and set:
+  `methodology.timeout_seconds`, `limits.first_break_symptom=step_timeout`,
+  `limits.stopped_by=iperf3_step_timeout`,
+  `errors.close_reason=timeout`, and `errors.error_code=124`.
+- Tests cover a fake slow `iperf3` command, validate the emitted timeout record,
+  and verify the command process is gone after timeout handling.
+- The report command already renders limit/error rows; test coverage now pins
+  timed-out step rendering.
+
 ## Comments
 
 - 2026-05-20: Created from Hetzner smoke `20260520T134420Z-smoke`. The public
   IPv4 baseline completed, but the failed private-path attempt showed that an
   unreachable path can hold the runtime CLI until the operator interrupts it.
+- 2026-05-21: Prior to this timeout work, smoke `20260521T070013Z-smoke`
+  confirmed the public IPv4 path and `just` operator flow are working. Commit
+  `f605b99` fixed adjacent `iperf3-baseline` contract problems (`--path-json`
+  inline JSON and release git SHA), but bad-path timeout handling remains the
+  next operator-safety gap before private-network probing or reference QUIC
+  comparison runs.
+- 2026-05-21: Closed after adding per-step timeout handling, timeout JSONL
+  semantics, report coverage, and README documentation. The change is local to
+  the benchmark subproject and does not add Terraform coupling or retry
+  orchestration.
+- 2026-05-21: Validation run before handoff: root `mix test`, benchmark
+  `mix test`, root `mix credo --strict`, benchmark `mix credo --strict`,
+  `mix format`, `just --fmt --check`, `git diff --check`, and a real local
+  `mix moqx.transport.iperf3_baseline` loopback run with
+  `--timeout-margin-seconds 1` all passed.

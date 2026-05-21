@@ -7,6 +7,8 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
   @default_script "moqx-transport-bench iperf3-baseline"
   @script_version "v1"
   @schema_version "transport-bench-v1"
+  @timeout_exit_status 124
+  @timeout_stop_condition "iperf3_step_timeout"
 
   def main(argv, opts \\ []) do
     script = Keyword.get(opts, :script, @default_script)
@@ -39,6 +41,8 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
           udp_duration: :integer,
           udp_bitrates: :string,
           udp_length: :integer,
+          timeout_margin_seconds: :integer,
+          iperf3_command: :string,
           reverse: :boolean,
           path_json: :string,
           evidence_tier: :string,
@@ -83,34 +87,42 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
   defp build_config(opts, argv, script) do
     tcp? = Keyword.get(opts, :tcp, true) && !Keyword.get(opts, :no_tcp, false)
     udp? = Keyword.get(opts, :udp, true) && !Keyword.get(opts, :no_udp, false)
+    timeout_margin_seconds = Keyword.get(opts, :timeout_margin_seconds, 5)
 
-    if !tcp? && !udp? do
-      {:error, "At least one of TCP or UDP must be enabled."}
-    else
-      udp_bitrates = parse_bitrates(Keyword.get(opts, :udp_bitrates, "10M,50M,100M"))
+    cond do
+      !tcp? && !udp? ->
+        {:error, "At least one of TCP or UDP must be enabled."}
 
-      config = %{
-        argv: argv,
-        script: script,
-        command: command_string(script, argv),
-        server: opts[:server],
-        port: Keyword.get(opts, :port, 5201),
-        local_server?: Keyword.get(opts, :local_server, false),
-        tcp?: tcp?,
-        udp?: udp?,
-        tcp_duration: Keyword.get(opts, :tcp_duration, 10),
-        udp_duration: Keyword.get(opts, :udp_duration, 10),
-        udp_bitrates: udp_bitrates,
-        udp_length: opts[:udp_length],
-        reverse?: Keyword.get(opts, :reverse, false),
-        path_json: opts[:path_json],
-        path_overrides: path_overrides(opts),
-        run_id: opts[:run_id] || default_run_id(opts[:server]),
-        output: opts[:output],
-        notes: opts[:notes]
-      }
+      timeout_margin_seconds <= 0 ->
+        {:error, "--timeout-margin-seconds must be greater than 0."}
 
-      {:ok, config}
+      true ->
+        udp_bitrates = parse_bitrates(Keyword.get(opts, :udp_bitrates, "10M,50M,100M"))
+
+        config = %{
+          argv: argv,
+          script: script,
+          command: command_string(script, argv),
+          server: opts[:server],
+          port: Keyword.get(opts, :port, 5201),
+          local_server?: Keyword.get(opts, :local_server, false),
+          tcp?: tcp?,
+          udp?: udp?,
+          tcp_duration: Keyword.get(opts, :tcp_duration, 10),
+          udp_duration: Keyword.get(opts, :udp_duration, 10),
+          timeout_margin_seconds: timeout_margin_seconds,
+          udp_bitrates: udp_bitrates,
+          udp_length: opts[:udp_length],
+          iperf3_command: Keyword.get(opts, :iperf3_command, "iperf3"),
+          reverse?: Keyword.get(opts, :reverse, false),
+          path_json: opts[:path_json],
+          path_overrides: path_overrides(opts),
+          run_id: opts[:run_id] || default_run_id(opts[:server]),
+          output: opts[:output],
+          notes: opts[:notes]
+        }
+
+        {:ok, config}
     end
   end
 
@@ -211,7 +223,7 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
 
   defp run_step(config, step, index, run_started_at) do
     started_at = timestamp()
-    {iperf_output, exit_status, iperf_args} = run_iperf3(config, step)
+    {iperf_output, exit_status, iperf_args, timed_out?, timeout_ms} = run_iperf3(config, step)
     finished_at = timestamp()
     decoded = decode_json(iperf_output)
 
@@ -226,7 +238,9 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
       exit_status: exit_status,
       iperf_args: iperf_args,
       iperf_output: iperf_output,
-      iperf_json: decoded
+      iperf_json: decoded,
+      timed_out?: timed_out?,
+      timeout_ms: timeout_ms
     })
   end
 
@@ -258,8 +272,108 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
 
     reverse_args = if config.reverse?, do: ["--reverse"], else: []
     args = base_args ++ protocol_args ++ reverse_args
-    {output, status} = System.cmd("iperf3", args, stderr_to_stdout: true)
-    {output, status, ["iperf3" | args]}
+    timeout_ms = step_timeout_ms(config, step)
+    {output, status, timed_out?} = run_iperf3_command(config.iperf3_command, args, timeout_ms)
+
+    {output, status, [config.iperf3_command | args], timed_out?, timeout_ms}
+  end
+
+  defp step_timeout_ms(config, step) do
+    (step.duration + config.timeout_margin_seconds) * 1000
+  end
+
+  defp run_iperf3_command(command, args, timeout_ms) do
+    executable = resolve_executable!(command)
+
+    port =
+      Port.open({:spawn_executable, executable}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: args
+      ])
+
+    timer = Process.send_after(self(), {:iperf3_timeout, port}, timeout_ms)
+
+    try do
+      collect_port(port, [])
+    after
+      Process.cancel_timer(timer)
+      flush_timeout(port)
+    end
+  end
+
+  defp resolve_executable!(command) do
+    cond do
+      Path.type(command) == :absolute && File.exists?(command) ->
+        command
+
+      executable = System.find_executable(command) ->
+        executable
+
+      true ->
+        raise "iperf3 command not found: #{command}"
+    end
+  end
+
+  defp collect_port(port, chunks) do
+    receive do
+      {^port, {:data, data}} ->
+        collect_port(port, [data | chunks])
+
+      {^port, {:exit_status, status}} ->
+        {IO.iodata_to_binary(Enum.reverse(chunks)), status, false}
+
+      {:iperf3_timeout, ^port} ->
+        terminate_port(port)
+        {IO.iodata_to_binary(Enum.reverse(chunks)), @timeout_exit_status, true}
+    end
+  end
+
+  defp terminate_port(port) do
+    os_pid = port_os_pid(port)
+    signal_pid(os_pid, "TERM")
+
+    unless wait_for_port_exit(port, 250) do
+      signal_pid(os_pid, "KILL")
+    end
+
+    Port.close(port)
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp port_os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} -> pid
+      _ -> nil
+    end
+  end
+
+  defp signal_pid(nil, _signal), do: :ok
+
+  defp signal_pid(pid, signal) do
+    System.cmd("kill", ["-#{signal}", Integer.to_string(pid)], stderr_to_stdout: true)
+    :ok
+  rescue
+    ErlangError -> :ok
+  end
+
+  defp wait_for_port_exit(port, timeout_ms) do
+    receive do
+      {^port, {:data, _data}} -> wait_for_port_exit(port, timeout_ms)
+      {^port, {:exit_status, _status}} -> true
+    after
+      timeout_ms -> false
+    end
+  end
+
+  defp flush_timeout(port) do
+    receive do
+      {:iperf3_timeout, ^port} -> :ok
+    after
+      0 -> :ok
+    end
   end
 
   defp build_record(ctx) do
@@ -401,12 +515,13 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
     %{
       "warmup_seconds" => 0,
       "step_seconds" => ctx.step.duration,
+      "timeout_seconds" => ctx.timeout_ms / 1000,
       "cooldown_seconds" => 0,
       "step_index" => ctx.step_index,
       "step_count" => ctx.step_count,
       "repetition_index" => 1,
       "repetition_count" => 1,
-      "stop_conditions" => ["iperf3_nonzero_exit"]
+      "stop_conditions" => ["iperf3_nonzero_exit", @timeout_stop_condition]
     }
   end
 
@@ -497,12 +612,12 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
   end
 
   defp limits(ctx) do
-    failed? = ctx.exit_status != 0
+    failed? = ctx.exit_status != 0 && !ctx.timed_out?
     udp_loss? = get_in(metrics(ctx), ["datagram_delivery_ratio"]) not in [nil, 1.0]
 
     %{
-      "first_break_symptom" => first_symptom(failed?, udp_loss?),
-      "stopped_by" => if(failed?, do: "iperf3_nonzero_exit", else: nil),
+      "first_break_symptom" => first_symptom(ctx.timed_out?, failed?, udp_loss?),
+      "stopped_by" => stopped_by(ctx.timed_out?, failed?),
       "connection_closed" => false,
       "protocol_error" => failed?,
       "throughput_plateau" => false,
@@ -517,21 +632,34 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
   defp errors(ctx) do
     message =
       cond do
-        ctx.exit_status == 0 -> nil
-        is_binary(ctx.iperf_output) && ctx.iperf_output != "" -> String.trim(ctx.iperf_output)
-        true -> "iperf3 exited with status #{ctx.exit_status}"
+        ctx.timed_out? ->
+          "iperf3 timed out after #{seconds(ctx.timeout_ms)}s"
+
+        ctx.exit_status == 0 ->
+          nil
+
+        is_binary(ctx.iperf_output) && ctx.iperf_output != "" ->
+          String.trim(ctx.iperf_output)
+
+        true ->
+          "iperf3 exited with status #{ctx.exit_status}"
       end
 
     %{
-      "close_reason" => nil,
+      "close_reason" => if(ctx.timed_out?, do: "timeout", else: nil),
       "error_code" => ctx.exit_status,
       "message" => message
     }
   end
 
-  defp first_symptom(true, _udp_loss?), do: "protocol_error"
-  defp first_symptom(false, true), do: "datagram_delivery_loss"
-  defp first_symptom(false, false), do: nil
+  defp first_symptom(true, _failed?, _udp_loss?), do: "step_timeout"
+  defp first_symptom(false, true, _udp_loss?), do: "protocol_error"
+  defp first_symptom(false, false, true), do: "datagram_delivery_loss"
+  defp first_symptom(false, false, false), do: nil
+
+  defp stopped_by(true, _failed?), do: @timeout_stop_condition
+  defp stopped_by(false, true), do: "iperf3_nonzero_exit"
+  defp stopped_by(false, false), do: nil
 
   defp write_records(records, nil) do
     Enum.each(records, fn record ->
@@ -636,6 +764,12 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
   defp rate(nil, _seconds), do: nil
   defp rate(_count, seconds) when not is_number(seconds) or seconds <= 0, do: nil
   defp rate(count, seconds), do: count / seconds
+
+  defp seconds(milliseconds) when rem(milliseconds, 1000) == 0 do
+    div(milliseconds, 1000)
+  end
+
+  defp seconds(milliseconds), do: milliseconds / 1000
 
   defp delivered_packets(nil, _lost), do: nil
   defp delivered_packets(packets, nil), do: packets
@@ -788,8 +922,10 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
       --port PORT                    iperf3 port (default: 5201)
       --tcp-duration SECONDS         TCP test duration (default: 10)
       --udp-duration SECONDS         UDP step duration (default: 10)
+      --timeout-margin-seconds N     kill each iperf3 step after duration + N seconds (default: 5)
       --udp-bitrates LIST            comma-separated UDP offered rates (default: 10M,50M,100M)
       --udp-length BYTES             UDP datagram size passed to iperf3 --length
+      --iperf3-command PATH          iperf3 executable override for controlled tests
       --no-tcp                       skip TCP baseline
       --no-udp                       skip UDP baseline
       --reverse                      ask iperf3 to run in reverse direction

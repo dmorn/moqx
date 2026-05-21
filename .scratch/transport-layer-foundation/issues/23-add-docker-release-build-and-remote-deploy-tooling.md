@@ -107,3 +107,11 @@ Validation:
   provisioning, release, deploy, destroy, and cleanup workflow has one operator
   command surface. The deploy flow now treats Terraform `client` and `server`
   as separate parallel units.
+- 2026-05-21: Smoke `20260521T070013Z-smoke` validated the `just` operator
+  flow end to end on Hetzner `arm-smoke`: release build for commit `502d424`,
+  role-based parallel deploy to `fsn1` client and `nbg1` server, remote
+  `moqx-transport-bench help`, public IPv4 `iperf3-baseline` result capture,
+  report validation, destroy, empty Terraform state, and no labelled Hetzner
+  resources remaining. Follow-up commit `f605b99` fixed two packaging/CLI
+  polish issues found during the smoke: release records now include the build
+  git SHA, and `--path-json` accepts inline JSON as documented.

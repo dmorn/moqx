@@ -68,3 +68,17 @@ from that smoke-test experience.
   or consciously scope around follow-ups 24 and 25: failed path attempts should
   not hang indefinitely, and private-network readiness needs a deterministic
   answer if reference comparisons are expected to use private paths.
+- 2026-05-21: Hetzner ARM smoke `20260521T070013Z-smoke` re-proved the
+  operator path after replacing Make with `just`: fresh run key, Terraform
+  plan/apply, cloud-init readiness, Docker release build, parallel role deploy,
+  remote CLI smoke, public IPv4 `iperf3-baseline`, JSONL/report capture,
+  destroy, and `just bench-transport-verify-clean` all succeeded. The public
+  path reported TCP 5.18 Gbps and UDP 10/50/100 Mbps with 100% delivery. The
+  smoke also exposed two benchmark CLI contract bugs fixed in `f605b99`:
+  `--path-json` now accepts inline JSON as documented, and release records now
+  embed the Docker build git SHA.
+- 2026-05-21: Follow-up #24 is closed: bad `iperf3-baseline` paths now produce
+  bounded timeout JSONL instead of hanging indefinitely. The remaining
+  infrastructure decision before reference-comparison runs is #25: either make
+  Hetzner private-network readiness deterministic or scope #12 explicitly to
+  public IPv4 paths for the first implementation.

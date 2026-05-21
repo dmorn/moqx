@@ -14,6 +14,21 @@ defmodule MOQX.TransportBench.ReportTest do
     assert report =~ "loopback calibration only"
   end
 
+  test "renders timed out steps in the limits section" do
+    record =
+      record()
+      |> put_in(["limits", "first_break_symptom"], "step_timeout")
+      |> put_in(["limits", "stopped_by"], "iperf3_step_timeout")
+      |> put_in(["errors", "close_reason"], "timeout")
+      |> put_in(["errors", "error_code"], 124)
+      |> put_in(["errors", "message"], "iperf3 timed out after 2s")
+
+    report = Report.render([record])
+
+    assert report =~ "Limit: stream_pressure first=step_timeout stopped_by=iperf3_step_timeout"
+    assert report =~ "iperf3 timed out after 2s"
+  end
+
   defp record do
     %{
       "schema_version" => "transport-bench-v1",

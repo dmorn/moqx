@@ -117,6 +117,12 @@ For remote controlled paths, start `iperf3 --server` on the server host
 yourself and pass the public or private endpoint explicitly. The task does not
 provision infrastructure, start Terraform, or assume loopback.
 
+Each `iperf3` step is killed after its requested duration plus
+`--timeout-margin-seconds` (default: 5). For example, a TCP step with
+`--tcp-duration 10` uses a 15 second process timeout. Timed-out steps still emit
+valid JSONL with `limits.first_break_symptom=step_timeout` and
+`errors.close_reason=timeout`.
+
 Path metadata can be supplied as either a JSON file path or an inline JSON
 object:
 
