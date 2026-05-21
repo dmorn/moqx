@@ -1,6 +1,7 @@
 defmodule MOQX.TransportBench.ReferenceComparison do
   @moduledoc false
 
+  alias MOQX.Transport
   alias MOQX.TransportBench.BuildInfo
   alias MOQX.TransportBench.PathMetadata
 
@@ -8,8 +9,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   @script_version "v1"
   @schema_version "transport-bench-v1"
   @timeout_exit_status 124
-  @timeout_stop_condition "quicprobe_step_timeout"
-  @supported_topology "reference-client-to-reference-server"
+  @timeout_stop_condition "reference_comparison_step_timeout"
+  @reference_client_topology "reference-client-to-reference-server"
+  @moqx_client_topology "moqx-client-to-reference-server"
+  @supported_topologies [@reference_client_topology, @moqx_client_topology]
 
   def main(argv, opts \\ []) do
     script = Keyword.get(opts, :script, @default_script)
@@ -79,7 +82,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       is_nil(opts[:topology]) ->
         {:error, "Missing required --topology VALUE.\n\n#{usage(script)}"}
 
-      opts[:topology] != @supported_topology ->
+      opts[:topology] not in @supported_topologies ->
         {:error, "Unsupported --topology #{inspect(opts[:topology])}.\n\n#{usage(script)}"}
 
       is_nil(opts[:server]) ->
@@ -164,9 +167,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp run(config) do
     run_started_at = timestamp()
     step_started_at = timestamp()
-    {output, exit_status, args, timed_out?, timeout_ms} = run_quicprobe(config)
+    {measurement, output, exit_status, args, timed_out?, timeout_ms} = run_topology(config)
     step_finished_at = timestamp()
-    decoded = decode_json(output)
 
     record =
       build_record(%{
@@ -175,9 +177,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         step_started_at: step_started_at,
         step_finished_at: step_finished_at,
         exit_status: exit_status,
-        quicprobe_args: args,
-        quicprobe_output: output,
-        quicprobe_json: decoded,
+        step_args: args,
+        step_output: output,
+        measurement: measurement,
         timed_out?: timed_out?,
         timeout_ms: timeout_ms
       })
@@ -185,12 +187,16 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     write_records([record], config.output)
   end
 
+  defp run_topology(%{topology: @reference_client_topology} = config), do: run_quicprobe(config)
+  defp run_topology(%{topology: @moqx_client_topology} = config), do: run_moqx_client(config)
+
   defp run_quicprobe(config) do
     args = quicprobe_args(config)
     timeout_ms = (config.timeout_seconds + config.timeout_margin_seconds) * 1000
     {output, status, timed_out?} = run_command(config.quicprobe_command, args, timeout_ms)
+    measurement = decode_json(output)
 
-    {output, status, [config.quicprobe_command | args], timed_out?, timeout_ms}
+    {measurement, output, status, [config.quicprobe_command | args], timed_out?, timeout_ms}
   end
 
   defp quicprobe_args(config) do
@@ -221,6 +227,253 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       args
     end
   end
+
+  defp run_moqx_client(config) do
+    args = moqx_client_step_args(config)
+    timeout_ms = (config.timeout_seconds + config.timeout_margin_seconds) * 1000
+
+    task =
+      Task.async(fn ->
+        do_run_moqx_client(config)
+      end)
+
+    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, measurement}} ->
+        {measurement, "", 0, args, false, timeout_ms}
+
+      {:ok, {:error, message}} ->
+        {%{}, message, 1, args, false, timeout_ms}
+
+      nil ->
+        {%{}, "", @timeout_exit_status, args, true, timeout_ms}
+    end
+  end
+
+  defp moqx_client_step_args(config) do
+    [
+      "moqx-client",
+      "--addr",
+      "#{config.server}:#{config.port}",
+      "--ca",
+      config.ca,
+      "--alpn",
+      config.alpn,
+      "--stream-direction",
+      config.stream_direction,
+      "--stream-count",
+      Integer.to_string(config.stream_count),
+      "--payload-size",
+      Integer.to_string(config.payload_size),
+      "--payload-count",
+      Integer.to_string(config.payload_count),
+      "--timeout",
+      "#{config.timeout_seconds}s"
+    ]
+    |> maybe_append_servername(config.servername)
+  end
+
+  defp do_run_moqx_client(config) do
+    {:ok, ctx} = Transport.new(MOQX.Transport.Quicer)
+    connect_started_at = monotonic_us()
+
+    case Transport.connect(
+           ctx,
+           config.server,
+           config.port,
+           connect_opts(config),
+           client_timeout_ms(config)
+         ) do
+      {:ok, connection, ctx} ->
+        handshake_latency_ms = elapsed_ms(connect_started_at)
+
+        try do
+          {:ok, measure_moqx_stream_pressure(ctx, connection, config, handshake_latency_ms)}
+        after
+          _result = Transport.close_connection(ctx, connection, 0)
+        end
+
+      {:error, reason, _ctx} ->
+        {:error, inspect(reason)}
+    end
+  rescue
+    exception ->
+      {:error, Exception.format(:error, exception, __STACKTRACE__)}
+  catch
+    kind, reason ->
+      {:error, Exception.format(kind, reason, __STACKTRACE__)}
+  end
+
+  defp connect_opts(config) do
+    [
+      alpn: config.alpn,
+      cacertfile: config.ca,
+      verify: :verify_peer,
+      peer_bidi_stream_count: max(config.stream_count + 2, 10),
+      peer_unidi_stream_count: max(config.stream_count + 2, 10)
+    ]
+    |> maybe_put_server_name(config.servername)
+  end
+
+  defp maybe_put_server_name(opts, nil), do: opts
+  defp maybe_put_server_name(opts, servername), do: Keyword.put(opts, :server_name, servername)
+
+  defp client_timeout_ms(config), do: config.timeout_seconds * 1000
+
+  defp measure_moqx_stream_pressure(ctx, connection, config, handshake_latency_ms) do
+    application_started_at = monotonic_us()
+    payload = binary_payload(config.payload_size)
+
+    {result, _ctx} =
+      Enum.reduce(1..config.stream_count, {empty_stream_result(), ctx}, fn _index,
+                                                                           {result, ctx} ->
+        {stream_result, ctx} =
+          run_moqx_pressure_stream(ctx, connection, payload, config, application_started_at)
+
+        {merge_stream_result(result, stream_result), ctx}
+      end)
+
+    application_duration_ms = elapsed_ms(application_started_at)
+    first_byte_latency_ms = result.first_byte_latency_ms
+
+    bytes_for_goodput =
+      if config.stream_direction == "unidirectional",
+        do: result.bytes_sent,
+        else: result.bytes_received
+
+    %{
+      "schema_version" => "moqx-reference-measurement-v1",
+      "record_type" => "client_run",
+      "tool" => "moqx-transport-bench",
+      "client_implementation" => "moqx",
+      "reference_implementation" => "quicprobe",
+      "reference_version" => nil,
+      "alpn" => config.alpn,
+      "stream_direction" => config.stream_direction,
+      "stream_count" => config.stream_count,
+      "payload_size_bytes" => config.payload_size,
+      "payload_count" => config.payload_count,
+      "bytes_sent" => result.bytes_sent,
+      "bytes_received" => result.bytes_received,
+      "handshake_latency_ms" => handshake_latency_ms,
+      "first_byte_latency_ms" => first_byte_latency_ms,
+      "application_duration_ms" => application_duration_ms,
+      "goodput_bps" => bits_per_second(bytes_for_goodput, application_duration_ms),
+      "stream_latency_ms" => latency_summary(result.stream_latencies_ms),
+      "send_rate_packets_per_second" =>
+        rate(config.stream_count * config.payload_count, seconds(application_duration_ms)),
+      "stream_scheduling" => "sequential"
+    }
+  end
+
+  defp empty_stream_result do
+    %{
+      bytes_sent: 0,
+      bytes_received: 0,
+      first_byte_latency_ms: nil,
+      stream_latencies_ms: []
+    }
+  end
+
+  defp run_moqx_pressure_stream(ctx, connection, payload, config, first_byte_origin) do
+    stream_started_at = monotonic_us()
+
+    {:ok, stream, ctx} =
+      Transport.open_stream(ctx, connection, direction: stream_direction(config))
+
+    {sent, ctx} = send_payloads(ctx, stream, payload, config.payload_count)
+    {:ok, ctx} = Transport.finish_sending(ctx, stream)
+
+    {received, first_byte_latency_ms, ctx} =
+      if config.stream_direction == "bidirectional" do
+        recv_echo_payload(ctx, stream, payload, config.payload_count, first_byte_origin)
+      else
+        {0, nil, ctx}
+      end
+
+    {%{
+       bytes_sent: sent,
+       bytes_received: received,
+       first_byte_latency_ms: first_byte_latency_ms,
+       stream_latencies_ms: [elapsed_ms(stream_started_at)]
+     }, ctx}
+  end
+
+  defp stream_direction(%{stream_direction: "bidirectional"}), do: :bidirectional
+  defp stream_direction(%{stream_direction: "unidirectional"}), do: :unidirectional
+
+  defp send_payloads(ctx, stream, payload, count) do
+    Enum.reduce(1..count, {0, ctx}, fn _index, {bytes, ctx} ->
+      {:ok, ctx} = Transport.send_stream(ctx, stream, payload, [])
+      {bytes + byte_size(payload), ctx}
+    end)
+  end
+
+  defp recv_echo_payload(ctx, stream, payload, count, first_byte_origin) do
+    expected_bytes = byte_size(payload) * count
+    recv_echo_payload(ctx, stream, payload, expected_bytes, 0, nil, first_byte_origin)
+  end
+
+  defp recv_echo_payload(
+         ctx,
+         _stream,
+         _payload,
+         expected_bytes,
+         expected_bytes,
+         first_byte_latency_ms,
+         _first_byte_origin
+       ) do
+    {expected_bytes, first_byte_latency_ms, ctx}
+  end
+
+  defp recv_echo_payload(
+         ctx,
+         stream,
+         payload,
+         expected_bytes,
+         received,
+         first_byte_latency_ms,
+         first_byte_origin
+       ) do
+    remaining = expected_bytes - received
+    {:ok, data, ctx} = Transport.recv_stream(ctx, stream, remaining)
+
+    unless matches_payload?(data, payload, received) do
+      raise "echo payload mismatch"
+    end
+
+    first_byte_latency_ms = first_byte_latency_ms || elapsed_ms(first_byte_origin)
+
+    recv_echo_payload(
+      ctx,
+      stream,
+      payload,
+      expected_bytes,
+      received + byte_size(data),
+      first_byte_latency_ms,
+      first_byte_origin
+    )
+  end
+
+  defp matches_payload?(chunk, payload, offset) do
+    chunk
+    |> :binary.bin_to_list()
+    |> Enum.with_index(offset)
+    |> Enum.all?(fn {byte, index} ->
+      byte == :binary.at(payload, rem(index, byte_size(payload)))
+    end)
+  end
+
+  defp merge_stream_result(left, right) do
+    %{
+      bytes_sent: left.bytes_sent + right.bytes_sent,
+      bytes_received: left.bytes_received + right.bytes_received,
+      first_byte_latency_ms: left.first_byte_latency_ms || right.first_byte_latency_ms,
+      stream_latencies_ms: left.stream_latencies_ms ++ right.stream_latencies_ms
+    }
+  end
+
+  defp maybe_append_servername(args, nil), do: args
+  defp maybe_append_servername(args, servername), do: args ++ ["--servername", servername]
 
   defp run_command(command, args, timeout_ms) do
     executable = resolve_executable!(command)
@@ -343,7 +596,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "command" => ctx.config.command,
       "notes" => ctx.config.notes,
       "step_started_at" => ctx.step_started_at,
-      "step_command" => Enum.join(ctx.quicprobe_args, " ")
+      "step_command" => Enum.join(ctx.step_args, " ")
     }
   end
 
@@ -401,93 +654,106 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp local_only(false, _value), do: nil
 
   defp software_metadata(ctx) do
-    result = result_json(ctx)
+    measurement = measurement(ctx)
 
     %{
       "elixir_version" => System.version(),
       "otp_version" => System.otp_release(),
       "moqx_version" => moqx_version(),
-      "quicer_version" => nil,
+      "quicer_version" => quicer_version(ctx.config),
       "msquic_version" => nil,
-      "reference_implementation" => result["reference_implementation"] || "quicprobe",
-      "reference_version" => result["reference_version"]
+      "reference_implementation" => measurement["reference_implementation"] || "quicprobe",
+      "reference_version" => measurement["reference_version"]
     }
   end
 
+  defp quicer_version(%{topology: @moqx_client_topology}), do: app_version(:quicer)
+  defp quicer_version(_config), do: nil
+
   defp profile_metadata(ctx) do
-    result = result_json(ctx)
+    measurement = measurement(ctx)
 
     %{
       "name" => "reference_quic",
-      "alpn" => result["alpn"] || ctx.config.alpn,
+      "alpn" => measurement["alpn"] || ctx.config.alpn,
       "datagrams" => false,
       "congestion_control" => nil,
       "pacing" => nil,
       "settings" => %{
         "topology" => ctx.config.topology,
         "reference_tool" => "quicprobe",
-        "reference_tool_schema" => result["schema_version"]
+        "measurement_schema" => measurement["schema_version"],
+        "client_implementation" => measurement["client_implementation"] || "quicprobe",
+        "stream_scheduling" =>
+          measurement["stream_scheduling"] || default_stream_scheduling(ctx.config)
       }
     }
   end
 
+  defp default_stream_scheduling(%{topology: @reference_client_topology}), do: "concurrent"
+  defp default_stream_scheduling(%{topology: @moqx_client_topology}), do: "sequential"
+
   defp workload_metadata(ctx) do
-    result = result_json(ctx)
-    duration_seconds = seconds(result["application_duration_ms"])
-    stream_count = result["stream_count"] || ctx.config.stream_count
-    payload_count = result["payload_count"] || ctx.config.payload_count
+    measurement = measurement(ctx)
+    duration_seconds = seconds(measurement["application_duration_ms"])
+    stream_count = measurement["stream_count"] || ctx.config.stream_count
+    payload_count = measurement["payload_count"] || ctx.config.payload_count
 
     %{
       "family" => "reference_comparison",
       "direction" => "client_to_server",
-      "stream_direction" => result["stream_direction"] || ctx.config.stream_direction,
+      "stream_direction" => measurement["stream_direction"] || ctx.config.stream_direction,
       "stream_count" => stream_count,
-      "payload_size_bytes" => result["payload_size_bytes"] || ctx.config.payload_size,
+      "payload_size_bytes" => measurement["payload_size_bytes"] || ctx.config.payload_size,
       "payloads_per_second" => rate(stream_count * payload_count, duration_seconds),
       "offered_load_bps" => nil,
       "datagram_size_bytes" => nil,
       "datagrams_per_second" => nil,
       "control_trickle_bps" => nil,
       "topology" => ctx.config.topology,
-      "tool" => "quicprobe",
+      "tool" => workload_tool(ctx.config),
       "server" => ctx.config.server,
       "port" => ctx.config.port
     }
   end
 
+  defp workload_tool(%{topology: @moqx_client_topology}), do: "moqx"
+  defp workload_tool(_config), do: "quicprobe"
+
   defp methodology_metadata(ctx) do
-    result = result_json(ctx)
+    measurement = measurement(ctx)
 
     %{
       "warmup_seconds" => 0,
-      "step_seconds" => seconds(result["application_duration_ms"]),
+      "step_seconds" => seconds(measurement["application_duration_ms"]),
       "timeout_seconds" => ctx.timeout_ms / 1000,
       "cooldown_seconds" => 0,
       "step_index" => 1,
       "step_count" => 1,
       "repetition_index" => 1,
       "repetition_count" => 1,
-      "stop_conditions" => ["quicprobe_nonzero_exit", @timeout_stop_condition]
+      "stop_conditions" => ["reference_comparison_nonzero_exit", @timeout_stop_condition]
     }
   end
 
   defp metrics(ctx) do
-    result = result_json(ctx)
-    latencies = result["stream_latency_ms"] || %{}
+    measurement = measurement(ctx)
+    latencies = measurement["stream_latency_ms"] || %{}
 
     %{
-      "handshake_latency_ms" => number(result["handshake_latency_ms"]),
-      "first_byte_latency_ms" => number(result["first_byte_latency_ms"]),
+      "handshake_latency_ms" => number(measurement["handshake_latency_ms"]),
+      "first_byte_latency_ms" => number(measurement["first_byte_latency_ms"]),
       "offered_load_bps" => nil,
-      "goodput_bps" => number(result["goodput_bps"]),
-      "send_rate_packets_per_second" => nil,
+      "goodput_bps" => number(measurement["goodput_bps"]),
+      "send_rate_packets_per_second" => number(measurement["send_rate_packets_per_second"]),
       "send_rate_datagrams_per_second" => nil,
       "delivered_datagrams_per_second" => nil,
       "datagram_delivery_ratio" => nil,
       "datagram_drop_count" => nil,
       "datagram_late_count" => nil,
-      "stream_count" => number(result["stream_count"]) || ctx.config.stream_count,
-      "payload_size_bytes" => number(result["payload_size_bytes"]) || ctx.config.payload_size,
+      "stream_count" => number(measurement["stream_count"]) || ctx.config.stream_count,
+      "payload_size_bytes" =>
+        number(measurement["payload_size_bytes"]) || ctx.config.payload_size,
       "latency_p50_ms" => number(latencies["p50"]),
       "latency_p95_ms" => number(latencies["p95"]),
       "latency_p99_ms" => number(latencies["p99"]),
@@ -500,21 +766,23 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "send_backpressure_ms" => nil,
       "stream_stall_count" => if(ctx.exit_status == 0, do: 0, else: nil),
       "control_latency_p99_ms" => nil,
-      "bytes_sent" => number(result["bytes_sent"]),
-      "bytes_received" => number(result["bytes_received"]),
-      "quicprobe_exit_status" => ctx.exit_status
+      "bytes_sent" => number(measurement["bytes_sent"]),
+      "bytes_received" => number(measurement["bytes_received"]),
+      "reference_comparison_exit_status" => ctx.exit_status
     }
   end
 
   defp limits(ctx) do
     failed? = ctx.exit_status != 0 && !ctx.timed_out?
-    invalid_json? = ctx.exit_status == 0 && !valid_result?(ctx.quicprobe_json)
+
+    invalid_measurement? =
+      ctx.exit_status == 0 && !valid_measurement?(ctx.config, ctx.measurement)
 
     %{
-      "first_break_symptom" => first_symptom(ctx.timed_out?, failed?, invalid_json?),
-      "stopped_by" => stopped_by(ctx.timed_out?, failed?, invalid_json?),
+      "first_break_symptom" => first_symptom(ctx.timed_out?, failed?, invalid_measurement?),
+      "stopped_by" => stopped_by(ctx.timed_out?, failed?, invalid_measurement?),
       "connection_closed" => false,
-      "protocol_error" => failed? || invalid_json?,
+      "protocol_error" => failed? || invalid_measurement?,
       "throughput_plateau" => false,
       "latency_explosion" => false,
       "mailbox_growth_without_recovery" => false,
@@ -528,14 +796,14 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     message =
       cond do
         ctx.timed_out? ->
-          "quicprobe timed out after #{seconds(ctx.timeout_ms)}s"
+          "reference comparison step timed out after #{seconds(ctx.timeout_ms)}s"
 
         ctx.exit_status != 0 ->
-          failure_output(ctx.quicprobe_output) ||
-            "quicprobe exited with status #{ctx.exit_status}"
+          failure_output(ctx.step_output) ||
+            "reference comparison step exited with status #{ctx.exit_status}"
 
-        !valid_result?(ctx.quicprobe_json) ->
-          "quicprobe output did not contain a quicprobe-v1 client_run record"
+        !valid_measurement?(ctx.config, ctx.measurement) ->
+          "reference comparison step did not produce a valid client_run measurement"
 
         true ->
           nil
@@ -554,17 +822,26 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp first_symptom(false, false, false), do: nil
 
   defp stopped_by(true, _failed?, _invalid_json?), do: @timeout_stop_condition
-  defp stopped_by(false, true, _invalid_json?), do: "quicprobe_nonzero_exit"
-  defp stopped_by(false, false, true), do: "quicprobe_invalid_json"
+  defp stopped_by(false, true, _invalid_json?), do: "reference_comparison_nonzero_exit"
+  defp stopped_by(false, false, true), do: "reference_comparison_invalid_measurement"
   defp stopped_by(false, false, false), do: nil
 
-  defp result_json(%{quicprobe_json: json}) when is_map(json), do: json
-  defp result_json(_ctx), do: %{}
+  defp measurement(%{measurement: measurement}) when is_map(measurement), do: measurement
+  defp measurement(_ctx), do: %{}
 
-  defp valid_result?(%{"schema_version" => "quicprobe-v1", "record_type" => "client_run"}),
-    do: true
+  defp valid_measurement?(
+         %{topology: @reference_client_topology},
+         %{"schema_version" => "quicprobe-v1", "record_type" => "client_run"}
+       ),
+       do: true
 
-  defp valid_result?(_json), do: false
+  defp valid_measurement?(
+         %{topology: @moqx_client_topology},
+         %{"schema_version" => "moqx-reference-measurement-v1", "record_type" => "client_run"}
+       ),
+       do: true
+
+  defp valid_measurement?(_config, _measurement), do: false
 
   defp write_records(records, nil) do
     Enum.each(records, fn record ->
@@ -634,6 +911,35 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp seconds(milliseconds) when is_number(milliseconds), do: milliseconds / 1000
+
+  defp binary_payload(size), do: :binary.copy(<<0>>, size)
+
+  defp bits_per_second(bytes, duration_ms) when is_number(bytes) and duration_ms > 0 do
+    bytes * 8 * 1000 / duration_ms
+  end
+
+  defp bits_per_second(_bytes, _duration_ms), do: nil
+
+  defp latency_summary(values) do
+    sorted = Enum.sort(values)
+
+    %{
+      "p50" => percentile(sorted, 0.50),
+      "p95" => percentile(sorted, 0.95),
+      "p99" => percentile(sorted, 0.99)
+    }
+  end
+
+  defp percentile([], _p), do: nil
+  defp percentile([value], _p), do: value
+
+  defp percentile(sorted, p) do
+    index = trunc((length(sorted) - 1) * p)
+    Enum.at(sorted, index)
+  end
+
+  defp monotonic_us, do: System.monotonic_time(:microsecond)
+  defp elapsed_ms(started_at), do: (monotonic_us() - started_at) / 1000
 
   defp compact(map) when is_map(map) do
     map
@@ -777,10 +1083,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp usage(script) do
     """
     Usage:
-      #{script} --topology reference-client-to-reference-server --server HOST --ca PATH [options]
+      #{script} --topology TOPOLOGY --server HOST --ca PATH [options]
 
     Required:
-      --topology VALUE               reference topology; currently only reference-client-to-reference-server
+      --topology VALUE               reference-client-to-reference-server or moqx-client-to-reference-server
       --server HOST                  reference server host or IP
       --ca PATH                      CA certificate for the reference server
 
@@ -792,9 +1098,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       --stream-count N               concurrent streams (default: 1)
       --payload-size BYTES           bytes per payload write (default: 1200)
       --payload-count N              payload writes per stream (default: 1)
-      --timeout-seconds N            quicprobe client timeout (default: 5)
-      --timeout-margin-seconds N     kill quicprobe after timeout + N seconds (default: 2)
-      --quicprobe-command PATH       quicprobe executable (default: quicprobe)
+      --timeout-seconds N            client timeout (default: 5)
+      --timeout-margin-seconds N     kill/abort step after timeout + N seconds (default: 2)
+      --quicprobe-command PATH       quicprobe executable for reference-client topology (default: quicprobe)
       --path-json PATH_OR_JSON       path metadata file or inline JSON object
       --output PATH                  write JSONL to a file instead of stdout
       --run-id ID                    run identifier
@@ -818,6 +1124,11 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         --topology reference-client-to-reference-server \\
         --server 127.0.0.1 --port 4433 --ca .tmp/integration-certs/ca.pem \\
         --quicprobe-command /path/to/quicprobe --stream-count 2
+
+      #{script} \\
+        --topology moqx-client-to-reference-server \\
+        --server 127.0.0.1 --port 4433 --ca .tmp/integration-certs/ca.pem \\
+        --servername localhost --stream-count 2
     """
   end
 end

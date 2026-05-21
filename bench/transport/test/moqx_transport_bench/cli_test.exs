@@ -21,8 +21,10 @@ defmodule MOQX.TransportBench.CLITest do
   end
 
   test "prints reference comparison usage" do
-    assert capture_io(fn -> CLI.main(["help", "reference-comparison"]) end) =~
-             "--topology reference-client-to-reference-server"
+    output = capture_io(fn -> CLI.main(["help", "reference-comparison"]) end)
+
+    assert output =~ "reference-client-to-reference-server"
+    assert output =~ "moqx-client-to-reference-server"
   end
 
   test "decodes release wrapper arguments" do

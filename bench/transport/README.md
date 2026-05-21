@@ -223,8 +223,8 @@ bytes echoed back, first-byte latency, aggregate goodput, and stream latency
 percentiles. Unidirectional pressure reports bytes sent and write-side stream
 latency; it has no echo bytes or first-byte latency.
 
-The canonical benchmark wrapper for the first reference-to-reference topology
-is:
+The canonical benchmark wrapper supports the first reference-to-reference and
+MOQX-client-to-reference-server topologies:
 
 ```bash
 moqx-transport-bench reference-comparison \
@@ -238,11 +238,26 @@ moqx-transport-bench reference-comparison \
   --payload-size 1200 \
   --payload-count 100 \
   --output bench/transport/results/reference-comparison.jsonl
+
+moqx-transport-bench reference-comparison \
+  --topology moqx-client-to-reference-server \
+  --server 127.0.0.1 \
+  --port 4433 \
+  --ca .tmp/integration-certs/ca.pem \
+  --servername localhost \
+  --stream-direction bidirectional \
+  --stream-count 4 \
+  --payload-size 1200 \
+  --payload-count 100 \
+  --output bench/transport/results/moqx-client-reference.jsonl
 ```
 
 The command does not start the reference server. Start `tools/quicprobe server`
 explicitly on the chosen endpoint first, then run the benchmark wrapper from
-the client side. The wrapper emits `transport-bench-v1` JSONL.
+the client side. The wrapper emits `transport-bench-v1` JSONL. The current
+MOQX-client topology uses the existing synchronous `MOQX.Transport.send_stream/4`
+path and records `stream_scheduling=sequential`; it is a correctness and
+shape-comparison baseline before concurrent stream-pressure support.
 
 ### Pressure Patterns
 

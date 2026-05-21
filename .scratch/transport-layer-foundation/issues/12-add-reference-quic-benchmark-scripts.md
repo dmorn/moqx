@@ -151,11 +151,22 @@ shape is committed with the first local loopback reference-to-reference record.
   `127.0.0.1:4434`, produced 2048 bytes sent/received, and passed
   `mix moqx.transport.report /private/tmp/moqx-reference-comparison-smoke.jsonl
   --strict` with only the expected loopback-calibration warning.
+- 2026-05-21: Added the `moqx-client-to-reference-server` topology to
+  `moqx-transport-bench reference-comparison`. It uses
+  `MOQX.Transport.Quicer` against an explicit `tools/quicprobe server`, emits
+  canonical `transport-bench-v1` JSONL, records `quicer_version`, byte counts,
+  handshake latency, first-byte latency, goodput, payload send rate, stream
+  latency percentiles, and `stream_scheduling=sequential`. Local smoke
+  `moqx-client-reference-smoke` against `127.0.0.1:4434` produced 2048 bytes
+  sent/received and passed strict report validation with only the expected
+  loopback-calibration warning.
 
 Remaining slices:
 
-- `moqx-client-to-reference-server` using `MOQX.Transport.Quicer`.
 - `reference-client-to-moqx-listener` with a documented two-process shape.
 - Packaging/deploy story for the quicprobe executable alongside benchmark
   releases.
+- Concurrent MOQX stream pressure. The current MOQX-client wrapper records
+  `stream_scheduling=sequential` because it exercises the existing synchronous
+  `MOQX.Transport.send_stream/4` path.
 - Datagram pressure after stream-pressure records are stable.

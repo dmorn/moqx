@@ -54,6 +54,7 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["software"]["reference_implementation"] == "quic-go"
     assert record["software"]["reference_version"] == "v0.50.1"
     assert record["profile"]["settings"]["topology"] == "reference-client-to-reference-server"
+    assert record["profile"]["settings"]["stream_scheduling"] == "concurrent"
 
     args = File.read!(args_path)
     assert args =~ "client"
