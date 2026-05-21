@@ -231,9 +231,29 @@ shape is committed with the first local loopback reference-to-reference record.
   bytes sent and received, 100% delivery, zero drops, and no break symptom.
   These are loopback calibration only, not real network evidence; rate-stepped
   datagram ramps and mixed control-plus-object pressure remain future slices.
+- 2026-05-21: Disposable Hetzner datagram smoke passed for run
+  `20260521T155945Z-datagram-smoke` on the `arm-smoke` profile: `cax21`
+  client in `fsn1`, `cax21` server in `nbg1`, private path
+  `10.88.0.11 -> 10.88.0.12`, MTU 1450. `just
+  bench-transport-private-check` proved ICMP and TCP readiness with 0% ping
+  loss and ~3.8 ms average RTT. Both `moqx-transport-bench` and `quicprobe`
+  Linux/ARM64 artifacts for git `17c4774` deployed and smoke-checked on both
+  nodes. A tiny canonical `iperf3-baseline` record on the private path reported
+  5.27 Gbps TCP goodput and a 10 Mbps UDP step with 100% delivery. Three
+  burst-mode `datagram_pressure` reference-comparison records passed strict
+  report validation with 100 datagrams of 64 bytes, 6,400 bytes sent and
+  received, 100% delivery, zero drops, and no break symptom:
+  reference-client-to-reference-server, MOQX-client-to-reference-server, and
+  reference-client-to-MOQX-listener. Result artifacts are under
+  `bench/transport/results/20260521T155945Z-datagram-smoke/`. Infrastructure
+  was destroyed and `just bench-transport-verify-clean` confirmed no Terraform
+  state entries or labelled Hetzner resources remain. These are smoke records,
+  not capacity claims.
 
 Remaining slices:
 
+- Rate-stepped datagram pressure with explicit offered datagrams/sec, duration,
+  stop thresholds, and delivery-loss behavior.
 - Mixed control-plus-object pressure after stream and datagram records are stable.
 - Resource usage, mailbox pressure, and backpressure indicators for higher-rate
   controlled-path runs.
