@@ -20,6 +20,11 @@ defmodule MOQX.TransportBench.CLITest do
              "--path-json PATH_OR_JSON"
   end
 
+  test "prints reference comparison usage" do
+    assert capture_io(fn -> CLI.main(["help", "reference-comparison"]) end) =~
+             "--topology reference-client-to-reference-server"
+  end
+
   test "decodes release wrapper arguments" do
     encoded =
       ["report", "/tmp/run.jsonl", "--strict"]

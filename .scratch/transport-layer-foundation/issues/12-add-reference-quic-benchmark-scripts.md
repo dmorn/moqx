@@ -1,6 +1,6 @@
 # Add reference QUIC benchmark scripts
 
-Status: needs-triage
+Status: ready-for-agent
 Type: AFK
 
 ## Parent
@@ -140,3 +140,22 @@ shape is committed with the first local loopback reference-to-reference record.
   shared benchmark schema. Local loopback smoke passed with two bidirectional
   streams, 256-byte payloads, four writes per stream, and 2048 bytes sent and
   received.
+- 2026-05-21: First canonical wrapper slice:
+  `moqx-transport-bench reference-comparison` and Mix wrapper
+  `mix moqx.transport.reference_comparison` now support the
+  `reference-client-to-reference-server` topology. The command requires an
+  explicit `--quicprobe-command`, caller-provided `--server` and `--ca`, and
+  does not start the reference server implicitly. It converts `quicprobe-v1`
+  client output into one `transport-bench-v1` JSONL `step_summary`. Local
+  smoke `reference-smoke` used a temporary quicprobe binary against
+  `127.0.0.1:4434`, produced 2048 bytes sent/received, and passed
+  `mix moqx.transport.report /private/tmp/moqx-reference-comparison-smoke.jsonl
+  --strict` with only the expected loopback-calibration warning.
+
+Remaining slices:
+
+- `moqx-client-to-reference-server` using `MOQX.Transport.Quicer`.
+- `reference-client-to-moqx-listener` with a documented two-process shape.
+- Packaging/deploy story for the quicprobe executable alongside benchmark
+  releases.
+- Datagram pressure after stream-pressure records are stable.

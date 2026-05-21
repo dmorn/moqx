@@ -223,6 +223,27 @@ bytes echoed back, first-byte latency, aggregate goodput, and stream latency
 percentiles. Unidirectional pressure reports bytes sent and write-side stream
 latency; it has no echo bytes or first-byte latency.
 
+The canonical benchmark wrapper for the first reference-to-reference topology
+is:
+
+```bash
+moqx-transport-bench reference-comparison \
+  --topology reference-client-to-reference-server \
+  --server 127.0.0.1 \
+  --port 4433 \
+  --ca .tmp/integration-certs/ca.pem \
+  --quicprobe-command /path/to/quicprobe \
+  --stream-direction bidirectional \
+  --stream-count 4 \
+  --payload-size 1200 \
+  --payload-count 100 \
+  --output bench/transport/results/reference-comparison.jsonl
+```
+
+The command does not start the reference server. Start `tools/quicprobe server`
+explicitly on the chosen endpoint first, then run the benchmark wrapper from
+the client side. The wrapper emits `transport-bench-v1` JSONL.
+
 ### Pressure Patterns
 
 Tools should model transport-level pressure patterns before full protocol
