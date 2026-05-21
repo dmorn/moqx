@@ -1,6 +1,9 @@
 defmodule MOQX.TransportBench.Iperf3Baseline do
   @moduledoc false
 
+  alias MOQX.TransportBench.BuildInfo
+  alias MOQX.TransportBench.PathMetadata
+
   @default_script "moqx-transport-bench iperf3-baseline"
   @script_version "v1"
   @schema_version "transport-bench-v1"
@@ -280,7 +283,7 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
       "run_id" => ctx.config.run_id,
       "started_at" => ctx.run_started_at,
       "finished_at" => ctx.finished_at,
-      "git_sha" => git_sha(),
+      "git_sha" => BuildInfo.git_sha(),
       "script" => ctx.config.script,
       "script_version" => @script_version,
       "command" => ctx.config.command,
@@ -346,15 +349,8 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
   defp local_only(false, _value), do: nil
 
   defp load_path_json(path) do
-    path
-    |> File.read!()
-    |> decode_json!()
-    |> unwrap_path_json()
+    PathMetadata.load_json!(path)
   end
-
-  defp unwrap_path_json(%{"path" => path}), do: path
-  defp unwrap_path_json(%{"value" => value}) when is_map(value), do: unwrap_path_json(value)
-  defp unwrap_path_json(path) when is_map(path), do: path
 
   defp software_metadata do
     %{
@@ -612,8 +608,6 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
     _ -> nil
   end
 
-  defp decode_json!(output), do: output |> extract_json_object() |> :json.decode()
-
   defp extract_json_object(output) do
     with {start, _} <- :binary.match(output, "{"),
          matches when matches != [] <- :binary.matches(output, "}"),
@@ -680,13 +674,6 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
   end
 
   defp timestamp, do: DateTime.utc_now() |> DateTime.to_iso8601()
-
-  defp git_sha do
-    case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
-      {sha, 0} -> String.trim(sha)
-      _ -> nil
-    end
-  end
 
   defp hostname do
     case :inet.gethostname() do
@@ -807,7 +794,7 @@ defmodule MOQX.TransportBench.Iperf3Baseline do
       --no-udp                       skip UDP baseline
       --reverse                      ask iperf3 to run in reverse direction
       --local-server                 start a temporary local iperf3 server
-      --path-json PATH               JSON path metadata object or Terraform output value
+      --path-json PATH_OR_JSON       path metadata file or inline JSON object
       --output PATH                  write JSONL to a file instead of stdout
       --run-id ID                    run identifier
 

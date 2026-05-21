@@ -5,10 +5,12 @@ ARG ELIXIR_IMAGE=elixir:1.19.5-otp-28
 FROM ${ELIXIR_IMAGE} AS builder
 
 ARG ARTIFACT_NAME=moqx-transport-bench.tar.gz
+ARG BUILD_GIT_SHA=unknown
 ARG RELEASE_NAME=moqx_transport_bench
 
 ENV MIX_ENV=prod \
-    LANG=C.UTF-8
+    LANG=C.UTF-8 \
+    MOQX_TRANSPORT_BENCH_BUILD_GIT_SHA=${BUILD_GIT_SHA}
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

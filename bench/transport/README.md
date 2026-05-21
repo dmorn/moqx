@@ -117,6 +117,18 @@ For remote controlled paths, start `iperf3 --server` on the server host
 yourself and pass the public or private endpoint explicitly. The task does not
 provision infrastructure, start Terraform, or assume loopback.
 
+Path metadata can be supplied as either a JSON file path or an inline JSON
+object:
+
+```bash
+moqx-transport-bench iperf3-baseline \
+  --server 203.0.113.10 \
+  --path-json '{"evidence_tier":"edge_to_server","path_id":"example-public-ipv4","client":{"host_id":"client","provider":null,"region":null,"instance_class":null,"os":null,"kernel":null,"cpu_model":null,"memory_bytes":null,"nic_or_network_class":"public_ipv4"},"server":{"host_id":"server","provider":null,"region":null,"instance_class":null,"os":null,"kernel":null,"cpu_model":null,"memory_bytes":null,"nic_or_network_class":"public_ipv4"}}'
+```
+
+The same option accepts Terraform `output -json <name>` values, including
+wrappers shaped as `{"value": ...}` or `{"path": ...}`.
+
 ### Self-Pair Calibration
 
 Run `MOQX.Transport.Quicer` client and listener on the same host or loopback.
@@ -593,6 +605,9 @@ The default artifact path is:
 ```text
 bench/transport/build/artifacts/moqx-transport-bench-<version>-<git>-linux-arm64.tar.gz
 ```
+
+The Docker build embeds the same git SHA in the benchmark release, so records
+emitted by the remote CLI can be tied back to the artifact that produced them.
 
 The Docker build uses `elixir:1.19.5-otp-28` by default and can be overridden:
 

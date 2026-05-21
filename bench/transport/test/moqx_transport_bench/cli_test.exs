@@ -15,6 +15,11 @@ defmodule MOQX.TransportBench.CLITest do
              "moqx-transport-bench report PATH"
   end
 
+  test "documents inline or file path metadata input for iperf3 baseline" do
+    assert capture_io(fn -> CLI.main(["help", "iperf3-baseline"]) end) =~
+             "--path-json PATH_OR_JSON"
+  end
+
   test "decodes release wrapper arguments" do
     encoded =
       ["report", "/tmp/run.jsonl", "--strict"]

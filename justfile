@@ -163,6 +163,7 @@ bench-transport-build-release:
       --output "type=local,dest={{ artifact_dir }}" \
       --build-arg "ELIXIR_IMAGE={{ elixir_image }}" \
       --build-arg "RELEASE_NAME={{ release_name }}" \
+      --build-arg "BUILD_GIT_SHA={{ git_sha }}" \
       --build-arg "ARTIFACT_NAME={{ artifact_name }}" \
       ../..
     @test -f "{{ artifact }}"

@@ -1,6 +1,8 @@
 defmodule MOQX.TransportBench.QuicerSelfPair do
   @moduledoc false
 
+  alias MOQX.TransportBench.BuildInfo
+
   alias MOQX.Transport
   alias MOQX.Transport.Profile
 
@@ -577,7 +579,7 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
       "run_id" => ctx.config.run_id,
       "started_at" => ctx.run_started_at,
       "finished_at" => ctx.step_finished_at,
-      "git_sha" => git_sha(),
+      "git_sha" => BuildInfo.git_sha(),
       "script" => ctx.config.script,
       "script_version" => @script_version,
       "command" => ctx.config.command,
@@ -939,13 +941,6 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
   end
 
   defp command_string(script, argv), do: Enum.join([script | argv], " ")
-
-  defp git_sha do
-    case System.cmd("git", ["rev-parse", "--short", "HEAD"], stderr_to_stdout: true) do
-      {sha, 0} -> String.trim(sha)
-      _error -> nil
-    end
-  end
 
   defp app_version(app) do
     case Application.spec(app, :vsn) do
