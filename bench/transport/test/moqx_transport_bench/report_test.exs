@@ -14,6 +14,27 @@ defmodule MOQX.TransportBench.ReportTest do
     assert report =~ "loopback calibration only"
   end
 
+  test "renders numeric datagram delivery percentages" do
+    record =
+      record()
+      |> put_in(["workload", "family"], "datagram_pressure")
+      |> put_in(["workload", "step"], "datagram_pressure")
+      |> put_in(["workload", "stream_count"], nil)
+      |> put_in(["workload", "payload_size_bytes"], 64)
+      |> put_in(["workload", "datagram_size_bytes"], 64)
+      |> put_in(["metrics", "goodput_bps"], 2_000_000.0)
+      |> put_in(["metrics", "send_rate_packets_per_second"], 1_000.0)
+      |> put_in(["metrics", "send_rate_datagrams_per_second"], 1_000.0)
+      |> put_in(["metrics", "delivered_datagrams_per_second"], 1_000.0)
+      |> put_in(["metrics", "datagram_delivery_ratio"], 1.0)
+      |> put_in(["metrics", "datagram_drop_count"], 0)
+
+    report = Report.render([record])
+
+    assert report =~ "datagram_pressure"
+    assert report =~ "100.00%"
+  end
+
   test "renders timed out steps in the limits section" do
     record =
       record()

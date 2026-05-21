@@ -199,7 +199,8 @@ The first selected reference implementation is the repo-owned Go tool
 single reference client run. That output is an implementation-specific
 reference measurement, not the canonical benchmark schema; `moqx-transport-bench`
 commands are responsible for converting reference measurements into
-`transport-bench-v1` JSONL records.
+`transport-bench-v1` JSONL records. The `server` mode is an explicit peer
+process; it supports stream echo/drain and QUIC DATAGRAM echo.
 
 ```bash
 go run ./tools/quicprobe server --addr :4433 \
@@ -222,6 +223,24 @@ For unidirectional stream pressure, set
 bytes echoed back, first-byte latency, aggregate goodput, and stream latency
 percentiles. Unidirectional pressure reports bytes sent and write-side stream
 latency; it has no echo bytes or first-byte latency.
+
+For burst-mode datagram pressure, use `--workload datagram_pressure`.
+Datagram pressure sends fixed-size QUIC DATAGRAM frames, records offered
+datagrams, locally accepted sends, echoed datagrams, delivery ratio, drops, and
+datagram latency percentiles, then maps delivery loss to
+`limits.first_break_symptom=datagram_delivery_loss`. This first reference
+comparison slice is intentionally burst-only; rate-stepped offered-load
+datagram ramps remain future work.
+
+```bash
+go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
+  --ca .tmp/integration-certs/ca.pem \
+  --alpn moqx-test \
+  --json \
+  --workload datagram_pressure \
+  --datagram-size 1200 \
+  --datagram-count 1000
+```
 
 The canonical benchmark wrapper supports reference-to-reference,
 MOQX-client-to-reference-server, and reference-client-to-MOQX-listener
@@ -274,6 +293,35 @@ moqx-transport-bench reference-comparison \
   --output bench/transport/results/reference-client-moqx-listener.jsonl
 ```
 
+Use the same topologies for datagram pressure by replacing the stream options
+with an explicit datagram workload. For example, start a MOQX listener peer:
+
+```bash
+moqx-transport-bench moqx-listener \
+  --host 0.0.0.0 \
+  --port 4433 \
+  --certfile .tmp/integration-certs/server.pem \
+  --keyfile .tmp/integration-certs/server-key.pem \
+  --workload datagram_pressure \
+  --datagram-size 1200 \
+  --datagram-count 1000
+```
+
+Then run the reference client topology against it:
+
+```bash
+moqx-transport-bench reference-comparison \
+  --topology reference-client-to-moqx-listener \
+  --server 127.0.0.1 \
+  --port 4433 \
+  --ca .tmp/integration-certs/ca.pem \
+  --quicprobe-command /path/to/quicprobe \
+  --workload datagram_pressure \
+  --datagram-size 1200 \
+  --datagram-count 1000 \
+  --output bench/transport/results/reference-client-moqx-listener-datagrams.jsonl
+```
+
 The measurement command does not start the peer server. For reference server
 topologies, start `tools/quicprobe server` explicitly on the chosen endpoint
 first. For reference-client-to-MOQX-listener runs, start
@@ -286,6 +334,12 @@ streams, schedules payload rounds across those streams, and records
 `MOQX.Transport.send_stream/4`; send completion is reported later as a
 transport event and is not peer-delivery proof.
 
+`moqx-transport-bench moqx-listener` is a correctness and interop peer, not yet
+a high-rate performance peer. Its stream-pressure path currently accepts the
+expected streams up front, then serves them in stream-id order. That is useful
+for contract smokes, but heavier listener-side performance claims need a
+dedicated concurrent serving path.
+
 ### Pressure Patterns
 
 Tools should model transport-level pressure patterns before full protocol
@@ -293,7 +347,8 @@ semantics exist:
 
 - stream pressure: one stream, many streams, bidirectional streams,
   unidirectional streams;
-- datagram pressure: fixed-size datagrams at stepped offered rates;
+- datagram pressure: fixed-size datagrams in burst mode first, then at stepped
+  offered rates once pacing/ramp support exists;
 - mixed MOQT-shaped pressure: a low-rate control stream plus object-like
   unidirectional streams and/or datagrams.
 

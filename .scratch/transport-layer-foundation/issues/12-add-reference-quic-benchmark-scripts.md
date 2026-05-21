@@ -217,7 +217,23 @@ shape is committed with the first local loopback reference-to-reference record.
   bidirectional streams, 2 payloads per stream, 1536 bytes sent and echoed,
   `server_implementation=moqx`, `stream_scheduling=concurrent`, and no break
   symptom. This remains loopback calibration only, not real network evidence.
+- 2026-05-21: Added the burst-mode `datagram_pressure` workload to #12
+  reference-comparison tooling. `tools/quicprobe` now enables QUIC DATAGRAM and
+  echoes datagrams from the reference server; `reference-comparison
+  --workload datagram_pressure` emits canonical `transport-bench-v1` records
+  for `reference-client-to-reference-server`,
+  `moqx-client-to-reference-server`, and `reference-client-to-moqx-listener`.
+  `moqx-transport-bench moqx-listener` can serve datagram echo runs when
+  started with the same workload and expected datagram count. Datagram records
+  distinguish offered, locally accepted, and echoed datagrams, and map delivery
+  loss to `datagram_delivery_loss` rather than a protocol error. Local loopback
+  smokes for all three topologies used 4 datagrams of 64 bytes, reported 256
+  bytes sent and received, 100% delivery, zero drops, and no break symptom.
+  These are loopback calibration only, not real network evidence; rate-stepped
+  datagram ramps and mixed control-plus-object pressure remain future slices.
 
 Remaining slices:
 
-- Datagram pressure after stream-pressure records are stable.
+- Mixed control-plus-object pressure after stream and datagram records are stable.
+- Resource usage, mailbox pressure, and backpressure indicators for higher-rate
+  controlled-path runs.

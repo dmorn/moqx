@@ -180,6 +180,62 @@ func TestClientServerJSONUnidirectionalStreamPressure(t *testing.T) {
 	}
 }
 
+func TestClientServerJSONDatagramPressure(t *testing.T) {
+	t.Parallel()
+
+	certs := writeTestCerts(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ready := make(chan string, 1)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runServer(ctx, serverConfig{
+			addr:     "127.0.0.1:0",
+			certFile: certs.serverCert,
+			keyFile:  certs.serverKey,
+			alpn:     "moqx-test",
+		}, ready)
+	}()
+
+	addr := awaitServerReady(t, ready, errc)
+	var output strings.Builder
+
+	clientCtx, clientCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer clientCancel()
+
+	err := runClient(clientCtx, clientConfig{
+		addr:          addr,
+		caFile:        certs.caCert,
+		alpn:          "moqx-test",
+		serverName:    "localhost",
+		jsonOutput:    true,
+		workload:      datagramPressureWorkload,
+		datagramSize:  64,
+		datagramCount: 4,
+	}, &output)
+	if err != nil {
+		t.Fatalf("runClient() error = %v", err)
+	}
+
+	var result clientRunResult
+	if err := json.Unmarshal([]byte(output.String()), &result); err != nil {
+		t.Fatalf("JSON output did not decode: %v\n%s", err, output.String())
+	}
+
+	assertDatagramRunResult(t, result, 64, 4)
+
+	cancel()
+	select {
+	case err := <-errc:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("runServer() after cancel error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop after context cancellation")
+	}
+}
+
 func assertClientRunResult(
 	t *testing.T,
 	result clientRunResult,
@@ -199,6 +255,9 @@ func assertClientRunResult(
 	}
 	if result.ALPN != "moqx-test" {
 		t.Fatalf("alpn = %q, want moqx-test", result.ALPN)
+	}
+	if result.Workload != streamPressureWorkload {
+		t.Fatalf("workload = %q, want %s", result.Workload, streamPressureWorkload)
 	}
 	if result.StreamDirection != direction {
 		t.Fatalf("stream_direction = %q, want %s", result.StreamDirection, direction)
@@ -233,6 +292,63 @@ func assertClientRunResult(
 	}
 	if _, ok := result.StreamLatencyMS["p50"]; !ok {
 		t.Fatalf("stream latency summary = %#v, want p50", result.StreamLatencyMS)
+	}
+}
+
+func assertDatagramRunResult(t *testing.T, result clientRunResult, datagramSize int, datagramCount int) {
+	t.Helper()
+
+	expectedBytes := int64(datagramSize * datagramCount)
+	if result.SchemaVersion != "quicprobe-v1" {
+		t.Fatalf("schema_version = %q, want quicprobe-v1", result.SchemaVersion)
+	}
+	if result.RecordType != "client_run" {
+		t.Fatalf("record_type = %q, want client_run", result.RecordType)
+	}
+	if result.ALPN != "moqx-test" {
+		t.Fatalf("alpn = %q, want moqx-test", result.ALPN)
+	}
+	if result.Workload != datagramPressureWorkload {
+		t.Fatalf("workload = %q, want %s", result.Workload, datagramPressureWorkload)
+	}
+	if result.DatagramSizeBytes != datagramSize {
+		t.Fatalf("datagram_size_bytes = %d, want %d", result.DatagramSizeBytes, datagramSize)
+	}
+	if result.DatagramCount != datagramCount {
+		t.Fatalf("datagram_count = %d, want %d", result.DatagramCount, datagramCount)
+	}
+	if result.DatagramsOffered != datagramCount {
+		t.Fatalf("datagrams_offered = %d, want %d", result.DatagramsOffered, datagramCount)
+	}
+	if result.DatagramsAccepted != datagramCount {
+		t.Fatalf("datagrams_accepted = %d, want %d", result.DatagramsAccepted, datagramCount)
+	}
+	if result.DatagramsReceived != datagramCount {
+		t.Fatalf("datagrams_received = %d, want %d", result.DatagramsReceived, datagramCount)
+	}
+	if result.DatagramDropCount != 0 {
+		t.Fatalf("datagram_drop_count = %d, want 0", result.DatagramDropCount)
+	}
+	if result.DatagramDeliveryRatio != 1.0 {
+		t.Fatalf("datagram_delivery_ratio = %f, want 1.0", result.DatagramDeliveryRatio)
+	}
+	if result.BytesSent != expectedBytes {
+		t.Fatalf("bytes_sent = %d, want %d", result.BytesSent, expectedBytes)
+	}
+	if result.BytesReceived != expectedBytes {
+		t.Fatalf("bytes_received = %d, want %d", result.BytesReceived, expectedBytes)
+	}
+	if result.FirstByteLatencyMS == nil {
+		t.Fatal("first_byte_latency_ms = nil, want measured value")
+	}
+	if result.GoodputBPS <= 0 {
+		t.Fatalf("goodput_bps = %f, want positive", result.GoodputBPS)
+	}
+	if result.SendRateDatagramPPS <= 0 {
+		t.Fatalf("send_rate_datagrams_per_second = %f, want positive", result.SendRateDatagramPPS)
+	}
+	if _, ok := result.DatagramLatencyMS["p50"]; !ok {
+		t.Fatalf("datagram latency summary = %#v, want p50", result.DatagramLatencyMS)
 	}
 }
 

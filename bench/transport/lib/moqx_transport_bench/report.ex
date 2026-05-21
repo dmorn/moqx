@@ -216,7 +216,7 @@ defmodule MOQX.TransportBench.Report do
   defp rate(_value), do: "n/a"
 
   defp percent(value) when is_number(value),
-    do: :io_lib.format("~.2f%", [value * 100]) |> IO.iodata_to_binary()
+    do: (:io_lib.format("~.2f", [value * 100.0]) |> IO.iodata_to_binary()) <> "%"
 
   defp percent(_value), do: "n/a"
 
