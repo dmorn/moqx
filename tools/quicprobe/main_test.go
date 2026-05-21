@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
 	"net"
@@ -62,6 +63,176 @@ func TestClientServerBidiEcho(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server did not stop after context cancellation")
+	}
+}
+
+func TestClientServerJSONStreamPressure(t *testing.T) {
+	t.Parallel()
+
+	certs := writeTestCerts(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ready := make(chan string, 1)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runServer(ctx, serverConfig{
+			addr:     "127.0.0.1:0",
+			certFile: certs.serverCert,
+			keyFile:  certs.serverKey,
+			alpn:     "moqx-test",
+		}, ready)
+	}()
+
+	addr := awaitServerReady(t, ready, errc)
+	var output strings.Builder
+
+	clientCtx, clientCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer clientCancel()
+
+	err := runClient(clientCtx, clientConfig{
+		addr:            addr,
+		caFile:          certs.caCert,
+		alpn:            "moqx-test",
+		serverName:      "localhost",
+		jsonOutput:      true,
+		streamDirection: "bidirectional",
+		streamCount:     2,
+		payloadSize:     128,
+		payloadCount:    3,
+	}, &output)
+	if err != nil {
+		t.Fatalf("runClient() error = %v", err)
+	}
+
+	var result clientRunResult
+	if err := json.Unmarshal([]byte(output.String()), &result); err != nil {
+		t.Fatalf("JSON output did not decode: %v\n%s", err, output.String())
+	}
+
+	assertClientRunResult(t, result, "bidirectional", 2, 128, 3)
+
+	cancel()
+	select {
+	case err := <-errc:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("runServer() after cancel error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop after context cancellation")
+	}
+}
+
+func TestClientServerJSONUnidirectionalStreamPressure(t *testing.T) {
+	t.Parallel()
+
+	certs := writeTestCerts(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ready := make(chan string, 1)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runServer(ctx, serverConfig{
+			addr:     "127.0.0.1:0",
+			certFile: certs.serverCert,
+			keyFile:  certs.serverKey,
+			alpn:     "moqx-test",
+		}, ready)
+	}()
+
+	addr := awaitServerReady(t, ready, errc)
+	var output strings.Builder
+
+	clientCtx, clientCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer clientCancel()
+
+	err := runClient(clientCtx, clientConfig{
+		addr:            addr,
+		caFile:          certs.caCert,
+		alpn:            "moqx-test",
+		serverName:      "localhost",
+		jsonOutput:      true,
+		streamDirection: "unidirectional",
+		streamCount:     2,
+		payloadSize:     128,
+		payloadCount:    3,
+	}, &output)
+	if err != nil {
+		t.Fatalf("runClient() error = %v", err)
+	}
+
+	var result clientRunResult
+	if err := json.Unmarshal([]byte(output.String()), &result); err != nil {
+		t.Fatalf("JSON output did not decode: %v\n%s", err, output.String())
+	}
+
+	assertClientRunResult(t, result, "unidirectional", 2, 128, 3)
+
+	cancel()
+	select {
+	case err := <-errc:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("runServer() after cancel error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop after context cancellation")
+	}
+}
+
+func assertClientRunResult(
+	t *testing.T,
+	result clientRunResult,
+	direction string,
+	streamCount int,
+	payloadSize int,
+	payloadCount int,
+) {
+	t.Helper()
+
+	expectedBytes := int64(streamCount * payloadSize * payloadCount)
+	if result.SchemaVersion != "quicprobe-v1" {
+		t.Fatalf("schema_version = %q, want quicprobe-v1", result.SchemaVersion)
+	}
+	if result.RecordType != "client_run" {
+		t.Fatalf("record_type = %q, want client_run", result.RecordType)
+	}
+	if result.ALPN != "moqx-test" {
+		t.Fatalf("alpn = %q, want moqx-test", result.ALPN)
+	}
+	if result.StreamDirection != direction {
+		t.Fatalf("stream_direction = %q, want %s", result.StreamDirection, direction)
+	}
+	if result.StreamCount != streamCount {
+		t.Fatalf("stream_count = %d, want %d", result.StreamCount, streamCount)
+	}
+	if result.PayloadSizeBytes != payloadSize {
+		t.Fatalf("payload_size_bytes = %d, want %d", result.PayloadSizeBytes, payloadSize)
+	}
+	if result.PayloadCount != payloadCount {
+		t.Fatalf("payload_count = %d, want %d", result.PayloadCount, payloadCount)
+	}
+	if result.BytesSent != expectedBytes {
+		t.Fatalf("bytes_sent = %d, want %d", result.BytesSent, expectedBytes)
+	}
+	expectedReceived := expectedBytes
+	if direction == "unidirectional" {
+		expectedReceived = 0
+	}
+	if result.BytesReceived != expectedReceived {
+		t.Fatalf("bytes_received = %d, want %d", result.BytesReceived, expectedReceived)
+	}
+	if direction == "bidirectional" && result.FirstByteLatencyMS == nil {
+		t.Fatal("first_byte_latency_ms = nil, want measured value")
+	}
+	if direction == "unidirectional" && result.FirstByteLatencyMS != nil {
+		t.Fatalf("first_byte_latency_ms = %v, want nil", *result.FirstByteLatencyMS)
+	}
+	if result.GoodputBPS <= 0 {
+		t.Fatalf("goodput_bps = %f, want positive", result.GoodputBPS)
+	}
+	if _, ok := result.StreamLatencyMS["p50"]; !ok {
+		t.Fatalf("stream latency summary = %#v, want p50", result.StreamLatencyMS)
 	}
 }
 

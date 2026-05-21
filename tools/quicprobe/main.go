@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,12 +12,17 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
 )
 
 const defaultALPN = "moqx-test"
+const quicGoModulePath = "github.com/quic-go/quic-go"
 
 type serverConfig struct {
 	addr     string
@@ -31,6 +37,35 @@ type clientConfig struct {
 	alpn       string
 	serverName string
 	bidiEcho   string
+	jsonOutput bool
+
+	streamDirection string
+	streamCount     int
+	payloadSize     int
+	payloadCount    int
+}
+
+type clientRunResult struct {
+	SchemaVersion         string             `json:"schema_version"`
+	RecordType            string             `json:"record_type"`
+	Tool                  string             `json:"tool"`
+	ReferenceImpl         string             `json:"reference_implementation"`
+	ReferenceVersion      string             `json:"reference_version"`
+	StartedAt             string             `json:"started_at"`
+	FinishedAt            string             `json:"finished_at"`
+	RemoteAddr            string             `json:"remote_addr"`
+	ALPN                  string             `json:"alpn"`
+	StreamDirection       string             `json:"stream_direction"`
+	StreamCount           int                `json:"stream_count"`
+	PayloadSizeBytes      int                `json:"payload_size_bytes"`
+	PayloadCount          int                `json:"payload_count"`
+	BytesSent             int64              `json:"bytes_sent"`
+	BytesReceived         int64              `json:"bytes_received"`
+	HandshakeLatencyMS    float64            `json:"handshake_latency_ms"`
+	FirstByteLatencyMS    *float64           `json:"first_byte_latency_ms"`
+	ApplicationDurationMS float64            `json:"application_duration_ms"`
+	GoodputBPS            float64            `json:"goodput_bps"`
+	StreamLatencyMS       map[string]float64 `json:"stream_latency_ms"`
 }
 
 func main() {
@@ -108,6 +143,11 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	flags.StringVar(&cfg.alpn, "alpn", envOrDefault("QUICPROBE_ALPN", defaultALPN), "QUIC ALPN")
 	flags.StringVar(&cfg.serverName, "servername", "", "TLS server name override")
 	flags.StringVar(&cfg.bidiEcho, "bidi-echo", "", "payload to send on a bidirectional stream and expect as echo")
+	flags.BoolVar(&cfg.jsonOutput, "json", false, "emit structured JSON for a measured stream-pressure run")
+	flags.StringVar(&cfg.streamDirection, "stream-direction", "bidirectional", "stream direction for --json runs: bidirectional or unidirectional")
+	flags.IntVar(&cfg.streamCount, "stream-count", 1, "number of concurrent streams for --json runs")
+	flags.IntVar(&cfg.payloadSize, "payload-size", 1200, "payload bytes per write for --json runs")
+	flags.IntVar(&cfg.payloadCount, "payload-count", 1, "payload writes per stream for --json runs")
 	flags.DurationVar(&timeout, "timeout", 5*time.Second, "client timeout")
 
 	if err := flags.Parse(args); err != nil {
@@ -122,6 +162,18 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	}
 	if timeout <= 0 {
 		return clientConfig{}, 0, errors.New("client --timeout must be positive")
+	}
+	if cfg.streamDirection != "bidirectional" && cfg.streamDirection != "unidirectional" {
+		return clientConfig{}, 0, errors.New("client --stream-direction must be bidirectional or unidirectional")
+	}
+	if cfg.streamCount <= 0 {
+		return clientConfig{}, 0, errors.New("client --stream-count must be positive")
+	}
+	if cfg.payloadSize <= 0 {
+		return clientConfig{}, 0, errors.New("client --payload-size must be positive")
+	}
+	if cfg.payloadCount <= 0 {
+		return clientConfig{}, 0, errors.New("client --payload-count must be positive")
 	}
 
 	return cfg, timeout, nil
@@ -162,6 +214,23 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string) error
 }
 
 func handleConnection(ctx context.Context, conn quic.Connection) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		acceptBidiStreams(ctx, conn)
+	}()
+
+	go func() {
+		defer wg.Done()
+		acceptUniStreams(ctx, conn)
+	}()
+
+	wg.Wait()
+}
+
+func acceptBidiStreams(ctx context.Context, conn quic.Connection) {
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
@@ -172,20 +241,47 @@ func handleConnection(ctx context.Context, conn quic.Connection) {
 	}
 }
 
-func handleBidiEchoStream(stream quic.Stream) {
-	buffer := make([]byte, 64*1024)
-	n, err := stream.Read(buffer)
-	if err != nil && err != io.EOF {
-		stream.CancelWrite(1)
-		return
-	}
+func acceptUniStreams(ctx context.Context, conn quic.Connection) {
+	for {
+		stream, err := conn.AcceptUniStream(ctx)
+		if err != nil {
+			return
+		}
 
-	if _, err := stream.Write(buffer[:n]); err != nil {
+		go drainUniStream(stream)
+	}
+}
+
+func handleBidiEchoStream(stream quic.Stream) {
+	if err := echoStream(stream); err != nil {
 		stream.CancelWrite(1)
 		return
 	}
 
 	_ = stream.Close()
+}
+
+func echoStream(stream quic.Stream) error {
+	buffer := make([]byte, 32*1024)
+
+	for {
+		n, readErr := stream.Read(buffer)
+		if n > 0 {
+			if _, err := writeFull(stream, buffer[:n]); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
+}
+
+func drainUniStream(stream quic.ReceiveStream) {
+	_, _ = io.Copy(io.Discard, stream)
 }
 
 func runClient(ctx context.Context, cfg clientConfig, stdout io.Writer) error {
@@ -204,6 +300,8 @@ func runClient(ctx context.Context, cfg clientConfig, stdout io.Writer) error {
 		return err
 	}
 
+	startedAt := time.Now()
+
 	conn, err := quic.DialAddr(ctx, cfg.addr, &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		RootCAs:    roots,
@@ -214,6 +312,19 @@ func runClient(ctx context.Context, cfg clientConfig, stdout io.Writer) error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.CloseWithError(0, "done")
+
+	handshakeLatency := time.Since(startedAt)
+
+	if cfg.jsonOutput {
+		result, err := runStreamPressureClient(ctx, cfg, conn, startedAt, handshakeLatency)
+		if err != nil {
+			return err
+		}
+
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(result)
+	}
 
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
@@ -242,6 +353,327 @@ func runClient(ctx context.Context, cfg clientConfig, stdout io.Writer) error {
 	return nil
 }
 
+func runStreamPressureClient(
+	ctx context.Context,
+	cfg clientConfig,
+	conn quic.Connection,
+	startedAt time.Time,
+	handshakeLatency time.Duration,
+) (clientRunResult, error) {
+	applicationStartedAt := time.Now()
+	payload := deterministicPayload(cfg.payloadSize)
+	firstByte := make(chan time.Duration, 1)
+	latencies := make([]float64, cfg.streamCount)
+
+	var bytesSent int64
+	var bytesReceived int64
+	var wg sync.WaitGroup
+	errc := make(chan error, cfg.streamCount)
+
+	for index := 0; index < cfg.streamCount; index++ {
+		index := index
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			streamStartedAt := time.Now()
+
+			sent, received, err := runPressureStream(
+				ctx,
+				cfg,
+				conn,
+				payload,
+				firstByte,
+				applicationStartedAt,
+			)
+			if err != nil {
+				errc <- err
+				return
+			}
+
+			atomic.AddInt64(&bytesSent, sent)
+			atomic.AddInt64(&bytesReceived, received)
+			latencies[index] = durationMillis(time.Since(streamStartedAt))
+		}()
+	}
+
+	wg.Wait()
+	close(errc)
+
+	for err := range errc {
+		if err != nil {
+			return clientRunResult{}, err
+		}
+	}
+
+	applicationDuration := time.Since(applicationStartedAt)
+	finishedAt := time.Now()
+	firstByteLatency := firstByteLatencyMS(firstByte)
+	totalBytesSent := atomic.LoadInt64(&bytesSent)
+	totalBytesReceived := atomic.LoadInt64(&bytesReceived)
+
+	return clientRunResult{
+		SchemaVersion:         "quicprobe-v1",
+		RecordType:            "client_run",
+		Tool:                  "quicprobe",
+		ReferenceImpl:         "quic-go",
+		ReferenceVersion:      moduleVersion(quicGoModulePath),
+		StartedAt:             startedAt.UTC().Format(time.RFC3339Nano),
+		FinishedAt:            finishedAt.UTC().Format(time.RFC3339Nano),
+		RemoteAddr:            conn.RemoteAddr().String(),
+		ALPN:                  conn.ConnectionState().TLS.NegotiatedProtocol,
+		StreamDirection:       cfg.streamDirection,
+		StreamCount:           cfg.streamCount,
+		PayloadSizeBytes:      cfg.payloadSize,
+		PayloadCount:          cfg.payloadCount,
+		BytesSent:             totalBytesSent,
+		BytesReceived:         totalBytesReceived,
+		HandshakeLatencyMS:    durationMillis(handshakeLatency),
+		FirstByteLatencyMS:    firstByteLatency,
+		ApplicationDurationMS: durationMillis(applicationDuration),
+		GoodputBPS:            goodputBPS(totalBytesSent, totalBytesReceived, applicationDuration, cfg.streamDirection),
+		StreamLatencyMS:       latencySummary(latencies),
+	}, nil
+}
+
+func runPressureStream(
+	ctx context.Context,
+	cfg clientConfig,
+	conn quic.Connection,
+	payload []byte,
+	firstByte chan<- time.Duration,
+	firstByteOrigin time.Time,
+) (int64, int64, error) {
+	switch cfg.streamDirection {
+	case "bidirectional":
+		return runBidiPressureStream(ctx, cfg, conn, payload, firstByte, firstByteOrigin)
+	case "unidirectional":
+		return runUniPressureStream(ctx, cfg, conn, payload)
+	default:
+		return 0, 0, fmt.Errorf("unsupported stream direction %q", cfg.streamDirection)
+	}
+}
+
+func runBidiPressureStream(
+	ctx context.Context,
+	cfg clientConfig,
+	conn quic.Connection,
+	payload []byte,
+	firstByte chan<- time.Duration,
+	firstByteOrigin time.Time,
+) (int64, int64, error) {
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("open bidirectional pressure stream: %w", err)
+	}
+
+	type writeResult struct {
+		sent int64
+		err  error
+	}
+
+	writec := make(chan writeResult, 1)
+	go func() {
+		sent, err := writePayloads(stream, payload, cfg.payloadCount)
+		if err != nil {
+			writec <- writeResult{sent: sent, err: fmt.Errorf("write bidirectional pressure stream: %w", err)}
+			return
+		}
+		if err := stream.Close(); err != nil {
+			writec <- writeResult{sent: sent, err: fmt.Errorf("close bidirectional pressure stream write side: %w", err)}
+			return
+		}
+
+		writec <- writeResult{sent: sent}
+	}()
+
+	received, readErr := readEchoPayload(stream, payload, cfg.payloadCount, firstByte, firstByteOrigin)
+	write := <-writec
+	if write.err != nil {
+		return write.sent, received, write.err
+	}
+	if readErr != nil {
+		return write.sent, received, readErr
+	}
+
+	return write.sent, received, nil
+}
+
+func runUniPressureStream(
+	ctx context.Context,
+	cfg clientConfig,
+	conn quic.Connection,
+	payload []byte,
+) (int64, int64, error) {
+	stream, err := conn.OpenUniStreamSync(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("open unidirectional pressure stream: %w", err)
+	}
+
+	sent, err := writePayloads(stream, payload, cfg.payloadCount)
+	if err != nil {
+		return sent, 0, fmt.Errorf("write unidirectional pressure stream: %w", err)
+	}
+	if err := stream.Close(); err != nil {
+		return sent, 0, fmt.Errorf("close unidirectional pressure stream: %w", err)
+	}
+
+	return sent, 0, nil
+}
+
+func writePayloads(writer io.Writer, payload []byte, count int) (int64, error) {
+	var total int64
+
+	for i := 0; i < count; i++ {
+		n, err := writeFull(writer, payload)
+		total += int64(n)
+		if err != nil {
+			return total, err
+		}
+	}
+
+	return total, nil
+}
+
+func writeFull(writer io.Writer, payload []byte) (int, error) {
+	var total int
+
+	for total < len(payload) {
+		n, err := writer.Write(payload[total:])
+		total += n
+		if err != nil {
+			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrShortWrite
+		}
+	}
+
+	return total, nil
+}
+
+func readEchoPayload(
+	reader io.Reader,
+	payload []byte,
+	count int,
+	firstByte chan<- time.Duration,
+	firstByteOrigin time.Time,
+) (int64, error) {
+	expectedBytes := len(payload) * count
+	if expectedBytes == 0 {
+		return 0, nil
+	}
+
+	buffer := make([]byte, min(expectedBytes, 32*1024))
+	var total int64
+	firstByteReported := false
+
+	for int(total) < expectedBytes {
+		remaining := expectedBytes - int(total)
+		readSize := min(remaining, len(buffer))
+
+		n, err := reader.Read(buffer[:readSize])
+		if n > 0 {
+			if !firstByteReported {
+				notifyFirstByte(firstByte, time.Since(firstByteOrigin))
+				firstByteReported = true
+			}
+
+			if !matchesPayload(buffer[:n], payload, int(total)) {
+				return total + int64(n), errors.New("echo payload mismatch")
+			}
+
+			total += int64(n)
+		}
+		if err != nil {
+			if err == io.EOF && int(total) == expectedBytes {
+				return total, nil
+			}
+			return total, fmt.Errorf("read echo payload: %w", err)
+		}
+	}
+
+	return total, nil
+}
+
+func matchesPayload(chunk []byte, payload []byte, offset int) bool {
+	for index, value := range chunk {
+		if value != payload[(offset+index)%len(payload)] {
+			return false
+		}
+	}
+
+	return true
+}
+
+func notifyFirstByte(firstByte chan<- time.Duration, latency time.Duration) {
+	select {
+	case firstByte <- latency:
+	default:
+	}
+}
+
+func firstByteLatencyMS(firstByte <-chan time.Duration) *float64 {
+	select {
+	case latency := <-firstByte:
+		value := durationMillis(latency)
+		return &value
+	default:
+		return nil
+	}
+}
+
+func deterministicPayload(size int) []byte {
+	payload := make([]byte, size)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+	return payload
+}
+
+func latencySummary(values []float64) map[string]float64 {
+	if len(values) == 0 {
+		return map[string]float64{"p50": 0, "p95": 0, "p99": 0}
+	}
+
+	sorted := append([]float64(nil), values...)
+	sort.Float64s(sorted)
+
+	return map[string]float64{
+		"p50": percentile(sorted, 0.50),
+		"p95": percentile(sorted, 0.95),
+		"p99": percentile(sorted, 0.99),
+	}
+}
+
+func percentile(sorted []float64, p float64) float64 {
+	if len(sorted) == 1 {
+		return sorted[0]
+	}
+
+	index := int(float64(len(sorted)-1) * p)
+	return sorted[index]
+}
+
+func durationMillis(duration time.Duration) float64 {
+	return float64(duration.Microseconds()) / 1000.0
+}
+
+func goodputBPS(sent int64, received int64, duration time.Duration, direction string) float64 {
+	seconds := duration.Seconds()
+	if seconds <= 0 {
+		return 0
+	}
+
+	bytes := received
+	if direction == "unidirectional" {
+		bytes = sent
+	}
+
+	return float64(bytes*8) / seconds
+}
+
 func serverNameFor(addr string, override string) (string, error) {
 	if override != "" {
 		return override, nil
@@ -253,6 +685,21 @@ func serverNameFor(addr string, override string) (string, error) {
 	}
 
 	return host, nil
+}
+
+func moduleVersion(path string) string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "unknown"
+	}
+
+	for _, dep := range info.Deps {
+		if dep.Path == path {
+			return dep.Version
+		}
+	}
+
+	return "unknown"
 }
 
 func envOrDefault(key string, fallback string) string {

@@ -69,6 +69,20 @@ go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
   --bidi-echo hello
 ```
 
+For reference stream-pressure experiments, the client can emit structured
+`quicprobe-v1` JSON:
+
+```bash
+go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
+  --ca .tmp/integration-certs/ca.pem \
+  --alpn moqx-test \
+  --json \
+  --stream-direction bidirectional \
+  --stream-count 2 \
+  --payload-size 1200 \
+  --payload-count 100
+```
+
 ## License
 
 MIT

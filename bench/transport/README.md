@@ -194,6 +194,35 @@ Run the selected reference QUIC implementation on controlled server paths:
 Reference-to-reference results help separate path/tool limits from `moqx`
 limits.
 
+The first selected reference implementation is the repo-owned Go tool
+`tools/quicprobe`. Its `client --json` mode emits `quicprobe-v1` JSON for a
+single reference client run. That output is an implementation-specific
+reference measurement, not the canonical benchmark schema; `moqx-transport-bench`
+commands are responsible for converting reference measurements into
+`transport-bench-v1` JSONL records.
+
+```bash
+go run ./tools/quicprobe server --addr :4433 \
+  --cert .tmp/integration-certs/server.pem \
+  --key .tmp/integration-certs/server-key.pem \
+  --alpn moqx-test
+
+go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
+  --ca .tmp/integration-certs/ca.pem \
+  --alpn moqx-test \
+  --json \
+  --stream-direction bidirectional \
+  --stream-count 4 \
+  --payload-size 1200 \
+  --payload-count 100
+```
+
+For unidirectional stream pressure, set
+`--stream-direction unidirectional`. Bidirectional pressure reports bytes sent,
+bytes echoed back, first-byte latency, aggregate goodput, and stream latency
+percentiles. Unidirectional pressure reports bytes sent and write-side stream
+latency; it has no echo bytes or first-byte latency.
+
 ### Pressure Patterns
 
 Tools should model transport-level pressure patterns before full protocol

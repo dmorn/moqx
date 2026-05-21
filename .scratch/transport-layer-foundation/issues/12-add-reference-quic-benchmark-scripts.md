@@ -128,3 +128,15 @@ shape is committed with the first local loopback reference-to-reference record.
   passed when local UDP bind was allowed. Sandbox-blocked UDP bind exposed one
   test-hardening follow-up: quicprobe tests should select on readiness and
   server error channels instead of waiting on readiness forever.
+- 2026-05-21: First reference-tool implementation slice:
+  `tools/quicprobe client --json` now emits `quicprobe-v1` JSON for measured
+  stream-pressure runs, with handshake latency, first-byte latency where
+  applicable, byte counts, goodput, and stream latency percentiles. The
+  reference server now supports bidirectional echo streams and unidirectional
+  stream drains; bidirectional echo uses bounded streaming rather than buffering
+  the entire payload. This is deliberately still reference-tool output, not
+  canonical `transport-bench-v1` JSONL; the next slice is a
+  `moqx-transport-bench` command that runs or ingests this output and emits the
+  shared benchmark schema. Local loopback smoke passed with two bidirectional
+  streams, 256-byte payloads, four writes per stream, and 2048 bytes sent and
+  received.
