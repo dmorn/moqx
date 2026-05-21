@@ -11,8 +11,13 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   @timeout_exit_status 124
   @timeout_stop_condition "reference_comparison_step_timeout"
   @reference_client_topology "reference-client-to-reference-server"
+  @reference_client_moqx_listener_topology "reference-client-to-moqx-listener"
   @moqx_client_topology "moqx-client-to-reference-server"
-  @supported_topologies [@reference_client_topology, @moqx_client_topology]
+  @supported_topologies [
+    @reference_client_topology,
+    @reference_client_moqx_listener_topology,
+    @moqx_client_topology
+  ]
 
   def main(argv, opts \\ []) do
     script = Keyword.get(opts, :script, @default_script)
@@ -188,6 +193,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp run_topology(%{topology: @reference_client_topology} = config), do: run_quicprobe(config)
+
+  defp run_topology(%{topology: @reference_client_moqx_listener_topology} = config),
+    do: run_quicprobe(config)
+
   defp run_topology(%{topology: @moqx_client_topology} = config), do: run_moqx_client(config)
 
   defp run_quicprobe(config) do
@@ -713,6 +722,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         "reference_tool" => "quicprobe",
         "measurement_schema" => measurement["schema_version"],
         "client_implementation" => measurement["client_implementation"] || "quicprobe",
+        "server_implementation" => server_implementation(ctx.config),
         "stream_scheduling" =>
           measurement["stream_scheduling"] || default_stream_scheduling(ctx.config)
       }
@@ -720,7 +730,14 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp default_stream_scheduling(%{topology: @reference_client_topology}), do: "concurrent"
+
+  defp default_stream_scheduling(%{topology: @reference_client_moqx_listener_topology}),
+    do: "concurrent"
+
   defp default_stream_scheduling(%{topology: @moqx_client_topology}), do: "concurrent"
+
+  defp server_implementation(%{topology: @reference_client_moqx_listener_topology}), do: "moqx"
+  defp server_implementation(_config), do: "quicprobe"
 
   defp workload_metadata(ctx) do
     measurement = measurement(ctx)
@@ -860,6 +877,12 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp valid_measurement?(
          %{topology: @reference_client_topology},
+         %{"schema_version" => "quicprobe-v1", "record_type" => "client_run"}
+       ),
+       do: true
+
+  defp valid_measurement?(
+         %{topology: @reference_client_moqx_listener_topology},
          %{"schema_version" => "quicprobe-v1", "record_type" => "client_run"}
        ),
        do: true
@@ -1115,9 +1138,12 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       #{script} --topology TOPOLOGY --server HOST --ca PATH [options]
 
     Required:
-      --topology VALUE               reference-client-to-reference-server or moqx-client-to-reference-server
-      --server HOST                  reference server host or IP
-      --ca PATH                      CA certificate for the reference server
+      --topology VALUE               one of:
+                                      reference-client-to-reference-server
+                                      reference-client-to-moqx-listener
+                                      moqx-client-to-reference-server
+      --server HOST                  peer server host or IP
+      --ca PATH                      CA certificate for the peer server
 
     Common options:
       --port PORT                    reference server UDP port (default: 4433)
@@ -1129,7 +1155,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       --payload-count N              payload writes per stream (default: 1)
       --timeout-seconds N            client timeout (default: 5)
       --timeout-margin-seconds N     kill/abort step after timeout + N seconds (default: 2)
-      --quicprobe-command PATH       quicprobe executable for reference-client topology (default: quicprobe)
+      --quicprobe-command PATH       quicprobe executable for reference-client topologies (default: quicprobe)
       --path-json PATH_OR_JSON       path metadata file or inline JSON object
       --output PATH                  write JSONL to a file instead of stdout
       --run-id ID                    run identifier
@@ -1158,6 +1184,20 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         --topology moqx-client-to-reference-server \\
         --server 127.0.0.1 --port 4433 --ca .tmp/integration-certs/ca.pem \\
         --servername localhost --stream-count 2
+
+    Reference client to MOQX listener:
+      server$ moqx-transport-bench moqx-listener \\
+        --host 0.0.0.0 --port 4433 \\
+        --certfile /opt/moqx-bench/certs/server.pem \\
+        --keyfile /opt/moqx-bench/certs/server-key.pem \\
+        --stream-count 2
+
+      client$ #{script} \\
+        --topology reference-client-to-moqx-listener \\
+        --server SERVER_PRIVATE_IP --port 4433 \\
+        --ca /opt/moqx-bench/certs/ca.pem \\
+        --quicprobe-command /opt/moqx-bench/quicprobe/current/bin/quicprobe \\
+        --stream-count 2
     """
   end
 end

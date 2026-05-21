@@ -16,12 +16,12 @@ This isolates client-side and listener-side behavior while measuring raw transpo
 ## Acceptance criteria
 
 - [x] A script measures `MOQX.Transport` client behavior against the selected reference server.
-- [ ] A script measures selected reference client behavior against a `MOQX.Transport` listener.
-- [ ] Scripts accept caller-provided endpoints for same-region, cross-region, and edge-to-server paths.
+- [x] A script measures selected reference client behavior against a `MOQX.Transport` listener.
+- [x] Scripts accept caller-provided endpoints for same-region, cross-region, and edge-to-server paths.
 - [ ] Measurements include handshake latency, first-byte latency, stream throughput, datagram behavior where available, latency percentiles, resource usage, and stall/backpressure indicators.
 - [ ] Scripts can run stream pressure, datagram pressure, and mixed control-plus-object patterns defined by issue 08.
-- [ ] Scripts document how to start any required external reference process.
-- [ ] Output follows the shared benchmark metadata/result schema defined by issue 08 and is comparable with the MOQX self-pair calibration benchmark.
+- [x] Scripts document how to start any required external reference process.
+- [x] Output follows the shared benchmark metadata/result schema defined by issue 08 and is comparable with the MOQX self-pair calibration benchmark.
 - [ ] Any protocol mismatch or unsupported feature in the selected reference implementation is documented.
 
 ## Blocked by
@@ -205,8 +205,19 @@ shape is committed with the first local loopback reference-to-reference record.
   feedback. Docker-backed loopback smoke against `quicprobe server` passed with
   3 streams, 2 payloads per stream, 1536 bytes sent and echoed,
   `stream_scheduling=concurrent`, and no break symptom.
+- 2026-05-21: Added the `reference-client-to-moqx-listener` topology and the
+  explicit `moqx-transport-bench moqx-listener` peer command. Operators start
+  the MOQX listener on the server endpoint, then run
+  `reference-comparison --topology reference-client-to-moqx-listener` from the
+  client side with caller-provided endpoint, CA, SNI, and path metadata. The
+  listener receives stream payloads through `MOQX.Transport.recv_stream/3`,
+  echoes with async `MOQX.Transport.send_stream/4`, waits for local send
+  completions, and waits for the peer close before closing locally. Local
+  loopback smoke `local-reference-client-listener-smoke` passed with 3
+  bidirectional streams, 2 payloads per stream, 1536 bytes sent and echoed,
+  `server_implementation=moqx`, `stream_scheduling=concurrent`, and no break
+  symptom. This remains loopback calibration only, not real network evidence.
 
 Remaining slices:
 
-- `reference-client-to-moqx-listener` with a documented two-process shape.
 - Datagram pressure after stream-pressure records are stable.

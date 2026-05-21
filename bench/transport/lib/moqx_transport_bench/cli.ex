@@ -2,6 +2,7 @@ defmodule MOQX.TransportBench.CLI do
   @moduledoc false
 
   alias MOQX.TransportBench.Iperf3Baseline
+  alias MOQX.TransportBench.MoqxListener
   alias MOQX.TransportBench.QuicerSelfPair
   alias MOQX.TransportBench.ReferenceComparison
   alias MOQX.TransportBench.ReportCommand
@@ -40,6 +41,7 @@ defmodule MOQX.TransportBench.CLI do
       self-pair         Run the quicer self-pair calibration benchmark
       reference-comparison
                         Run selected reference QUIC comparison benchmarks
+      moqx-listener     Run a MOQX.Transport echo/drain listener
       report            Render and validate transport benchmark JSONL
 
     Use "#{program} help COMMAND" for command-specific options.
@@ -57,6 +59,10 @@ defmodule MOQX.TransportBench.CLI do
   defp dispatch(command, argv, opts)
        when command in ["reference-comparison", "reference_comparison"] do
     ReferenceComparison.main(argv, script: command_script(:reference_comparison, opts))
+  end
+
+  defp dispatch(command, argv, opts) when command in ["moqx-listener", "moqx_listener"] do
+    MoqxListener.main(argv, script: command_script(:moqx_listener, opts))
   end
 
   defp dispatch("report", argv, opts) do
@@ -78,11 +84,13 @@ defmodule MOQX.TransportBench.CLI do
   defp mix_script(:iperf3_baseline), do: "mix moqx.transport.iperf3_baseline"
   defp mix_script(:self_pair), do: "mix moqx.transport.self_pair"
   defp mix_script(:reference_comparison), do: "mix moqx.transport.reference_comparison"
+  defp mix_script(:moqx_listener), do: "mix moqx.transport.moqx_listener"
   defp mix_script(:report), do: "mix moqx.transport.report"
 
   defp runtime_script(:iperf3_baseline, program), do: "#{program} iperf3-baseline"
   defp runtime_script(:self_pair, program), do: "#{program} self-pair"
   defp runtime_script(:reference_comparison, program), do: "#{program} reference-comparison"
+  defp runtime_script(:moqx_listener, program), do: "#{program} moqx-listener"
   defp runtime_script(:report, program), do: "#{program} report"
 
   defp program(opts), do: Keyword.get(opts, :program, @runtime_program)

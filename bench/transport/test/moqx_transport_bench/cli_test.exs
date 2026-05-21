@@ -7,12 +7,22 @@ defmodule MOQX.TransportBench.CLITest do
   alias MOQX.TransportBench.ReleaseCLI
 
   test "prints top-level runtime usage" do
-    assert capture_io(fn -> CLI.main([]) end) =~ "moqx-transport-bench COMMAND"
+    output = capture_io(fn -> CLI.main([]) end)
+
+    assert output =~ "moqx-transport-bench COMMAND"
+    assert output =~ "moqx-listener"
   end
 
   test "prints command-specific runtime usage" do
     assert capture_io(fn -> CLI.main(["help", "report"]) end) =~
              "moqx-transport-bench report PATH"
+  end
+
+  test "prints MOQX listener usage" do
+    output = capture_io(fn -> CLI.main(["help", "moqx-listener"]) end)
+
+    assert output =~ "moqx-transport-bench moqx-listener"
+    assert output =~ "reference-client-to-MOQX-listener"
   end
 
   test "documents inline or file path metadata input for iperf3 baseline" do
@@ -24,6 +34,7 @@ defmodule MOQX.TransportBench.CLITest do
     output = capture_io(fn -> CLI.main(["help", "reference-comparison"]) end)
 
     assert output =~ "reference-client-to-reference-server"
+    assert output =~ "reference-client-to-moqx-listener"
     assert output =~ "moqx-client-to-reference-server"
   end
 

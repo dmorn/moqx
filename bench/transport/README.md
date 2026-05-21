@@ -223,8 +223,9 @@ bytes echoed back, first-byte latency, aggregate goodput, and stream latency
 percentiles. Unidirectional pressure reports bytes sent and write-side stream
 latency; it has no echo bytes or first-byte latency.
 
-The canonical benchmark wrapper supports the first reference-to-reference and
-MOQX-client-to-reference-server topologies:
+The canonical benchmark wrapper supports reference-to-reference,
+MOQX-client-to-reference-server, and reference-client-to-MOQX-listener
+topologies:
 
 ```bash
 moqx-transport-bench reference-comparison \
@@ -250,15 +251,40 @@ moqx-transport-bench reference-comparison \
   --payload-size 1200 \
   --payload-count 100 \
   --output bench/transport/results/moqx-client-reference.jsonl
+
+moqx-transport-bench moqx-listener \
+  --host 0.0.0.0 \
+  --port 4433 \
+  --certfile .tmp/integration-certs/server.pem \
+  --keyfile .tmp/integration-certs/server-key.pem \
+  --stream-count 4 \
+  --payload-size 1200 \
+  --payload-count 100
+
+moqx-transport-bench reference-comparison \
+  --topology reference-client-to-moqx-listener \
+  --server 127.0.0.1 \
+  --port 4433 \
+  --ca .tmp/integration-certs/ca.pem \
+  --quicprobe-command /path/to/quicprobe \
+  --stream-direction bidirectional \
+  --stream-count 4 \
+  --payload-size 1200 \
+  --payload-count 100 \
+  --output bench/transport/results/reference-client-moqx-listener.jsonl
 ```
 
-The command does not start the reference server. Start `tools/quicprobe server`
-explicitly on the chosen endpoint first, then run the benchmark wrapper from
-the client side. The wrapper emits `transport-bench-v1` JSONL. The MOQX-client
-topology opens all requested streams, schedules payload rounds across those
-streams, and records `stream_scheduling=concurrent`. Stream sends are accepted
-asynchronously by `MOQX.Transport.send_stream/4`; send completion is reported
-later as a transport event and is not peer-delivery proof.
+The measurement command does not start the peer server. For reference server
+topologies, start `tools/quicprobe server` explicitly on the chosen endpoint
+first. For reference-client-to-MOQX-listener runs, start
+`moqx-transport-bench moqx-listener` explicitly on the server endpoint; it
+serves one connection by default and then exits. Then run
+`reference-comparison` from the client side. The wrapper emits
+`transport-bench-v1` JSONL. The MOQX-client topology opens all requested
+streams, schedules payload rounds across those streams, and records
+`stream_scheduling=concurrent`. Stream sends are accepted asynchronously by
+`MOQX.Transport.send_stream/4`; send completion is reported later as a
+transport event and is not peer-delivery proof.
 
 ### Pressure Patterns
 
