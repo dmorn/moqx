@@ -34,7 +34,7 @@ func TestClientServerBidiEcho(t *testing.T) {
 		}, ready)
 	}()
 
-	addr := <-ready
+	addr := awaitServerReady(t, ready, errc)
 	var output strings.Builder
 
 	clientCtx, clientCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -63,6 +63,21 @@ func TestClientServerBidiEcho(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("server did not stop after context cancellation")
 	}
+}
+
+func awaitServerReady(t *testing.T, ready <-chan string, errc <-chan error) string {
+	t.Helper()
+
+	select {
+	case addr := <-ready:
+		return addr
+	case err := <-errc:
+		t.Fatalf("runServer() startup error = %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not become ready")
+	}
+
+	return ""
 }
 
 type testCerts struct {

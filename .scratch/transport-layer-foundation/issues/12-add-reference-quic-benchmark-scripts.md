@@ -55,8 +55,36 @@ Current status:
   provisioning, release deploy, remote command execution, result capture, and
   teardown work before reference-comparison commands are added.
 
-Keep this issue at `needs-triage` until the runtime command shape is designed
-from that smoke-test experience.
+Reference-comparison command contract, first pass:
+
+- Extend `tools/quicprobe` from an echo probe into a reference pressure peer.
+  It should keep `server` and `client` modes, but add structured JSON output
+  for measured client runs and server support for stream sink/echo, optional
+  unidirectional streams, and later datagrams.
+- Keep canonical benchmark JSONL in the Elixir benchmark project. `quicprobe`
+  may emit reference-run JSON, but `moqx-transport-bench` is responsible for
+  converting measured runs into `transport-bench-v1` records.
+- Add one runtime command family under `moqx-transport-bench`, tentatively
+  `reference-comparison`, with an explicit `--topology`:
+  - `moqx-client-to-reference-server`;
+  - `reference-client-to-moqx-listener`;
+  - `reference-client-to-reference-server`.
+- For real server paths, peer processes are explicit operator steps. The
+  benchmark command should accept endpoints and path metadata; it should not
+  provision infrastructure or hide server startup.
+- Implement in this order:
+  1. local loopback `reference-client-to-reference-server` using `quicprobe`
+     JSON output;
+  2. `moqx-client-to-reference-server` using `MOQX.Transport.Quicer`;
+  3. `reference-client-to-moqx-listener` with a documented two-process remote
+     shape;
+  4. datagram pressure after stream-pressure records are stable.
+- The first workload should be stream pressure, not mixed MOQT-shaped load.
+  Mixed control-plus-object pressure should build on the same measurement
+  primitives after the simple stream path is comparable.
+
+Move this issue out of `needs-triage` once the `reference-comparison` CLI
+shape is committed with the first local loopback reference-to-reference record.
 
 ## Comments
 
@@ -87,3 +115,16 @@ from that smoke-test experience.
   `just bench-transport-private-check`, validated by smoke
   `20260521T093427Z-private-smoke`. #12 can now design reference-comparison
   runtime command contracts against both public IPv4 and private-network paths.
+- 2026-05-21: Design/experiment pass:
+  `tools/quicprobe` is currently a minimal quic-go bidi echo peer, not a
+  benchmark tool. quic-go exposes bidirectional streams, unidirectional streams,
+  and RFC 9221 datagrams through `Config.EnableDatagrams`, so it can be grown
+  into the selected reference pressure peer. Existing interop smoke is good:
+  `mix test test/integration/quicer_listener_contract_test.exs --include
+  integration` proved reference client to `MOQX.Transport` listener, and
+  `mix test test/integration/quicer_reference_server_contract_test.exs
+  --include integration` proved `MOQX.Transport` client to reference server
+  against the running Docker harness. A bounded `go test` for quicprobe also
+  passed when local UDP bind was allowed. Sandbox-blocked UDP bind exposed one
+  test-hardening follow-up: quicprobe tests should select on readiness and
+  server error channels instead of waiting on readiness forever.
