@@ -139,6 +139,12 @@ resource "hcloud_server" "node" {
     otp_version    = var.otp_version
     elixir_version = var.elixir_version
     go_version     = var.go_version
+
+    private_network_enabled   = var.enable_private_network
+    private_network_interface = var.private_network_interface
+    private_network_cidr      = var.private_network_cidr
+    private_gateway_ip        = cidrhost(var.private_subnet_cidr, 1)
+    private_ip                = each.value.private_ip
   })
 
   firewall_ids = [hcloud_firewall.operator.id]

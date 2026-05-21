@@ -81,3 +81,8 @@ output "toolchain_check_commands" {
     "ssh root@${server.ipv4_address} 'cloud-init status --wait && go version && elixir --version && iperf3 --version | head -1'"
   }
 }
+
+output "private_network_check_command" {
+  description = "Read-only recipe that proves private ICMP and TCP connectivity between the benchmark endpoints."
+  value       = var.enable_private_network ? "just bench-transport-private-check ${var.run_id}" : null
+}

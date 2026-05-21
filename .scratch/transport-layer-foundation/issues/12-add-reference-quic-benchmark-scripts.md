@@ -82,3 +82,8 @@ from that smoke-test experience.
   infrastructure decision before reference-comparison runs is #25: either make
   Hetzner private-network readiness deterministic or scope #12 explicitly to
   public IPv4 paths for the first implementation.
+- 2026-05-21: Follow-up #25 is closed: Hetzner private-network readiness is now
+  an explicit operator step with static guest netplan config and
+  `just bench-transport-private-check`, validated by smoke
+  `20260521T093427Z-private-smoke`. #12 can now design reference-comparison
+  runtime command contracts against both public IPv4 and private-network paths.

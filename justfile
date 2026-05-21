@@ -129,6 +129,58 @@ bench-transport-destroy run_id=current_run profile="arm-smoke":
 bench-transport-outputs:
     cd "{{ infra_dir }}" && terraform output
 
+# Prove private-network readiness with ICMP and TCP before benchmark traffic.
+bench-transport-private-check run_id=current_run port="55209":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    key="{{ bench_dir }}/.keys/{{ run_id }}/id_ed25519"
+    test -f "$key" || {
+      printf 'Missing SSH key for run %s\n' "{{ run_id }}" >&2
+      exit 2
+    }
+
+    servers_json="$(cd "{{ infra_dir }}" && terraform output -json servers)"
+    client_public="$(printf '%s' "$servers_json" | jq -r '.client.public_ipv4')"
+    server_public="$(printf '%s' "$servers_json" | jq -r '.server.public_ipv4')"
+    client_private="$(printf '%s' "$servers_json" | jq -r '.client.private_ip // empty')"
+    server_private="$(printf '%s' "$servers_json" | jq -r '.server.private_ip // empty')"
+
+    if [ -z "$client_private" ] || [ -z "$server_private" ]; then
+      printf '%s\n' 'Terraform outputs do not include private IPs. Private network is disabled or not applied.' >&2
+      exit 2
+    fi
+
+    ssh_opts=(
+      -i "$key"
+      -o IdentitiesOnly=yes
+      -o StrictHostKeyChecking=accept-new
+      -o UserKnownHostsFile="{{ bench_dir }}/.keys/{{ run_id }}/known_hosts"
+    )
+
+    client="root@$client_public"
+    server="root@$server_public"
+    remote_log="/tmp/moqx-private-iperf3-{{ port }}.log"
+
+    cleanup() {
+      ssh "${ssh_opts[@]}" "$server" "pkill -f 'iperf3 .*--port {{ port }}' >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+
+    ssh "${ssh_opts[@]}" "$client" "cloud-init status --wait >/dev/null && ip -4 address show && ip route get '$server_private'"
+    ssh "${ssh_opts[@]}" "$server" "cloud-init status --wait >/dev/null && ip -4 address show && ip route get '$client_private'"
+    ssh "${ssh_opts[@]}" "$server" "nohup iperf3 --server --bind '$server_private' --port '{{ port }}' --one-off > '$remote_log' 2>&1 &"
+    sleep 1
+    ssh "${ssh_opts[@]}" "$client" "ping -c 3 -W 2 '$server_private'"
+    ssh "${ssh_opts[@]}" "$client" "iperf3 --client '$server_private' --port '{{ port }}' --time 1 --json >/tmp/moqx-private-check.json"
+
+    printf 'Private network ready: %s -> %s over ICMP and TCP port %s\n' "$client_private" "$server_private" "{{ port }}"
+
 # Verify Terraform state and Hetzner labelled resources are clean after destroy.
 bench-transport-verify-clean:
     #!/usr/bin/env bash

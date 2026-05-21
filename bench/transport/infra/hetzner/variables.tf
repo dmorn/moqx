@@ -94,6 +94,12 @@ variable "private_network_zone" {
   default     = "eu-central"
 }
 
+variable "private_network_interface" {
+  description = "Guest OS interface name for the first attached Hetzner private network on the selected server families."
+  type        = string
+  default     = "enp7s0"
+}
+
 variable "client_private_ip" {
   description = "Private IP for the client endpoint when enable_private_network is true."
   type        = string

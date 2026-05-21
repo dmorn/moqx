@@ -703,6 +703,17 @@ Terraform outputs include path metadata for public IPv4 and private-network
 runs. Benchmark tools should merge those outputs with live host inventory and
 run-specific metrics.
 
+Before using private-network path metadata, run:
+
+```bash
+just bench-transport-private-check
+```
+
+The check proves that both nodes have their configured private IPs ready and
+that the client can reach the server private IP over ICMP and TCP. Treat private
+path benchmark results as invalid if this readiness check has not passed for
+the same Terraform run.
+
 ## Implementation Order
 
 The intended issue order is:

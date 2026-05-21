@@ -18,12 +18,49 @@ write_files:
       Provisioning installs only the base build toolchain, iperf3, Go, Erlang,
       and Elixir. Deploy a moqx-transport-bench release artifact when you are
       ready to run a benchmark.
+%{ if private_network_enabled }
+  - path: /etc/netplan/60-moqx-bench-private-network.yaml
+    permissions: "0644"
+    content: |
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          ${private_network_interface}:
+            dhcp4: false
+            mtu: 1450
+            addresses:
+              - ${private_ip}/32
+            routes:
+              - to: ${private_network_cidr}
+                via: ${private_gateway_ip}
+                on-link: true
+%{ endif }
 
 runcmd:
   - |
       set -eu
       export HOME=/root
       export DEBIAN_FRONTEND=noninteractive
+%{ if private_network_enabled }
+      private_iface="${private_network_interface}"
+
+      for _ in $(seq 1 30); do
+        if ip link show dev "$private_iface" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 1
+      done
+
+      ip link show dev "$private_iface"
+      systemctl stop "hc-net-ifup@$private_iface.service" || true
+      systemctl mask "hc-net-ifup@$private_iface.service" || true
+      ip address flush dev "$private_iface" scope global || true
+      netplan generate
+      netplan apply
+      ip -4 address show dev "$private_iface"
+      ip route get "${private_gateway_ip}"
+%{ endif }
       apt-get update
       apt-get install -y \
         autoconf \

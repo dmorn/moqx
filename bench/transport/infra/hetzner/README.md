@@ -40,6 +40,18 @@ Check cloud-init and the installed tools before running benchmarks:
 terraform output -json toolchain_check_commands
 ```
 
+When the private network is enabled, prove private-path readiness before using
+private IPs for benchmarks:
+
+```bash
+just bench-transport-private-check
+```
+
+The check waits for cloud-init on both nodes, verifies that each node has a
+route to its peer private IP, pings the server private IP from the client, and
+runs a one-second `iperf3` TCP probe bound to the server private IP. Do not use
+`path_metadata_private` for benchmark results until this check passes.
+
 Destroy the pair when the run is finished:
 
 ```bash
@@ -84,10 +96,18 @@ allowed.
 
 Cloud-init intentionally does little:
 
+- writes a static netplan file for the first Hetzner private NIC when private
+  networking is enabled;
 - installs build tools, `iperf3`, and small shell utilities;
 - installs Go from the official Linux archive at `go.dev/dl`;
 - installs Erlang/OTP and Elixir with the official Elixir install script;
 - writes a short note under `/opt/moqx-bench/`.
+
+For the current CAX/CCX profiles, the first Hetzner private interface is
+configured as `enp7s0` with the assigned private IP as `/32`, MTU 1450, and a
+route to the private network CIDR via the network gateway. The Terraform
+variable `private_network_interface` exists so a future profile can override
+the guest interface name if needed.
 
 The benchmark repo is not cloned automatically, and no benchmark process is
 started automatically. Deploy a `moqx-transport-bench` release artifact or use
