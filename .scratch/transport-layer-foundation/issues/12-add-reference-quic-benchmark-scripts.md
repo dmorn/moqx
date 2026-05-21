@@ -178,6 +178,24 @@ shape is committed with the first local loopback reference-to-reference record.
   Terraform role under `/opt/moqx-bench/quicprobe` and smoke-checks that the
   binary starts. The remaining #12 blocker is exercising this on disposable
   Hetzner nodes, then adding the reference-client-to-MOQX-listener command.
+- 2026-05-21: Disposable Hetzner smoke passed for run
+  `20260521T133654Z-smoke` on the `arm-smoke` profile: `cax21` client in
+  `fsn1`, `cax21` server in `nbg1`, private path
+  `10.88.0.11 -> 10.88.0.12`, MTU 1450. `just
+  bench-transport-private-check` proved ICMP and TCP readiness with 0% ping
+  loss and ~3.6 ms average RTT. Both `moqx-transport-bench` and `quicprobe`
+  Linux/ARM64 artifacts for git `ae52d74` deployed and smoke-checked on both
+  nodes. A tiny canonical `iperf3-baseline` record on the private path reported
+  5.18 Gbps TCP goodput and a 10 Mbps UDP step with 100% delivery. Two tiny
+  reference-comparison records passed report validation: quicprobe client to
+  quicprobe server reported 17.849 ms handshake latency, 4.419 ms first byte,
+  and 4.32 Mbps goodput; MOQX client to quicprobe server reported 41.265 ms
+  handshake latency, 7.417 ms first byte, and 2.59 Mbps goodput. Result
+  artifacts are under
+  `bench/transport/results/20260521T133654Z-smoke/`. Infrastructure was
+  destroyed and `just bench-transport-verify-clean` confirmed no Terraform
+  state entries or labelled Hetzner resources remain. These are smoke records,
+  not capacity claims.
 
 Remaining slices:
 
