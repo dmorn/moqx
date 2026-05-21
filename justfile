@@ -13,12 +13,17 @@ target_os := env('TARGET_OS', 'linux')
 target_arch := env('TARGET_ARCH', 'arm64')
 docker_platform := target_os + "/" + target_arch
 elixir_image := env('ELIXIR_IMAGE', 'elixir:1.19.5-otp-28')
+go_image := env('GO_IMAGE', 'golang:1.23-bookworm')
 
 artifact_dir := "build/artifacts"
 artifact_name := release_cli + "-" + release_version + "-" + git_sha + "-" + target_os + "-" + target_arch + ".tar.gz"
 artifact_rel := artifact_dir + "/" + artifact_name
 artifact := bench_dir + "/" + artifact_rel
 remote_dir := "/opt/moqx-bench/moqx-transport-bench"
+quicprobe_artifact_name := "quicprobe-" + git_sha + "-" + target_os + "-" + target_arch + ".tar.gz"
+quicprobe_artifact_rel := artifact_dir + "/" + quicprobe_artifact_name
+quicprobe_artifact := bench_dir + "/" + quicprobe_artifact_rel
+quicprobe_remote_dir := "/opt/moqx-bench/quicprobe"
 current_run := `if [ -f bench/transport/.run/current ]; then cat bench/transport/.run/current; fi`
 
 # Show available recipes.
@@ -221,13 +226,35 @@ bench-transport-build-release:
     @test -f "{{ artifact }}"
     @printf 'Built %s\n' "{{ artifact }}"
 
+# Build the Linux/ARM64 quicprobe reference peer artifact with Docker.
+bench-transport-build-quicprobe:
+    mkdir -p "{{ bench_dir }}/{{ artifact_dir }}"
+    docker buildx build \
+      --platform "{{ docker_platform }}" \
+      --file "{{ bench_dir }}/docker/Dockerfile.quicprobe" \
+      --target artifact \
+      --output "type=local,dest={{ bench_dir }}/{{ artifact_dir }}" \
+      --build-arg "GO_IMAGE={{ go_image }}" \
+      --build-arg "ARTIFACT_NAME={{ quicprobe_artifact_name }}" \
+      .
+    @test -f "{{ quicprobe_artifact }}"
+    @printf 'Built %s\n' "{{ quicprobe_artifact }}"
+
 # Print the release artifact path for the current defaults.
 bench-transport-artifact-path:
     @printf '%s\n' "{{ artifact }}"
 
+# Print the quicprobe artifact path for the current defaults.
+bench-transport-quicprobe-artifact-path:
+    @printf '%s\n' "{{ quicprobe_artifact }}"
+
 # Deploy the release artifact to both Terraform roles in parallel.
 [parallel]
 bench-transport-deploy run_id=current_run artifact=artifact_rel: (bench-transport-deploy-role run_id "client" artifact) (bench-transport-deploy-role run_id "server" artifact)
+
+# Deploy the quicprobe reference peer artifact to both Terraform roles in parallel.
+[parallel]
+bench-transport-deploy-quicprobe run_id=current_run artifact=quicprobe_artifact_rel: (bench-transport-deploy-quicprobe-role run_id "client" artifact) (bench-transport-deploy-quicprobe-role run_id "server" artifact)
 
 # Deploy the release artifact to one Terraform role.
 bench-transport-deploy-role run_id role artifact=artifact_rel:
@@ -241,6 +268,19 @@ bench-transport-deploy-role run_id role artifact=artifact_rel:
 
     target="$(just --quiet bench-transport-target {{ role }})"
     just bench-transport-deploy-target "$target" "{{ run_id }}" "{{ artifact }}"
+
+# Deploy the quicprobe artifact to one Terraform role.
+bench-transport-deploy-quicprobe-role run_id role artifact=quicprobe_artifact_rel:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    target="$(just --quiet bench-transport-target {{ role }})"
+    just bench-transport-deploy-quicprobe-target "$target" "{{ run_id }}" "{{ artifact }}"
 
 # Print the public SSH target for a Terraform role.
 bench-transport-target role:
@@ -284,6 +324,34 @@ bench-transport-deploy-target target run_id=current_run artifact=artifact_rel:
         --artifact "{{ artifact }}" \
         --remote-dir "{{ remote_dir }}" \
         --smoke \
+        -- "{{ target }}" 2>&1 | tee "../../$log"
+
+# Deploy the quicprobe artifact to one explicit SSH target.
+bench-transport-deploy-quicprobe-target target run_id=current_run artifact=quicprobe_artifact_rel:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    key="{{ bench_dir }}/.keys/{{ run_id }}/id_ed25519"
+    test -f "$key" || {
+      printf 'Missing SSH key for run %s\n' "{{ run_id }}" >&2
+      exit 2
+    }
+
+    mkdir -p "{{ bench_dir }}/results/{{ run_id }}"
+    safe_target="$(printf '%s' "{{ target }}" | tr -c 'A-Za-z0-9_.@-' '_')"
+    log="{{ bench_dir }}/results/{{ run_id }}/deploy-quicprobe-$safe_target.log"
+
+    cd "{{ bench_dir }}"
+    SSH_OPTS="-i .keys/{{ run_id }}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=.keys/{{ run_id }}/known_hosts" \
+      scripts/deploy_release.sh \
+        --artifact "{{ artifact }}" \
+        --remote-dir "{{ quicprobe_remote_dir }}" \
+        --smoke-command "bin/quicprobe 2>&1 | grep -q usage:" \
         -- "{{ target }}" 2>&1 | tee "../../$log"
 
 # Remove local transport benchmark release artifacts.

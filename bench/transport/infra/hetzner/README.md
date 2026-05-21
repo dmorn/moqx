@@ -129,11 +129,23 @@ the Terraform `client` and `server` roles:
 just bench-transport-deploy
 ```
 
+Reference-comparison runs also need the repo-owned `tools/quicprobe` binary on
+the benchmark nodes. Build and deploy it separately:
+
+```bash
+just bench-transport-build-quicprobe
+just bench-transport-deploy-quicprobe
+```
+
 The deploy step only resolves already-provisioned Terraform outputs,
 copies/extracts the release, and runs `moqx-transport-bench help` remotely.
 It does not provision infrastructure and does not start benchmark traffic.
 Client and server deploys run as separate parallel units; the top-level recipe
 fails if either role fails.
+
+The `quicprobe` deploy step follows the same role-based model and installs
+under `/opt/moqx-bench/quicprobe/current/bin/quicprobe`. It verifies that the
+binary starts, but it does not start a long-lived reference server.
 
 ## Result Metadata
 

@@ -689,11 +689,33 @@ ELIXIR_IMAGE=elixir:1.19.5-otp-28 TARGET_ARCH=arm64 \
   just bench-transport-build-release
 ```
 
+Build the matching Linux/ARM64 `tools/quicprobe` reference peer artifact:
+
+```bash
+just bench-transport-build-quicprobe
+```
+
+The default artifact path is:
+
+```text
+bench/transport/build/artifacts/quicprobe-<git>-linux-arm64.tar.gz
+```
+
+`quicprobe` is packaged separately from the Elixir release so reference peer
+deployment stays explicit and the benchmark release does not need a Go runtime.
+The Docker build runs `go test ./...` before producing the tarball.
+
 Deploy a built artifact to the Terraform `client` and `server` roles in
 parallel:
 
 ```bash
 just bench-transport-deploy
+```
+
+Deploy the built `quicprobe` artifact to the same roles:
+
+```bash
+just bench-transport-deploy-quicprobe
 ```
 
 The deploy recipe reads the current run id from
@@ -718,6 +740,14 @@ Deployment copies the tarball, extracts it under
 
 ```bash
 /opt/moqx-bench/moqx-transport-bench/current/bin/moqx-transport-bench help
+```
+
+`quicprobe` deployment copies the tarball, extracts it under
+`/opt/moqx-bench/quicprobe/releases/<artifact-name>/`, updates the `current`
+symlink, and verifies that the binary starts:
+
+```bash
+/opt/moqx-bench/quicprobe/current/bin/quicprobe 2>&1 | grep -q usage:
 ```
 
 The deploy target does not provision infrastructure or run benchmark traffic.

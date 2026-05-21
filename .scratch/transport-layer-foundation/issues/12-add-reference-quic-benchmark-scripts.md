@@ -15,7 +15,7 @@ This isolates client-side and listener-side behavior while measuring raw transpo
 
 ## Acceptance criteria
 
-- [ ] A script measures `MOQX.Transport` client behavior against the selected reference server.
+- [x] A script measures `MOQX.Transport` client behavior against the selected reference server.
 - [ ] A script measures selected reference client behavior against a `MOQX.Transport` listener.
 - [ ] Scripts accept caller-provided endpoints for same-region, cross-region, and edge-to-server paths.
 - [ ] Measurements include handshake latency, first-byte latency, stream throughput, datagram behavior where available, latency percentiles, resource usage, and stall/backpressure indicators.
@@ -51,9 +51,9 @@ Current status:
   - reference client to reference server where practical.
 - Output must remain `transport-bench-v1` JSONL and comparable with
   `self-pair` and `iperf3-baseline`.
-- The next useful dependency is an end-to-end Hetzner smoke that proves
-  provisioning, release deploy, remote command execution, result capture, and
-  teardown work before reference-comparison commands are added.
+- The next useful dependency is packaging and deploying `tools/quicprobe`
+  alongside the runtime benchmark CLI so reference-comparison smokes can run on
+  controlled Hetzner paths without rebuilding or cloning the repo on targets.
 
 Reference-comparison command contract, first pass:
 
@@ -160,13 +160,30 @@ shape is committed with the first local loopback reference-to-reference record.
   `moqx-client-reference-smoke` against `127.0.0.1:4434` produced 2048 bytes
   sent/received and passed strict report validation with only the expected
   loopback-calibration warning.
+- 2026-05-21: Async stream send contract landed in `b07f15b`. Post-commit
+  loopback self-pair smoke confirmed the benchmark still runs and emits valid
+  `transport-bench-v1` JSONL. A 4-stream, 1000-payload stream-pressure smoke
+  reported 216.79 Mbps and 22.58k sends/s on loopback. A 1000-datagram smoke
+  reported 100% delivery; a 5000-datagram burst intentionally found local
+  datagram delivery loss, proving the harness still detects break symptoms.
+  These are loopback calibration only, not real network evidence. The next
+  operational blocker for #12 is deploying `tools/quicprobe` to the same
+  controlled nodes as `moqx-transport-bench`.
+- 2026-05-21: Added Docker packaging and `just` deploy recipes for
+  `tools/quicprobe`. `just bench-transport-build-quicprobe` now builds the
+  Linux/ARM64 reference peer artifact through `golang:1.23-bookworm`, runs
+  `go test ./...` inside the build, and emits
+  `bench/transport/build/artifacts/quicprobe-<git>-linux-arm64.tar.gz`.
+  `just bench-transport-deploy-quicprobe` deploys the artifact to each
+  Terraform role under `/opt/moqx-bench/quicprobe` and smoke-checks that the
+  binary starts. The remaining #12 blocker is exercising this on disposable
+  Hetzner nodes, then adding the reference-client-to-MOQX-listener command.
 
 Remaining slices:
 
 - `reference-client-to-moqx-listener` with a documented two-process shape.
-- Packaging/deploy story for the quicprobe executable alongside benchmark
-  releases.
-- Concurrent MOQX stream pressure. The current MOQX-client wrapper records
-  `stream_scheduling=sequential` because it exercises the existing synchronous
-  `MOQX.Transport.send_stream/4` path.
+- Concurrent MOQX stream pressure. Commit `b07f15b` made
+  `MOQX.Transport.send_stream/4` admission-based and async, so the wrapper can
+  now be redesigned to keep multiple stream sends outstanding instead of using
+  the sequential correctness baseline.
 - Datagram pressure after stream-pressure records are stable.

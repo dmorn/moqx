@@ -4,7 +4,7 @@ set -eu
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/deploy_release.sh --artifact PATH [--remote-dir DIR] [--smoke] -- TARGET...
+  scripts/deploy_release.sh --artifact PATH [--remote-dir DIR] [--smoke] [--smoke-command COMMAND] -- TARGET...
 
 Environment:
   SSH_OPTS   Extra options passed to ssh and scp.
@@ -15,12 +15,19 @@ Example:
     --remote-dir /opt/moqx-bench/moqx-transport-bench \
     --smoke \
     -- root@203.0.113.10 root@203.0.113.11
+
+  scripts/deploy_release.sh \
+    --artifact build/artifacts/quicprobe-<git>-linux-arm64.tar.gz \
+    --remote-dir /opt/moqx-bench/quicprobe \
+    --smoke-command "bin/quicprobe 2>&1 | grep -q usage:" \
+    -- root@203.0.113.10
 USAGE
 }
 
 artifact=""
 remote_dir="/opt/moqx-bench/moqx-transport-bench"
 smoke=0
+smoke_command="bin/moqx-transport-bench help"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -35,6 +42,11 @@ while [ "$#" -gt 0 ]; do
     --smoke)
       smoke=1
       shift
+      ;;
+    --smoke-command)
+      smoke=1
+      smoke_command="${2:?missing value for --smoke-command}"
+      shift 2
       ;;
     --help|-h)
       usage
@@ -77,6 +89,13 @@ case "$remote_dir" in
     ;;
 esac
 
+case "$smoke_command" in
+  *"'"*)
+    printf 'Unsupported --smoke-command with single quotes: %s\n' "$smoke_command" >&2
+    exit 2
+    ;;
+esac
+
 artifact_base=$(basename "$artifact")
 release_id=${artifact_base%.tar.gz}
 remote_releases="$remote_dir/releases"
@@ -99,6 +118,6 @@ for target do
 
   if [ "$smoke" -eq 1 ]; then
     # shellcheck disable=SC2086
-    ssh $SSH_OPTS "$target" "'$remote_current/bin/moqx-transport-bench' help"
+    ssh $SSH_OPTS "$target" "cd '$remote_current' && $smoke_command"
   fi
 done
