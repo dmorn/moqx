@@ -196,12 +196,17 @@ shape is committed with the first local loopback reference-to-reference record.
   destroyed and `just bench-transport-verify-clean` confirmed no Terraform
   state entries or labelled Hetzner resources remain. These are smoke records,
   not capacity claims.
+- 2026-05-21: Redesigned the MOQX-client reference-comparison stream pressure
+  loop to open all requested streams first, schedule payload rounds across all
+  streams, and attach FIN to each final payload with `send_stream(..., finish:
+  true)`. The topology now records `stream_scheduling=concurrent`. This keeps
+  send admission asynchronous and lets multiple stream sends remain outstanding;
+  bidirectional runs still use echoed bytes as the application-level delivery
+  feedback. Docker-backed loopback smoke against `quicprobe server` passed with
+  3 streams, 2 payloads per stream, 1536 bytes sent and echoed,
+  `stream_scheduling=concurrent`, and no break symptom.
 
 Remaining slices:
 
 - `reference-client-to-moqx-listener` with a documented two-process shape.
-- Concurrent MOQX stream pressure. Commit `b07f15b` made
-  `MOQX.Transport.send_stream/4` admission-based and async, so the wrapper can
-  now be redesigned to keep multiple stream sends outstanding instead of using
-  the sequential correctness baseline.
 - Datagram pressure after stream-pressure records are stable.

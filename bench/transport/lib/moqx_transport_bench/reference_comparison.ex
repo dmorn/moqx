@@ -323,14 +323,11 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     application_started_at = monotonic_us()
     payload = binary_payload(config.payload_size)
 
-    {result, _ctx} =
-      Enum.reduce(1..config.stream_count, {empty_stream_result(), ctx}, fn _index,
-                                                                           {result, ctx} ->
-        {stream_result, ctx} =
-          run_moqx_pressure_stream(ctx, connection, payload, config, application_started_at)
+    {streams, ctx} = open_pressure_streams(ctx, connection, config)
+    {streams, ctx} = schedule_pressure_payloads(ctx, streams, payload, config.payload_count)
 
-        {merge_stream_result(result, stream_result), ctx}
-      end)
+    {result, _ctx} =
+      collect_pressure_streams(ctx, streams, payload, config, application_started_at)
 
     application_duration_ms = elapsed_ms(application_started_at)
     first_byte_latency_ms = result.first_byte_latency_ms
@@ -361,7 +358,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "stream_latency_ms" => latency_summary(result.stream_latencies_ms),
       "send_rate_packets_per_second" =>
         rate(config.stream_count * config.payload_count, seconds(application_duration_ms)),
-      "stream_scheduling" => "sequential"
+      "stream_scheduling" => "concurrent"
     }
   end
 
@@ -374,38 +371,70 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     }
   end
 
-  defp run_moqx_pressure_stream(ctx, connection, payload, config, first_byte_origin) do
-    stream_started_at = monotonic_us()
+  defp stream_direction(%{stream_direction: "bidirectional"}), do: :bidirectional
+  defp stream_direction(%{stream_direction: "unidirectional"}), do: :unidirectional
 
-    {:ok, stream, ctx} =
-      Transport.open_stream(ctx, connection, direction: stream_direction(config))
+  defp open_pressure_streams(ctx, connection, config) do
+    Enum.reduce(1..config.stream_count, {[], ctx}, fn _index, {streams, ctx} ->
+      started_at = monotonic_us()
 
-    {sent, ctx} = send_payloads(ctx, stream, payload, config.payload_count)
-    {:ok, ctx} = Transport.finish_sending(ctx, stream)
+      {:ok, stream, ctx} =
+        Transport.open_stream(ctx, connection, direction: stream_direction(config))
 
+      stream_state = %{stream: stream, started_at: started_at, bytes_sent: 0}
+      {[stream_state | streams], ctx}
+    end)
+    |> then(fn {streams, ctx} -> {Enum.reverse(streams), ctx} end)
+  end
+
+  defp schedule_pressure_payloads(ctx, streams, payload, payload_count) do
+    Enum.reduce(1..payload_count, {streams, ctx}, fn payload_index, {streams, ctx} ->
+      schedule_payload_round(streams, ctx, payload, payload_index == payload_count)
+    end)
+  end
+
+  defp schedule_payload_round(streams, ctx, payload, finish?) do
+    Enum.map_reduce(streams, ctx, fn stream_state, ctx ->
+      schedule_stream_payload(stream_state, ctx, payload, finish?)
+    end)
+  end
+
+  defp schedule_stream_payload(stream_state, ctx, payload, finish?) do
+    opts = if finish?, do: [finish: true], else: []
+    {:ok, _send, ctx} = Transport.send_stream(ctx, stream_state.stream, payload, opts)
+
+    {%{stream_state | bytes_sent: stream_state.bytes_sent + byte_size(payload)}, ctx}
+  end
+
+  defp collect_pressure_streams(ctx, streams, payload, config, first_byte_origin) do
+    Enum.reduce(streams, {empty_stream_result(), ctx}, fn stream_state, {result, ctx} ->
+      {stream_result, ctx} =
+        collect_pressure_stream(ctx, stream_state, payload, config, first_byte_origin)
+
+      {merge_stream_result(result, stream_result), ctx}
+    end)
+  end
+
+  defp collect_pressure_stream(ctx, stream_state, payload, config, first_byte_origin) do
     {received, first_byte_latency_ms, ctx} =
       if config.stream_direction == "bidirectional" do
-        recv_echo_payload(ctx, stream, payload, config.payload_count, first_byte_origin)
+        recv_echo_payload(
+          ctx,
+          stream_state.stream,
+          payload,
+          config.payload_count,
+          first_byte_origin
+        )
       else
         {0, nil, ctx}
       end
 
     {%{
-       bytes_sent: sent,
+       bytes_sent: stream_state.bytes_sent,
        bytes_received: received,
        first_byte_latency_ms: first_byte_latency_ms,
-       stream_latencies_ms: [elapsed_ms(stream_started_at)]
+       stream_latencies_ms: [elapsed_ms(stream_state.started_at)]
      }, ctx}
-  end
-
-  defp stream_direction(%{stream_direction: "bidirectional"}), do: :bidirectional
-  defp stream_direction(%{stream_direction: "unidirectional"}), do: :unidirectional
-
-  defp send_payloads(ctx, stream, payload, count) do
-    Enum.reduce(1..count, {0, ctx}, fn _index, {bytes, ctx} ->
-      {:ok, _send, ctx} = Transport.send_stream(ctx, stream, payload, [])
-      {bytes + byte_size(payload), ctx}
-    end)
   end
 
   defp recv_echo_payload(ctx, stream, payload, count, first_byte_origin) do
@@ -691,7 +720,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp default_stream_scheduling(%{topology: @reference_client_topology}), do: "concurrent"
-  defp default_stream_scheduling(%{topology: @moqx_client_topology}), do: "sequential"
+  defp default_stream_scheduling(%{topology: @moqx_client_topology}), do: "concurrent"
 
   defp workload_metadata(ctx) do
     measurement = measurement(ctx)
