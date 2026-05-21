@@ -159,10 +159,10 @@ defmodule MOQX.TransportTest do
       ctx = flush_context_events(ctx)
 
       assert {:ok, ctx} = MOQX.Transport.set_active(ctx, server_stream, true)
-      assert {:ok, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "hello", [])
+      assert {:ok, _send, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "hello", [])
 
       assert {:ok, {:stream_data, ^server_stream, "hello", %{}}, _ctx} =
-               MOQX.Transport.receive_event(ctx, 100)
+               receive_context_stream_data(ctx, server_stream, "hello", 100)
     end
 
     test "controlling_process transfers whole context handles" do
@@ -209,6 +209,15 @@ defmodule MOQX.TransportTest do
       {:timeout, ctx} -> ctx
       {:ok, _event, ctx} -> flush_context_events(ctx)
       {:unknown, _message, ctx} -> flush_context_events(ctx)
+    end
+  end
+
+  defp receive_context_stream_data(ctx, stream, payload, timeout) do
+    case MOQX.Transport.receive_event(ctx, timeout) do
+      {:ok, {:stream_data, ^stream, ^payload, _metadata} = event, ctx} -> {:ok, event, ctx}
+      {:ok, _event, ctx} -> receive_context_stream_data(ctx, stream, payload, 0)
+      {:unknown, _message, ctx} -> receive_context_stream_data(ctx, stream, payload, 0)
+      {:timeout, ctx} -> {:timeout, ctx}
     end
   end
 

@@ -7,7 +7,7 @@ defmodule MOQX.Transport do
   wrapper handles.
   """
 
-  alias MOQX.Transport.{BackendRef, Connection, Context, Listener, Stream, StreamInfo}
+  alias MOQX.Transport.{BackendRef, Connection, Context, Listener, Send, Stream, StreamInfo}
 
   @type listener :: term()
   @type connection :: term()
@@ -88,7 +88,9 @@ defmodule MOQX.Transport do
       connections: %{},
       streams: %{},
       stream_counters: %{},
-      pending_peer_streams: :queue.new()
+      pending_peer_streams: :queue.new(),
+      pending_sends: %{},
+      finished_sending: MapSet.new()
     }
 
     {:ok, %Context{backend: %BackendRef{module: backend, data: data}}}
@@ -237,7 +239,12 @@ defmodule MOQX.Transport do
   end
 
   @doc """
-  Sends bytes on stream.
+  Schedules bytes on stream.
+
+  Returns a send token once the backend accepts the send request. Completion or
+  cancellation is reported later as a stream event where available.
+
+  Pass `finish: true` to attach FIN to this accepted payload.
   """
   def send_stream(ctx, stream, data, opts \\ [])
 
@@ -247,11 +254,90 @@ defmodule MOQX.Transport do
 
   def send_stream(%Context{} = ctx, %Stream{} = stream, data, opts) do
     require_same_backend(ctx, stream, fn ->
-      case ctx.backend.module.send_stream(stream.backend.data, data, opts) do
-        :ok -> {:ok, ctx}
-        {:error, reason} -> {:error, reason, ctx}
-      end
+      schedule_stream_send(ctx, stream.backend.data, data, opts)
     end)
+  end
+
+  defp schedule_stream_send(ctx, raw_stream, data, opts) do
+    if finished_sending?(ctx, raw_stream) do
+      {:error, :send_side_finished, ctx}
+    else
+      send = build_send(data, opts)
+      accept_stream_send(ctx, raw_stream, data, opts, send)
+    end
+  end
+
+  defp accept_stream_send(ctx, raw_stream, data, opts, send) do
+    case ctx.backend.module.send_stream(raw_stream, data, opts) do
+      :ok ->
+        ctx =
+          ctx
+          |> enqueue_pending_send(raw_stream, send)
+          |> maybe_mark_finished_sending(raw_stream, send.finish?)
+
+        {:ok, send, ctx}
+
+      {:error, reason} ->
+        {:error, reason, ctx}
+    end
+  end
+
+  defp build_send(data, opts) do
+    %Send{
+      ref: make_ref(),
+      byte_size: :erlang.iolist_size(data),
+      finish?: option(opts, :finish, false) == true
+    }
+  end
+
+  defp maybe_mark_finished_sending(ctx, raw_stream, true),
+    do: mark_finished_sending(ctx, raw_stream)
+
+  defp maybe_mark_finished_sending(ctx, _raw_stream, false), do: ctx
+
+  defp finished_sending?(ctx, raw_stream) do
+    MapSet.member?(ctx.backend.data.finished_sending, raw_stream)
+  end
+
+  defp mark_finished_sending(ctx, raw_stream) do
+    update_backend_data(ctx, fn data ->
+      Map.update!(data, :finished_sending, &MapSet.put(&1, raw_stream))
+    end)
+  end
+
+  defp enqueue_pending_send(ctx, raw_stream, send) do
+    update_backend_data(ctx, fn data ->
+      Map.update!(data, :pending_sends, fn pending ->
+        Map.update(pending, raw_stream, :queue.in(send, :queue.new()), &:queue.in(send, &1))
+      end)
+    end)
+  end
+
+  defp pop_pending_send(ctx, raw_stream) do
+    pending = ctx.backend.data.pending_sends
+    queue = Map.get(pending, raw_stream, :queue.new())
+
+    case :queue.out(queue) do
+      {{:value, send}, remaining} ->
+        {{:ok, send}, store_remaining_pending_sends(ctx, pending, raw_stream, remaining)}
+
+      {:empty, _queue} ->
+        {{:error, nil}, ctx}
+    end
+  end
+
+  defp store_remaining_pending_sends(ctx, pending, raw_stream, remaining) do
+    update_backend_data(ctx, fn data ->
+      Map.put(data, :pending_sends, remaining_pending_sends(pending, raw_stream, remaining))
+    end)
+  end
+
+  defp remaining_pending_sends(pending, raw_stream, remaining) do
+    if :queue.is_empty(remaining) do
+      Map.delete(pending, raw_stream)
+    else
+      Map.put(pending, raw_stream, remaining)
+    end
   end
 
   @doc """
@@ -310,7 +396,11 @@ defmodule MOQX.Transport do
   end
 
   def finish_sending(%Context{} = ctx, %Stream{} = stream) do
-    call_stream_shutdown(ctx, stream, :finish_sending, [])
+    if finished_sending?(ctx, stream.backend.data) do
+      {:error, :send_side_finished, ctx}
+    else
+      call_stream_shutdown(ctx, stream, :finish_sending, [], finish?: true)
+    end
   end
 
   @doc """
@@ -585,7 +675,7 @@ defmodule MOQX.Transport do
 
   defp normalize_context_message(ctx, {:moqx_transport, event}) do
     case wrap_event(ctx, event) do
-      {:ok, event} -> {:ok, event, ctx}
+      {:ok, event, ctx} -> {:ok, event, ctx}
       {:error, reason} -> {:error, reason, ctx}
     end
   end
@@ -597,7 +687,7 @@ defmodule MOQX.Transport do
 
       event ->
         case wrap_event(ctx, event) do
-          {:ok, event} -> {:ok, event, ctx}
+          {:ok, event, ctx} -> {:ok, event, ctx}
           {:error, reason} -> {:error, reason, ctx}
         end
     end
@@ -613,53 +703,94 @@ defmodule MOQX.Transport do
     end
   end
 
-  defp call_stream_shutdown(ctx, stream, function, args) do
+  defp call_stream_shutdown(ctx, stream, function, args, opts \\ []) do
     require_same_backend(ctx, stream, fn ->
       result = apply(ctx.backend.module, function, [stream.backend.data | args])
 
       case result do
-        :ok -> {:ok, ctx}
-        {:error, reason} -> {:error, reason, ctx}
+        :ok ->
+          ctx =
+            maybe_mark_finished_sending(ctx, stream.backend.data, option(opts, :finish?, false))
+
+          {:ok, ctx}
+
+        {:error, reason} ->
+          {:error, reason, ctx}
       end
     end)
   end
 
+  defp wrap_event(ctx, {:stream_event, raw_stream, :send_complete, cancelled?}) do
+    case Map.fetch(ctx.backend.data.streams, raw_stream) do
+      {:ok, stream} ->
+        {{status, send}, ctx} = pop_pending_send(ctx, raw_stream)
+        {event, metadata} = send_completion_event(cancelled?, status, send)
+        {:ok, {:stream_event, stream, event, metadata}, ctx}
+
+      :error ->
+        {:error, {:unknown_transport_handle, raw_stream}}
+    end
+  end
+
   defp wrap_event(ctx, {:stream_event, raw_stream, event, metadata}) do
     case Map.fetch(ctx.backend.data.streams, raw_stream) do
-      {:ok, stream} -> {:ok, {:stream_event, stream, event, metadata}}
+      {:ok, stream} -> {:ok, {:stream_event, stream, event, metadata}, ctx}
       :error -> {:error, {:unknown_transport_handle, raw_stream}}
     end
   end
 
   defp wrap_event(ctx, {:stream_data, raw_stream, data, metadata}) do
     case Map.fetch(ctx.backend.data.streams, raw_stream) do
-      {:ok, stream} -> {:ok, {:stream_data, stream, data, metadata}}
+      {:ok, stream} -> {:ok, {:stream_data, stream, data, metadata}, ctx}
       :error -> {:error, {:unknown_transport_handle, raw_stream}}
     end
   end
 
   defp wrap_event(ctx, {:datagram, raw_connection, data, metadata}) do
     case Map.fetch(ctx.backend.data.connections, raw_connection) do
-      {:ok, connection} -> {:ok, {:datagram, connection, data, metadata}}
+      {:ok, connection} -> {:ok, {:datagram, connection, data, metadata}, ctx}
       :error -> {:error, {:unknown_transport_handle, raw_connection}}
     end
   end
 
   defp wrap_event(ctx, {:connection_event, raw_connection, event, metadata}) do
     case Map.fetch(ctx.backend.data.connections, raw_connection) do
-      {:ok, connection} -> {:ok, {:connection_event, connection, event, metadata}}
+      {:ok, connection} -> {:ok, {:connection_event, connection, event, metadata}, ctx}
       :error -> {:error, {:unknown_transport_handle, raw_connection}}
     end
   end
 
   defp wrap_event(ctx, {:listener_event, raw_handle, event, metadata}) do
     case fetch_listener_event_handle(ctx, raw_handle) do
-      {:ok, handle} -> {:ok, {:listener_event, handle, event, metadata}}
+      {:ok, handle} -> {:ok, {:listener_event, handle, event, metadata}, ctx}
       :error -> {:error, {:unknown_transport_handle, raw_handle}}
     end
   end
 
-  defp wrap_event(_ctx, event), do: {:ok, event}
+  defp wrap_event(ctx, event), do: {:ok, event, ctx}
+
+  defp send_completion_event(false, :ok, send) do
+    {:send_completed, send_completion_metadata(send, false)}
+  end
+
+  defp send_completion_event(true, :ok, send) do
+    {:send_cancelled, send_completion_metadata(send, true)}
+  end
+
+  defp send_completion_event(cancelled?, :error, _send) do
+    event = if cancelled?, do: :send_cancelled, else: :send_completed
+    {event, %{orphan?: true, cancelled?: cancelled?}}
+  end
+
+  defp send_completion_metadata(%Send{} = send, cancelled?) do
+    %{
+      send: send,
+      ref: send.ref,
+      byte_size: send.byte_size,
+      finish?: send.finish?,
+      cancelled?: cancelled?
+    }
+  end
 
   defp fetch_listener_event_handle(ctx, raw_handle) do
     case Map.fetch(ctx.backend.data.listeners, raw_handle) do

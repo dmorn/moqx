@@ -36,6 +36,8 @@ _Avoid_: half-connection, close direction
 ## Relationships
 
 - **Finish Sending** affects the local sending **Stream Side** of exactly one stream and maps to QUIC FIN.
+- A stream send accepted with `finish: true` carries the final payload and **Finish Sending** in one ordered send request.
+- A standalone **Finish Sending** is a FIN-only operation ordered after previously accepted sends on the same stream owner path.
 - **Abort Sending** affects the local sending **Stream Side** of exactly one stream and maps to QUIC RESET_STREAM.
 - **Abort Receiving** affects the local receiving **Stream Side** of exactly one stream and maps to QUIC STOP_SENDING.
 - A **Connection Close** ends the connection and may implicitly close all streams on that connection.

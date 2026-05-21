@@ -403,7 +403,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp send_payloads(ctx, stream, payload, count) do
     Enum.reduce(1..count, {0, ctx}, fn _index, {bytes, ctx} ->
-      {:ok, ctx} = Transport.send_stream(ctx, stream, payload, [])
+      {:ok, _send, ctx} = Transport.send_stream(ctx, stream, payload, [])
       {bytes + byte_size(payload), ctx}
     end)
   end

@@ -43,11 +43,34 @@ defmodule MOQX.TransportContract do
       defp cleanup_pair(_pair), do: :ok
 
       defp await_stream_event(ctx, stream, event, timeout) do
-        case MOQX.Transport.receive_event(ctx, timeout) do
+        deadline = System.monotonic_time(:millisecond) + timeout
+        await_stream_event_until(ctx, stream, event, deadline)
+      end
+
+      defp await_stream_event_until(ctx, stream, event, deadline) do
+        remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+        case MOQX.Transport.receive_event(ctx, remaining) do
           {:ok, {:stream_event, ^stream, ^event, metadata}, ctx} -> {metadata, ctx}
           {:timeout, ctx} -> {:timeout, ctx}
-          {:ok, _event, ctx} -> await_stream_event(ctx, stream, event, 0)
-          {:unknown, _message, ctx} -> await_stream_event(ctx, stream, event, 0)
+          {:ok, _event, ctx} -> await_stream_event_until(ctx, stream, event, deadline)
+          {:unknown, _message, ctx} -> await_stream_event_until(ctx, stream, event, deadline)
+        end
+      end
+
+      defp await_stream_data(ctx, stream, payload, timeout) do
+        deadline = System.monotonic_time(:millisecond) + timeout
+        await_stream_data_until(ctx, stream, payload, deadline)
+      end
+
+      defp await_stream_data_until(ctx, stream, payload, deadline) do
+        remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+        case MOQX.Transport.receive_event(ctx, remaining) do
+          {:ok, {:stream_data, ^stream, ^payload, metadata}, ctx} -> {metadata, ctx}
+          {:timeout, ctx} -> {:timeout, ctx}
+          {:ok, _event, ctx} -> await_stream_data_until(ctx, stream, payload, deadline)
+          {:unknown, _message, ctx} -> await_stream_data_until(ctx, stream, payload, deadline)
         end
       end
 
@@ -75,22 +98,29 @@ defmodule MOQX.TransportContract do
       end
 
       defp await_shutdown_event(ctx, stream, event, expected_metadata, timeout) do
-        case MOQX.Transport.receive_event(ctx, timeout) do
+        deadline = System.monotonic_time(:millisecond) + timeout
+        await_shutdown_event_until(ctx, stream, event, expected_metadata, deadline)
+      end
+
+      defp await_shutdown_event_until(ctx, stream, event, expected_metadata, deadline) do
+        remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+        case MOQX.Transport.receive_event(ctx, remaining) do
           {:ok, {:stream_event, ^stream, ^event, metadata}, ctx} ->
             if Map.merge(metadata, expected_metadata) == metadata do
               {metadata, ctx}
             else
-              await_shutdown_event(ctx, stream, event, expected_metadata, 0)
+              await_shutdown_event_until(ctx, stream, event, expected_metadata, deadline)
             end
 
           {:timeout, ctx} ->
             {:timeout, ctx}
 
           {:ok, _event, ctx} ->
-            await_shutdown_event(ctx, stream, event, expected_metadata, 0)
+            await_shutdown_event_until(ctx, stream, event, expected_metadata, deadline)
 
           {:unknown, _message, ctx} ->
-            await_shutdown_event(ctx, stream, event, expected_metadata, 0)
+            await_shutdown_event_until(ctx, stream, event, expected_metadata, deadline)
         end
       end
 
@@ -122,7 +152,7 @@ defmodule MOQX.TransportContract do
 
       defp maybe_echo_support_payload(_echo_peer, ctx, payload, server_stream) do
         {:ok, ^payload, ctx} = MOQX.Transport.recv_stream(ctx, server_stream, byte_size(payload))
-        {:ok, ctx} = MOQX.Transport.send_stream(ctx, server_stream, payload, [])
+        {:ok, _send, ctx} = MOQX.Transport.send_stream(ctx, server_stream, payload, [])
         ctx
       end
     end
@@ -166,7 +196,7 @@ defmodule MOQX.TransportContract do
 
             assert {:ok, stream, ctx} = MOQX.Transport.open_stream(ctx, connection, active: false)
             {ctx, stream, echo_stream} = maybe_accept_support_echo_stream(echo_peer, ctx, stream)
-            assert {:ok, ctx} = MOQX.Transport.send_stream(ctx, stream, payload, [])
+            assert {:ok, _send, ctx} = MOQX.Transport.send_stream(ctx, stream, payload, [])
             ctx = maybe_echo_support_payload(echo_peer, ctx, payload, echo_stream)
 
             assert {:ok, ^payload, _ctx} =
@@ -260,95 +290,215 @@ defmodule MOQX.TransportContract do
   defp shutdown_tests(contracts) do
     if :shutdown in contracts do
       quote do
-        test "finish_sending emits normalized peer event", %{fixture: fixture} do
-          pair = connect_pair(fixture, :moq_lite_04)
+        (unquote_splicing(shutdown_test_blocks()))
+      end
+    end
+  end
 
-          try do
-            %{ctx: ctx, client: client, server: server} = pair
+  defp shutdown_test_blocks do
+    [
+      finish_sending_event_test(),
+      finish_sending_order_test(),
+      send_stream_finish_test(),
+      send_completion_event_test(),
+      abort_sending_event_test(),
+      abort_receiving_event_test(),
+      connection_close_event_test()
+    ]
+  end
 
-            assert {:ok, client_stream, ctx} =
-                     MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
+  defp finish_sending_event_test do
+    quote do
+      test "finish_sending emits normalized peer event", %{fixture: fixture} do
+        pair = connect_pair(fixture, :moq_lite_04)
 
-            assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
-            ctx = flush_transport_events(ctx)
+        try do
+          %{ctx: ctx, client: client, server: server} = pair
 
-            assert {:ok, ctx} = MOQX.Transport.finish_sending(ctx, client_stream)
+          assert {:ok, client_stream, ctx} =
+                   MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
 
-            assert {%{}, _ctx} =
-                     await_shutdown_event(ctx, server_stream, :peer_finished_sending, %{}, 100)
-          after
-            cleanup_pair(pair)
-          end
+          assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+          ctx = flush_transport_events(ctx)
+
+          assert {:ok, ctx} = MOQX.Transport.finish_sending(ctx, client_stream)
+
+          assert {%{}, ctx} =
+                   await_shutdown_event(ctx, server_stream, :peer_finished_sending, %{}, 100)
+
+          assert {:error, :send_side_finished, ^ctx} =
+                   MOQX.Transport.send_stream(ctx, client_stream, "late", [])
+        after
+          cleanup_pair(pair)
         end
+      end
+    end
+  end
 
-        test "abort_sending preserves application error code in peer event", %{fixture: fixture} do
-          pair = connect_pair(fixture, :moq_lite_04)
+  defp finish_sending_order_test do
+    quote do
+      test "finish_sending is ordered after accepted stream payloads", %{fixture: fixture} do
+        pair = connect_pair(fixture, :moq_lite_04)
 
-          try do
-            %{ctx: ctx, client: client, server: server} = pair
+        try do
+          %{ctx: ctx, client: client, server: server} = pair
 
-            assert {:ok, client_stream, ctx} =
-                     MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
+          assert {:ok, client_stream, ctx} =
+                   MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
 
-            assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
-            ctx = flush_transport_events(ctx)
+          assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+          ctx = flush_transport_events(ctx)
 
-            assert {:ok, ctx} = MOQX.Transport.abort_sending(ctx, client_stream, 42)
+          assert {:ok, _send, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "one", [])
+          assert {:ok, _send, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "two", [])
+          assert {:ok, ctx} = MOQX.Transport.finish_sending(ctx, client_stream)
 
-            assert {%{error_code: 42}, _ctx} =
-                     await_shutdown_event(
-                       ctx,
-                       server_stream,
-                       :peer_aborted_sending,
-                       %{error_code: 42},
-                       100
-                     )
-          after
-            cleanup_pair(pair)
-          end
+          assert {:ok, "onetwo", ctx} = MOQX.Transport.recv_stream(ctx, server_stream, 6)
+
+          assert {%{}, _ctx} =
+                   await_shutdown_event(ctx, server_stream, :peer_finished_sending, %{}, 100)
+        after
+          cleanup_pair(pair)
         end
+      end
+    end
+  end
 
-        test "abort_receiving preserves application error code in peer event", %{fixture: fixture} do
-          pair = connect_pair(fixture, :moq_lite_04)
+  defp send_stream_finish_test do
+    quote do
+      test "send_stream can attach FIN to the final accepted payload", %{fixture: fixture} do
+        pair = connect_pair(fixture, :moq_lite_04)
 
-          try do
-            %{ctx: ctx, client: client, server: server} = pair
+        try do
+          %{ctx: ctx, client: client, server: server} = pair
 
-            assert {:ok, client_stream, ctx} =
-                     MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
+          assert {:ok, client_stream, ctx} =
+                   MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
 
-            assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
-            ctx = flush_transport_events(ctx)
+          assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+          ctx = flush_transport_events(ctx)
 
-            assert {:ok, ctx} = MOQX.Transport.abort_receiving(ctx, server_stream, 7)
+          assert {:ok, %{byte_size: 5, finish?: true}, ctx} =
+                   MOQX.Transport.send_stream(ctx, client_stream, "final", finish: true)
 
-            assert {%{error_code: 7}, _ctx} =
-                     await_shutdown_event(
-                       ctx,
-                       client_stream,
-                       :peer_aborted_receiving,
-                       %{error_code: 7},
-                       100
-                     )
-          after
-            cleanup_pair(pair)
-          end
+          assert {:ok, "final", ctx} = MOQX.Transport.recv_stream(ctx, server_stream, 5)
+
+          assert {%{}, ctx} =
+                   await_shutdown_event(ctx, server_stream, :peer_finished_sending, %{}, 100)
+
+          assert {:error, :send_side_finished, ^ctx} =
+                   MOQX.Transport.send_stream(ctx, client_stream, "late", [])
+        after
+          cleanup_pair(pair)
         end
+      end
+    end
+  end
 
-        test "close_connection emits normalized peer close event", %{fixture: fixture} do
-          pair = connect_pair(fixture, :moq_lite_04)
+  defp send_completion_event_test do
+    quote do
+      test "send completion events carry the accepted send token", %{fixture: fixture} do
+        pair = connect_pair(fixture, :moq_lite_04)
 
-          try do
-            %{ctx: ctx, client: client, server: server} = pair
-            ctx = flush_transport_events(ctx)
+        try do
+          %{ctx: ctx, client: client, server: server} = pair
 
-            assert {:ok, ctx} = MOQX.Transport.close_connection(ctx, client, 3)
+          assert {:ok, client_stream, ctx} =
+                   MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
 
-            assert {:ok, {:connection_event, ^server, :closed, %{error_code: 3}}, _ctx} =
-                     await_connection_close(ctx, server, 100)
-          after
-            cleanup_pair(pair)
-          end
+          assert {:ok, _server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+          ctx = flush_transport_events(ctx)
+
+          assert {:ok, send, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "payload", [])
+
+          assert {%{send: ^send, ref: ref, byte_size: 7, finish?: false}, _ctx} =
+                   await_stream_event(ctx, client_stream, :send_completed, 100)
+
+          assert is_reference(ref)
+        after
+          cleanup_pair(pair)
+        end
+      end
+    end
+  end
+
+  defp abort_sending_event_test do
+    quote do
+      test "abort_sending preserves application error code in peer event", %{fixture: fixture} do
+        pair = connect_pair(fixture, :moq_lite_04)
+
+        try do
+          %{ctx: ctx, client: client, server: server} = pair
+
+          assert {:ok, client_stream, ctx} =
+                   MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
+
+          assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+          ctx = flush_transport_events(ctx)
+
+          assert {:ok, ctx} = MOQX.Transport.abort_sending(ctx, client_stream, 42)
+
+          assert {%{error_code: 42}, _ctx} =
+                   await_shutdown_event(
+                     ctx,
+                     server_stream,
+                     :peer_aborted_sending,
+                     %{error_code: 42},
+                     100
+                   )
+        after
+          cleanup_pair(pair)
+        end
+      end
+    end
+  end
+
+  defp abort_receiving_event_test do
+    quote do
+      test "abort_receiving preserves application error code in peer event", %{fixture: fixture} do
+        pair = connect_pair(fixture, :moq_lite_04)
+
+        try do
+          %{ctx: ctx, client: client, server: server} = pair
+
+          assert {:ok, client_stream, ctx} =
+                   MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
+
+          assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+          ctx = flush_transport_events(ctx)
+
+          assert {:ok, ctx} = MOQX.Transport.abort_receiving(ctx, server_stream, 7)
+
+          assert {%{error_code: 7}, _ctx} =
+                   await_shutdown_event(
+                     ctx,
+                     client_stream,
+                     :peer_aborted_receiving,
+                     %{error_code: 7},
+                     100
+                   )
+        after
+          cleanup_pair(pair)
+        end
+      end
+    end
+  end
+
+  defp connection_close_event_test do
+    quote do
+      test "close_connection emits normalized peer close event", %{fixture: fixture} do
+        pair = connect_pair(fixture, :moq_lite_04)
+
+        try do
+          %{ctx: ctx, client: client, server: server} = pair
+          ctx = flush_transport_events(ctx)
+
+          assert {:ok, ctx} = MOQX.Transport.close_connection(ctx, client, 3)
+
+          assert {:ok, {:connection_event, ^server, :closed, %{error_code: 3}}, _ctx} =
+                   await_connection_close(ctx, server, 100)
+        after
+          cleanup_pair(pair)
         end
       end
     end
@@ -438,8 +588,10 @@ defmodule MOQX.TransportContract do
             assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
             ctx = flush_transport_events(ctx)
 
-            assert {:ok, ctx} = MOQX.Transport.send_stream(ctx, client_stream, ["one", "two"], [])
-            assert {:ok, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "three", [])
+            assert {:ok, _send, ctx} =
+                     MOQX.Transport.send_stream(ctx, client_stream, ["one", "two"], [])
+
+            assert {:ok, _send, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "three", [])
 
             assert {:ok, "onetwo", ctx} = MOQX.Transport.recv_stream(ctx, server_stream, 6)
             assert {:ok, "three", _ctx} = MOQX.Transport.recv_stream(ctx, server_stream, 5)
@@ -461,10 +613,11 @@ defmodule MOQX.TransportContract do
             ctx = flush_transport_events(ctx)
 
             assert {:ok, ctx} = MOQX.Transport.set_active(ctx, server_stream, true)
-            assert {:ok, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "active-data", [])
 
-            assert {:ok, {:stream_data, ^server_stream, "active-data", %{}}, _ctx} =
-                     MOQX.Transport.receive_event(ctx, 100)
+            assert {:ok, _send, ctx} =
+                     MOQX.Transport.send_stream(ctx, client_stream, "active-data", [])
+
+            assert {%{}, _ctx} = await_stream_data(ctx, server_stream, "active-data", 100)
           after
             cleanup_pair(pair)
           end
@@ -582,7 +735,7 @@ defmodule MOQX.TransportContract.QuicerListenerFixture do
         with {:ok, connection, ctx} <- accept_probe_client(ctx, listener, client_task),
              {:ok, stream, ctx} <- MOQX.Transport.accept_stream(ctx, connection, [], 5_000),
              {:ok, ^payload, ctx} <- receive_stream_data(ctx, stream, payload),
-             {:ok, _ctx} <- MOQX.Transport.send_stream(ctx, stream, payload, []),
+             {:ok, _send, _ctx} <- MOQX.Transport.send_stream(ctx, stream, payload, []),
              {:ok, ^payload} <- await_probe_client(client_task) do
           {:ok, payload}
         end

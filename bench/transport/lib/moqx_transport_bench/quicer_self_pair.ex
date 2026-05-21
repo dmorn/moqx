@@ -402,7 +402,7 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
     {client_stream, server_stream, ctx} =
       open_stream_pair(pair.ctx, pair.client, pair.server, config)
 
-    {:ok, ctx} = Transport.send_stream(ctx, client_stream, <<1>>, [])
+    {:ok, _send, ctx} = Transport.send_stream(ctx, client_stream, <<1>>, [])
     {:ok, <<1>>, ctx} = Transport.recv_stream(ctx, server_stream, 1)
     first_byte_latency_ms = elapsed_ms(started_at)
 
@@ -500,7 +500,7 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
 
   defp stream_payloads(ctx, client_stream, server_stream, payload, config) do
     Enum.reduce(1..config.payload_count, {0, ctx}, fn _index, {bytes, ctx} ->
-      {:ok, ctx} = Transport.send_stream(ctx, client_stream, payload, [])
+      {:ok, _send, ctx} = Transport.send_stream(ctx, client_stream, payload, [])
       {:ok, received, ctx} = recv_exact(ctx, server_stream, byte_size(payload), <<>>)
       {bytes + byte_size(received), ctx}
     end)

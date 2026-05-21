@@ -155,6 +155,14 @@ loss, or cancellation is an asynchronous transport event, not something
 by per-datagram send-state waits and matches the rest of the native QUIC async
 transport operations.
 
+2026-05-21 amendment: stream sends follow the same admission model.
+`send_stream/4` returns an accepted send token and does not wait for backend
+send completion. Backend send completion or cancellation is surfaced later as a
+stream event with the accepted send token. `send_stream/4` accepts `finish:
+true` to attach QUIC FIN to the final payload; standalone `finish_sending/2`
+remains the FIN-only form and is ordered after previously accepted sends on the
+same stream owner path. Neither form is peer-delivery proof.
+
 ### Performance and limits research
 
 Transport performance and limit analysis belongs in a separate benchmark/research harness, not in the regular test suite. The harness is for discovering real QUIC path limits and protocol pressure points: how hard a link can be pushed before it degrades or fails, and how much of the path `moqx` can fill under stream, datagram, and mixed MOQT-shaped load.

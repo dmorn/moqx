@@ -168,9 +168,13 @@ defmodule MOQX.Transport.Support do
   end
 
   @impl true
-  def send_stream(%Stream{} = stream, data, _opts) do
+  def send_stream(%Stream{} = stream, data, opts) do
     ref = make_ref()
-    send(stream.pid, {:send_data, self(), ref, IO.iodata_to_binary(data)})
+
+    send(
+      stream.pid,
+      {:send_data, self(), ref, IO.iodata_to_binary(data), option(opts, :finish, false) == true}
+    )
 
     receive do
       {^ref, result} -> result
@@ -491,7 +495,15 @@ defmodule MOQX.Transport.Support do
   end
 
   defp start_stream(owner) do
-    state = %{owner: owner, peer: nil, buffer: <<>>, recvs: :queue.new(), active: false}
+    state = %{
+      owner: owner,
+      peer: nil,
+      buffer: <<>>,
+      recvs: :queue.new(),
+      active: false,
+      send_finished?: false
+    }
+
     %Stream{pid: spawn(fn -> stream_loop(state) end)}
   end
 
@@ -516,10 +528,25 @@ defmodule MOQX.Transport.Support do
         send(caller, {ref, :ok})
         stream_loop(%{state | owner: owner})
 
-      {:send_data, caller, ref, data} ->
-        send(state.peer.pid, {:incoming_data, data})
-        send(caller, {ref, :ok})
+      {:send_data, caller, ref, _data, _finish?} when state.send_finished? ->
+        send(caller, {ref, {:error, :send_side_finished}})
         stream_loop(state)
+
+      {:send_data, caller, ref, data, finish?} ->
+        send(state.peer.pid, {:incoming_data, data})
+
+        if finish? do
+          send(state.peer.pid, {:peer_finished_sending})
+        end
+
+        send(caller, {ref, :ok})
+
+        send(
+          caller,
+          {:moqx_transport, {:stream_event, %Stream{pid: self()}, :send_complete, false}}
+        )
+
+        stream_loop(%{state | send_finished?: finish?})
 
       {:incoming_data, data} ->
         if state.active && state.owner do
@@ -529,10 +556,14 @@ defmodule MOQX.Transport.Support do
           stream_loop(deliver_passive_data(%{state | buffer: state.buffer <> data}))
         end
 
+      {:finish_sending, caller, ref, []} when state.send_finished? ->
+        send(caller, {ref, {:error, :send_side_finished}})
+        stream_loop(state)
+
       {:finish_sending, caller, ref, []} ->
         send(state.peer.pid, {:peer_finished_sending})
         send(caller, {ref, :ok})
-        stream_loop(state)
+        stream_loop(%{state | send_finished?: true})
 
       {:abort_sending, caller, ref, [error_code]} ->
         send(state.peer.pid, {:peer_aborted_sending, error_code})

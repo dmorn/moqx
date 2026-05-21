@@ -8,10 +8,13 @@ defmodule MOQX.Transport.Quicer do
 
   @behaviour MOQX.Transport
 
-  import Bitwise, only: [&&&: 2]
+  import Bitwise, only: [&&&: 2, |||: 2]
 
   alias MOQX.Transport.Capabilities
   alias MOQX.Transport.Quicer.Options
+
+  @quic_send_flag_fin 0x0004
+  @quicer_send_flag_sync 0x1000
 
   @impl true
   def listen(port, opts) do
@@ -112,7 +115,7 @@ defmodule MOQX.Transport.Quicer do
 
   @impl true
   def send_stream(stream, data, opts \\ []) do
-    case :quicer.send(stream, data, option(opts, :flags, 0)) do
+    case :quicer.async_send(stream, data, send_flags(opts)) do
       {:ok, _bytes} -> :ok
       {:error, _reason} = error -> error
     end
@@ -298,6 +301,18 @@ defmodule MOQX.Transport.Quicer do
   defp normalize_result({:ok, _value} = ok), do: ok
   defp normalize_result({:error, _reason} = error), do: error
   defp normalize_result({:error, reason, details}), do: {:error, {reason, details}}
+
+  defp send_flags(opts) do
+    flags =
+      opts
+      |> option(:flags, 0)
+      |> maybe_add_fin_flag(option(opts, :finish, false) == true)
+
+    flags ||| @quicer_send_flag_sync
+  end
+
+  defp maybe_add_fin_flag(flags, true), do: flags ||| @quic_send_flag_fin
+  defp maybe_add_fin_flag(flags, false), do: flags
 
   defp option(opts, key, default) when is_map(opts), do: Map.get(opts, key, default)
   defp option(opts, key, default) when is_list(opts), do: Keyword.get(opts, key, default)

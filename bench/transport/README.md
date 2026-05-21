@@ -255,9 +255,11 @@ moqx-transport-bench reference-comparison \
 The command does not start the reference server. Start `tools/quicprobe server`
 explicitly on the chosen endpoint first, then run the benchmark wrapper from
 the client side. The wrapper emits `transport-bench-v1` JSONL. The current
-MOQX-client topology uses the existing synchronous `MOQX.Transport.send_stream/4`
-path and records `stream_scheduling=sequential`; it is a correctness and
-shape-comparison baseline before concurrent stream-pressure support.
+MOQX-client topology records `stream_scheduling=sequential`; it is a correctness
+and shape-comparison baseline before concurrent stream-pressure support. Stream
+sends are accepted asynchronously by `MOQX.Transport.send_stream/4`; send
+completion is reported later as a transport event and is not peer-delivery
+proof.
 
 ### Pressure Patterns
 
