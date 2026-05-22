@@ -271,6 +271,7 @@ func TestClientServerJSONPacedDatagramPressure(t *testing.T) {
 		datagramCount:   999,
 		datagramRate:    20,
 		durationSeconds: 1,
+		rateTolerance:   0.95,
 	}, &output)
 	if err != nil {
 		t.Fatalf("runClient() error = %v", err)
@@ -288,6 +289,15 @@ func TestClientServerJSONPacedDatagramPressure(t *testing.T) {
 	if result.TargetDatagramPPS != 20 {
 		t.Fatalf("target_datagrams_per_second = %f, want 20", result.TargetDatagramPPS)
 	}
+	if result.TargetDurationSeconds != 1 {
+		t.Fatalf("target_duration_seconds = %d, want 1", result.TargetDurationSeconds)
+	}
+	if !result.OfferedRateValid {
+		t.Fatalf("offered_rate_valid = false, ratio=%f", result.OfferedRateRatio)
+	}
+	if result.OfferedRateTolerance != 0.95 {
+		t.Fatalf("offered_rate_tolerance = %f, want 0.95", result.OfferedRateTolerance)
+	}
 
 	cancel()
 	select {
@@ -297,6 +307,40 @@ func TestClientServerJSONPacedDatagramPressure(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("server did not stop after context cancellation")
+	}
+}
+
+func TestPacedDatagramDeadlineUsesAbsoluteSchedule(t *testing.T) {
+	startedAt := time.Unix(100, 0)
+	interval := 250 * time.Microsecond
+
+	tests := []struct {
+		sequence int
+		want     time.Time
+	}{
+		{sequence: 1, want: startedAt},
+		{sequence: 2, want: startedAt.Add(250 * time.Microsecond)},
+		{sequence: 5, want: startedAt.Add(time.Millisecond)},
+	}
+
+	for _, test := range tests {
+		if got := pacedDatagramDeadline(startedAt, interval, test.sequence); !got.Equal(test.want) {
+			t.Fatalf("sequence %d deadline = %v, want %v", test.sequence, got, test.want)
+		}
+	}
+}
+
+func TestOfferedRateValidRequiresToleranceForPacedDatagrams(t *testing.T) {
+	cfg := clientConfig{datagramRate: 1000, durationSeconds: 1, rateTolerance: 0.95}
+
+	if offeredRateValid(0.94, cfg) {
+		t.Fatal("offeredRateValid(0.94) = true, want false")
+	}
+	if !offeredRateValid(0.95, cfg) {
+		t.Fatal("offeredRateValid(0.95) = false, want true")
+	}
+	if !offeredRateValid(0, clientConfig{}) {
+		t.Fatal("burst offeredRateValid = false, want true")
 	}
 }
 

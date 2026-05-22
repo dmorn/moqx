@@ -59,6 +59,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           datagram_rate: :integer,
           duration_seconds: :integer,
           delivery_threshold: :string,
+          offered_rate_tolerance: :string,
           timeout_seconds: :integer,
           timeout_margin_seconds: :integer,
           quicprobe_command: :string,
@@ -132,6 +133,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       datagram_rate: opts[:datagram_rate],
       duration_seconds: opts[:duration_seconds],
       delivery_threshold: parse_delivery_threshold(Keyword.get(opts, :delivery_threshold, "1.0")),
+      offered_rate_tolerance:
+        parse_delivery_threshold(Keyword.get(opts, :offered_rate_tolerance, "0.95")),
       timeout_seconds: Keyword.get(opts, :timeout_seconds, 5),
       timeout_margin_seconds: Keyword.get(opts, :timeout_margin_seconds, 2),
       quicprobe_command: Keyword.get(opts, :quicprobe_command, "quicprobe"),
@@ -150,7 +153,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          :ok <- validate_datagram_size(config),
          :ok <- validate_positive(config.datagram_count, "--datagram-count"),
          :ok <- validate_paced_datagrams(config),
-         :ok <- validate_delivery_threshold(config.delivery_threshold),
+         :ok <- validate_ratio(config.delivery_threshold, "--delivery-threshold"),
+         :ok <- validate_positive_ratio(config.offered_rate_tolerance, "--offered-rate-tolerance"),
          :ok <- validate_positive(config.timeout_seconds, "--timeout-seconds"),
          :ok <- validate_positive(config.timeout_margin_seconds, "--timeout-margin-seconds"),
          :ok <- validate_stream_direction(config.stream_direction) do
@@ -213,11 +217,18 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp parse_delivery_threshold(value) when is_integer(value) or is_float(value), do: value
   defp parse_delivery_threshold(_value), do: :invalid
 
-  defp validate_delivery_threshold(value) when is_number(value) and value >= 0.0 and value <= 1.0,
+  defp validate_ratio(value, _name) when is_number(value) and value >= 0.0 and value <= 1.0,
     do: :ok
 
-  defp validate_delivery_threshold(_value),
-    do: {:error, "--delivery-threshold must be a number from 0.0 to 1.0."}
+  defp validate_ratio(_value, name),
+    do: {:error, "#{name} must be a number from 0.0 to 1.0."}
+
+  defp validate_positive_ratio(value, _name)
+       when is_number(value) and value > 0.0 and value <= 1.0,
+       do: :ok
+
+  defp validate_positive_ratio(_value, name),
+    do: {:error, "#{name} must be a number greater than 0.0 and at most 1.0."}
 
   defp validate_stream_direction(direction)
        when direction in ["bidirectional", "unidirectional"],
@@ -385,7 +396,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           "--datagram-rate",
           Integer.to_string(config.datagram_rate),
           "--duration-seconds",
-          Integer.to_string(config.duration_seconds)
+          Integer.to_string(config.duration_seconds),
+          "--offered-rate-tolerance",
+          Float.to_string(config.offered_rate_tolerance)
         ]
     else
       args
@@ -533,6 +546,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     application_duration_ms = elapsed_ms(application_started_at)
     bytes_sent = accepted * config.datagram_size
     bytes_received = received_count * config.datagram_size
+    send_rate = rate(accepted, seconds(send_duration_ms))
+    offered_rate_ratio = target_rate_ratio(send_rate, config)
 
     %{
       "schema_version" => "moqx-reference-measurement-v1",
@@ -548,8 +563,11 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "datagram_count" => offered,
       "datagram_mode" => datagram_mode(config),
       "target_datagrams_per_second" => target_datagram_rate(config),
-      "duration_seconds" => config.duration_seconds,
+      "target_duration_seconds" => target_duration_seconds(config),
       "delivery_threshold" => config.delivery_threshold,
+      "offered_rate_ratio" => offered_rate_ratio,
+      "offered_rate_tolerance" => config.offered_rate_tolerance,
+      "offered_rate_valid" => offered_rate_valid?(offered_rate_ratio, config),
       "datagrams_offered" => offered,
       "datagrams_accepted" => accepted,
       "datagrams_received" => received_count,
@@ -562,8 +580,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "application_duration_ms" => application_duration_ms,
       "offered_load_bps" => offered_load_bps(config),
       "goodput_bps" => bits_per_second(bytes_received, application_duration_ms),
-      "send_rate_packets_per_second" => rate(accepted, seconds(send_duration_ms)),
-      "send_rate_datagrams_per_second" => rate(accepted, seconds(send_duration_ms)),
+      "send_rate_packets_per_second" => send_rate,
+      "send_rate_datagrams_per_second" => send_rate,
       "datagram_latency_ms" => latency_summary(latencies)
     }
   end
@@ -1244,6 +1262,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         "workload" => measurement["workload"] || ctx.config.workload,
         "datagram_mode" => measurement["datagram_mode"] || profile_datagram_mode(ctx.config),
         "delivery_threshold" => ctx.config.delivery_threshold,
+        "offered_rate_tolerance" => ctx.config.offered_rate_tolerance,
         "reference_tool" => "quicprobe",
         "measurement_schema" => measurement["schema_version"],
         "client_implementation" => measurement["client_implementation"] || "quicprobe",
@@ -1359,6 +1378,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "goodput_bps" => number(measurement["goodput_bps"]),
       "send_rate_packets_per_second" => send_rate_packets_per_second(measurement),
       "send_rate_datagrams_per_second" => number(measurement["send_rate_datagrams_per_second"]),
+      "offered_rate_ratio" => number(measurement["offered_rate_ratio"]),
       "delivered_datagrams_per_second" => delivered_datagrams_per_second(measurement),
       "datagram_delivery_ratio" => number(measurement["datagram_delivery_ratio"]),
       "datagram_drop_count" => number(measurement["datagram_drop_count"]),
@@ -1445,6 +1465,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           failure_output(ctx.step_output) ||
             "reference comparison step exited with status #{ctx.exit_status}"
 
+        offered_rate_invalid?(ctx.config, ctx.measurement) ->
+          "reference comparison offered rate below tolerance: actual/target #{number(measurement(ctx)["offered_rate_ratio"])} < #{ctx.config.offered_rate_tolerance}"
+
         !valid_measurement?(ctx.config, ctx.measurement) ->
           "reference comparison step did not produce a valid client_run measurement"
 
@@ -1483,22 +1506,23 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp non_null(value), do: value
 
   defp valid_measurement?(
-         %{topology: @reference_client_topology},
-         %{"schema_version" => "quicprobe-v1", "record_type" => "client_run"}
+         %{topology: @reference_client_topology} = config,
+         %{"schema_version" => "quicprobe-v1", "record_type" => "client_run"} = measurement
        ),
-       do: true
+       do: valid_offered_rate?(config, measurement)
 
   defp valid_measurement?(
-         %{topology: @reference_client_moqx_listener_topology},
-         %{"schema_version" => "quicprobe-v1", "record_type" => "client_run"}
+         %{topology: @reference_client_moqx_listener_topology} = config,
+         %{"schema_version" => "quicprobe-v1", "record_type" => "client_run"} = measurement
        ),
-       do: true
+       do: valid_offered_rate?(config, measurement)
 
   defp valid_measurement?(
-         %{topology: @moqx_client_topology},
-         %{"schema_version" => "moqx-reference-measurement-v1", "record_type" => "client_run"}
+         %{topology: @moqx_client_topology} = config,
+         %{"schema_version" => "moqx-reference-measurement-v1", "record_type" => "client_run"} =
+           measurement
        ),
-       do: true
+       do: valid_offered_rate?(config, measurement)
 
   defp valid_measurement?(_config, _measurement), do: false
 
@@ -1586,6 +1610,43 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp target_datagram_rate(config),
     do: if(paced_datagrams?(config), do: config.datagram_rate, else: nil)
+
+  defp target_duration_seconds(config),
+    do: if(paced_datagrams?(config), do: config.duration_seconds, else: nil)
+
+  defp target_rate_ratio(send_rate, config) do
+    case target_datagram_rate(config) do
+      target when is_number(target) and is_number(send_rate) and target > 0 ->
+        send_rate / target
+
+      _ ->
+        nil
+    end
+  end
+
+  defp offered_rate_valid?(_ratio, %{datagram_rate: nil}), do: true
+
+  defp offered_rate_valid?(ratio, config) when is_number(ratio),
+    do: ratio >= config.offered_rate_tolerance
+
+  defp offered_rate_valid?(_ratio, _config), do: false
+
+  defp valid_offered_rate?(config, measurement),
+    do: !offered_rate_invalid?(config, measurement)
+
+  defp offered_rate_invalid?(
+         %{workload: @datagram_pressure_workload, datagram_rate: rate},
+         %{"datagram_mode" => "paced"} = measurement
+       )
+       when is_integer(rate) and rate > 0 do
+    case measurement["offered_rate_valid"] do
+      true -> false
+      false -> true
+      _ -> true
+    end
+  end
+
+  defp offered_rate_invalid?(_config, _measurement), do: false
 
   defp effective_datagram_count(config) do
     if paced_datagrams?(config) do
@@ -1813,6 +1874,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       --datagram-rate N              target datagrams/sec for paced datagram_pressure
       --duration-seconds N           paced datagram_pressure duration; offered = rate * duration
       --delivery-threshold RATIO     minimum acceptable delivery ratio before loss stop (default: 1.0)
+      --offered-rate-tolerance RATIO minimum actual/target offered rate for paced steps (default: 0.95)
       --timeout-seconds N            client timeout (default: 5)
       --timeout-margin-seconds N     kill/abort step after timeout + N seconds (default: 2)
       --quicprobe-command PATH       quicprobe executable for reference-client topologies (default: quicprobe)

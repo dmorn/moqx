@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"sync"
@@ -27,6 +28,7 @@ const quicGoModulePath = "github.com/quic-go/quic-go"
 const streamPressureWorkload = "stream_pressure"
 const datagramPressureWorkload = "datagram_pressure"
 const datagramHeaderSize = 16
+const pacedSpinThreshold = 200 * time.Microsecond
 
 type serverConfig struct {
 	addr     string
@@ -52,6 +54,7 @@ type clientConfig struct {
 	datagramCount   int
 	datagramRate    int
 	durationSeconds int
+	rateTolerance   float64
 }
 
 type clientRunResult struct {
@@ -73,6 +76,10 @@ type clientRunResult struct {
 	DatagramCount         int                `json:"datagram_count"`
 	DatagramMode          string             `json:"datagram_mode"`
 	TargetDatagramPPS     float64            `json:"target_datagrams_per_second"`
+	TargetDurationSeconds int                `json:"target_duration_seconds"`
+	OfferedRateRatio      float64            `json:"offered_rate_ratio"`
+	OfferedRateTolerance  float64            `json:"offered_rate_tolerance"`
+	OfferedRateValid      bool               `json:"offered_rate_valid"`
 	DatagramsOffered      int                `json:"datagrams_offered"`
 	DatagramsAccepted     int                `json:"datagrams_accepted"`
 	DatagramsReceived     int                `json:"datagrams_received"`
@@ -182,6 +189,7 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	flags.IntVar(&cfg.datagramCount, "datagram-count", 1000, "datagrams to send for datagram_pressure --json runs")
 	flags.IntVar(&cfg.datagramRate, "datagram-rate", 0, "target datagrams per second for paced datagram_pressure --json runs")
 	flags.IntVar(&cfg.durationSeconds, "duration-seconds", 0, "paced datagram_pressure duration in seconds")
+	flags.Float64Var(&cfg.rateTolerance, "offered-rate-tolerance", 0.95, "minimum actual/target send rate ratio for paced datagram_pressure runs")
 	flags.DurationVar(&timeout, "timeout", 5*time.Second, "client timeout")
 
 	if err := flags.Parse(args); err != nil {
@@ -229,6 +237,9 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	}
 	if cfg.datagramRate == 0 && cfg.durationSeconds > 0 {
 		return clientConfig{}, 0, errors.New("client --datagram-rate is required when --duration-seconds is set")
+	}
+	if cfg.rateTolerance <= 0 || cfg.rateTolerance > 1 {
+		return clientConfig{}, 0, errors.New("client --offered-rate-tolerance must be greater than 0 and at most 1")
 	}
 
 	return cfg, timeout, nil
@@ -573,6 +584,8 @@ func runDatagramPressureClient(
 	drops := offered - receiveResult.received
 	bytesSent := int64(accepted * cfg.datagramSize)
 	bytesReceived := int64(receiveResult.received * cfg.datagramSize)
+	sendRate := rate(accepted, sendDuration)
+	offeredRateRatio := targetRateRatio(sendRate, cfg)
 
 	return clientRunResult{
 		SchemaVersion:         "quicprobe-v1",
@@ -590,6 +603,10 @@ func runDatagramPressureClient(
 		DatagramCount:         offered,
 		DatagramMode:          mode,
 		TargetDatagramPPS:     targetDatagramRate(cfg),
+		TargetDurationSeconds: targetDurationSeconds(cfg),
+		OfferedRateRatio:      offeredRateRatio,
+		OfferedRateTolerance:  cfg.rateTolerance,
+		OfferedRateValid:      offeredRateValid(offeredRateRatio, cfg),
 		DatagramsOffered:      offered,
 		DatagramsAccepted:     accepted,
 		DatagramsReceived:     receiveResult.received,
@@ -602,7 +619,7 @@ func runDatagramPressureClient(
 		ApplicationDurationMS: durationMillis(applicationDuration),
 		OfferedLoadBPS:        offeredLoadBPS(cfg),
 		GoodputBPS:            throughputBPS(bytesReceived, applicationDuration),
-		SendRateDatagramPPS:   rate(accepted, sendDuration),
+		SendRateDatagramPPS:   sendRate,
 		DatagramLatencyMS:     latencySummary(receiveResult.latencies),
 	}, nil
 }
@@ -631,25 +648,56 @@ func sendDatagramBurst(conn quic.Connection, cfg clientConfig, count int) (int, 
 func sendDatagramPaced(ctx context.Context, conn quic.Connection, cfg clientConfig, count int) (int, time.Duration, error) {
 	startedAt := time.Now()
 	interval := time.Second / time.Duration(cfg.datagramRate)
-	nextSend := time.NewTimer(0)
-	defer nextSend.Stop()
 
 	for sequence := 1; sequence <= count; sequence++ {
-		select {
-		case <-ctx.Done():
+		deadline := pacedDatagramDeadline(startedAt, interval, sequence)
+		if err := waitUntil(ctx, deadline); err != nil {
 			return sequence - 1, time.Since(startedAt), nil
-		case <-nextSend.C:
 		}
 
 		payload := datagramPayload(uint64(sequence), cfg.datagramSize, time.Now())
 		if err := conn.SendDatagram(payload); err != nil {
 			return sequence - 1, time.Since(startedAt), fmt.Errorf("send datagram %d: %w", sequence, err)
 		}
-
-		nextSend.Reset(interval)
 	}
 
 	return count, time.Since(startedAt), nil
+}
+
+func pacedDatagramDeadline(startedAt time.Time, interval time.Duration, sequence int) time.Time {
+	return startedAt.Add(time.Duration(sequence-1) * interval)
+}
+
+func waitUntil(ctx context.Context, deadline time.Time) error {
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil
+		}
+
+		if remaining <= pacedSpinThreshold {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				runtime.Gosched()
+				continue
+			}
+		}
+
+		timer := time.NewTimer(remaining - pacedSpinThreshold)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func effectiveDatagramCount(cfg clientConfig) int {
@@ -674,6 +722,31 @@ func targetDatagramRate(cfg clientConfig) float64 {
 	}
 
 	return 0
+}
+
+func targetDurationSeconds(cfg clientConfig) int {
+	if cfg.datagramRate > 0 {
+		return cfg.durationSeconds
+	}
+
+	return 0
+}
+
+func targetRateRatio(sendRate float64, cfg clientConfig) float64 {
+	target := targetDatagramRate(cfg)
+	if target <= 0 || sendRate <= 0 {
+		return 0
+	}
+
+	return sendRate / target
+}
+
+func offeredRateValid(ratio float64, cfg clientConfig) bool {
+	if cfg.datagramRate == 0 {
+		return true
+	}
+
+	return ratio >= cfg.rateTolerance
 }
 
 func offeredLoadBPS(cfg clientConfig) float64 {

@@ -269,6 +269,45 @@ shape is committed with the first local loopback reference-to-reference record.
   smokes at 10 datagrams/sec for 1 second passed for all three topologies with
   100% delivery and sub-millisecond p50 latency; these remain calibration
   checks, not real-network capacity claims.
+- 2026-05-22: Hetzner paced-datagram smoke
+  `20260522T104552Z-paced-datagram-smoke` used a disposable `x86-control`
+  fallback after both `arm-smoke` and `arm-default` failed Hetzner placement.
+  The actual path was `ccx23` fsn1 -> hel1 over the private network
+  `10.88.0.11 -> 10.88.0.12`. Private ICMP was healthy with 0% loss and
+  roughly 26.8 ms average RTT. `iperf3` on the private path reported roughly
+  1.15 Gbps TCP with 0 retransmits, and 100 Mbps UDP with 0% loss and about
+  0.011 ms jitter. The Linux/amd64 Elixir release build failed under Docker
+  cross-architecture emulation on the Apple ARM workstation, so the smoke
+  captured raw `quicprobe-v1` evidence rather than canonical
+  `transport-bench-v1` wrapper records. The important finding was tool-side:
+  the current `quicprobe` paced sender was the first bottleneck, not the
+  network. At 64-byte datagrams, target 100/500/1000 pps delivered 100% but
+  actually sent about 94/436/804 pps. At target 2000/5000/10000 pps, actual
+  send rates were about 916/1236/2148 pps and runs became timeout-dominated
+  with delivery ratios 91.4%/49.3%/42.9%. Artifacts are under
+  `bench/transport/results/20260522T104552Z-paced-datagram-smoke/`.
+  Infrastructure was destroyed and `just bench-transport-verify-clean`
+  confirmed no Terraform state entries or labelled Hetzner resources remain.
+- 2026-05-22: `quicprobe` paced datagram sender now uses absolute-deadline
+  pacing and reports `offered_rate_ratio`, `offered_rate_tolerance`, and
+  `offered_rate_valid`. The benchmark wrapper passes the tolerance through and
+  marks paced datagram records with missed offered-rate targets as
+  `tool_output_invalid` instead of treating them as network delivery loss.
+  Local loopback smokes after the fix held the target rate at 1000 pps for 2
+  seconds (`offered_rate_ratio` about 1.0005) and 10000 pps for 2 seconds
+  (`offered_rate_ratio` about 1.0000), both with 100% delivery. These are still
+  calibration checks; the Hetzner rate sweep needs to be rerun before making
+  real-network capacity claims.
+- 2026-05-22: attempted a follow-up ARM Hetzner run
+  `20260522T115741Z-arm-pacing-smoke` after the pacing fix. All ARM profiles
+  failed provider placement before benchmark traffic could run:
+  `arm-smoke` (`cax21`, fsn1 -> nbg1) created the server but failed client
+  placement, while `arm-default` (`cax31`, fsn1 -> hel1), `arm-stress`
+  (`cax41`, fsn1 -> hel1), and `arm-low-rtt` (`cax31`, fsn1 -> nbg1) failed
+  both node placements. Each partial state was destroyed, and
+  `just bench-transport-verify-clean` confirmed no Terraform state entries or
+  labelled Hetzner resources remain. No iperf3 or QUIC measurements were
+  collected in this attempt.
 
 Remaining slices:
 

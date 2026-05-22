@@ -233,6 +233,11 @@ records offered datagrams, locally accepted sends, echoed datagrams, delivery
 ratio, drops, and datagram latency percentiles. Delivery below
 `--delivery-threshold` maps to
 `limits.first_break_symptom=datagram_delivery_loss`.
+For paced steps, actual send rate is part of the measurement contract:
+`offered_rate_ratio` is actual send rate divided by target rate, and
+`offered_rate_valid=false` means the load generator missed
+`--offered-rate-tolerance` and the result is tool evidence, not network
+capacity evidence.
 
 ```bash
 go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
@@ -252,7 +257,8 @@ go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
   --workload datagram_pressure \
   --datagram-size 1200 \
   --datagram-rate 1000 \
-  --duration-seconds 10
+  --duration-seconds 10 \
+  --offered-rate-tolerance 0.95
 ```
 
 The canonical benchmark wrapper supports reference-to-reference,

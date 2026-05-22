@@ -211,6 +211,8 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
         "2",
         "--delivery-threshold",
         "0.95",
+        "--offered-rate-tolerance",
+        "0.9",
         "--quicprobe-command",
         fake_quicprobe,
         "--output",
@@ -226,10 +228,12 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
 
     assert record["profile"]["settings"]["datagram_mode"] == "paced"
     assert record["profile"]["settings"]["delivery_threshold"] == 0.95
+    assert record["profile"]["settings"]["offered_rate_tolerance"] == 0.9
     assert record["profile"]["pacing"] == "paced"
     assert record["workload"]["datagrams_per_second"] == 5.0
     assert record["workload"]["offered_load_bps"] == 2560.0
     assert record["metrics"]["offered_load_bps"] == 2560.0
+    assert record["metrics"]["offered_rate_ratio"] == 1.0
     assert record["metrics"]["datagram_delivery_ratio"] == 0.9
     assert record["metrics"]["datagram_drop_count"] == 1
     assert record["limits"]["first_break_symptom"] == "datagram_delivery_loss"
@@ -239,7 +243,60 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert args =~ "--datagram-size 64"
     assert args =~ "--datagram-rate 5"
     assert args =~ "--duration-seconds 2"
+    assert args =~ "--offered-rate-tolerance 0.9"
     assert args =~ "--timeout 7s"
+  end
+
+  test "marks paced datagram results invalid when the generator misses the target offered rate" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "reference-paced-invalid.jsonl")
+
+    fake_quicprobe =
+      fake_quicprobe_command(
+        dir,
+        Path.join(dir, "quicprobe-paced-invalid.args"),
+        paced_datagram_quicprobe_json(offered_rate_ratio: 0.8, offered_rate_valid: false)
+      )
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "reference-client-to-reference-server",
+        "--workload",
+        "datagram_pressure",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--datagram-size",
+        "64",
+        "--datagram-rate",
+        "5",
+        "--duration-seconds",
+        "2",
+        "--delivery-threshold",
+        "0.95",
+        "--offered-rate-tolerance",
+        "0.95",
+        "--quicprobe-command",
+        fake_quicprobe,
+        "--output",
+        output_path,
+        "--run-id",
+        "reference-paced-invalid-test"
+      ],
+      script: "test reference-comparison"
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+    assert record["limits"]["first_break_symptom"] == "tool_output_invalid"
+    assert record["limits"]["stopped_by"] == "reference_comparison_invalid_measurement"
+    assert record["limits"]["protocol_error"] == true
+    assert record["errors"]["message"] =~ "offered rate below tolerance"
+    assert record["errors"]["message"] =~ "0.8 < 0.95"
   end
 
   defp fake_quicprobe_command(dir, args_path) do
@@ -330,7 +387,10 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     """
   end
 
-  defp paced_datagram_quicprobe_json do
+  defp paced_datagram_quicprobe_json(overrides \\ []) do
+    offered_rate_ratio = Keyword.get(overrides, :offered_rate_ratio, 1.0)
+    offered_rate_valid = Keyword.get(overrides, :offered_rate_valid, true)
+
     """
     {
       "schema_version": "quicprobe-v1",
@@ -348,7 +408,10 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
       "datagram_count": 10,
       "datagram_mode": "paced",
       "target_datagrams_per_second": 5.0,
-      "duration_seconds": 2,
+      "target_duration_seconds": 2,
+      "offered_rate_ratio": #{offered_rate_ratio},
+      "offered_rate_tolerance": 0.95,
+      "offered_rate_valid": #{offered_rate_valid},
       "datagrams_offered": 10,
       "datagrams_accepted": 10,
       "datagrams_received": 9,
