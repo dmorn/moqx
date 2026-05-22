@@ -50,6 +50,8 @@ type clientConfig struct {
 	payloadCount    int
 	datagramSize    int
 	datagramCount   int
+	datagramRate    int
+	durationSeconds int
 }
 
 type clientRunResult struct {
@@ -69,6 +71,8 @@ type clientRunResult struct {
 	PayloadCount          int                `json:"payload_count"`
 	DatagramSizeBytes     int                `json:"datagram_size_bytes"`
 	DatagramCount         int                `json:"datagram_count"`
+	DatagramMode          string             `json:"datagram_mode"`
+	TargetDatagramPPS     float64            `json:"target_datagrams_per_second"`
 	DatagramsOffered      int                `json:"datagrams_offered"`
 	DatagramsAccepted     int                `json:"datagrams_accepted"`
 	DatagramsReceived     int                `json:"datagrams_received"`
@@ -79,10 +83,18 @@ type clientRunResult struct {
 	HandshakeLatencyMS    float64            `json:"handshake_latency_ms"`
 	FirstByteLatencyMS    *float64           `json:"first_byte_latency_ms"`
 	ApplicationDurationMS float64            `json:"application_duration_ms"`
+	OfferedLoadBPS        float64            `json:"offered_load_bps"`
 	GoodputBPS            float64            `json:"goodput_bps"`
 	SendRateDatagramPPS   float64            `json:"send_rate_datagrams_per_second"`
 	StreamLatencyMS       map[string]float64 `json:"stream_latency_ms"`
 	DatagramLatencyMS     map[string]float64 `json:"datagram_latency_ms"`
+}
+
+type datagramReceiveResult struct {
+	received         int
+	firstByteLatency *float64
+	latencies        []float64
+	err              error
 }
 
 func main() {
@@ -168,6 +180,8 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	flags.IntVar(&cfg.payloadCount, "payload-count", 1, "payload writes per stream for --json runs")
 	flags.IntVar(&cfg.datagramSize, "datagram-size", 1200, "datagram bytes per send for datagram_pressure --json runs")
 	flags.IntVar(&cfg.datagramCount, "datagram-count", 1000, "datagrams to send for datagram_pressure --json runs")
+	flags.IntVar(&cfg.datagramRate, "datagram-rate", 0, "target datagrams per second for paced datagram_pressure --json runs")
+	flags.IntVar(&cfg.durationSeconds, "duration-seconds", 0, "paced datagram_pressure duration in seconds")
 	flags.DurationVar(&timeout, "timeout", 5*time.Second, "client timeout")
 
 	if err := flags.Parse(args); err != nil {
@@ -203,6 +217,18 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	}
 	if cfg.datagramCount <= 0 {
 		return clientConfig{}, 0, errors.New("client --datagram-count must be positive")
+	}
+	if cfg.datagramRate < 0 {
+		return clientConfig{}, 0, errors.New("client --datagram-rate must be zero or positive")
+	}
+	if cfg.durationSeconds < 0 {
+		return clientConfig{}, 0, errors.New("client --duration-seconds must be zero or positive")
+	}
+	if cfg.datagramRate > 0 && cfg.durationSeconds == 0 {
+		return clientConfig{}, 0, errors.New("client --duration-seconds is required when --datagram-rate is set")
+	}
+	if cfg.datagramRate == 0 && cfg.durationSeconds > 0 {
+		return clientConfig{}, 0, errors.New("client --datagram-rate is required when --duration-seconds is set")
 	}
 
 	return cfg, timeout, nil
@@ -517,21 +543,36 @@ func runDatagramPressureClient(
 	}
 
 	applicationStartedAt := time.Now()
-	accepted, sendDuration, err := sendDatagramBurst(conn, cfg)
+	offered := effectiveDatagramCount(cfg)
+	mode := datagramMode(cfg)
+	receiveResultc := make(chan datagramReceiveResult, 1)
+
+	go func() {
+		received, firstByteLatency, latencies, err := receiveDatagramEchoes(ctx, conn, offered, applicationStartedAt)
+
+		receiveResultc <- datagramReceiveResult{
+			received:         received,
+			firstByteLatency: firstByteLatency,
+			latencies:        latencies,
+			err:              err,
+		}
+	}()
+
+	accepted, sendDuration, err := sendDatagrams(ctx, conn, cfg, offered)
 	if err != nil {
 		return clientRunResult{}, err
 	}
 
-	received, firstByteLatency, latencies, err := receiveDatagramEchoes(ctx, conn, accepted, applicationStartedAt)
-	if err != nil {
-		return clientRunResult{}, err
+	receiveResult := <-receiveResultc
+	if receiveResult.err != nil {
+		return clientRunResult{}, receiveResult.err
 	}
 
 	applicationDuration := time.Since(applicationStartedAt)
 	finishedAt := time.Now()
-	drops := cfg.datagramCount - received
+	drops := offered - receiveResult.received
 	bytesSent := int64(accepted * cfg.datagramSize)
-	bytesReceived := int64(received * cfg.datagramSize)
+	bytesReceived := int64(receiveResult.received * cfg.datagramSize)
 
 	return clientRunResult{
 		SchemaVersion:         "quicprobe-v1",
@@ -546,34 +587,101 @@ func runDatagramPressureClient(
 		Workload:              datagramPressureWorkload,
 		PayloadSizeBytes:      cfg.datagramSize,
 		DatagramSizeBytes:     cfg.datagramSize,
-		DatagramCount:         cfg.datagramCount,
-		DatagramsOffered:      cfg.datagramCount,
+		DatagramCount:         offered,
+		DatagramMode:          mode,
+		TargetDatagramPPS:     targetDatagramRate(cfg),
+		DatagramsOffered:      offered,
 		DatagramsAccepted:     accepted,
-		DatagramsReceived:     received,
-		DatagramDeliveryRatio: ratio(received, cfg.datagramCount),
+		DatagramsReceived:     receiveResult.received,
+		DatagramDeliveryRatio: ratio(receiveResult.received, offered),
 		DatagramDropCount:     drops,
 		BytesSent:             bytesSent,
 		BytesReceived:         bytesReceived,
 		HandshakeLatencyMS:    durationMillis(handshakeLatency),
-		FirstByteLatencyMS:    firstByteLatency,
+		FirstByteLatencyMS:    receiveResult.firstByteLatency,
 		ApplicationDurationMS: durationMillis(applicationDuration),
+		OfferedLoadBPS:        offeredLoadBPS(cfg),
 		GoodputBPS:            throughputBPS(bytesReceived, applicationDuration),
 		SendRateDatagramPPS:   rate(accepted, sendDuration),
-		DatagramLatencyMS:     latencySummary(latencies),
+		DatagramLatencyMS:     latencySummary(receiveResult.latencies),
 	}, nil
 }
 
-func sendDatagramBurst(conn quic.Connection, cfg clientConfig) (int, time.Duration, error) {
+func sendDatagrams(ctx context.Context, conn quic.Connection, cfg clientConfig, count int) (int, time.Duration, error) {
+	if cfg.datagramRate > 0 {
+		return sendDatagramPaced(ctx, conn, cfg, count)
+	}
+
+	return sendDatagramBurst(conn, cfg, count)
+}
+
+func sendDatagramBurst(conn quic.Connection, cfg clientConfig, count int) (int, time.Duration, error) {
 	startedAt := time.Now()
 
-	for sequence := 1; sequence <= cfg.datagramCount; sequence++ {
+	for sequence := 1; sequence <= count; sequence++ {
 		payload := datagramPayload(uint64(sequence), cfg.datagramSize, time.Now())
 		if err := conn.SendDatagram(payload); err != nil {
 			return sequence - 1, time.Since(startedAt), fmt.Errorf("send datagram %d: %w", sequence, err)
 		}
 	}
 
-	return cfg.datagramCount, time.Since(startedAt), nil
+	return count, time.Since(startedAt), nil
+}
+
+func sendDatagramPaced(ctx context.Context, conn quic.Connection, cfg clientConfig, count int) (int, time.Duration, error) {
+	startedAt := time.Now()
+	interval := time.Second / time.Duration(cfg.datagramRate)
+	nextSend := time.NewTimer(0)
+	defer nextSend.Stop()
+
+	for sequence := 1; sequence <= count; sequence++ {
+		select {
+		case <-ctx.Done():
+			return sequence - 1, time.Since(startedAt), nil
+		case <-nextSend.C:
+		}
+
+		payload := datagramPayload(uint64(sequence), cfg.datagramSize, time.Now())
+		if err := conn.SendDatagram(payload); err != nil {
+			return sequence - 1, time.Since(startedAt), fmt.Errorf("send datagram %d: %w", sequence, err)
+		}
+
+		nextSend.Reset(interval)
+	}
+
+	return count, time.Since(startedAt), nil
+}
+
+func effectiveDatagramCount(cfg clientConfig) int {
+	if cfg.datagramRate > 0 {
+		return cfg.datagramRate * cfg.durationSeconds
+	}
+
+	return cfg.datagramCount
+}
+
+func datagramMode(cfg clientConfig) string {
+	if cfg.datagramRate > 0 {
+		return "paced"
+	}
+
+	return "burst"
+}
+
+func targetDatagramRate(cfg clientConfig) float64 {
+	if cfg.datagramRate > 0 {
+		return float64(cfg.datagramRate)
+	}
+
+	return 0
+}
+
+func offeredLoadBPS(cfg clientConfig) float64 {
+	if cfg.datagramRate > 0 {
+		return float64(cfg.datagramRate * cfg.datagramSize * 8)
+	}
+
+	return 0
 }
 
 func receiveDatagramEchoes(

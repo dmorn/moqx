@@ -224,13 +224,15 @@ bytes echoed back, first-byte latency, aggregate goodput, and stream latency
 percentiles. Unidirectional pressure reports bytes sent and write-side stream
 latency; it has no echo bytes or first-byte latency.
 
-For burst-mode datagram pressure, use `--workload datagram_pressure`.
-Datagram pressure sends fixed-size QUIC DATAGRAM frames, records offered
-datagrams, locally accepted sends, echoed datagrams, delivery ratio, drops, and
-datagram latency percentiles, then maps delivery loss to
-`limits.first_break_symptom=datagram_delivery_loss`. This first reference
-comparison slice is intentionally burst-only; rate-stepped offered-load
-datagram ramps remain future work.
+For datagram pressure, use `--workload datagram_pressure`. By default the
+workload sends a burst of `--datagram-count` fixed-size QUIC DATAGRAM frames.
+For a fixed-rate step, set both `--datagram-rate` and `--duration-seconds`; the
+offered datagram count becomes `rate * duration`, and the record distinguishes
+target offered rate from actual send and delivered rates. Datagram pressure
+records offered datagrams, locally accepted sends, echoed datagrams, delivery
+ratio, drops, and datagram latency percentiles. Delivery below
+`--delivery-threshold` maps to
+`limits.first_break_symptom=datagram_delivery_loss`.
 
 ```bash
 go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
@@ -240,6 +242,17 @@ go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
   --workload datagram_pressure \
   --datagram-size 1200 \
   --datagram-count 1000
+```
+
+```bash
+go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
+  --ca .tmp/integration-certs/ca.pem \
+  --alpn moqx-test \
+  --json \
+  --workload datagram_pressure \
+  --datagram-size 1200 \
+  --datagram-rate 1000 \
+  --duration-seconds 10
 ```
 
 The canonical benchmark wrapper supports reference-to-reference,
@@ -321,6 +334,11 @@ moqx-transport-bench reference-comparison \
   --datagram-count 1000 \
   --output bench/transport/results/reference-client-moqx-listener-datagrams.jsonl
 ```
+
+For paced datagram steps against `moqx-listener`, pass the same
+`--datagram-rate` and `--duration-seconds` pair to the listener and the
+reference-comparison command so both sides agree on the expected datagram
+count.
 
 The measurement command does not start the peer server. For reference server
 topologies, start `tools/quicprobe server` explicitly on the chosen endpoint

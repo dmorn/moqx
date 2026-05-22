@@ -56,6 +56,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           payload_count: :integer,
           datagram_size: :integer,
           datagram_count: :integer,
+          datagram_rate: :integer,
+          duration_seconds: :integer,
+          delivery_threshold: :string,
           timeout_seconds: :integer,
           timeout_margin_seconds: :integer,
           quicprobe_command: :string,
@@ -126,6 +129,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       payload_count: Keyword.get(opts, :payload_count, 1),
       datagram_size: Keyword.get(opts, :datagram_size, 1200),
       datagram_count: Keyword.get(opts, :datagram_count, 1000),
+      datagram_rate: opts[:datagram_rate],
+      duration_seconds: opts[:duration_seconds],
+      delivery_threshold: parse_delivery_threshold(Keyword.get(opts, :delivery_threshold, "1.0")),
       timeout_seconds: Keyword.get(opts, :timeout_seconds, 5),
       timeout_margin_seconds: Keyword.get(opts, :timeout_margin_seconds, 2),
       quicprobe_command: Keyword.get(opts, :quicprobe_command, "quicprobe"),
@@ -143,6 +149,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          :ok <- validate_positive(config.payload_count, "--payload-count"),
          :ok <- validate_datagram_size(config),
          :ok <- validate_positive(config.datagram_count, "--datagram-count"),
+         :ok <- validate_paced_datagrams(config),
+         :ok <- validate_delivery_threshold(config.delivery_threshold),
          :ok <- validate_positive(config.timeout_seconds, "--timeout-seconds"),
          :ok <- validate_positive(config.timeout_margin_seconds, "--timeout-margin-seconds"),
          :ok <- validate_stream_direction(config.stream_direction) do
@@ -152,6 +160,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp validate_positive(value, _name) when is_integer(value) and value > 0, do: :ok
   defp validate_positive(_value, name), do: {:error, "#{name} must be greater than 0."}
+
+  defp validate_optional_positive(nil, _name), do: :ok
+  defp validate_optional_positive(value, name), do: validate_positive(value, name)
 
   defp validate_workload(workload)
        when workload in [@stream_pressure_workload, @datagram_pressure_workload],
@@ -169,6 +180,44 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp validate_datagram_size(_config), do: :ok
+
+  defp validate_paced_datagrams(%{
+         workload: @datagram_pressure_workload,
+         datagram_rate: rate,
+         duration_seconds: duration
+       }) do
+    with :ok <- validate_optional_positive(rate, "--datagram-rate"),
+         :ok <- validate_optional_positive(duration, "--duration-seconds") do
+      cond do
+        is_integer(rate) and is_nil(duration) ->
+          {:error, "--duration-seconds is required when --datagram-rate is set."}
+
+        is_nil(rate) and is_integer(duration) ->
+          {:error, "--datagram-rate is required when --duration-seconds is set."}
+
+        true ->
+          :ok
+      end
+    end
+  end
+
+  defp validate_paced_datagrams(_config), do: :ok
+
+  defp parse_delivery_threshold(value) when is_binary(value) do
+    case Float.parse(value) do
+      {parsed, ""} -> parsed
+      _ -> :invalid
+    end
+  end
+
+  defp parse_delivery_threshold(value) when is_integer(value) or is_float(value), do: value
+  defp parse_delivery_threshold(_value), do: :invalid
+
+  defp validate_delivery_threshold(value) when is_number(value) and value >= 0.0 and value <= 1.0,
+    do: :ok
+
+  defp validate_delivery_threshold(_value),
+    do: {:error, "--delivery-threshold must be a number from 0.0 to 1.0."}
 
   defp validate_stream_direction(direction)
        when direction in ["bidirectional", "unidirectional"],
@@ -231,7 +280,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp run_quicprobe(config) do
     args = quicprobe_args(config)
-    timeout_ms = (config.timeout_seconds + config.timeout_margin_seconds) * 1000
+    timeout_ms = step_timeout_ms(config)
     {output, status, timed_out?} = run_command(config.quicprobe_command, args, timeout_ms)
     measurement = decode_json(output)
 
@@ -239,32 +288,32 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp quicprobe_args(config) do
-    args = [
-      "client",
-      "--addr",
-      "#{config.server}:#{config.port}",
-      "--ca",
-      config.ca,
-      "--alpn",
-      config.alpn,
-      "--json",
-      "--workload",
-      config.workload,
-      "--stream-direction",
-      config.stream_direction,
-      "--stream-count",
-      Integer.to_string(config.stream_count),
-      "--payload-size",
-      Integer.to_string(config.payload_size),
-      "--payload-count",
-      Integer.to_string(config.payload_count),
-      "--datagram-size",
-      Integer.to_string(config.datagram_size),
-      "--datagram-count",
-      Integer.to_string(config.datagram_count),
-      "--timeout",
-      "#{config.timeout_seconds}s"
-    ]
+    args =
+      [
+        "client",
+        "--addr",
+        "#{config.server}:#{config.port}",
+        "--ca",
+        config.ca,
+        "--alpn",
+        config.alpn,
+        "--json",
+        "--workload",
+        config.workload,
+        "--stream-direction",
+        config.stream_direction,
+        "--stream-count",
+        Integer.to_string(config.stream_count),
+        "--payload-size",
+        Integer.to_string(config.payload_size),
+        "--payload-count",
+        Integer.to_string(config.payload_count),
+        "--datagram-size",
+        Integer.to_string(config.datagram_size),
+        "--timeout",
+        "#{datagram_client_timeout_seconds(config)}s"
+      ]
+      |> append_datagram_args(config)
 
     if config.servername do
       args ++ ["--servername", config.servername]
@@ -275,7 +324,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp run_moqx_client(config) do
     args = moqx_client_step_args(config)
-    timeout_ms = (config.timeout_seconds + config.timeout_margin_seconds) * 1000
+    timeout_ms = step_timeout_ms(config)
 
     task =
       Task.async(fn ->
@@ -315,12 +364,40 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       Integer.to_string(config.payload_count),
       "--datagram-size",
       Integer.to_string(config.datagram_size),
-      "--datagram-count",
-      Integer.to_string(config.datagram_count),
       "--timeout",
-      "#{config.timeout_seconds}s"
+      "#{datagram_client_timeout_seconds(config)}s"
     ]
+    |> append_datagram_args(config)
     |> maybe_append_servername(config.servername)
+  end
+
+  defp append_datagram_args(args, %{workload: @datagram_pressure_workload} = config) do
+    args =
+      args ++
+        [
+          "--datagram-count",
+          Integer.to_string(config.datagram_count)
+        ]
+
+    if paced_datagrams?(config) do
+      args ++
+        [
+          "--datagram-rate",
+          Integer.to_string(config.datagram_rate),
+          "--duration-seconds",
+          Integer.to_string(config.duration_seconds)
+        ]
+    else
+      args
+    end
+  end
+
+  defp append_datagram_args(args, _config) do
+    args ++
+      [
+        "--datagram-count",
+        "1000"
+      ]
   end
 
   defp do_run_moqx_client(config) do
@@ -373,6 +450,16 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp maybe_put_server_name(opts, servername), do: Keyword.put(opts, :server_name, servername)
 
   defp client_timeout_ms(config), do: config.timeout_seconds * 1000
+
+  defp step_timeout_ms(config) do
+    (datagram_client_timeout_seconds(config) + config.timeout_margin_seconds) * 1000
+  end
+
+  defp datagram_client_timeout_seconds(%{workload: @datagram_pressure_workload} = config) do
+    config.timeout_seconds + (config.duration_seconds || 0)
+  end
+
+  defp datagram_client_timeout_seconds(config), do: config.timeout_seconds
 
   defp measure_moqx_workload(
          ctx,
@@ -437,18 +524,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp measure_moqx_datagram_pressure(ctx, connection, config, handshake_latency_ms) do
     application_started_at = monotonic_us()
-    {accepted, send_duration_ms, ctx} = send_moqx_datagrams(ctx, connection, config)
+    offered = effective_datagram_count(config)
 
-    {received, first_byte_latency_ms, latencies, _ctx} =
-      receive_moqx_datagrams(
-        ctx,
-        connection,
-        config,
-        MapSet.new(),
-        [],
-        nil,
-        application_started_at
-      )
+    {accepted, send_duration_ms, received, first_byte_latency_ms, latencies, _ctx} =
+      send_and_receive_moqx_datagrams(ctx, connection, config, offered, application_started_at)
 
     received_count = MapSet.size(received)
     application_duration_ms = elapsed_ms(application_started_at)
@@ -466,17 +545,22 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "workload" => @datagram_pressure_workload,
       "payload_size_bytes" => config.datagram_size,
       "datagram_size_bytes" => config.datagram_size,
-      "datagram_count" => config.datagram_count,
-      "datagrams_offered" => config.datagram_count,
+      "datagram_count" => offered,
+      "datagram_mode" => datagram_mode(config),
+      "target_datagrams_per_second" => target_datagram_rate(config),
+      "duration_seconds" => config.duration_seconds,
+      "delivery_threshold" => config.delivery_threshold,
+      "datagrams_offered" => offered,
       "datagrams_accepted" => accepted,
       "datagrams_received" => received_count,
-      "datagram_delivery_ratio" => ratio(received_count, config.datagram_count),
-      "datagram_drop_count" => config.datagram_count - received_count,
+      "datagram_delivery_ratio" => ratio(received_count, offered),
+      "datagram_drop_count" => offered - received_count,
       "bytes_sent" => bytes_sent,
       "bytes_received" => bytes_received,
       "handshake_latency_ms" => handshake_latency_ms,
       "first_byte_latency_ms" => first_byte_latency_ms,
       "application_duration_ms" => application_duration_ms,
+      "offered_load_bps" => offered_load_bps(config),
       "goodput_bps" => bits_per_second(bytes_received, application_duration_ms),
       "send_rate_packets_per_second" => rate(accepted, seconds(send_duration_ms)),
       "send_rate_datagrams_per_second" => rate(accepted, seconds(send_duration_ms)),
@@ -484,11 +568,94 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     }
   end
 
-  defp send_moqx_datagrams(ctx, connection, config) do
+  defp send_and_receive_moqx_datagrams(
+         ctx,
+         connection,
+         %{datagram_rate: rate} = config,
+         count,
+         started_at
+       )
+       when is_integer(rate) and rate > 0 do
+    send_started_at = monotonic_us()
+    interval_us = div(1_000_000, rate)
+
+    {accepted, ctx, received, latencies, first_byte, _next_send_at} =
+      Enum.reduce(
+        1..count,
+        {0, ctx, MapSet.new(), [], nil, send_started_at},
+        fn sequence, {accepted, ctx, received, latencies, first_byte, next_send_at} ->
+          {received, first_byte, latencies, ctx} =
+            receive_moqx_datagrams_until(
+              ctx,
+              connection,
+              received,
+              latencies,
+              first_byte,
+              started_at,
+              next_send_at
+            )
+
+          {:ok, ctx} =
+            Transport.send_datagram(
+              ctx,
+              connection,
+              DatagramPayload.encode(sequence, config.datagram_size, monotonic_us())
+            )
+
+          {received, first_byte, latencies, ctx} =
+            drain_available_moqx_datagrams(
+              ctx,
+              connection,
+              received,
+              latencies,
+              first_byte,
+              started_at
+            )
+
+          {accepted + 1, ctx, received, latencies, first_byte, next_send_at + interval_us}
+        end
+      )
+
+    send_duration_ms = elapsed_ms(send_started_at)
+
+    {received, first_byte, latencies, ctx} =
+      receive_moqx_datagrams(
+        ctx,
+        connection,
+        config,
+        count,
+        received,
+        latencies,
+        first_byte,
+        started_at
+      )
+
+    {accepted, send_duration_ms, received, first_byte, latencies, ctx}
+  end
+
+  defp send_and_receive_moqx_datagrams(ctx, connection, config, count, started_at) do
+    {accepted, send_duration_ms, ctx} = send_moqx_datagrams(ctx, connection, config, count)
+
+    {received, first_byte, latencies, ctx} =
+      receive_moqx_datagrams(
+        ctx,
+        connection,
+        config,
+        count,
+        MapSet.new(),
+        [],
+        nil,
+        started_at
+      )
+
+    {accepted, send_duration_ms, received, first_byte, latencies, ctx}
+  end
+
+  defp send_moqx_datagrams(ctx, connection, config, count) do
     started_at = monotonic_us()
 
     {accepted, ctx} =
-      Enum.reduce(1..config.datagram_count, {0, ctx}, fn sequence, {accepted, ctx} ->
+      Enum.reduce(1..count, {0, ctx}, fn sequence, {accepted, ctx} ->
         {:ok, ctx} =
           Transport.send_datagram(
             ctx,
@@ -502,25 +669,150 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     {accepted, elapsed_ms(started_at), ctx}
   end
 
-  defp receive_moqx_datagrams(
+  defp receive_moqx_datagrams_until(
          ctx,
          connection,
-         config,
+         received,
+         latencies,
+         first_byte,
+         started_at,
+         target_us
+       ) do
+    remaining_ms = max(ceil((target_us - monotonic_us()) / 1000), 0)
+
+    case Transport.receive_event(ctx, remaining_ms) do
+      {:ok, {:datagram, ^connection, payload, _metadata}, ctx} ->
+        {received, latencies, first_byte} =
+          record_moqx_datagram(payload, received, latencies, first_byte, started_at)
+
+        receive_moqx_datagrams_until(
+          ctx,
+          connection,
+          received,
+          latencies,
+          first_byte,
+          started_at,
+          target_us
+        )
+
+      {:ok, _event, ctx} ->
+        receive_moqx_datagrams_until(
+          ctx,
+          connection,
+          received,
+          latencies,
+          first_byte,
+          started_at,
+          target_us
+        )
+
+      {:unknown, _message, ctx} ->
+        receive_moqx_datagrams_until(
+          ctx,
+          connection,
+          received,
+          latencies,
+          first_byte,
+          started_at,
+          target_us
+        )
+
+      {:error, _reason, ctx} ->
+        {received, first_byte, latencies, ctx}
+
+      {:timeout, ctx} ->
+        {received, first_byte, latencies, ctx}
+    end
+  end
+
+  defp drain_available_moqx_datagrams(
+         ctx,
+         connection,
          received,
          latencies,
          first_byte,
          started_at
        ) do
-    if MapSet.size(received) >= config.datagram_count or
-         elapsed_ms(started_at) >= client_timeout_ms(config) do
-      {received, first_byte, latencies, ctx}
-    else
-      receive_moqx_datagram(ctx, connection, config, received, latencies, first_byte, started_at)
+    case Transport.receive_event(ctx, 0) do
+      {:ok, {:datagram, ^connection, payload, _metadata}, ctx} ->
+        {received, latencies, first_byte} =
+          record_moqx_datagram(payload, received, latencies, first_byte, started_at)
+
+        drain_available_moqx_datagrams(
+          ctx,
+          connection,
+          received,
+          latencies,
+          first_byte,
+          started_at
+        )
+
+      {:ok, _event, ctx} ->
+        drain_available_moqx_datagrams(
+          ctx,
+          connection,
+          received,
+          latencies,
+          first_byte,
+          started_at
+        )
+
+      {:unknown, _message, ctx} ->
+        drain_available_moqx_datagrams(
+          ctx,
+          connection,
+          received,
+          latencies,
+          first_byte,
+          started_at
+        )
+
+      {:error, _reason, ctx} ->
+        {received, first_byte, latencies, ctx}
+
+      {:timeout, ctx} ->
+        {received, first_byte, latencies, ctx}
     end
   end
 
-  defp receive_moqx_datagram(ctx, connection, config, received, latencies, first_byte, started_at) do
-    remaining_ms = max(client_timeout_ms(config) - trunc(elapsed_ms(started_at)), 0)
+  defp receive_moqx_datagrams(
+         ctx,
+         connection,
+         config,
+         expected,
+         received,
+         latencies,
+         first_byte,
+         started_at
+       ) do
+    if MapSet.size(received) >= expected or
+         elapsed_ms(started_at) >= datagram_receive_timeout_ms(config) do
+      {received, first_byte, latencies, ctx}
+    else
+      receive_moqx_datagram(
+        ctx,
+        connection,
+        config,
+        expected,
+        received,
+        latencies,
+        first_byte,
+        started_at
+      )
+    end
+  end
+
+  defp receive_moqx_datagram(
+         ctx,
+         connection,
+         config,
+         expected,
+         received,
+         latencies,
+         first_byte,
+         started_at
+       ) do
+    remaining_ms = max(datagram_receive_timeout_ms(config) - trunc(elapsed_ms(started_at)), 0)
 
     case Transport.receive_event(ctx, remaining_ms) do
       {:ok, {:datagram, ^connection, payload, _metadata}, ctx} ->
@@ -531,6 +823,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           ctx,
           connection,
           config,
+          expected,
           received,
           latencies,
           first_byte,
@@ -542,6 +835,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           ctx,
           connection,
           config,
+          expected,
           received,
           latencies,
           first_byte,
@@ -553,6 +847,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           ctx,
           connection,
           config,
+          expected,
           received,
           latencies,
           first_byte,
@@ -564,6 +859,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           ctx,
           connection,
           config,
+          expected,
           received,
           latencies,
           first_byte,
@@ -942,10 +1238,12 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "alpn" => measurement["alpn"] || ctx.config.alpn,
       "datagrams" => ctx.config.workload == @datagram_pressure_workload,
       "congestion_control" => nil,
-      "pacing" => nil,
+      "pacing" => datagram_pacing(ctx.config),
       "settings" => %{
         "topology" => ctx.config.topology,
         "workload" => measurement["workload"] || ctx.config.workload,
+        "datagram_mode" => measurement["datagram_mode"] || profile_datagram_mode(ctx.config),
+        "delivery_threshold" => ctx.config.delivery_threshold,
         "reference_tool" => "quicprobe",
         "measurement_schema" => measurement["schema_version"],
         "client_implementation" => measurement["client_implementation"] || "quicprobe",
@@ -974,29 +1272,23 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp workload_metadata(ctx) do
     measurement = measurement(ctx)
     duration_seconds = seconds(measurement["application_duration_ms"])
-    datagram? = ctx.config.workload == @datagram_pressure_workload
-
-    stream_count =
-      if datagram?, do: nil, else: measurement["stream_count"] || ctx.config.stream_count
-
-    payload_count =
-      if datagram?, do: nil, else: measurement["payload_count"] || ctx.config.payload_count
+    stream_count = workload_stream_count(ctx.config, measurement)
+    payload_count = workload_payload_count(ctx.config, measurement)
 
     %{
       "family" => "reference_comparison",
       "direction" => "client_to_server",
-      "stream_direction" =>
-        if(datagram?,
-          do: nil,
-          else: measurement["stream_direction"] || ctx.config.stream_direction
-        ),
+      "stream_direction" => workload_stream_direction(ctx.config, measurement),
       "stream_count" => stream_count,
       "payload_size_bytes" =>
         measurement["payload_size_bytes"] || workload_payload_size(ctx.config),
       "payloads_per_second" => payloads_per_second(stream_count, payload_count, duration_seconds),
-      "offered_load_bps" => nil,
+      "offered_load_bps" =>
+        number(measurement["offered_load_bps"]) || offered_load_bps(ctx.config),
       "datagram_size_bytes" => measurement["datagram_size_bytes"],
-      "datagrams_per_second" => measurement["send_rate_datagrams_per_second"],
+      "datagrams_per_second" =>
+        number(measurement["target_datagrams_per_second"]) ||
+          measurement["send_rate_datagrams_per_second"],
       "control_trickle_bps" => nil,
       "topology" => ctx.config.topology,
       "tool" => workload_tool(ctx.config),
@@ -1007,6 +1299,21 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp workload_tool(%{topology: @moqx_client_topology}), do: "moqx"
   defp workload_tool(_config), do: "quicprobe"
+
+  defp workload_stream_count(%{workload: @datagram_pressure_workload}, _measurement), do: nil
+
+  defp workload_stream_count(config, measurement),
+    do: measurement["stream_count"] || config.stream_count
+
+  defp workload_payload_count(%{workload: @datagram_pressure_workload}, _measurement), do: nil
+
+  defp workload_payload_count(config, measurement),
+    do: measurement["payload_count"] || config.payload_count
+
+  defp workload_stream_direction(%{workload: @datagram_pressure_workload}, _measurement), do: nil
+
+  defp workload_stream_direction(config, measurement),
+    do: measurement["stream_direction"] || config.stream_direction
 
   defp workload_payload_size(%{workload: @datagram_pressure_workload} = config),
     do: config.datagram_size
@@ -1047,7 +1354,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     %{
       "handshake_latency_ms" => number(measurement["handshake_latency_ms"]),
       "first_byte_latency_ms" => number(measurement["first_byte_latency_ms"]),
-      "offered_load_bps" => nil,
+      "offered_load_bps" =>
+        number(measurement["offered_load_bps"]) || offered_load_bps(ctx.config),
       "goodput_bps" => number(measurement["goodput_bps"]),
       "send_rate_packets_per_second" => send_rate_packets_per_second(measurement),
       "send_rate_datagrams_per_second" => number(measurement["send_rate_datagrams_per_second"]),
@@ -1124,7 +1432,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     ratio = number(measurement(ctx)["datagram_delivery_ratio"])
 
     ctx.config.workload == @datagram_pressure_workload and !failed? and !invalid_measurement? and
-      is_number(ratio) and ratio < 1.0
+      is_number(ratio) and ratio < ctx.config.delivery_threshold
   end
 
   defp errors(ctx) do
@@ -1260,6 +1568,47 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     do: nil
 
   defp ratio(count, total), do: count / total
+
+  defp paced_datagrams?(%{datagram_rate: rate}) when is_integer(rate) and rate > 0, do: true
+  defp paced_datagrams?(_config), do: false
+
+  defp datagram_mode(config), do: if(paced_datagrams?(config), do: "paced", else: "burst")
+
+  defp datagram_pacing(%{workload: @datagram_pressure_workload} = config),
+    do: datagram_mode(config)
+
+  defp datagram_pacing(_config), do: nil
+
+  defp profile_datagram_mode(%{workload: @datagram_pressure_workload} = config),
+    do: datagram_mode(config)
+
+  defp profile_datagram_mode(_config), do: nil
+
+  defp target_datagram_rate(config),
+    do: if(paced_datagrams?(config), do: config.datagram_rate, else: nil)
+
+  defp effective_datagram_count(config) do
+    if paced_datagrams?(config) do
+      config.datagram_rate * config.duration_seconds
+    else
+      config.datagram_count
+    end
+  end
+
+  defp offered_load_bps(%{workload: @datagram_pressure_workload} = config) do
+    case target_datagram_rate(config) do
+      nil -> nil
+      rate -> rate * config.datagram_size * 8
+    end
+  end
+
+  defp offered_load_bps(_config), do: nil
+
+  defp datagram_receive_timeout_ms(%{workload: @datagram_pressure_workload} = config) do
+    datagram_client_timeout_seconds(config) * 1000
+  end
+
+  defp datagram_receive_timeout_ms(config), do: client_timeout_ms(config)
 
   defp seconds(nil), do: nil
 
@@ -1461,6 +1810,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       --payload-count N              payload writes per stream (default: 1)
       --datagram-size BYTES          bytes per datagram for datagram_pressure (default: 1200)
       --datagram-count N             datagrams to send for datagram_pressure (default: 1000)
+      --datagram-rate N              target datagrams/sec for paced datagram_pressure
+      --duration-seconds N           paced datagram_pressure duration; offered = rate * duration
+      --delivery-threshold RATIO     minimum acceptable delivery ratio before loss stop (default: 1.0)
       --timeout-seconds N            client timeout (default: 5)
       --timeout-margin-seconds N     kill/abort step after timeout + N seconds (default: 2)
       --quicprobe-command PATH       quicprobe executable for reference-client topologies (default: quicprobe)
@@ -1499,6 +1851,13 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         --server 127.0.0.1 --port 4433 --ca .tmp/integration-certs/ca.pem \\
         --quicprobe-command /path/to/quicprobe \\
         --datagram-size 1200 --datagram-count 1000
+
+      #{script} \\
+        --topology reference-client-to-reference-server \\
+        --workload datagram_pressure \\
+        --server 127.0.0.1 --port 4433 --ca .tmp/integration-certs/ca.pem \\
+        --quicprobe-command /path/to/quicprobe \\
+        --datagram-size 1200 --datagram-rate 1000 --duration-seconds 10
 
     Reference client to MOQX listener:
       server$ moqx-transport-bench moqx-listener \\

@@ -42,6 +42,8 @@ defmodule MOQX.TransportBench.MoqxListener do
           payload_count: :integer,
           datagram_size: :integer,
           datagram_count: :integer,
+          datagram_rate: :integer,
+          duration_seconds: :integer,
           connection_count: :integer,
           timeout_seconds: :integer,
           help: :boolean
@@ -84,6 +86,8 @@ defmodule MOQX.TransportBench.MoqxListener do
       payload_count: Keyword.get(opts, :payload_count, 1),
       datagram_size: Keyword.get(opts, :datagram_size, 1200),
       datagram_count: Keyword.get(opts, :datagram_count, 1000),
+      datagram_rate: opts[:datagram_rate],
+      duration_seconds: opts[:duration_seconds],
       connection_count: Keyword.get(opts, :connection_count, 1),
       timeout_ms: Keyword.get(opts, :timeout_seconds, @default_timeout_seconds) * 1000
     }
@@ -95,6 +99,7 @@ defmodule MOQX.TransportBench.MoqxListener do
          :ok <- validate_positive(config.payload_count, "--payload-count"),
          :ok <- validate_datagram_size(config),
          :ok <- validate_positive(config.datagram_count, "--datagram-count"),
+         :ok <- validate_paced_datagrams(config),
          :ok <- validate_non_negative(config.connection_count, "--connection-count"),
          :ok <- validate_stream_direction(config.stream_direction),
          :ok <- validate_file(config.certfile, "--certfile"),
@@ -105,6 +110,9 @@ defmodule MOQX.TransportBench.MoqxListener do
 
   defp validate_positive(value, _name) when is_integer(value) and value > 0, do: :ok
   defp validate_positive(_value, name), do: {:error, "#{name} must be greater than 0."}
+
+  defp validate_optional_positive(nil, _name), do: :ok
+  defp validate_optional_positive(value, name), do: validate_positive(value, name)
 
   defp validate_non_negative(value, _name) when is_integer(value) and value >= 0, do: :ok
   defp validate_non_negative(_value, name), do: {:error, "#{name} must be 0 or greater."}
@@ -125,6 +133,28 @@ defmodule MOQX.TransportBench.MoqxListener do
   end
 
   defp validate_datagram_size(_config), do: :ok
+
+  defp validate_paced_datagrams(%{
+         workload: @datagram_pressure_workload,
+         datagram_rate: rate,
+         duration_seconds: duration
+       }) do
+    with :ok <- validate_optional_positive(rate, "--datagram-rate"),
+         :ok <- validate_optional_positive(duration, "--duration-seconds") do
+      cond do
+        is_integer(rate) and is_nil(duration) ->
+          {:error, "--duration-seconds is required when --datagram-rate is set."}
+
+        is_nil(rate) and is_integer(duration) ->
+          {:error, "--datagram-rate is required when --duration-seconds is set."}
+
+        true ->
+          :ok
+      end
+    end
+  end
+
+  defp validate_paced_datagrams(_config), do: :ok
 
   defp validate_stream_direction(direction)
        when direction in ["bidirectional", "unidirectional"],
@@ -349,7 +379,7 @@ defmodule MOQX.TransportBench.MoqxListener do
   end
 
   defp receive_datagrams(ctx, connection, config, received) do
-    if MapSet.size(received) >= config.datagram_count do
+    if MapSet.size(received) >= expected_datagram_count(config) do
       {:ok, ctx}
     else
       receive_datagram(ctx, connection, config, received)
@@ -390,6 +420,13 @@ defmodule MOQX.TransportBench.MoqxListener do
 
   defp stream_id(stream), do: stream.info.stream_id
 
+  defp expected_datagram_count(%{datagram_rate: rate, duration_seconds: duration})
+       when is_integer(rate) and is_integer(duration) do
+    rate * duration
+  end
+
+  defp expected_datagram_count(config), do: config.datagram_count
+
   defp usage(script) do
     """
     Usage:
@@ -413,6 +450,8 @@ defmodule MOQX.TransportBench.MoqxListener do
       --payload-count N              payload writes per stream (default: 1)
       --datagram-size BYTES          bytes per datagram for datagram_pressure (default: 1200)
       --datagram-count N             datagrams expected for datagram_pressure (default: 1000)
+      --datagram-rate N              target datagrams/sec expected for paced datagram_pressure
+      --duration-seconds N           paced datagram_pressure duration; expected datagrams = rate * duration
       --connection-count N           accepted connections before exit; 0 means unlimited (default: 1)
       --timeout-seconds N            accept/read timeout per operation (default: #{@default_timeout_seconds})
 

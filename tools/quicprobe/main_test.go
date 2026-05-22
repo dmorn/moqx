@@ -236,6 +236,70 @@ func TestClientServerJSONDatagramPressure(t *testing.T) {
 	}
 }
 
+func TestClientServerJSONPacedDatagramPressure(t *testing.T) {
+	t.Parallel()
+
+	certs := writeTestCerts(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ready := make(chan string, 1)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runServer(ctx, serverConfig{
+			addr:     "127.0.0.1:0",
+			certFile: certs.serverCert,
+			keyFile:  certs.serverKey,
+			alpn:     "moqx-test",
+		}, ready)
+	}()
+
+	addr := awaitServerReady(t, ready, errc)
+	var output strings.Builder
+
+	clientCtx, clientCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer clientCancel()
+
+	err := runClient(clientCtx, clientConfig{
+		addr:            addr,
+		caFile:          certs.caCert,
+		alpn:            "moqx-test",
+		serverName:      "localhost",
+		jsonOutput:      true,
+		workload:        datagramPressureWorkload,
+		datagramSize:    64,
+		datagramCount:   999,
+		datagramRate:    20,
+		durationSeconds: 1,
+	}, &output)
+	if err != nil {
+		t.Fatalf("runClient() error = %v", err)
+	}
+
+	var result clientRunResult
+	if err := json.Unmarshal([]byte(output.String()), &result); err != nil {
+		t.Fatalf("JSON output did not decode: %v\n%s", err, output.String())
+	}
+
+	assertDatagramRunResult(t, result, 64, 20)
+	if result.DatagramMode != "paced" {
+		t.Fatalf("datagram_mode = %q, want paced", result.DatagramMode)
+	}
+	if result.TargetDatagramPPS != 20 {
+		t.Fatalf("target_datagrams_per_second = %f, want 20", result.TargetDatagramPPS)
+	}
+
+	cancel()
+	select {
+	case err := <-errc:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("runServer() after cancel error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop after context cancellation")
+	}
+}
+
 func assertClientRunResult(
 	t *testing.T,
 	result clientRunResult,
@@ -316,6 +380,9 @@ func assertDatagramRunResult(t *testing.T, result clientRunResult, datagramSize 
 	}
 	if result.DatagramCount != datagramCount {
 		t.Fatalf("datagram_count = %d, want %d", result.DatagramCount, datagramCount)
+	}
+	if result.DatagramMode == "" {
+		t.Fatal("datagram_mode = empty, want burst or paced")
 	}
 	if result.DatagramsOffered != datagramCount {
 		t.Fatalf("datagrams_offered = %d, want %d", result.DatagramsOffered, datagramCount)

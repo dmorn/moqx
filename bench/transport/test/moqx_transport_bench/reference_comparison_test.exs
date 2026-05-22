@@ -163,6 +163,7 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
 
     assert record["profile"]["datagrams"] == true
     assert record["profile"]["settings"]["workload"] == "datagram_pressure"
+    assert record["profile"]["settings"]["datagram_mode"] == "burst"
     assert record["profile"]["settings"]["stream_scheduling"] == :null
     assert record["workload"]["stream_count"] == :null
     assert record["workload"]["datagram_size_bytes"] == 64
@@ -182,6 +183,63 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert args =~ "--workload datagram_pressure"
     assert args =~ "--datagram-size 64"
     assert args =~ "--datagram-count 4"
+  end
+
+  test "emits paced datagram pressure fields and threshold stop condition" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "reference-paced-datagram.jsonl")
+    args_path = Path.join(dir, "quicprobe-paced-datagram.args")
+    fake_quicprobe = fake_quicprobe_command(dir, args_path, paced_datagram_quicprobe_json())
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "reference-client-to-reference-server",
+        "--workload",
+        "datagram_pressure",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--datagram-size",
+        "64",
+        "--datagram-rate",
+        "5",
+        "--duration-seconds",
+        "2",
+        "--delivery-threshold",
+        "0.95",
+        "--quicprobe-command",
+        fake_quicprobe,
+        "--output",
+        output_path,
+        "--run-id",
+        "reference-paced-datagram-test"
+      ],
+      script: "test reference-comparison"
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["profile"]["settings"]["datagram_mode"] == "paced"
+    assert record["profile"]["settings"]["delivery_threshold"] == 0.95
+    assert record["profile"]["pacing"] == "paced"
+    assert record["workload"]["datagrams_per_second"] == 5.0
+    assert record["workload"]["offered_load_bps"] == 2560.0
+    assert record["metrics"]["offered_load_bps"] == 2560.0
+    assert record["metrics"]["datagram_delivery_ratio"] == 0.9
+    assert record["metrics"]["datagram_drop_count"] == 1
+    assert record["limits"]["first_break_symptom"] == "datagram_delivery_loss"
+
+    args = File.read!(args_path)
+    assert args =~ "--workload datagram_pressure"
+    assert args =~ "--datagram-size 64"
+    assert args =~ "--datagram-rate 5"
+    assert args =~ "--duration-seconds 2"
+    assert args =~ "--timeout 7s"
   end
 
   defp fake_quicprobe_command(dir, args_path) do
@@ -250,6 +308,7 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
       "payload_size_bytes": 64,
       "datagram_size_bytes": 64,
       "datagram_count": 4,
+      "datagram_mode": "burst",
       "datagrams_offered": 4,
       "datagrams_accepted": 4,
       "datagrams_received": 3,
@@ -262,6 +321,47 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
       "application_duration_ms": 2.0,
       "goodput_bps": 768000.0,
       "send_rate_datagrams_per_second": 4000.0,
+      "datagram_latency_ms": {
+        "p50": 0.2,
+        "p95": 0.4,
+        "p99": 0.4
+      }
+    }
+    """
+  end
+
+  defp paced_datagram_quicprobe_json do
+    """
+    {
+      "schema_version": "quicprobe-v1",
+      "record_type": "client_run",
+      "tool": "quicprobe",
+      "reference_implementation": "quic-go",
+      "reference_version": "v0.50.1",
+      "started_at": "2026-05-21T10:15:13Z",
+      "finished_at": "2026-05-21T10:15:15Z",
+      "remote_addr": "127.0.0.1:4433",
+      "alpn": "moqx-test",
+      "workload": "datagram_pressure",
+      "payload_size_bytes": 64,
+      "datagram_size_bytes": 64,
+      "datagram_count": 10,
+      "datagram_mode": "paced",
+      "target_datagrams_per_second": 5.0,
+      "duration_seconds": 2,
+      "datagrams_offered": 10,
+      "datagrams_accepted": 10,
+      "datagrams_received": 9,
+      "datagram_delivery_ratio": 0.9,
+      "datagram_drop_count": 1,
+      "bytes_sent": 640,
+      "bytes_received": 576,
+      "handshake_latency_ms": 6.5,
+      "first_byte_latency_ms": 0.4,
+      "application_duration_ms": 2000.0,
+      "offered_load_bps": 2560.0,
+      "goodput_bps": 2304.0,
+      "send_rate_datagrams_per_second": 5.0,
       "datagram_latency_ms": {
         "p50": 0.2,
         "p95": 0.4,

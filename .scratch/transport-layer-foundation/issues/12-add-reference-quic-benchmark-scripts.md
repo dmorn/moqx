@@ -259,6 +259,16 @@ shape is committed with the first local loopback reference-to-reference record.
   useful smoke evidence. A local loopback MOQX-client datagram smoke after the
   fix produced positive latency percentiles and a strict report with
   `step=datagram_pressure`.
+- 2026-05-22: Added the first fixed-rate datagram pressure primitive. The
+  reference-comparison CLI now accepts `--datagram-rate`,
+  `--duration-seconds`, and `--delivery-threshold`; paced mode offers
+  `rate * duration` datagrams and records target offered rate separately from
+  actual send and delivered rates. The reference client and MOQX-client paths
+  now receive datagram echoes while sending paced traffic so latency
+  percentiles do not include artificial post-send queueing. Local loopback
+  smokes at 10 datagrams/sec for 1 second passed for all three topologies with
+  100% delivery and sub-millisecond p50 latency; these remain calibration
+  checks, not real-network capacity claims.
 
 Remaining slices:
 
