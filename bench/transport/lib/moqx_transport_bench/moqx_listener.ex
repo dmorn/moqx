@@ -2,10 +2,11 @@ defmodule MOQX.TransportBench.MoqxListener do
   @moduledoc false
 
   alias MOQX.Transport
+  alias MOQX.TransportBench.DatagramPayload
 
   @default_script "moqx-transport-bench moqx-listener"
   @default_timeout_seconds 30
-  @datagram_header_size 16
+  @datagram_header_size DatagramPayload.header_size()
   @stream_pressure_workload "stream_pressure"
   @datagram_pressure_workload "datagram_pressure"
 
@@ -380,11 +381,12 @@ defmodule MOQX.TransportBench.MoqxListener do
     end
   end
 
-  defp record_datagram(received, <<sequence::unsigned-big-64, _rest::binary>>) do
-    MapSet.put(received, sequence)
+  defp record_datagram(received, payload) do
+    case DatagramPayload.sequence(payload) do
+      {:ok, sequence} -> MapSet.put(received, sequence)
+      :error -> received
+    end
   end
-
-  defp record_datagram(received, _payload), do: received
 
   defp stream_id(stream), do: stream.info.stream_id
 

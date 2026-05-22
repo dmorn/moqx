@@ -249,6 +249,16 @@ shape is committed with the first local loopback reference-to-reference record.
   was destroyed and `just bench-transport-verify-clean` confirmed no Terraform
   state entries or labelled Hetzner resources remain. These are smoke records,
   not capacity claims.
+- 2026-05-22: Follow-up from inspecting the datagram-smoke reports: the human
+  report table now displays `datagram_pressure` for reference-comparison
+  datagram records instead of only `reference_comparison`, and MOQX-originated
+  datagram probe timestamps now encode signed monotonic timestamps correctly.
+  The old `20260521T155945Z-datagram-smoke` MOQX-client-to-reference-server
+  artifact has invalid negative datagram latency percentiles, but its
+  delivery, byte-count, drop-count, handshake, and first-byte fields remain
+  useful smoke evidence. A local loopback MOQX-client datagram smoke after the
+  fix produced positive latency percentiles and a strict report with
+  `step=datagram_pressure`.
 
 Remaining slices:
 

@@ -35,6 +35,19 @@ defmodule MOQX.TransportBench.ReportTest do
     assert report =~ "100.00%"
   end
 
+  test "renders profile workload when a reference comparison record has no step" do
+    record =
+      record()
+      |> put_in(["profile", "name"], "reference_quic")
+      |> put_in(["profile", "settings"], %{"workload" => "datagram_pressure"})
+      |> put_in(["workload", "family"], "reference_comparison")
+      |> update_in(["workload"], &Map.delete(&1, "step"))
+
+    report = Report.render([record])
+
+    assert report =~ "datagram_pressure"
+  end
+
   test "renders timed out steps in the limits section" do
     record =
       record()

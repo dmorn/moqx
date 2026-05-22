@@ -101,12 +101,11 @@ defmodule MOQX.TransportBench.Report do
       Enum.map(records, fn record ->
         metrics = record["metrics"] || %{}
         methodology = record["methodology"] || %{}
-        workload = record["workload"] || %{}
         limits = record["limits"] || %{}
         profile = record["profile"] || %{}
 
         [
-          pad(step_name(workload), 24),
+          pad(step_name(record), 24),
           pad(value(profile["name"]), 14),
           pad(seconds(methodology["step_seconds"]), 10),
           pad(bps(metrics["goodput_bps"]), 12),
@@ -142,11 +141,10 @@ defmodule MOQX.TransportBench.Report do
   end
 
   defp limit_row(record) do
-    workload = record["workload"] || %{}
     limits = record["limits"] || %{}
     errors = record["errors"] || %{}
 
-    "Limit: #{step_name(workload)} first=#{value(limits["first_break_symptom"])} stopped_by=#{value(limits["stopped_by"])} error=#{value(errors["message"])}"
+    "Limit: #{step_name(record)} first=#{value(limits["first_break_symptom"])} stopped_by=#{value(limits["stopped_by"])} error=#{value(errors["message"])}"
   end
 
   defp validation(%{valid?: true, warnings: []}), do: "Validation\nOK"
@@ -189,9 +187,22 @@ defmodule MOQX.TransportBench.Report do
     do:
       "#{value(endpoint["host_id"])}@#{value(endpoint["provider"])}/#{value(endpoint["region"])}"
 
-  defp step_name(%{"step" => step}) when step not in [nil, :null], do: step
-  defp step_name(%{"family" => family}) when family not in [nil, :null], do: family
-  defp step_name(_workload), do: "n/a"
+  defp step_name(record) do
+    workload = record["workload"] || %{}
+    profile = record["profile"] || %{}
+    settings = profile["settings"] || %{}
+
+    value =
+      first_present([
+        workload["step"],
+        settings["workload"],
+        workload["family"]
+      ])
+
+    value(value)
+  end
+
+  defp first_present(values), do: Enum.find(values, &present?/1)
 
   defp seconds(value) when is_number(value),
     do: :io_lib.format("~.3fs", [value * 1.0]) |> IO.iodata_to_binary()

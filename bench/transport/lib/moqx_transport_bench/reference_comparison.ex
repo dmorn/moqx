@@ -3,6 +3,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   alias MOQX.Transport
   alias MOQX.TransportBench.BuildInfo
+  alias MOQX.TransportBench.DatagramPayload
   alias MOQX.TransportBench.PathMetadata
 
   @default_script "moqx-transport-bench reference-comparison"
@@ -10,7 +11,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   @schema_version "transport-bench-v1"
   @timeout_exit_status 124
   @timeout_stop_condition "reference_comparison_step_timeout"
-  @datagram_header_size 16
+  @datagram_header_size DatagramPayload.header_size()
   @stream_pressure_workload "stream_pressure"
   @datagram_pressure_workload "datagram_pressure"
   @reference_client_topology "reference-client-to-reference-server"
@@ -492,7 +493,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           Transport.send_datagram(
             ctx,
             connection,
-            datagram_payload(sequence, config.datagram_size, monotonic_us())
+            DatagramPayload.encode(sequence, config.datagram_size, monotonic_us())
           )
 
         {accepted + 1, ctx}
@@ -575,23 +576,25 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp record_moqx_datagram(
-         <<sequence::unsigned-big-64, sent_at::unsigned-big-64, _rest::binary>>,
+         payload,
          received,
          latencies,
          first_byte,
          started_at
        ) do
-    if MapSet.member?(received, sequence) do
-      {received, latencies, first_byte}
-    else
-      latency = elapsed_ms(sent_at)
-      first_byte = first_byte || elapsed_ms(started_at)
-      {MapSet.put(received, sequence), [latency | latencies], first_byte}
-    end
-  end
+    case DatagramPayload.decode(payload) do
+      {:ok, sequence, sent_at} ->
+        if MapSet.member?(received, sequence) do
+          {received, latencies, first_byte}
+        else
+          latency = elapsed_ms(sent_at)
+          first_byte = first_byte || elapsed_ms(started_at)
+          {MapSet.put(received, sequence), [latency | latencies], first_byte}
+        end
 
-  defp record_moqx_datagram(_payload, received, latencies, first_byte, _started_at) do
-    {received, latencies, first_byte}
+      :error ->
+        {received, latencies, first_byte}
+    end
   end
 
   defp empty_stream_result do
@@ -1267,13 +1270,6 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp seconds(milliseconds) when is_number(milliseconds), do: milliseconds / 1000
 
   defp binary_payload(size), do: :binary.copy(<<0>>, size)
-
-  defp datagram_payload(sequence, size, sent_at) do
-    padding_size = size - @datagram_header_size
-    padding = :binary.copy(<<0>>, padding_size)
-
-    <<sequence::unsigned-big-64, sent_at::unsigned-big-64, padding::binary>>
-  end
 
   defp bits_per_second(bytes, duration_ms) when is_number(bytes) and duration_ms > 0 do
     bytes * 8 * 1000 / duration_ms
