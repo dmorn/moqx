@@ -67,3 +67,12 @@ first.
   correctness peer. Remaining work is about high-rate observability,
   rate-stepped datagram pressure, and any transport API refactor suggested by
   real benchmark evidence.
+- 2026-05-22: The ARM near-MTU run `20260522T133552Z-mtu-dgram` showed that
+  strict delivery-threshold failures can make `methodology.step_seconds`,
+  `goodput_bps`, and `delivered_datagrams_per_second` harder to interpret:
+  failed paced steps offered traffic for 10 seconds, then included the longer
+  timeout/drain window in the recorded step duration. Delivery ratio, drop
+  count, offered rate ratio, and latency percentiles remain the primary
+  capacity signals for those records. A follow-up should decide whether paced
+  records need separate active-send duration and total-observation duration
+  fields.

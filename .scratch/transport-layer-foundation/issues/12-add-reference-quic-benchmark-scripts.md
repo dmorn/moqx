@@ -324,6 +324,24 @@ shape is committed with the first local loopback reference-to-reference record.
   97.10% delivery and 8,701 drops; 40k pps delivered 95.52% with 17,903 drops;
   50k pps delivered 92.24% with 38,824 drops. Result artifacts are under
   `bench/transport/results/20260522T125804Z-arm-remote-test/`.
+- 2026-05-22: ARM private-path near-MTU datagram run
+  `20260522T133552Z-mtu-dgram` repeated the `arm-smoke` shape on the same
+  private path (`cax21` fsn1 -> nbg1, private `10.88.0.11 -> 10.88.0.12`, MTU
+  1450) using git `18134ab` artifacts. Private readiness passed with 0% ping
+  loss and about 5.40 ms average RTT. The iperf3 baseline reported 5.04 Gbps
+  TCP goodput and 100 Mbps UDP with 100% delivery at 1200-byte UDP datagrams.
+  Reference `quicprobe` client to reference `quicprobe` server then ran
+  1200-byte QUIC DATAGRAM paced steps at 5k/10k/20k/30k pps, corresponding to
+  roughly 48/96/192/288 Mbps offered payload bandwidth. Offered-rate validation
+  passed at each step. The 5k pps step delivered 100% with zero drops and p99
+  latency about 3.61 ms. The first strict-threshold loss appeared at 10k pps:
+  one dropped datagram out of 100k offered, displayed as 100.00% after
+  rounding but marked `datagram_delivery_loss`. At 20k pps delivery was 99.70%
+  with 608 drops and p99 about 5.90 ms; at 30k pps delivery was 99.18% with
+  2,453 drops and p99 about 8.93 ms. Result artifacts are under
+  `bench/transport/results/20260522T133552Z-mtu-dgram/`. Infrastructure was
+  destroyed and `just bench-transport-verify-clean` confirmed no Terraform
+  state entries or labelled Hetzner resources remain.
 
 Remaining slices:
 
