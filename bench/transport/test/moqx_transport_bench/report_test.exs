@@ -26,12 +26,24 @@ defmodule MOQX.TransportBench.ReportTest do
       |> put_in(["metrics", "send_rate_packets_per_second"], 1_000.0)
       |> put_in(["metrics", "send_rate_datagrams_per_second"], 1_000.0)
       |> put_in(["metrics", "delivered_datagrams_per_second"], 1_000.0)
-      |> put_in(["metrics", "datagram_delivery_ratio"], 1.0)
+      |> put_in(["metrics", "datagram_delivery_ratio"], 1)
       |> put_in(["metrics", "datagram_drop_count"], 0)
 
     report = Report.render([record])
 
     assert report =~ "datagram_pressure"
+    assert report =~ "100.00%"
+  end
+
+  test "renders integer-like float datagram delivery percentages" do
+    record =
+      record()
+      |> put_in(["workload", "family"], "datagram_pressure")
+      |> put_in(["workload", "step"], "datagram_pressure")
+      |> put_in(["metrics", "datagram_delivery_ratio"], 1.0)
+
+    report = Report.render([record])
+
     assert report =~ "100.00%"
   end
 
