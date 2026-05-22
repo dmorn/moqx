@@ -308,6 +308,22 @@ shape is committed with the first local loopback reference-to-reference record.
   `just bench-transport-verify-clean` confirmed no Terraform state entries or
   labelled Hetzner resources remain. No iperf3 or QUIC measurements were
   collected in this attempt.
+- 2026-05-22: ARM private-path paced datagram run
+  `20260522T125804Z-arm-remote-test` succeeded on `arm-smoke`: `cax21` client
+  in `fsn1` (`91.99.116.201`, private `10.88.0.11`) to `cax21` server in
+  `nbg1` (`188.245.79.185`, private `10.88.0.12`), MTU 1450. Private readiness
+  passed with 0% ping loss and about 4.15 ms average RTT. Canonical iperf3
+  baseline on the private path reported 5.39 Gbps TCP goodput and 100 Mbps UDP
+  with 100% delivery. `moqx-transport-bench` and `quicprobe` ARM64 artifacts
+  for git `951ee7c` deployed to both roles; client release deploy needed a
+  manual artifact recopy after an interrupted deploy left a truncated tarball.
+  Reference `quicprobe` client to reference `quicprobe` server paced 64-byte
+  QUIC DATAGRAM results were contract-valid and offered-rate-valid at every
+  step: 1k/5k/10k/20k pps delivered 100% with zero drops, p99 latency about
+  4.08/4.45/4.96/4.51 ms. The first loss point observed was 30k pps with
+  97.10% delivery and 8,701 drops; 40k pps delivered 95.52% with 17,903 drops;
+  50k pps delivered 92.24% with 38,824 drops. Result artifacts are under
+  `bench/transport/results/20260522T125804Z-arm-remote-test/`.
 
 Remaining slices:
 
