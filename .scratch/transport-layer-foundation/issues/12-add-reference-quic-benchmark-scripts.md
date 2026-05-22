@@ -342,11 +342,67 @@ shape is committed with the first local loopback reference-to-reference record.
   `bench/transport/results/20260522T133552Z-mtu-dgram/`. Infrastructure was
   destroyed and `just bench-transport-verify-clean` confirmed no Terraform
   state entries or labelled Hetzner resources remain.
+- 2026-05-22: Interpretation of the two ARM paced-datagram runs: the private
+  path itself is not the first observed bottleneck. The same path sustained
+  about 5 Gbps TCP and 100 Mbps raw UDP without loss, while QUIC DATAGRAM loss
+  appeared much earlier in protocol-shaped runs. The 64-byte run found a
+  packet-rate/process-pressure limit: 30k pps is only about 15.36 Mbps payload,
+  yet that is where delivery loss became obvious. The 1200-byte run showed the
+  useful-payload shape: 5k pps, about 48 Mbps payload, stayed clean; the first
+  strict 100% delivery failure appeared around 10k pps, about 96 Mbps payload,
+  with one drop in 100k offered; 20k and 30k pps continued to deliver
+  99%+ while latency and drops grew. For #12, this means DATAGRAM completion
+  should report several thresholds, not a single "break" number: first loss,
+  99.9% delivery, 99% delivery, latency growth, and offered-rate validity.
+- 2026-05-22: ARM private-path stream-pressure run
+  `20260522T141346Z-strm` succeeded on `arm-smoke`: `cax21` client in `fsn1`
+  to `cax21` server in `nbg1` over the private network
+  `10.88.0.11 -> 10.88.0.12`, MTU 1450. Private readiness passed with 0%
+  ping loss and about 3.8 ms average RTT. The iperf3 baseline reported 4.25
+  Gbps TCP goodput and 100 Mbps UDP with 100% delivery. The 12 canonical
+  stream-pressure records in `stream-combined.jsonl` passed strict contract
+  validation, and infrastructure was destroyed with
+  `just bench-transport-verify-clean` confirming no state entries or labelled
+  Hetzner resources remain.
+- 2026-05-22: Stream-pressure interpretation from `20260522T141346Z-strm`:
+  reference-client-to-reference-server showed the path/reference baseline
+  scaling from 107 Mbps with one bidirectional stream to 769 Mbps with 16
+  streams, 843 Mbps with 64 streams, and 1.36 Gbps with 64 unidirectional
+  streams. MOQX-client-to-reference-server reached only about 24.5 Mbps with
+  one bidirectional stream and 25.0 Mbps with two, then timed out at four and
+  eight bidirectional streams and crashed at 16/64 streams with a closed-echo
+  `MatchError`; this is split to follow-up #29. The same MOQX client path did
+  reach 852 Mbps with 64 unidirectional streams, so the failure is specific to
+  concurrent bidirectional echo feedback rather than all stream sending.
+  Reference-client-to-MOQX-listener stayed correct but plateaued around 185
+  Mbps at 16/64 bidirectional streams while p99 latency grew from about 787 ms
+  to 3.27 s; 64 unidirectional streams reached only 290 Mbps with about 2.09 s
+  p99 latency. Treat the current MOQX listener as correctness evidence, not a
+  performance ceiling for a future optimized listener.
 
 Remaining slices:
 
-- Rate-stepped datagram pressure with explicit offered datagrams/sec, duration,
-  stop thresholds, and delivery-loss behavior.
-- Mixed control-plus-object pressure after stream and datagram records are stable.
-- Resource usage, mailbox pressure, and backpressure indicators for higher-rate
-  controlled-path runs.
+- Real-path stream-pressure has first controlled ARM evidence for all three
+  topologies. Before treating it as complete, fix or explicitly scope around
+  #29, then rerun the MOQX-client bidirectional bracket. Also decide whether
+  the current `moqx-listener` should remain a correctness peer for #12 or
+  whether listener performance work belongs in #26 before final capacity
+  claims.
+- MOQX-involved paced DATAGRAM sweeps on the controlled ARM private path:
+  MOQX-client-to-reference-server and reference-client-to-MOQX-listener. The
+  reference-to-reference baseline now exists for 64-byte and 1200-byte payloads;
+  the missing comparison is how much client-side and listener-side BEAM/quicer
+  behavior changes the envelope.
+- Mixed MOQT-shaped pressure: low-rate control-like bidirectional traffic plus
+  object-like unidirectional streams and/or DATAGRAM pressure. This is still
+  absent as a workload, so it needs implementation plus local calibration and
+  one controlled-path smoke before #12 can claim the issue-08 matrix is covered.
+- Resource and pressure indicators: either implement meaningful CPU, memory,
+  mailbox-depth, send-backpressure, and stream-stall observations for the
+  reference-comparison records, or explicitly split the remaining observability
+  work into #26 and narrow #12's acceptance criteria. The current JSONL schema
+  has fields for these signals, but many are still null in real runs.
+- Protocol and reference-feature mismatch notes: document any known quicprobe,
+  quic-go, quicer, or MOQX listener limitations that affect comparability, such
+  as the listener being a correctness peer first and the current DATAGRAM
+  report semantics around strict-threshold timeout/drain windows.

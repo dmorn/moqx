@@ -76,3 +76,12 @@ first.
   capacity signals for those records. A follow-up should decide whether paced
   records need separate active-send duration and total-observation duration
   fields.
+- 2026-05-22: The ARM stream-pressure run `20260522T141346Z-strm` added
+  listener-side pressure evidence: reference-client-to-MOQX-listener stayed
+  contract-valid, but bidirectional goodput plateaued around 185 Mbps from 16
+  to 64 streams while p99 latency grew from about 787 ms to 3.27 s. The same
+  path's reference-to-reference baseline reached 769 Mbps at 16 bidirectional
+  streams, 843 Mbps at 64 bidirectional streams, and 1.36 Gbps with 64
+  unidirectional streams. This reinforces that the current `moqx-listener`
+  command is a correctness peer first and needs explicit observability or a
+  different serving model before it can support listener-side capacity claims.
