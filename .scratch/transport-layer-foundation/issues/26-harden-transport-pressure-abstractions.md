@@ -85,3 +85,16 @@ first.
   unidirectional streams. This reinforces that the current `moqx-listener`
   command is a correctness peer first and needs explicit observability or a
   different serving model before it can support listener-side capacity claims.
+- 2026-05-26: The #29 remote rerun
+  `20260526T075945Z-issue-29-bidi` showed the same kind of boundary on the
+  MOQX-client side after the correctness bug was fixed. On a same-region
+  `cax21` ARM private path with a 6.85 Gbps TCP iperf3 baseline, the
+  reference-client-to-reference-server control reached about 541/844/932 Mbps
+  at 4/8/16 bidirectional streams with p99 latency about 70/91/164 ms. The
+  MOQX-client-to-reference-server topology delivered all bytes with no break
+  symptom, but only about 78.6/69.7/60.8 Mbps and p99 latency about
+  487 ms/1.10 s/2.52 s. The benchmark now separates correctness from
+  performance, but these numbers need observability before optimization:
+  scheduler pressure, mailbox depth over time, send-completion cadence, active
+  event drain rate, and per-stream window occupancy are the likely first
+  signals to add.

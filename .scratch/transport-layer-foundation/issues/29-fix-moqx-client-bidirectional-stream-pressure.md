@@ -1,6 +1,6 @@
 # Fix MOQX client bidirectional stream pressure
 
-Status: ready-for-agent
+Status: closed
 Type: Bug
 
 ## Parent
@@ -57,10 +57,10 @@ Artifacts are under
 - [x] Timeout, closed-stream, or protocol-error outcomes still emit
       contract-valid `transport-bench-v1` records with useful `limits` and
       `errors` fields.
-- [ ] The root cause of the four/eight-stream stall is identified: receive
+- [x] The root cause of the four/eight-stream stall is identified: receive
       collection, FIN ordering, peer echo semantics, stream scheduling, or
       transport API behavior.
-- [ ] After the fix, the ARM bidirectional bracket is rerun and #12 is updated
+- [x] After the fix, the ARM bidirectional bracket is rerun and #12 is updated
       with the new evidence.
 
 ## Notes
@@ -110,3 +110,31 @@ Artifacts are under
   destroyed immediately and `bench-transport-verify-clean` confirmed no
   Terraform state entries or labelled Hetzner resources remained. No remote
   benchmark evidence was captured in this attempt.
+- 2026-05-26: Remote ARM rerun succeeded after preserving partial resources
+  and switching this round to a same-region private path because `fsn1` and
+  `hel1` ARM placement kept returning `resource_unavailable`. The measured
+  path was disposable Hetzner `cax21` nodes in `nbg1 -> nbg1`,
+  `10.88.0.11 -> 10.88.0.12`, using deployed
+  `moqx-transport-bench`/`quicprobe` artifacts from git `7b63f0a`.
+  Manual private readiness passed with 0% ping loss and about 1.45 ms average
+  RTT. The structured iperf3 baseline reported 6.85 Gbps TCP, 100 Mbps UDP
+  with 100% delivery, 500 Mbps UDP with 99.96% delivery, and 1 Gbps UDP with
+  99.63% delivery.
+- 2026-05-26: The fixed MOQX-client bidirectional bracket is now remote-valid
+  for the original failure shape. Against the reference `quicprobe` server on
+  the same private path, all MOQX-client runs completed with full echoed byte
+  counts, no timeout, no nonzero exit, no closed-stream crash, and no break
+  symptom: four streams echoed 4.8 MB at about 78.64 Mbps with p99 latency
+  about 487 ms; eight streams echoed 9.6 MB at about 69.72 Mbps with p99 about
+  1.10 s; 16 streams echoed 19.2 MB at about 60.79 Mbps with p99 about
+  2.52 s. The reference-client-to-reference-server control on the same path
+  reached about 541/844/932 Mbps at 4/8/16 streams with p99 latency about
+  70/91/164 ms. The root cause for #29 was therefore the benchmark's previous
+  passive/serial echo collection and closed-stream event handling, not a
+  QUIC-link break. The remaining large MOQX throughput and latency gap is a
+  separate performance/observability follow-up, not this correctness bug.
+  Canonical artifacts are under
+  `bench/transport/results/20260526T075945Z-issue-29-bidi/`, especially
+  `iperf3-baseline-private.jsonl` and
+  `reference-comparison-stream-private.jsonl`. Infrastructure was still
+  intentionally running at the time this note was written.

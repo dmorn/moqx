@@ -379,15 +379,44 @@ shape is committed with the first local loopback reference-to-reference record.
   to 3.27 s; 64 unidirectional streams reached only 290 Mbps with about 2.09 s
   p99 latency. Treat the current MOQX listener as correctness evidence, not a
   performance ceiling for a future optimized listener.
+- 2026-05-26: #29 remote rerun filled the missing MOQX-client bidirectional
+  correctness evidence after the active-event fix. Run
+  `20260526T075945Z-issue-29-bidi` used same-region disposable ARM nodes
+  (`cax21`, `nbg1 -> nbg1`) over the private network
+  `10.88.0.11 -> 10.88.0.12`, after `fsn1` and `hel1` ARM placements were
+  repeatedly unavailable. Manual private readiness passed with 0% ping loss and
+  about 1.45 ms average RTT. The structured iperf3 baseline reported 6.85 Gbps
+  TCP goodput; UDP steps showed 100 Mbps at 100% delivery, 500 Mbps at 99.96%
+  delivery, and 1 Gbps at 99.63% delivery.
+- 2026-05-26: The same run produced strict-valid
+  `transport-bench-v1` stream-pressure records for
+  `reference-client-to-reference-server` and
+  `moqx-client-to-reference-server` at 4/8/16 bidirectional streams with 1200
+  byte payloads and 1000 payloads per stream. The reference control delivered
+  4.8/9.6/19.2 MB at about 541/844/932 Mbps with p99 latency about
+  70/91/164 ms. The MOQX-client topology delivered the same byte counts with
+  no timeout, no nonzero exit, and no break symptom, but only about
+  78.6/69.7/60.8 Mbps with p99 latency about 487 ms/1.10 s/2.52 s. This
+  closes the #29 correctness gap for #12, while preserving a separate
+  performance question: the MOQX client is now correct under concurrent
+  bidirectional echo pressure, but much slower than the reference peer on the
+  same path. Artifacts are under
+  `bench/transport/results/20260526T075945Z-issue-29-bidi/`:
+  `path_metadata_private.json`, `iperf3-baseline-private.jsonl`, and
+  `reference-comparison-stream-private.jsonl`. The preserved server still
+  reported a cloud-init status error from Hetzner network-config schema
+  handling, so this round used manual toolchain and private-route readiness
+  checks. Infrastructure was still intentionally running at the time this note
+  was written.
 
 Remaining slices:
 
-- Real-path stream-pressure has first controlled ARM evidence for all three
-  topologies. Before treating it as complete, fix or explicitly scope around
-  #29, then rerun the MOQX-client bidirectional bracket. Also decide whether
+- Real-path stream-pressure now has controlled ARM evidence for all three
+  topologies, and #29 has been rerun successfully for the MOQX-client
+  bidirectional failure bracket. Before final capacity claims, decide whether
   the current `moqx-listener` should remain a correctness peer for #12 or
-  whether listener performance work belongs in #26 before final capacity
-  claims.
+  whether listener/client performance work belongs in #26 or a dedicated
+  optimization issue.
 - MOQX-involved paced DATAGRAM sweeps on the controlled ARM private path:
   MOQX-client-to-reference-server and reference-client-to-MOQX-listener. The
   reference-to-reference baseline now exists for 64-byte and 1200-byte payloads;
