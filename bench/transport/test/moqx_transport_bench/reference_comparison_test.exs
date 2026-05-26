@@ -299,6 +299,63 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["errors"]["message"] =~ "0.8 < 0.95"
   end
 
+  test "records structured diagnostics when MOQX bidirectional echo closes early" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-peer-shutdown.jsonl")
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-direction",
+        "bidirectional",
+        "--stream-count",
+        "2",
+        "--payload-size",
+        "256",
+        "--payload-count",
+        "4",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-peer-shutdown-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.PeerShutdownTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["limits"]["first_break_symptom"] == "stream_closed_before_expected_bytes"
+    assert record["limits"]["stopped_by"] == "stream_closed_before_expected_bytes"
+    assert record["limits"]["protocol_error"] == true
+    assert record["errors"]["message"] =~ "reason=peer_send_shutdown"
+    assert record["errors"]["details"]["bytes_expected"] == 1024
+    assert record["metrics"]["bytes_sent"] == 2048
+    assert record["metrics"]["bytes_received"] == 0
+
+    diagnostics = record["diagnostics"]
+    assert diagnostics["version"] == "stream-pressure-diagnostics-v1"
+    assert diagnostics["summary"]["streams_opened"] == 2
+    assert diagnostics["summary"]["streams_failed"] == 1
+    assert diagnostics["summary"]["bytes_sent"] == 2048
+    assert diagnostics["summary"]["bytes_received"] == 0
+
+    assert [
+             %{"phase" => "echo_failed", "error" => "peer_send_shutdown"},
+             %{"phase" => "receiving_echo"}
+           ] = diagnostics["streams"]
+  end
+
   defp fake_quicprobe_command(dir, args_path) do
     fake_quicprobe_command(dir, args_path, stream_quicprobe_json())
   end
@@ -444,5 +501,66 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     File.mkdir_p!(dir)
     on_exit(fn -> File.rm_rf(dir) end)
     dir
+  end
+
+  defmodule PeerShutdownTransport do
+    @behaviour MOQX.Transport
+
+    @impl true
+    def listen(_port, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept(_listener, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def handshake(connection, _timeout), do: {:ok, connection}
+
+    @impl true
+    def connect(_host, _port, _opts, _timeout), do: {:ok, :connection}
+
+    @impl true
+    def open_stream(_connection, _opts), do: {:ok, {:stream, make_ref()}}
+
+    @impl true
+    def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def send_stream(stream, _data, opts) do
+      if Keyword.get(opts, :finish, false) do
+        send(self(), {:moqx_transport, {:stream_event, stream, :peer_finished_sending, %{}}})
+      end
+
+      :ok
+    end
+
+    @impl true
+    def recv_stream(_stream, _byte_count), do: {:error, :peer_send_shutdown}
+
+    @impl true
+    def send_datagram(_connection, _data), do: {:error, :unsupported}
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection(_connection, _error_code), do: :ok
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process(_handle, _pid), do: :ok
+
+    @impl true
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
   end
 end

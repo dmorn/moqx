@@ -14,6 +14,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   @datagram_header_size DatagramPayload.header_size()
   @stream_pressure_workload "stream_pressure"
   @datagram_pressure_workload "datagram_pressure"
+  @stream_send_window 16
   @reference_client_topology "reference-client-to-reference-server"
   @reference_client_moqx_listener_topology "reference-client-to-moqx-listener"
   @moqx_client_topology "moqx-client-to-reference-server"
@@ -25,8 +26,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   def main(argv, opts \\ []) do
     script = Keyword.get(opts, :script, @default_script)
+    transport_backend = Keyword.get(opts, :transport_backend, MOQX.Transport.Quicer)
 
-    case parse(argv, script) do
+    case parse(argv, script, transport_backend) do
       {:help, message} ->
         IO.puts(message)
 
@@ -39,7 +41,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     end
   end
 
-  defp parse(argv, script) do
+  defp parse(argv, script, transport_backend) do
     {opts, _args, invalid} =
       OptionParser.parse(argv,
         strict: [
@@ -108,14 +110,15 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         {:error, "Missing required --ca PATH.\n\n#{usage(script)}"}
 
       true ->
-        build_config(opts, argv, script)
+        build_config(opts, argv, script, transport_backend)
     end
   end
 
-  defp build_config(opts, argv, script) do
+  defp build_config(opts, argv, script, transport_backend) do
     config = %{
       argv: argv,
       script: script,
+      transport_backend: transport_backend,
       command: command_string(script, argv),
       topology: opts[:topology],
       server: opts[:server],
@@ -336,21 +339,29 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp run_moqx_client(config) do
     args = moqx_client_step_args(config)
     timeout_ms = step_timeout_ms(config)
+    {diagnostics_agent, config} = maybe_start_diagnostics_agent(config)
 
-    task =
-      Task.async(fn ->
-        do_run_moqx_client(config)
-      end)
+    try do
+      task =
+        Task.async(fn ->
+          do_run_moqx_client(config)
+        end)
 
-    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {:ok, measurement}} ->
-        {measurement, "", 0, args, false, timeout_ms}
+      case Task.yield(task, timeout_ms) do
+        {:ok, {:ok, measurement}} ->
+          {measurement, "", 0, args, false, timeout_ms}
 
-      {:ok, {:error, message}} ->
-        {%{}, message, 1, args, false, timeout_ms}
+        {:ok, {:error, message}} ->
+          measurement = diagnostic_measurement(config, diagnostics_agent)
+          {measurement, message, 1, args, false, timeout_ms}
 
-      nil ->
-        {%{}, "", @timeout_exit_status, args, true, timeout_ms}
+        nil ->
+          measurement = diagnostic_measurement(config, diagnostics_agent)
+          _result = Task.shutdown(task, :brutal_kill)
+          {measurement, "", @timeout_exit_status, args, true, timeout_ms}
+      end
+    after
+      stop_diagnostics_agent(diagnostics_agent)
     end
   end
 
@@ -414,7 +425,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp do_run_moqx_client(config) do
-    {:ok, ctx} = Transport.new(MOQX.Transport.Quicer)
+    {:ok, ctx} = Transport.new(config.transport_backend)
     connect_started_at = monotonic_us()
 
     case Transport.connect(
@@ -426,6 +437,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          ) do
       {:ok, connection, ctx} ->
         handshake_latency_ms = elapsed_ms(connect_started_at)
+        record_diagnostics_summary(config, %{"handshake_latency_ms" => handshake_latency_ms})
 
         try do
           {:ok, measure_moqx_workload(ctx, connection, config, handshake_latency_ms)}
@@ -442,6 +454,162 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   catch
     kind, reason ->
       {:error, Exception.format(kind, reason, __STACKTRACE__)}
+  end
+
+  defp maybe_start_diagnostics_agent(%{topology: @moqx_client_topology} = config) do
+    case Agent.start_link(fn -> initial_diagnostics(config) end) do
+      {:ok, agent} -> {agent, Map.put(config, :diagnostics_agent, agent)}
+      {:error, _reason} -> {nil, config}
+    end
+  end
+
+  defp maybe_start_diagnostics_agent(config), do: {nil, config}
+
+  defp stop_diagnostics_agent(nil), do: :ok
+
+  defp stop_diagnostics_agent(agent) do
+    if Process.alive?(agent), do: Agent.stop(agent), else: :ok
+  end
+
+  defp initial_diagnostics(config) do
+    %{
+      "version" => "stream-pressure-diagnostics-v1",
+      "summary" => %{
+        "topology" => config.topology,
+        "workload" => config.workload,
+        "stream_direction" => config.stream_direction,
+        "stream_count" => config.stream_count,
+        "payload_size_bytes" => config.payload_size,
+        "payload_count" => config.payload_count
+      },
+      "streams" => %{},
+      "process" => %{}
+    }
+  end
+
+  defp diagnostic_measurement(config, nil), do: diagnostic_measurement(config, %{})
+
+  defp diagnostic_measurement(config, diagnostics_agent) when is_pid(diagnostics_agent) do
+    diagnostics =
+      if Process.alive?(diagnostics_agent) do
+        Agent.get(diagnostics_agent, & &1)
+      else
+        %{}
+      end
+
+    diagnostic_measurement(config, diagnostics)
+  end
+
+  defp diagnostic_measurement(config, diagnostics) do
+    summary = Map.get(diagnostics, "summary", %{})
+
+    %{
+      "schema_version" => "moqx-reference-measurement-v1",
+      "record_type" => "client_run",
+      "tool" => "moqx-transport-bench",
+      "client_implementation" => "moqx",
+      "reference_implementation" => "quicprobe",
+      "reference_version" => nil,
+      "alpn" => config.alpn,
+      "workload" => config.workload,
+      "stream_direction" => config.stream_direction,
+      "stream_count" => config.stream_count,
+      "payload_size_bytes" => config.payload_size,
+      "payload_count" => config.payload_count,
+      "bytes_sent" => Map.get(summary, "bytes_sent"),
+      "bytes_received" => Map.get(summary, "bytes_received"),
+      "handshake_latency_ms" => Map.get(summary, "handshake_latency_ms"),
+      "first_byte_latency_ms" => nil,
+      "application_duration_ms" => Map.get(summary, "application_duration_ms"),
+      "goodput_bps" => nil,
+      "stream_latency_ms" => %{"p50" => nil, "p95" => nil, "p99" => nil},
+      "send_rate_packets_per_second" => nil,
+      "stream_scheduling" => "concurrent",
+      "stream_failure" => Map.get(summary, "failure"),
+      "diagnostics" =>
+        diagnostics
+        |> Map.put("process", process_diagnostics())
+        |> diagnostics_stream_list()
+    }
+  end
+
+  defp diagnostics_stream_list(%{"streams" => streams} = diagnostics) when is_map(streams) do
+    Map.put(diagnostics, "streams", streams |> Map.values() |> Enum.sort_by(& &1["index"]))
+  end
+
+  defp diagnostics_stream_list(diagnostics), do: diagnostics
+
+  defp record_diagnostics_summary(%{diagnostics_agent: agent}, summary) when is_pid(agent) do
+    Agent.update(agent, fn diagnostics ->
+      update_in(diagnostics, ["summary"], &Map.merge(&1 || %{}, summary))
+    end)
+  end
+
+  defp record_diagnostics_summary(_config, _summary), do: :ok
+
+  defp record_stream_phase(config, stream_state, phase, attrs \\ %{})
+
+  defp record_stream_phase(%{diagnostics_agent: agent}, stream_state, phase, attrs)
+       when is_pid(agent) do
+    diagnostic =
+      stream_diagnostic(
+        stream_state,
+        Map.get(attrs, "bytes_expected", stream_state.bytes_sent),
+        Map.get(attrs, "bytes_received", 0),
+        phase,
+        attrs
+      )
+
+    Agent.update(agent, fn diagnostics ->
+      diagnostics
+      |> put_in(["streams", stream_state.index], diagnostic)
+      |> update_in(["summary"], fn summary ->
+        summary
+        |> Map.put("last_phase", phase)
+        |> Map.put("bytes_sent", summary_bytes_sent(diagnostics, diagnostic))
+        |> Map.put("bytes_received", summary_bytes_received(diagnostics, diagnostic))
+      end)
+    end)
+  end
+
+  defp record_stream_phase(_config, _stream_state, _phase, _attrs), do: :ok
+
+  defp record_scheduled_streams(config, streams, payload) do
+    expected_bytes = byte_size(payload) * config.payload_count
+
+    Enum.each(streams, fn stream_state ->
+      record_stream_phase(config, stream_state, "send_fin_scheduled", %{
+        "bytes_expected" => expected_bytes
+      })
+    end)
+  end
+
+  defp summary_bytes_sent(diagnostics, diagnostic) do
+    diagnostics
+    |> Map.get("streams", %{})
+    |> Map.put(diagnostic["index"], diagnostic)
+    |> Map.values()
+    |> Enum.map(&(&1["bytes_sent"] || 0))
+    |> Enum.sum()
+  end
+
+  defp summary_bytes_received(diagnostics, diagnostic) do
+    diagnostics
+    |> Map.get("streams", %{})
+    |> Map.put(diagnostic["index"], diagnostic)
+    |> Map.values()
+    |> Enum.map(&(&1["bytes_received"] || 0))
+    |> Enum.sum()
+  end
+
+  defp process_diagnostics do
+    message_queue_len =
+      case Process.info(self(), :message_queue_len) do
+        {:message_queue_len, value} -> value
+        nil -> nil
+      end
+
+    %{"message_queue_len" => message_queue_len}
   end
 
   defp connect_opts(config) do
@@ -497,10 +665,20 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     payload = binary_payload(config.payload_size)
 
     {streams, ctx} = open_pressure_streams(ctx, connection, config)
-    {streams, ctx} = schedule_pressure_payloads(ctx, streams, payload, config.payload_count)
 
     {result, _ctx} =
-      collect_pressure_streams(ctx, streams, payload, config, application_started_at)
+      if config.stream_direction == "bidirectional" do
+        collect_pressure_streams(ctx, streams, payload, config, application_started_at)
+      else
+        {streams, ctx} = schedule_pressure_payloads(ctx, streams, payload, config)
+        record_scheduled_streams(config, streams, payload)
+        collect_pressure_streams(ctx, streams, payload, config, application_started_at)
+      end
+
+    result =
+      if config.stream_direction == "bidirectional",
+        do: result,
+        else: %{result | bytes_sent: Enum.sum(Enum.map(streams, & &1.bytes_sent))}
 
     application_duration_ms = elapsed_ms(application_started_at)
     first_byte_latency_ms = result.first_byte_latency_ms
@@ -531,7 +709,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "stream_latency_ms" => latency_summary(result.stream_latencies_ms),
       "send_rate_packets_per_second" =>
         rate(config.stream_count * config.payload_count, seconds(application_duration_ms)),
-      "stream_scheduling" => "concurrent"
+      "stream_scheduling" => "concurrent",
+      "stream_failure" => result.failure,
+      "diagnostics" =>
+        stream_pressure_diagnostics(config, streams, result, application_duration_ms)
     }
   end
 
@@ -916,7 +1097,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       bytes_sent: 0,
       bytes_received: 0,
       first_byte_latency_ms: nil,
-      stream_latencies_ms: []
+      stream_latencies_ms: [],
+      stream_diagnostics: [],
+      failure: nil
     }
   end
 
@@ -924,21 +1107,36 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp stream_direction(%{stream_direction: "unidirectional"}), do: :unidirectional
 
   defp open_pressure_streams(ctx, connection, config) do
-    Enum.reduce(1..config.stream_count, {[], ctx}, fn _index, {streams, ctx} ->
+    Enum.reduce(1..config.stream_count, {[], ctx}, fn index, {streams, ctx} ->
       started_at = monotonic_us()
 
       {:ok, stream, ctx} =
-        Transport.open_stream(ctx, connection, direction: stream_direction(config))
+        Transport.open_stream(ctx, connection, open_stream_opts(config))
 
-      stream_state = %{stream: stream, started_at: started_at, bytes_sent: 0}
+      stream_state = %{
+        index: index,
+        stream: stream,
+        started_at: started_at,
+        bytes_sent: 0,
+        payloads_accepted: 0
+      }
+
+      record_stream_phase(config, stream_state, "opened")
+
       {[stream_state | streams], ctx}
     end)
     |> then(fn {streams, ctx} -> {Enum.reverse(streams), ctx} end)
   end
 
-  defp schedule_pressure_payloads(ctx, streams, payload, payload_count) do
-    Enum.reduce(1..payload_count, {streams, ctx}, fn payload_index, {streams, ctx} ->
-      schedule_payload_round(streams, ctx, payload, payload_index == payload_count)
+  defp open_stream_opts(%{stream_direction: "bidirectional"} = config) do
+    [direction: stream_direction(config), active: true]
+  end
+
+  defp open_stream_opts(config), do: [direction: stream_direction(config)]
+
+  defp schedule_pressure_payloads(ctx, streams, payload, config) do
+    Enum.reduce(1..config.payload_count, {streams, ctx}, fn payload_index, {streams, ctx} ->
+      schedule_payload_round(streams, ctx, payload, payload_index == config.payload_count)
     end)
   end
 
@@ -952,60 +1150,501 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     opts = if finish?, do: [finish: true], else: []
     {:ok, _send, ctx} = Transport.send_stream(ctx, stream_state.stream, payload, opts)
 
-    {%{stream_state | bytes_sent: stream_state.bytes_sent + byte_size(payload)}, ctx}
+    stream_state = %{
+      stream_state
+      | bytes_sent: stream_state.bytes_sent + byte_size(payload),
+        payloads_accepted: stream_state.payloads_accepted + 1
+    }
+
+    {stream_state, ctx}
+  end
+
+  defp collect_pressure_streams(
+         ctx,
+         streams,
+         payload,
+         %{stream_direction: "bidirectional"} = config,
+         first_byte_origin
+       ) do
+    collect_active_echo_streams(ctx, streams, payload, config, first_byte_origin)
   end
 
   defp collect_pressure_streams(ctx, streams, payload, config, first_byte_origin) do
-    Enum.reduce(streams, {empty_stream_result(), ctx}, fn stream_state, {result, ctx} ->
+    Enum.reduce_while(streams, {empty_stream_result(), ctx}, fn stream_state, {result, ctx} ->
       {stream_result, ctx} =
         collect_pressure_stream(ctx, stream_state, payload, config, first_byte_origin)
 
-      {merge_stream_result(result, stream_result), ctx}
+      result = merge_stream_result(result, stream_result)
+
+      if result.failure do
+        {:halt, {result, ctx}}
+      else
+        {:cont, {result, ctx}}
+      end
     end)
   end
 
+  defp collect_active_echo_streams(ctx, streams, payload, config, first_byte_origin) do
+    states =
+      Map.new(streams, fn stream_state ->
+        record_stream_phase(config, stream_state, "awaiting_echo", %{
+          "bytes_expected" => expected_stream_bytes(config)
+        })
+
+        {stream_state.stream,
+         %{
+           stream_state: stream_state,
+           bytes_received: 0,
+           first_byte_latency_ms: nil,
+           completed_at: nil,
+           payloads_scheduled: 0,
+           payloads_completed: 0,
+           send_inflight: 0,
+           send_completed: 0,
+           send_cancelled: 0,
+           peer_finished?: false,
+           failure: nil
+         }}
+      end)
+
+    {states, ctx} = prime_active_echo_sends(ctx, states, payload, config)
+    deadline_us = monotonic_us() + client_timeout_ms(config) * 1000
+    collect_active_echo_events(ctx, states, payload, config, first_byte_origin, deadline_us)
+  end
+
+  defp collect_active_echo_events(ctx, states, payload, config, first_byte_origin, deadline_us) do
+    cond do
+      all_streams_complete?(states) ->
+        active_echo_result(ctx, states, config)
+
+      failure = first_stream_failure(states) ->
+        active_echo_result(ctx, states, config, failure)
+
+      monotonic_us() >= deadline_us ->
+        failure = timeout_stream_failure(states, config)
+        active_echo_result(ctx, mark_timeout_failure(states, failure), config, failure)
+
+      true ->
+        timeout_ms = max(div(deadline_us - monotonic_us(), 1000), 0)
+
+        case Transport.receive_event(ctx, timeout_ms) do
+          {:ok, event, ctx} ->
+            {states, ctx} =
+              handle_active_echo_event(ctx, states, event, payload, config, first_byte_origin)
+
+            collect_active_echo_events(
+              ctx,
+              states,
+              payload,
+              config,
+              first_byte_origin,
+              deadline_us
+            )
+
+          {:unknown, _message, ctx} ->
+            collect_active_echo_events(
+              ctx,
+              states,
+              payload,
+              config,
+              first_byte_origin,
+              deadline_us
+            )
+
+          {:error, reason, ctx} ->
+            failure = receive_event_failure(states, config, reason)
+            active_echo_result(ctx, mark_timeout_failure(states, failure), config, failure)
+
+          {:timeout, ctx} ->
+            failure = timeout_stream_failure(states, config)
+            active_echo_result(ctx, mark_timeout_failure(states, failure), config, failure)
+        end
+    end
+  end
+
+  defp prime_active_echo_sends(ctx, states, payload, config) do
+    Enum.reduce(states, {%{}, ctx}, fn {stream, state}, {states, ctx} ->
+      {state, ctx} = schedule_active_stream_sends(ctx, state, payload, config)
+      {Map.put(states, stream, state), ctx}
+    end)
+  end
+
+  defp schedule_active_stream_sends(ctx, state, payload, config) do
+    cond do
+      state.failure ->
+        {state, ctx}
+
+      state.payloads_scheduled >= config.payload_count ->
+        {state, ctx}
+
+      state.send_inflight >= @stream_send_window ->
+        {state, ctx}
+
+      true ->
+        payload_index = state.payloads_scheduled + 1
+        finish? = payload_index == config.payload_count
+        opts = if finish?, do: [finish: true], else: []
+
+        case Transport.send_stream(ctx, state.stream_state.stream, payload, opts) do
+          {:ok, _send, ctx} ->
+            stream_state = %{
+              state.stream_state
+              | bytes_sent: state.stream_state.bytes_sent + byte_size(payload),
+                payloads_accepted: state.stream_state.payloads_accepted + 1
+            }
+
+            state = %{
+              state
+              | stream_state: stream_state,
+                payloads_scheduled: payload_index,
+                send_inflight: state.send_inflight + 1
+            }
+
+            record_stream_phase(config, stream_state, "send_window_open", %{
+              "bytes_expected" => expected_stream_bytes(config),
+              "payloads_scheduled" => state.payloads_scheduled,
+              "send_inflight" => state.send_inflight,
+              "send_window" => @stream_send_window
+            })
+
+            schedule_active_stream_sends(ctx, state, payload, config)
+
+          {:error, reason, ctx} ->
+            {fail_active_stream(state, config, reason_name(reason)), ctx}
+        end
+    end
+  end
+
+  defp handle_active_echo_event(
+         ctx,
+         states,
+         {:stream_data, stream, data, _metadata},
+         payload,
+         config,
+         first_byte_origin
+       ) do
+    states =
+      Map.update!(states, stream, fn state ->
+        handle_active_stream_data(state, data, payload, config, first_byte_origin)
+      end)
+
+    {states, ctx}
+  end
+
+  defp handle_active_echo_event(
+         ctx,
+         states,
+         {:stream_event, stream, :send_completed, _metadata},
+         payload,
+         config,
+         _first_byte_origin
+       ) do
+    state =
+      states
+      |> Map.fetch!(stream)
+      |> Map.update!(:send_completed, &(&1 + 1))
+      |> Map.update!(:payloads_completed, &(&1 + 1))
+      |> Map.update!(:send_inflight, &max(&1 - 1, 0))
+
+    {state, ctx} = schedule_active_stream_sends(ctx, state, payload, config)
+    {Map.put(states, stream, state), ctx}
+  end
+
+  defp handle_active_echo_event(
+         ctx,
+         states,
+         {:stream_event, stream, :send_cancelled, _metadata},
+         _payload,
+         config,
+         _first_byte_origin
+       ) do
+    states =
+      Map.update!(states, stream, fn state ->
+        state = update_in(state, [:send_cancelled], &((&1 || 0) + 1))
+        fail_active_stream(state, config, "send_cancelled")
+      end)
+
+    {states, ctx}
+  end
+
+  defp handle_active_echo_event(
+         ctx,
+         states,
+         {:stream_event, stream, :peer_finished_sending, _metadata},
+         _payload,
+         config,
+         _first_byte_origin
+       ) do
+    states =
+      Map.update!(states, stream, fn state ->
+        state = %{state | peer_finished?: true}
+
+        if state.bytes_received >= expected_stream_bytes(config) do
+          state
+        else
+          fail_active_stream(state, config, "peer_send_shutdown")
+        end
+      end)
+
+    {states, ctx}
+  end
+
+  defp handle_active_echo_event(
+         ctx,
+         states,
+         {:stream_event, stream, :closed, _metadata},
+         _payload,
+         config,
+         _first_byte_origin
+       ) do
+    states =
+      Map.update!(states, stream, fn state ->
+        if state.bytes_received >= expected_stream_bytes(config) do
+          state
+        else
+          fail_active_stream(state, config, "closed")
+        end
+      end)
+
+    {states, ctx}
+  end
+
+  defp handle_active_echo_event(ctx, states, _event, _payload, _config, _first_byte_origin),
+    do: {states, ctx}
+
+  defp handle_active_stream_data(state, data, payload, config, first_byte_origin) do
+    received = state.bytes_received
+
+    if matches_payload?(data, payload, received) do
+      record_active_stream_data(state, byte_size(data), config, first_byte_origin)
+    else
+      fail_active_stream(state, config, "echo_payload_mismatch")
+    end
+  end
+
+  defp record_active_stream_data(state, byte_count, config, first_byte_origin) do
+    received = state.bytes_received + byte_count
+    first_byte_latency_ms = state.first_byte_latency_ms || elapsed_ms(first_byte_origin)
+    completed_at = if received >= expected_stream_bytes(config), do: monotonic_us()
+    phase = if completed_at, do: "echo_complete", else: "receiving_echo"
+
+    state = %{
+      state
+      | bytes_received: received,
+        first_byte_latency_ms: first_byte_latency_ms,
+        completed_at: completed_at
+    }
+
+    record_stream_phase(config, state.stream_state, phase, %{
+      "bytes_expected" => expected_stream_bytes(config),
+      "bytes_received" => received,
+      "send_completed" => state.send_completed,
+      "send_cancelled" => state.send_cancelled
+    })
+
+    state
+  end
+
+  defp fail_active_stream(state, config, reason) do
+    failure = active_stream_failure(state, config, reason)
+
+    record_stream_phase(config, state.stream_state, "echo_failed", %{
+      "bytes_expected" => expected_stream_bytes(config),
+      "bytes_received" => state.bytes_received,
+      "error" => reason,
+      "incomplete_bytes" => max(expected_stream_bytes(config) - state.bytes_received, 0),
+      "send_completed" => state.send_completed,
+      "send_cancelled" => state.send_cancelled
+    })
+
+    %{state | failure: failure}
+  end
+
+  defp active_stream_failure(state, config, reason) do
+    %{
+      "phase" => "echo_failed",
+      "reason" => reason,
+      "stream_index" => state.stream_state.index,
+      "stream_id" => stream_id(state.stream_state.stream),
+      "bytes_expected" => expected_stream_bytes(config),
+      "bytes_received" => state.bytes_received,
+      "incomplete_bytes" => max(expected_stream_bytes(config) - state.bytes_received, 0),
+      "send_completed" => state.send_completed,
+      "send_cancelled" => state.send_cancelled
+    }
+  end
+
+  defp active_echo_result(ctx, states, config, failure \\ nil) do
+    diagnostics =
+      states
+      |> Map.values()
+      |> Enum.map(&active_stream_diagnostic(&1, config))
+
+    result = %{
+      bytes_sent: states |> Map.values() |> Enum.map(& &1.stream_state.bytes_sent) |> Enum.sum(),
+      bytes_received: states |> Map.values() |> Enum.map(& &1.bytes_received) |> Enum.sum(),
+      first_byte_latency_ms: first_observed_latency(states, :first_byte_latency_ms),
+      stream_latencies_ms: active_stream_latencies(states),
+      stream_diagnostics: diagnostics,
+      failure: failure
+    }
+
+    {result, ctx}
+  end
+
+  defp active_stream_diagnostic(state, config) do
+    phase =
+      cond do
+        state.failure -> "echo_failed"
+        state.bytes_received >= expected_stream_bytes(config) -> "echo_complete"
+        true -> "receiving_echo"
+      end
+
+    stream_diagnostic(
+      state.stream_state,
+      expected_stream_bytes(config),
+      state.bytes_received,
+      phase,
+      %{
+        "send_completed" => state.send_completed,
+        "send_cancelled" => state.send_cancelled,
+        "payloads_scheduled" => state.payloads_scheduled,
+        "payloads_completed" => state.payloads_completed,
+        "send_inflight" => state.send_inflight,
+        "send_completions_pending" => state.send_inflight,
+        "peer_finished" => state.peer_finished?,
+        "error" => state.failure && state.failure["reason"]
+      }
+    )
+  end
+
+  defp active_stream_latencies(states) do
+    states
+    |> Map.values()
+    |> Enum.map(fn state ->
+      finished_at = state.completed_at || monotonic_us()
+      (finished_at - state.stream_state.started_at) / 1000
+    end)
+  end
+
+  defp first_observed_latency(states, key) do
+    case states |> Map.values() |> Enum.map(&Map.get(&1, key)) |> Enum.reject(&is_nil/1) do
+      [] -> nil
+      values -> Enum.min(values)
+    end
+  end
+
+  defp all_streams_complete?(states) do
+    Enum.all?(states, fn {_stream, state} -> !is_nil(state.completed_at) end)
+  end
+
+  defp first_stream_failure(states) do
+    states
+    |> Map.values()
+    |> Enum.map(& &1.failure)
+    |> Enum.find(&is_map/1)
+  end
+
+  defp timeout_stream_failure(states, config) do
+    state =
+      states
+      |> Map.values()
+      |> Enum.reject(& &1.completed_at)
+      |> Enum.min_by(& &1.stream_state.index, fn -> nil end)
+
+    if state, do: active_stream_failure(state, config, "receive_timeout")
+  end
+
+  defp receive_event_failure(states, config, reason) do
+    state =
+      states
+      |> Map.values()
+      |> Enum.reject(& &1.completed_at)
+      |> Enum.min_by(& &1.stream_state.index, fn -> nil end)
+
+    if state, do: active_stream_failure(state, config, reason_name(reason))
+  end
+
+  defp mark_timeout_failure(states, nil), do: states
+
+  defp mark_timeout_failure(states, failure) do
+    {_stream, state} =
+      Enum.find(states, fn {_stream, state} ->
+        state.stream_state.index == failure["stream_index"]
+      end)
+
+    Map.put(states, state.stream_state.stream, %{state | failure: failure})
+  end
+
   defp collect_pressure_stream(ctx, stream_state, payload, config, first_byte_origin) do
-    {received, first_byte_latency_ms, ctx} =
+    {received, first_byte_latency_ms, ctx, diagnostic, failure} =
       if config.stream_direction == "bidirectional" do
         recv_echo_payload(
+          config,
           ctx,
-          stream_state.stream,
+          stream_state,
           payload,
           config.payload_count,
           first_byte_origin
         )
       else
-        {0, nil, ctx}
+        diagnostic =
+          stream_diagnostic(stream_state, 0, 0, "send_only_complete", %{
+            "latency_ms" => elapsed_ms(stream_state.started_at)
+          })
+
+        record_stream_phase(config, stream_state, "send_only_complete", diagnostic)
+        {0, nil, ctx, diagnostic, nil}
       end
 
     {%{
        bytes_sent: stream_state.bytes_sent,
        bytes_received: received,
        first_byte_latency_ms: first_byte_latency_ms,
-       stream_latencies_ms: [elapsed_ms(stream_state.started_at)]
+       stream_latencies_ms: [elapsed_ms(stream_state.started_at)],
+       stream_diagnostics: [diagnostic],
+       failure: failure
      }, ctx}
   end
 
-  defp recv_echo_payload(ctx, stream, payload, count, first_byte_origin) do
+  defp recv_echo_payload(config, ctx, stream_state, payload, count, first_byte_origin) do
     expected_bytes = byte_size(payload) * count
-    recv_echo_payload(ctx, stream, payload, expected_bytes, 0, nil, first_byte_origin)
+
+    record_stream_phase(config, stream_state, "receiving_echo", %{
+      "bytes_expected" => expected_bytes
+    })
+
+    recv_echo_payload(
+      config,
+      ctx,
+      stream_state,
+      payload,
+      expected_bytes,
+      0,
+      nil,
+      first_byte_origin
+    )
   end
 
   defp recv_echo_payload(
+         config,
          ctx,
-         _stream,
+         stream_state,
          _payload,
          expected_bytes,
          expected_bytes,
          first_byte_latency_ms,
          _first_byte_origin
        ) do
-    {expected_bytes, first_byte_latency_ms, ctx}
+    diagnostic = stream_diagnostic(stream_state, expected_bytes, expected_bytes, "echo_complete")
+    record_stream_phase(config, stream_state, "echo_complete", diagnostic)
+    {expected_bytes, first_byte_latency_ms, ctx, diagnostic, nil}
   end
 
   defp recv_echo_payload(
+         config,
          ctx,
-         stream,
+         stream_state,
          payload,
          expected_bytes,
          received,
@@ -1013,24 +1652,132 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          first_byte_origin
        ) do
     remaining = expected_bytes - received
-    {:ok, data, ctx} = Transport.recv_stream(ctx, stream, remaining)
+    read_size = min(remaining, byte_size(payload))
 
-    unless matches_payload?(data, payload, received) do
-      raise "echo payload mismatch"
+    case Transport.recv_stream(ctx, stream_state.stream, read_size) do
+      {:ok, data, ctx} ->
+        if matches_payload?(data, payload, received) do
+          first_byte_latency_ms = first_byte_latency_ms || elapsed_ms(first_byte_origin)
+
+          recv_echo_payload(
+            config,
+            ctx,
+            stream_state,
+            payload,
+            expected_bytes,
+            received + byte_size(data),
+            first_byte_latency_ms,
+            first_byte_origin
+          )
+        else
+          stream_failure(
+            config,
+            ctx,
+            stream_state,
+            expected_bytes,
+            received + byte_size(data),
+            "echo_payload_mismatch"
+          )
+        end
+
+      {:error, reason, ctx} ->
+        stream_failure(config, ctx, stream_state, expected_bytes, received, reason)
     end
-
-    first_byte_latency_ms = first_byte_latency_ms || elapsed_ms(first_byte_origin)
-
-    recv_echo_payload(
-      ctx,
-      stream,
-      payload,
-      expected_bytes,
-      received + byte_size(data),
-      first_byte_latency_ms,
-      first_byte_origin
-    )
   end
+
+  defp stream_failure(config, ctx, stream_state, expected_bytes, received, reason) do
+    reason = reason_name(reason)
+
+    diagnostic =
+      stream_diagnostic(stream_state, expected_bytes, received, "echo_failed", %{
+        "error" => reason,
+        "incomplete_bytes" => max(expected_bytes - received, 0)
+      })
+
+    failure = %{
+      "phase" => "echo_failed",
+      "reason" => reason,
+      "stream_index" => stream_state.index,
+      "stream_id" => stream_id(stream_state.stream),
+      "bytes_expected" => expected_bytes,
+      "bytes_received" => received,
+      "incomplete_bytes" => max(expected_bytes - received, 0)
+    }
+
+    record_stream_phase(config, stream_state, "echo_failed", diagnostic)
+    {received, nil, ctx, diagnostic, failure}
+  end
+
+  defp stream_pressure_diagnostics(config, streams, result, application_duration_ms) do
+    streamed =
+      Map.new(result.stream_diagnostics, fn diagnostic -> {diagnostic["index"], diagnostic} end)
+
+    stream_diagnostics =
+      Enum.map(streams, fn stream_state ->
+        Map.get_lazy(streamed, stream_state.index, fn ->
+          stream_diagnostic(
+            stream_state,
+            expected_stream_bytes(config),
+            0,
+            "scheduled_not_collected"
+          )
+        end)
+      end)
+
+    summary =
+      %{
+        "streams_opened" => length(streams),
+        "streams_completed" => count_phase(stream_diagnostics, "echo_complete"),
+        "streams_failed" => count_phase(stream_diagnostics, "echo_failed"),
+        "payloads_accepted" =>
+          stream_diagnostics |> Enum.map(&(&1["payloads_accepted"] || 0)) |> Enum.sum(),
+        "bytes_sent" => result.bytes_sent,
+        "bytes_expected" => expected_stream_bytes(config) * length(streams),
+        "bytes_received" => result.bytes_received,
+        "application_duration_ms" => application_duration_ms,
+        "failure" => result.failure
+      }
+      |> compact()
+
+    %{
+      "version" => "stream-pressure-diagnostics-v1",
+      "summary" => summary,
+      "streams" => stream_diagnostics,
+      "process" => process_diagnostics()
+    }
+  end
+
+  defp count_phase(stream_diagnostics, phase) do
+    Enum.count(stream_diagnostics, fn diagnostic -> diagnostic["phase"] == phase end)
+  end
+
+  defp expected_stream_bytes(config), do: config.payload_size * config.payload_count
+
+  defp stream_diagnostic(stream_state, expected_bytes, received, phase, extra \\ %{}) do
+    %{
+      "index" => stream_state.index,
+      "stream_id" => stream_id(stream_state.stream),
+      "direction" => stream_direction_name(stream_state.stream),
+      "phase" => phase,
+      "payloads_accepted" => stream_state.payloads_accepted,
+      "bytes_sent" => stream_state.bytes_sent,
+      "bytes_expected" => expected_bytes,
+      "bytes_received" => received,
+      "send_completions_pending" => stream_state.payloads_accepted
+    }
+    |> Map.merge(extra)
+    |> compact()
+  end
+
+  defp stream_id(%{info: %{stream_id: stream_id}}), do: stream_id
+
+  defp stream_direction_name(%{info: %{direction: direction}}) when is_atom(direction),
+    do: Atom.to_string(direction)
+
+  defp stream_direction_name(_stream), do: nil
+
+  defp reason_name(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_name(reason), do: inspect(reason)
 
   defp matches_payload?(chunk, payload, offset) do
     chunk
@@ -1046,7 +1793,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       bytes_sent: left.bytes_sent + right.bytes_sent,
       bytes_received: left.bytes_received + right.bytes_received,
       first_byte_latency_ms: left.first_byte_latency_ms || right.first_byte_latency_ms,
-      stream_latencies_ms: left.stream_latencies_ms ++ right.stream_latencies_ms
+      stream_latencies_ms: left.stream_latencies_ms ++ right.stream_latencies_ms,
+      stream_diagnostics: left.stream_diagnostics ++ right.stream_diagnostics,
+      failure: left.failure || right.failure
     }
   end
 
@@ -1159,7 +1908,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "methodology" => methodology_metadata(ctx),
       "metrics" => metrics(ctx),
       "limits" => limits(ctx),
-      "errors" => errors(ctx)
+      "errors" => errors(ctx),
+      "diagnostics" => diagnostics(ctx)
     }
   end
 
@@ -1432,13 +2182,21 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       ctx.exit_status == 0 && !valid_measurement?(ctx.config, ctx.measurement)
 
     datagram_loss? = datagram_loss?(ctx, failed?, invalid_measurement?)
+    stream_failure? = stream_failure?(ctx)
 
     %{
       "first_break_symptom" =>
-        first_symptom(ctx.timed_out?, failed?, invalid_measurement?, datagram_loss?),
-      "stopped_by" => stopped_by(ctx.timed_out?, failed?, invalid_measurement?, datagram_loss?),
+        first_symptom(
+          ctx.timed_out?,
+          failed?,
+          invalid_measurement?,
+          datagram_loss?,
+          stream_failure?
+        ),
+      "stopped_by" =>
+        stopped_by(ctx.timed_out?, failed?, invalid_measurement?, datagram_loss?, stream_failure?),
       "connection_closed" => false,
-      "protocol_error" => failed? || invalid_measurement?,
+      "protocol_error" => failed? || invalid_measurement? || stream_failure?,
       "throughput_plateau" => false,
       "latency_explosion" => false,
       "mailbox_growth_without_recovery" => false,
@@ -1461,6 +2219,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         ctx.timed_out? ->
           "reference comparison step timed out after #{seconds(ctx.timeout_ms)}s"
 
+        stream_failure?(ctx) ->
+          stream_failure_message(measurement(ctx)["stream_failure"])
+
         ctx.exit_status != 0 ->
           failure_output(ctx.step_output) ||
             "reference comparison step exited with status #{ctx.exit_status}"
@@ -1478,26 +2239,55 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     %{
       "close_reason" => if(ctx.timed_out?, do: "timeout", else: nil),
       "error_code" => ctx.exit_status,
-      "message" => message
+      "message" => message,
+      "details" => measurement(ctx)["stream_failure"]
     }
   end
 
-  defp first_symptom(true, _failed?, _invalid_json?, _datagram_loss?), do: "step_timeout"
-  defp first_symptom(false, true, _invalid_json?, _datagram_loss?), do: "protocol_error"
-  defp first_symptom(false, false, true, _datagram_loss?), do: "tool_output_invalid"
-  defp first_symptom(false, false, false, true), do: "datagram_delivery_loss"
-  defp first_symptom(false, false, false, false), do: nil
+  defp stream_failure?(ctx), do: is_map(measurement(ctx)["stream_failure"])
 
-  defp stopped_by(true, _failed?, _invalid_json?, _datagram_loss?), do: @timeout_stop_condition
+  defp stream_failure_message(nil), do: nil
 
-  defp stopped_by(false, true, _invalid_json?, _datagram_loss?),
+  defp stream_failure_message(failure) do
+    "moqx bidirectional stream failed during #{failure["phase"]}: " <>
+      "reason=#{failure["reason"]} stream=#{failure["stream_index"]} " <>
+      "received=#{failure["bytes_received"]}/#{failure["bytes_expected"]}"
+  end
+
+  defp first_symptom(true, _failed?, _invalid_json?, _datagram_loss?, _stream_failure?),
+    do: "step_timeout"
+
+  defp first_symptom(false, true, _invalid_json?, _datagram_loss?, _stream_failure?),
+    do: "protocol_error"
+
+  defp first_symptom(false, false, true, _datagram_loss?, _stream_failure?),
+    do: "tool_output_invalid"
+
+  defp first_symptom(false, false, false, true, _stream_failure?),
+    do: "datagram_delivery_loss"
+
+  defp first_symptom(false, false, false, false, true),
+    do: "stream_closed_before_expected_bytes"
+
+  defp first_symptom(false, false, false, false, false), do: nil
+
+  defp stopped_by(true, _failed?, _invalid_json?, _datagram_loss?, _stream_failure?),
+    do: @timeout_stop_condition
+
+  defp stopped_by(false, true, _invalid_json?, _datagram_loss?, _stream_failure?),
     do: "reference_comparison_nonzero_exit"
 
-  defp stopped_by(false, false, true, _datagram_loss?),
+  defp stopped_by(false, false, true, _datagram_loss?, _stream_failure?),
     do: "reference_comparison_invalid_measurement"
 
-  defp stopped_by(false, false, false, true), do: "datagram_delivery_loss"
-  defp stopped_by(false, false, false, false), do: nil
+  defp stopped_by(false, false, false, true, _stream_failure?), do: "datagram_delivery_loss"
+
+  defp stopped_by(false, false, false, false, true),
+    do: "stream_closed_before_expected_bytes"
+
+  defp stopped_by(false, false, false, false, false), do: nil
+
+  defp diagnostics(ctx), do: measurement(ctx)["diagnostics"]
 
   defp measurement(%{measurement: measurement}) when is_map(measurement), do: measurement
   defp measurement(_ctx), do: %{}

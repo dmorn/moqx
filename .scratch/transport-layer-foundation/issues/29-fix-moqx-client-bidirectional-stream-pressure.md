@@ -49,12 +49,12 @@ Artifacts are under
 
 ## Acceptance criteria
 
-- [ ] The failure is reproducible with a focused local or controlled-path test
+- [x] The failure is reproducible with a focused local or controlled-path test
       for `reference-comparison --topology moqx-client-to-reference-server`
       using at least four bidirectional streams.
-- [ ] Closed stream events in the echo receive path are handled explicitly and
+- [x] Closed stream events in the echo receive path are handled explicitly and
       never crash the benchmark with a `MatchError`.
-- [ ] Timeout, closed-stream, or protocol-error outcomes still emit
+- [x] Timeout, closed-stream, or protocol-error outcomes still emit
       contract-valid `transport-bench-v1` records with useful `limits` and
       `errors` fields.
 - [ ] The root cause of the four/eight-stream stall is identified: receive
@@ -70,3 +70,33 @@ Artifacts are under
   serial send admission.
 - Keep this in the benchmark/reference-comparison layer unless the root cause
   proves to be a `MOQX.Transport` contract bug.
+
+## Comments
+
+- 2026-05-22: Local diagnosis reproduced the original crash shape with
+  `reference-comparison --topology moqx-client-to-reference-server` and four
+  bidirectional streams: the benchmark matched on `{:ok, data, ctx}` from
+  `Transport.recv_stream/3`, but quicer can return peer close signals such as
+  `{:error, :peer_send_shutdown, ctx}` or `{:error, :closed, ctx}`. The first
+  fix turns those into contract-valid benchmark records with structured
+  stream diagnostics instead of a `MatchError`.
+- 2026-05-22: The benchmark now collects MOQX bidirectional echo pressure
+  through active transport events rather than passive `recv_stream/3`. This
+  lets the loop observe echo bytes, send completions, send cancellations, peer
+  FIN, timeout phase, per-stream byte counts, and mailbox depth in one place.
+  The send side remains async and uses a bounded per-stream send window so the
+  benchmark applies pressure through completion feedback instead of enqueueing
+  the entire stream body blindly.
+- 2026-05-26: Clean loopback validation against a freshly started
+  `tools/quicprobe server` on port 4444 passed for
+  MOQX-client-to-reference-server bidirectional echo with 1000 payloads of
+  1200 bytes per stream. The repo-local `.tmp/integration-certs` server
+  certificate had expired on 2026-05-25, so this rerun used a throwaway
+  `/tmp/moqx-29-certs` CA/certificate pair. Four streams echoed 4.8 MB at
+  about 161 Mbps, eight streams echoed 9.6 MB at about 157 Mbps, and 16
+  streams echoed 19.2 MB at about 137 Mbps. Diagnostics reported all streams
+  completed, zero failed streams, full payload acceptance, and low mailbox
+  depth for all three runs. All emitted strict-valid `transport-bench-v1`
+  records with no break symptom. This is loopback calibration only; #29 still
+  needs the ARM bidirectional bracket rerun before it can be closed against the
+  original real-path evidence.
