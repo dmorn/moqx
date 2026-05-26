@@ -457,6 +457,10 @@ shape is committed with the first local loopback reference-to-reference record.
   infrastructure for `20260526T075945Z-issue-29-bidi` was destroyed.
   `just bench-transport-verify-clean` reported no Terraform state entries or
   labelled Hetzner resources remaining.
+- 2026-05-26: Follow-up #30 is closed. `reference-comparison` now records
+  MOQX DATAGRAM send failures explicitly as `datagram_send_error` instead of
+  emitting a `MatchError`, and the README documents 1192 bytes as the current
+  near-limit MOQX/quicer DATAGRAM payload until capability metadata exists.
 
 Remaining slices:
 
@@ -467,9 +471,10 @@ Remaining slices:
   whether listener/client performance work belongs in #26 or a dedicated
   optimization issue.
 - MOQX-involved paced DATAGRAM sweeps now have same-region ARM private-path
-  evidence for 64-byte and near-limit 1192-byte payloads. Remaining DATAGRAM
-  work is follow-up quality: fix #30's max-payload/error-recording bug, then
-  decide whether cross-region repetition is needed before closing #12.
+  evidence for 64-byte and near-limit 1192-byte payloads, and #30 has fixed
+  the max-payload/error-recording bug exposed by the 1200-byte attempt. The
+  remaining question is whether cross-region repetition is needed before
+  closing #12.
 - Mixed MOQT-shaped pressure: low-rate control-like bidirectional traffic plus
   object-like unidirectional streams and/or DATAGRAM pressure. This is still
   absent as a workload, so it needs implementation plus local calibration and

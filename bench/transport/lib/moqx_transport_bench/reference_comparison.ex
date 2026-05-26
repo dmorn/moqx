@@ -720,14 +720,45 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     application_started_at = monotonic_us()
     offered = effective_datagram_count(config)
 
-    {accepted, send_duration_ms, received, first_byte_latency_ms, latencies, _ctx} =
-      send_and_receive_moqx_datagrams(ctx, connection, config, offered, application_started_at)
+    case send_and_receive_moqx_datagrams(ctx, connection, config, offered, application_started_at) do
+      {:ok, accepted, send_duration_ms, received, first_byte_latency_ms, latencies, _ctx} ->
+        datagram_measurement(%{
+          config: config,
+          handshake_latency_ms: handshake_latency_ms,
+          application_started_at: application_started_at,
+          offered: offered,
+          accepted: accepted,
+          send_duration_ms: send_duration_ms,
+          received: received,
+          first_byte_latency_ms: first_byte_latency_ms,
+          latencies: latencies
+        })
 
-    received_count = MapSet.size(received)
-    application_duration_ms = elapsed_ms(application_started_at)
-    bytes_sent = accepted * config.datagram_size
+      {:error, failure, accepted, send_duration_ms, received, first_byte_latency_ms, latencies,
+       _ctx} ->
+        datagram_measurement(%{
+          config: config,
+          handshake_latency_ms: handshake_latency_ms,
+          application_started_at: application_started_at,
+          offered: offered,
+          accepted: accepted,
+          send_duration_ms: send_duration_ms,
+          received: received,
+          first_byte_latency_ms: first_byte_latency_ms,
+          latencies: latencies,
+          failure: failure
+        })
+    end
+  end
+
+  defp datagram_measurement(args) do
+    config = args.config
+    failure = Map.get(args, :failure)
+    received_count = MapSet.size(args.received)
+    application_duration_ms = elapsed_ms(args.application_started_at)
+    bytes_sent = args.accepted * config.datagram_size
     bytes_received = received_count * config.datagram_size
-    send_rate = rate(accepted, seconds(send_duration_ms))
+    send_rate = rate(args.accepted, seconds(args.send_duration_ms))
     offered_rate_ratio = target_rate_ratio(send_rate, config)
 
     %{
@@ -741,7 +772,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "workload" => @datagram_pressure_workload,
       "payload_size_bytes" => config.datagram_size,
       "datagram_size_bytes" => config.datagram_size,
-      "datagram_count" => offered,
+      "datagram_count" => args.offered,
       "datagram_mode" => datagram_mode(config),
       "target_datagrams_per_second" => target_datagram_rate(config),
       "target_duration_seconds" => target_duration_seconds(config),
@@ -749,21 +780,22 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "offered_rate_ratio" => offered_rate_ratio,
       "offered_rate_tolerance" => config.offered_rate_tolerance,
       "offered_rate_valid" => offered_rate_valid?(offered_rate_ratio, config),
-      "datagrams_offered" => offered,
-      "datagrams_accepted" => accepted,
+      "datagrams_offered" => args.offered,
+      "datagrams_accepted" => args.accepted,
       "datagrams_received" => received_count,
-      "datagram_delivery_ratio" => ratio(received_count, offered),
-      "datagram_drop_count" => offered - received_count,
+      "datagram_delivery_ratio" => ratio(received_count, args.offered),
+      "datagram_drop_count" => args.offered - received_count,
       "bytes_sent" => bytes_sent,
       "bytes_received" => bytes_received,
-      "handshake_latency_ms" => handshake_latency_ms,
-      "first_byte_latency_ms" => first_byte_latency_ms,
+      "handshake_latency_ms" => args.handshake_latency_ms,
+      "first_byte_latency_ms" => args.first_byte_latency_ms,
       "application_duration_ms" => application_duration_ms,
       "offered_load_bps" => offered_load_bps(config),
       "goodput_bps" => bits_per_second(bytes_received, application_duration_ms),
       "send_rate_packets_per_second" => send_rate,
       "send_rate_datagrams_per_second" => send_rate,
-      "datagram_latency_ms" => latency_summary(latencies)
+      "datagram_latency_ms" => latency_summary(args.latencies),
+      "datagram_failure" => failure
     }
   end
 
@@ -778,8 +810,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     send_started_at = monotonic_us()
     interval_us = div(1_000_000, rate)
 
-    {accepted, ctx, received, latencies, first_byte, _next_send_at} =
-      Enum.reduce(
+    result =
+      Enum.reduce_while(
         1..count,
         {0, ctx, MapSet.new(), [], nil, send_started_at},
         fn sequence, {accepted, ctx, received, latencies, first_byte, next_send_at} ->
@@ -794,78 +826,122 @@ defmodule MOQX.TransportBench.ReferenceComparison do
               next_send_at
             )
 
-          {:ok, ctx} =
-            Transport.send_datagram(
-              ctx,
-              connection,
-              DatagramPayload.encode(sequence, config.datagram_size, monotonic_us())
-            )
+          case send_moqx_datagram(ctx, connection, config, sequence) do
+            {:ok, ctx} ->
+              {received, first_byte, latencies, ctx} =
+                drain_available_moqx_datagrams(
+                  ctx,
+                  connection,
+                  received,
+                  latencies,
+                  first_byte,
+                  started_at
+                )
 
-          {received, first_byte, latencies, ctx} =
-            drain_available_moqx_datagrams(
-              ctx,
-              connection,
-              received,
-              latencies,
-              first_byte,
-              started_at
-            )
+              {:cont,
+               {accepted + 1, ctx, received, latencies, first_byte, next_send_at + interval_us}}
 
-          {accepted + 1, ctx, received, latencies, first_byte, next_send_at + interval_us}
+            {:error, reason, ctx} ->
+              failure = datagram_send_failure(config, reason, sequence, count, accepted)
+              send_duration_ms = elapsed_ms(send_started_at)
+
+              {:halt,
+               {:error, failure, accepted, send_duration_ms, received, first_byte, latencies, ctx}}
+          end
         end
       )
 
-    send_duration_ms = elapsed_ms(send_started_at)
+    case result do
+      {:error, _failure, _accepted, _send_duration_ms, _received, _first_byte, _latencies, _ctx} =
+          error ->
+        error
 
-    {received, first_byte, latencies, ctx} =
-      receive_moqx_datagrams(
-        ctx,
-        connection,
-        config,
-        count,
-        received,
-        latencies,
-        first_byte,
-        started_at
-      )
+      {accepted, ctx, received, latencies, first_byte, _next_send_at} ->
+        send_duration_ms = elapsed_ms(send_started_at)
 
-    {accepted, send_duration_ms, received, first_byte, latencies, ctx}
+        {received, first_byte, latencies, ctx} =
+          receive_moqx_datagrams(
+            ctx,
+            connection,
+            config,
+            count,
+            received,
+            latencies,
+            first_byte,
+            started_at
+          )
+
+        {:ok, accepted, send_duration_ms, received, first_byte, latencies, ctx}
+    end
   end
 
   defp send_and_receive_moqx_datagrams(ctx, connection, config, count, started_at) do
-    {accepted, send_duration_ms, ctx} = send_moqx_datagrams(ctx, connection, config, count)
+    case send_moqx_datagrams(ctx, connection, config, count) do
+      {:ok, accepted, send_duration_ms, ctx} ->
+        {received, first_byte, latencies, ctx} =
+          receive_moqx_datagrams(
+            ctx,
+            connection,
+            config,
+            count,
+            MapSet.new(),
+            [],
+            nil,
+            started_at
+          )
 
-    {received, first_byte, latencies, ctx} =
-      receive_moqx_datagrams(
-        ctx,
-        connection,
-        config,
-        count,
-        MapSet.new(),
-        [],
-        nil,
-        started_at
-      )
+        {:ok, accepted, send_duration_ms, received, first_byte, latencies, ctx}
 
-    {accepted, send_duration_ms, received, first_byte, latencies, ctx}
+      {:error, failure, accepted, send_duration_ms, ctx} ->
+        {:error, failure, accepted, send_duration_ms, MapSet.new(), nil, [], ctx}
+    end
   end
 
   defp send_moqx_datagrams(ctx, connection, config, count) do
     started_at = monotonic_us()
 
-    {accepted, ctx} =
-      Enum.reduce(1..count, {0, ctx}, fn sequence, {accepted, ctx} ->
-        {:ok, ctx} =
-          Transport.send_datagram(
-            ctx,
-            connection,
-            DatagramPayload.encode(sequence, config.datagram_size, monotonic_us())
-          )
+    result =
+      Enum.reduce_while(1..count, {0, ctx}, fn sequence, {accepted, ctx} ->
+        case send_moqx_datagram(ctx, connection, config, sequence) do
+          {:ok, ctx} ->
+            {:cont, {accepted + 1, ctx}}
 
-        {accepted + 1, ctx}
+          {:error, reason, ctx} ->
+            failure = datagram_send_failure(config, reason, sequence, count, accepted)
+            {:halt, {:error, failure, accepted, elapsed_ms(started_at), ctx}}
+        end
       end)
 
-    {accepted, elapsed_ms(started_at), ctx}
+    case result do
+      {:error, _failure, _accepted, _send_duration_ms, _ctx} = error ->
+        error
+
+      {accepted, ctx} ->
+        {:ok, accepted, elapsed_ms(started_at), ctx}
+    end
+  end
+
+  defp send_moqx_datagram(ctx, connection, config, sequence) do
+    Transport.send_datagram(
+      ctx,
+      connection,
+      DatagramPayload.encode(sequence, config.datagram_size, monotonic_us())
+    )
+  end
+
+  defp datagram_send_failure(config, reason, sequence, offered, accepted) do
+    %{
+      "phase" => "send_datagram",
+      "reason" => reason_name(reason),
+      "datagram_sequence" => sequence,
+      "datagrams_offered" => offered,
+      "datagrams_accepted" => accepted,
+      "datagram_size_bytes" => config.datagram_size,
+      "target_datagrams_per_second" => target_datagram_rate(config),
+      "target_duration_seconds" => target_duration_seconds(config),
+      "offered_load_bps" => offered_load_bps(config),
+      "topology" => config.topology
+    }
   end
 
   defp receive_moqx_datagrams_until(
@@ -2182,6 +2258,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       ctx.exit_status == 0 && !valid_measurement?(ctx.config, ctx.measurement)
 
     datagram_loss? = datagram_loss?(ctx, failed?, invalid_measurement?)
+    datagram_send_failure? = datagram_send_failure?(ctx)
     stream_failure? = stream_failure?(ctx)
 
     %{
@@ -2189,14 +2266,23 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         first_symptom(
           ctx.timed_out?,
           failed?,
+          datagram_send_failure?,
           invalid_measurement?,
           datagram_loss?,
           stream_failure?
         ),
       "stopped_by" =>
-        stopped_by(ctx.timed_out?, failed?, invalid_measurement?, datagram_loss?, stream_failure?),
+        stopped_by(
+          ctx.timed_out?,
+          failed?,
+          datagram_send_failure?,
+          invalid_measurement?,
+          datagram_loss?,
+          stream_failure?
+        ),
       "connection_closed" => false,
-      "protocol_error" => failed? || invalid_measurement? || stream_failure?,
+      "protocol_error" =>
+        failed? || invalid_measurement? || datagram_send_failure? || stream_failure?,
       "throughput_plateau" => false,
       "latency_explosion" => false,
       "mailbox_growth_without_recovery" => false,
@@ -2214,37 +2300,53 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp errors(ctx) do
-    message =
-      cond do
-        ctx.timed_out? ->
-          "reference comparison step timed out after #{seconds(ctx.timeout_ms)}s"
-
-        stream_failure?(ctx) ->
-          stream_failure_message(measurement(ctx)["stream_failure"])
-
-        ctx.exit_status != 0 ->
-          failure_output(ctx.step_output) ||
-            "reference comparison step exited with status #{ctx.exit_status}"
-
-        offered_rate_invalid?(ctx.config, ctx.measurement) ->
-          "reference comparison offered rate below tolerance: actual/target #{number(measurement(ctx)["offered_rate_ratio"])} < #{ctx.config.offered_rate_tolerance}"
-
-        !valid_measurement?(ctx.config, ctx.measurement) ->
-          "reference comparison step did not produce a valid client_run measurement"
-
-        true ->
-          nil
-      end
-
     %{
       "close_reason" => if(ctx.timed_out?, do: "timeout", else: nil),
       "error_code" => ctx.exit_status,
-      "message" => message,
-      "details" => measurement(ctx)["stream_failure"]
+      "message" => error_message(ctx),
+      "details" => failure_details(ctx)
     }
   end
 
+  defp error_message(ctx) do
+    timed_out_message(ctx) ||
+      stream_failure_message(measurement(ctx)["stream_failure"]) ||
+      datagram_send_failure_message(measurement(ctx)["datagram_failure"]) ||
+      exit_status_message(ctx) ||
+      offered_rate_invalid_message(ctx) ||
+      invalid_measurement_message(ctx)
+  end
+
+  defp timed_out_message(%{timed_out?: true} = ctx),
+    do: "reference comparison step timed out after #{seconds(ctx.timeout_ms)}s"
+
+  defp timed_out_message(_ctx), do: nil
+
+  defp exit_status_message(%{exit_status: 0}), do: nil
+
+  defp exit_status_message(ctx) do
+    failure_output(ctx.step_output) ||
+      "reference comparison step exited with status #{ctx.exit_status}"
+  end
+
+  defp offered_rate_invalid_message(ctx) do
+    if offered_rate_invalid?(ctx.config, ctx.measurement) do
+      "reference comparison offered rate below tolerance: actual/target #{number(measurement(ctx)["offered_rate_ratio"])} < #{ctx.config.offered_rate_tolerance}"
+    end
+  end
+
+  defp invalid_measurement_message(ctx) do
+    unless valid_measurement?(ctx.config, ctx.measurement) do
+      "reference comparison step did not produce a valid client_run measurement"
+    end
+  end
+
   defp stream_failure?(ctx), do: is_map(measurement(ctx)["stream_failure"])
+  defp datagram_send_failure?(ctx), do: is_map(measurement(ctx)["datagram_failure"])
+
+  defp failure_details(ctx) do
+    measurement(ctx)["stream_failure"] || measurement(ctx)["datagram_failure"]
+  end
 
   defp stream_failure_message(nil), do: nil
 
@@ -2254,38 +2356,49 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "received=#{failure["bytes_received"]}/#{failure["bytes_expected"]}"
   end
 
-  defp first_symptom(true, _failed?, _invalid_json?, _datagram_loss?, _stream_failure?),
-    do: "step_timeout"
+  defp datagram_send_failure_message(nil), do: nil
 
-  defp first_symptom(false, true, _invalid_json?, _datagram_loss?, _stream_failure?),
-    do: "protocol_error"
+  defp datagram_send_failure_message(failure) do
+    "moqx datagram send failed: #{failure["reason"]}"
+  end
 
-  defp first_symptom(false, false, true, _datagram_loss?, _stream_failure?),
-    do: "tool_output_invalid"
+  defp first_symptom(
+         timed_out?,
+         failed?,
+         datagram_send_failure?,
+         invalid_measurement?,
+         datagram_loss?,
+         stream_failure?
+       ) do
+    cond do
+      timed_out? -> "step_timeout"
+      failed? -> "protocol_error"
+      datagram_send_failure? -> "datagram_send_error"
+      invalid_measurement? -> "tool_output_invalid"
+      datagram_loss? -> "datagram_delivery_loss"
+      stream_failure? -> "stream_closed_before_expected_bytes"
+      true -> nil
+    end
+  end
 
-  defp first_symptom(false, false, false, true, _stream_failure?),
-    do: "datagram_delivery_loss"
-
-  defp first_symptom(false, false, false, false, true),
-    do: "stream_closed_before_expected_bytes"
-
-  defp first_symptom(false, false, false, false, false), do: nil
-
-  defp stopped_by(true, _failed?, _invalid_json?, _datagram_loss?, _stream_failure?),
-    do: @timeout_stop_condition
-
-  defp stopped_by(false, true, _invalid_json?, _datagram_loss?, _stream_failure?),
-    do: "reference_comparison_nonzero_exit"
-
-  defp stopped_by(false, false, true, _datagram_loss?, _stream_failure?),
-    do: "reference_comparison_invalid_measurement"
-
-  defp stopped_by(false, false, false, true, _stream_failure?), do: "datagram_delivery_loss"
-
-  defp stopped_by(false, false, false, false, true),
-    do: "stream_closed_before_expected_bytes"
-
-  defp stopped_by(false, false, false, false, false), do: nil
+  defp stopped_by(
+         timed_out?,
+         failed?,
+         datagram_send_failure?,
+         invalid_measurement?,
+         datagram_loss?,
+         stream_failure?
+       ) do
+    cond do
+      timed_out? -> @timeout_stop_condition
+      failed? -> "reference_comparison_nonzero_exit"
+      datagram_send_failure? -> "datagram_send_error"
+      invalid_measurement? -> "reference_comparison_invalid_measurement"
+      datagram_loss? -> "datagram_delivery_loss"
+      stream_failure? -> "stream_closed_before_expected_bytes"
+      true -> nil
+    end
+  end
 
   defp diagnostics(ctx), do: measurement(ctx)["diagnostics"]
 

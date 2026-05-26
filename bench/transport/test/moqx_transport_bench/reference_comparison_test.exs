@@ -299,6 +299,115 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["errors"]["message"] =~ "0.8 < 0.95"
   end
 
+  test "records MOQX datagram send errors without crashing or losing requested load metadata" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-datagram-send-error.jsonl")
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "datagram_pressure",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--datagram-size",
+        "1193",
+        "--datagram-rate",
+        "5",
+        "--duration-seconds",
+        "2",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-datagram-send-error-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.DatagramSendErrorTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["workload"]["topology"] == "moqx-client-to-reference-server"
+    assert record["workload"]["datagram_size_bytes"] == 1193
+    assert record["workload"]["datagrams_per_second"] == 5.0
+    assert record["workload"]["offered_load_bps"] == 47_720.0
+    assert record["metrics"]["payload_size_bytes"] == 1193
+    assert record["metrics"]["offered_load_bps"] == 47_720.0
+    assert record["metrics"]["bytes_sent"] == 0
+    assert record["metrics"]["bytes_received"] == 0
+    assert record["limits"]["first_break_symptom"] == "datagram_send_error"
+    assert record["limits"]["stopped_by"] == "datagram_send_error"
+    assert record["limits"]["protocol_error"] == true
+    assert record["errors"]["message"] == "moqx datagram send failed: invalid_parameter"
+    refute record["errors"]["message"] =~ "MatchError"
+
+    assert record["errors"]["details"] == %{
+             "phase" => "send_datagram",
+             "reason" => "invalid_parameter",
+             "datagram_sequence" => 1,
+             "datagrams_offered" => 10,
+             "datagrams_accepted" => 0,
+             "datagram_size_bytes" => 1193,
+             "target_datagrams_per_second" => 5.0,
+             "target_duration_seconds" => 2,
+             "offered_load_bps" => 47_720.0,
+             "topology" => "moqx-client-to-reference-server"
+           }
+  end
+
+  test "records successful near-limit MOQX datagram delivery" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-near-limit-datagram.jsonl")
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "datagram_pressure",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--datagram-size",
+        "1192",
+        "--datagram-count",
+        "2",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-near-limit-datagram-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.DatagramEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["workload"]["topology"] == "moqx-client-to-reference-server"
+    assert record["workload"]["datagram_size_bytes"] == 1192
+    assert record["metrics"]["payload_size_bytes"] == 1192
+    assert record["metrics"]["bytes_sent"] == 2384
+    assert record["metrics"]["bytes_received"] == 2384
+    assert record["metrics"]["datagram_delivery_ratio"] == 1.0
+    assert record["metrics"]["datagram_drop_count"] == 0
+    assert record["limits"]["first_break_symptom"] == :null
+    assert record["errors"]["message"] == :null
+  end
+
   test "records structured diagnostics when MOQX bidirectional echo closes early" do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-peer-shutdown.jsonl")
@@ -538,6 +647,119 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
 
     @impl true
     def send_datagram(_connection, _data), do: {:error, :unsupported}
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection(_connection, _error_code), do: :ok
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process(_handle, _pid), do: :ok
+
+    @impl true
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+  end
+
+  defmodule DatagramSendErrorTransport do
+    @behaviour MOQX.Transport
+
+    @impl true
+    def listen(_port, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept(_listener, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def handshake(connection, _timeout), do: {:ok, connection}
+
+    @impl true
+    def connect(_host, _port, _opts, _timeout), do: {:ok, :connection}
+
+    @impl true
+    def open_stream(_connection, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def send_stream(_stream, _data, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def recv_stream(_stream, _byte_count), do: {:error, :unsupported}
+
+    @impl true
+    def send_datagram(_connection, _data), do: {:error, :invalid_parameter}
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection(_connection, _error_code), do: :ok
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process(_handle, _pid), do: :ok
+
+    @impl true
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+  end
+
+  defmodule DatagramEchoTransport do
+    @behaviour MOQX.Transport
+
+    @impl true
+    def listen(_port, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept(_listener, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def handshake(connection, _timeout), do: {:ok, connection}
+
+    @impl true
+    def connect(_host, _port, _opts, _timeout), do: {:ok, :connection}
+
+    @impl true
+    def open_stream(_connection, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def send_stream(_stream, _data, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def recv_stream(_stream, _byte_count), do: {:error, :unsupported}
+
+    @impl true
+    def send_datagram(connection, data) do
+      send(self(), {:moqx_transport, {:datagram, connection, data, %{}}})
+      :ok
+    end
 
     @impl true
     def finish_sending(_stream), do: :ok

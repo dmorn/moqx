@@ -239,6 +239,14 @@ For paced steps, actual send rate is part of the measurement contract:
 `--offered-rate-tolerance` and the result is tool evidence, not network
 capacity evidence.
 
+Current MOQX/quicer DATAGRAM measurements should use `--datagram-size 1192`
+as the near-limit payload size unless the transport exposes a different
+negotiated maximum. Controlled ARM evidence from 2026-05-26 showed the current
+MOQX send path accepts 1192-byte DATAGRAM payloads and rejects 1193 bytes and
+above with `:invalid_parameter`. `tools/quicprobe` reference-to-reference runs
+can still use larger payloads, such as 1200 bytes, to establish the reference
+path ceiling.
+
 ```bash
 go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
   --ca .tmp/integration-certs/ca.pem \
@@ -322,7 +330,7 @@ moqx-transport-bench moqx-listener \
   --certfile .tmp/integration-certs/server.pem \
   --keyfile .tmp/integration-certs/server-key.pem \
   --workload datagram_pressure \
-  --datagram-size 1200 \
+  --datagram-size 1192 \
   --datagram-count 1000
 ```
 
@@ -336,7 +344,7 @@ moqx-transport-bench reference-comparison \
   --ca .tmp/integration-certs/ca.pem \
   --quicprobe-command /path/to/quicprobe \
   --workload datagram_pressure \
-  --datagram-size 1200 \
+  --datagram-size 1192 \
   --datagram-count 1000 \
   --output bench/transport/results/reference-client-moqx-listener-datagrams.jsonl
 ```

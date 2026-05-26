@@ -1,6 +1,6 @@
 # Handle quicer DATAGRAM payload-size limit
 
-Status: ready-for-agent
+Status: closed
 Type: Bug
 
 ## Parent
@@ -61,17 +61,17 @@ Artifacts are under
 
 ## Acceptance criteria
 
-- [ ] MOQX DATAGRAM send errors are handled explicitly in
+- [x] MOQX DATAGRAM send errors are handled explicitly in
       `moqx-transport-bench reference-comparison`; no `MatchError` is emitted
       for `{:dgram_send_error, reason}`.
-- [ ] Failure records preserve the caller-requested datagram size, target rate,
+- [x] Failure records preserve the caller-requested datagram size, target rate,
       duration, offered load, and topology even when the first send fails.
-- [ ] The benchmark or transport layer documents the effective max DATAGRAM
+- [x] The benchmark or transport layer documents the effective max DATAGRAM
       payload-size behavior, or exposes enough capability metadata for callers
       to choose a valid size before running a pressure step.
-- [ ] #12 uses 1192 bytes as the current near-limit MOQX DATAGRAM payload until
+- [x] #12 uses 1192 bytes as the current near-limit MOQX DATAGRAM payload until
       the transport capability surface says otherwise.
-- [ ] Tests cover both a successful near-limit DATAGRAM path and an explicit
+- [x] Tests cover both a successful near-limit DATAGRAM path and an explicit
       send-error path without using `Application` env as a seam.
 
 ## Notes
@@ -81,3 +81,21 @@ Artifacts are under
   negotiated capability data.
 - Keep this separate from performance optimization. This issue is about
   correctness of capability handling and benchmark reporting.
+
+## Comments
+
+- 2026-05-26: Fixed in the benchmark layer with a TDD slice against
+  `MOQX.TransportBench.ReferenceComparison.main/2` and explicit transport
+  backend seams. MOQX-client DATAGRAM send errors now produce a structured
+  `datagram_failure` measurement, `limits.first_break_symptom` and
+  `limits.stopped_by` are `datagram_send_error`, and `errors.message` is a
+  clean `moqx datagram send failed: <reason>` instead of a `MatchError`
+  traceback. Failure records preserve requested datagram size, target rate,
+  target duration, offered load, topology, offered count, accepted count, and
+  failing sequence in `errors.details`.
+- 2026-05-26: Added regression coverage for both sides of the observed limit:
+  a successful 1192-byte MOQX DATAGRAM echo path and an explicit 1193-byte
+  send-error path. The tests use explicit transport backend modules and do not
+  rely on `Application` environment as a seam. The benchmark README now
+  documents 1192 bytes as the current near-limit MOQX/quicer DATAGRAM payload
+  size until negotiated capability metadata exists.
