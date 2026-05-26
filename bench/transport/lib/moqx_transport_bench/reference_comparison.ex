@@ -16,6 +16,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   @datagram_pressure_workload "datagram_pressure"
   @mixed_moqt_shaped_workload "mixed_moqt_shaped"
   @stream_send_window 16
+  @mixed_completion_drain_limit 1024
   @reference_client_topology "reference-client-to-reference-server"
   @reference_client_moqx_listener_topology "reference-client-to-moqx-listener"
   @moqx_client_topology "moqx-client-to-reference-server"
@@ -639,14 +640,44 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     |> Enum.sum()
   end
 
-  defp process_diagnostics do
+  defp process_diagnostics(process_samples \\ %{}) do
+    current = message_queue_len()
+
+    peak =
+      [current, Map.get(process_samples, "message_queue_len_peak")]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.max(fn -> nil end)
+
+    compact(%{
+      "message_queue_len" => current,
+      "message_queue_len_peak" => peak,
+      "message_queue_len_samples" => Map.get(process_samples, "message_queue_len_samples")
+    })
+  end
+
+  defp message_queue_len do
     message_queue_len =
       case Process.info(self(), :message_queue_len) do
         {:message_queue_len, value} -> value
         nil -> nil
       end
 
-    %{"message_queue_len" => message_queue_len}
+    message_queue_len
+  end
+
+  defp sample_process_diagnostics(%{process: process} = state) do
+    message_queue_len = message_queue_len()
+
+    process =
+      process
+      |> Map.put("message_queue_len", message_queue_len)
+      |> Map.update("message_queue_len_peak", message_queue_len, fn
+        nil -> message_queue_len
+        peak -> max(peak, message_queue_len || 0)
+      end)
+      |> Map.update("message_queue_len_samples", 1, &(&1 + 1))
+
+    %{state | process: process}
   end
 
   defp connect_opts(config) do
@@ -849,19 +880,32 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     application_started_at = monotonic_us()
     object_config = %{config | stream_direction: "unidirectional"}
     object_payload = binary_payload(config.payload_size)
+    control_payload = binary_payload(config.control_payload_size)
 
     {object_streams, ctx} = open_pressure_streams(ctx, connection, object_config)
 
-    {object_streams, ctx} =
-      schedule_pressure_payloads(ctx, object_streams, object_payload, object_config)
+    {state, _ctx} =
+      case Transport.open_stream(ctx, connection, direction: :bidirectional, active: true) do
+        {:ok, control_stream, ctx} ->
+          object_streams
+          |> initial_mixed_pressure_state(control_stream)
+          |> run_mixed_event_pump(
+            ctx,
+            object_payload,
+            object_config,
+            control_payload,
+            config,
+            application_started_at
+          )
 
-    record_scheduled_streams(object_config, object_streams, object_payload)
-
-    {control_result, _ctx} =
-      run_mixed_control_stream(ctx, connection, config, application_started_at)
+        {:error, reason, ctx} ->
+          failure = mixed_control_failure(config, "open_control_stream", reason, 0, 0)
+          {failed_initial_mixed_pressure_state(object_streams, failure), ctx}
+      end
 
     application_duration_ms = elapsed_ms(application_started_at)
-    object_bytes_sent = Enum.sum(Enum.map(object_streams, & &1.bytes_sent))
+    object_bytes_sent = mixed_object_bytes_sent(state)
+    control_result = mixed_control_result(state.control)
     bytes_sent = object_bytes_sent + control_result.bytes_sent
 
     %{
@@ -893,13 +937,13 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           seconds(application_duration_ms)
         ),
       "stream_scheduling" => "mixed_control_bidi_object_uni",
-      "stream_latency_ms" => latency_summary(object_stream_latencies(object_streams)),
+      "stream_latency_ms" => latency_summary(mixed_object_stream_latencies(state)),
       "control_latency_ms" => latency_summary(control_result.latencies),
       "stream_failure" => control_result.failure,
       "diagnostics" =>
         mixed_pressure_diagnostics(
           config,
-          object_streams,
+          state,
           control_result,
           object_bytes_sent,
           application_duration_ms
@@ -907,117 +951,720 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     }
   end
 
-  defp run_mixed_control_stream(ctx, connection, config, application_started_at) do
-    payload = binary_payload(config.control_payload_size)
-
-    case Transport.open_stream(ctx, connection, direction: :bidirectional) do
-      {:ok, stream, ctx} ->
-        send_and_receive_mixed_control(ctx, stream, config, payload, application_started_at)
-
-      {:error, reason, ctx} ->
-        failure = mixed_control_failure(config, "open_control_stream", reason, 0, 0)
-        {empty_mixed_control_result(failure), ctx}
-    end
+  defp initial_mixed_pressure_state(object_streams, control_stream) do
+    %{
+      object_streams:
+        Map.new(object_streams, fn stream_state ->
+          {stream_state.stream,
+           %{
+             stream_state: stream_state,
+             payloads_scheduled: 0,
+             payloads_completed: 0,
+             send_inflight: 0,
+             send_completed: 0,
+             send_cancelled: 0,
+             completed_at: nil,
+             failure: nil
+           }}
+        end),
+      control: initial_mixed_control_state(control_stream),
+      process: %{},
+      events_drained: 0,
+      ignored_events: 0,
+      unknown_events: 0,
+      receive_errors: 0,
+      object_send_events: 0,
+      control_send_events: 0,
+      control_data_events: 0,
+      completion_drain_events: 0
+    }
   end
 
-  defp send_and_receive_mixed_control(ctx, stream, config, payload, application_started_at) do
-    started_at = monotonic_us()
-    interval_us = div(1_000_000, config.control_rate)
-
-    result =
-      Enum.reduce_while(
-        1..config.control_message_count,
-        {%{bytes_sent: 0, bytes_received: 0, first_byte_latency_ms: nil, latencies: []}, ctx},
-        fn sequence, {result, ctx} ->
-          wait_until_us(started_at + (sequence - 1) * interval_us)
-          sent_at = monotonic_us()
-          opts = if sequence == config.control_message_count, do: [finish: true], else: []
-
-          case Transport.send_stream(ctx, stream, payload, opts) do
-            {:ok, _send, ctx} ->
-              receive_mixed_control_echo(
-                ctx,
-                stream,
-                config,
-                payload,
-                sequence,
-                sent_at,
-                application_started_at,
-                result
-              )
-
-            {:error, reason, ctx} ->
-              failure =
-                mixed_control_failure(
-                  config,
-                  "send_control_message",
-                  reason,
-                  sequence,
-                  result.bytes_received
-                )
-
-              {:halt, {%{result | failure: failure}, ctx}}
-          end
-        end
-      )
-
-    case result do
-      {%{failure: _failure} = result, ctx} -> {result, ctx}
-      {result, ctx} -> {Map.put(result, :failure, nil), ctx}
-    end
+  defp failed_initial_mixed_pressure_state(object_streams, failure) do
+    object_streams
+    |> initial_mixed_pressure_state(nil)
+    |> put_in([:control, :failure], failure)
   end
 
-  defp receive_mixed_control_echo(
+  defp initial_mixed_control_state(stream) do
+    %{
+      stream: stream,
+      bytes_sent: 0,
+      bytes_received: 0,
+      first_byte_latency_ms: nil,
+      latencies: [],
+      sent_at_by_sequence: %{},
+      messages_scheduled: 0,
+      messages_echoed: 0,
+      send_inflight: 0,
+      send_completed: 0,
+      send_cancelled: 0,
+      failure: nil
+    }
+  end
+
+  defp run_mixed_event_pump(
+         state,
          ctx,
-         stream,
+         object_payload,
+         object_config,
+         control_payload,
          config,
-         payload,
-         sequence,
-         sent_at,
-         application_started_at,
-         result
+         application_started_at
        ) do
-    case Transport.recv_stream(ctx, stream, byte_size(payload)) do
-      {:ok, data, ctx} ->
-        if matches_payload?(data, payload, 0) do
-          latency = elapsed_ms(sent_at)
+    deadline_us = application_started_at + client_timeout_ms(config) * 1000
 
-          first_byte_latency_ms =
-            result.first_byte_latency_ms || elapsed_ms(application_started_at)
+    state
+    |> sample_process_diagnostics()
+    |> collect_mixed_events(
+      ctx,
+      object_payload,
+      object_config,
+      control_payload,
+      config,
+      application_started_at,
+      deadline_us
+    )
+  end
 
-          {:cont,
-           {%{
-              result
-              | bytes_sent: result.bytes_sent + byte_size(payload),
-                bytes_received: result.bytes_received + byte_size(data),
-                first_byte_latency_ms: first_byte_latency_ms,
-                latencies: [latency | result.latencies]
-            }, ctx}}
-        else
-          failure =
-            mixed_control_failure(
+  defp collect_mixed_events(
+         state,
+         ctx,
+         object_payload,
+         object_config,
+         control_payload,
+         config,
+         application_started_at,
+         deadline_us
+       ) do
+    {state, ctx} = schedule_mixed_object_sends(state, ctx, object_payload, object_config)
+
+    {state, ctx} =
+      maybe_schedule_mixed_control(state, ctx, control_payload, config, application_started_at)
+
+    state = sample_process_diagnostics(state)
+
+    cond do
+      mixed_complete?(state, config) ->
+        state
+        |> drain_mixed_residual_events(
+          ctx,
+          object_payload,
+          object_config,
+          control_payload,
+          config,
+          application_started_at,
+          @mixed_completion_drain_limit
+        )
+        |> then(fn {state, ctx} -> {sample_process_diagnostics(state), ctx} end)
+
+      failure = first_mixed_failure(state) ->
+        {put_mixed_failure(state, failure), ctx}
+
+      monotonic_us() >= deadline_us ->
+        failure = mixed_timeout_failure(state, config)
+        {put_mixed_failure(state, failure), ctx}
+
+      true ->
+        timeout_ms = mixed_event_timeout_ms(state, config, application_started_at, deadline_us)
+
+        case Transport.receive_event(ctx, timeout_ms) do
+          {:ok, event, ctx} ->
+            state =
+              state
+              |> handle_mixed_event(
+                event,
+                object_payload,
+                object_config,
+                control_payload,
+                config,
+                application_started_at
+              )
+              |> sample_process_diagnostics()
+
+            collect_mixed_events(
+              state,
+              ctx,
+              object_payload,
+              object_config,
+              control_payload,
               config,
-              "receive_control_echo",
-              :echo_payload_mismatch,
-              sequence,
-              result.bytes_received + byte_size(data)
+              application_started_at,
+              deadline_us
             )
 
-          {:halt, {%{result | failure: failure}, ctx}}
+          {:unknown, _message, ctx} ->
+            state =
+              state
+              |> Map.update!(:unknown_events, &(&1 + 1))
+              |> sample_process_diagnostics()
+
+            collect_mixed_events(
+              state,
+              ctx,
+              object_payload,
+              object_config,
+              control_payload,
+              config,
+              application_started_at,
+              deadline_us
+            )
+
+          {:error, _reason, ctx} ->
+            state =
+              state
+              |> Map.update!(:receive_errors, &(&1 + 1))
+              |> sample_process_diagnostics()
+
+            collect_mixed_events(
+              state,
+              ctx,
+              object_payload,
+              object_config,
+              control_payload,
+              config,
+              application_started_at,
+              deadline_us
+            )
+
+          {:timeout, ctx} ->
+            collect_mixed_events(
+              sample_process_diagnostics(state),
+              ctx,
+              object_payload,
+              object_config,
+              control_payload,
+              config,
+              application_started_at,
+              deadline_us
+            )
         end
+    end
+  end
+
+  defp drain_mixed_residual_events(
+         state,
+         ctx,
+         object_payload,
+         object_config,
+         control_payload,
+         config,
+         application_started_at,
+         limit
+       )
+
+  defp drain_mixed_residual_events(
+         state,
+         ctx,
+         _object_payload,
+         _object_config,
+         _control_payload,
+         _config,
+         _application_started_at,
+         limit
+       )
+       when limit <= 0 do
+    {state, ctx}
+  end
+
+  defp drain_mixed_residual_events(
+         state,
+         ctx,
+         object_payload,
+         object_config,
+         control_payload,
+         config,
+         application_started_at,
+         limit
+       ) do
+    case Transport.receive_event(ctx, 0) do
+      {:ok, event, ctx} ->
+        state =
+          state
+          |> handle_mixed_event(
+            event,
+            object_payload,
+            object_config,
+            control_payload,
+            config,
+            application_started_at
+          )
+          |> Map.update!(:completion_drain_events, &(&1 + 1))
+          |> sample_process_diagnostics()
+
+        drain_mixed_residual_events(
+          state,
+          ctx,
+          object_payload,
+          object_config,
+          control_payload,
+          config,
+          application_started_at,
+          limit - 1
+        )
+
+      {:unknown, _message, ctx} ->
+        state =
+          state
+          |> Map.update!(:unknown_events, &(&1 + 1))
+          |> Map.update!(:completion_drain_events, &(&1 + 1))
+          |> sample_process_diagnostics()
+
+        drain_mixed_residual_events(
+          state,
+          ctx,
+          object_payload,
+          object_config,
+          control_payload,
+          config,
+          application_started_at,
+          limit - 1
+        )
+
+      {:error, _reason, ctx} ->
+        state =
+          state
+          |> Map.update!(:receive_errors, &(&1 + 1))
+          |> Map.update!(:completion_drain_events, &(&1 + 1))
+          |> sample_process_diagnostics()
+
+        drain_mixed_residual_events(
+          state,
+          ctx,
+          object_payload,
+          object_config,
+          control_payload,
+          config,
+          application_started_at,
+          limit - 1
+        )
+
+      {:timeout, ctx} ->
+        {state, ctx}
+    end
+  end
+
+  defp schedule_mixed_object_sends(state, ctx, payload, config) do
+    Enum.reduce(state.object_streams, {state, ctx}, fn {stream, object}, {state, ctx} ->
+      {object, ctx} = schedule_mixed_object_stream_sends(object, ctx, payload, config)
+      {%{state | object_streams: Map.put(state.object_streams, stream, object)}, ctx}
+    end)
+  end
+
+  defp schedule_mixed_object_stream_sends(object, ctx, payload, config) do
+    cond do
+      object.failure ->
+        {object, ctx}
+
+      object.payloads_scheduled >= config.payload_count ->
+        {object, ctx}
+
+      object.send_inflight >= @stream_send_window ->
+        {object, ctx}
+
+      true ->
+        payload_index = object.payloads_scheduled + 1
+        finish? = payload_index == config.payload_count
+        opts = if finish?, do: [finish: true], else: []
+
+        case Transport.send_stream(ctx, object.stream_state.stream, payload, opts) do
+          {:ok, _send, ctx} ->
+            stream_state = %{
+              object.stream_state
+              | bytes_sent: object.stream_state.bytes_sent + byte_size(payload),
+                payloads_accepted: object.stream_state.payloads_accepted + 1
+            }
+
+            object = %{
+              object
+              | stream_state: stream_state,
+                payloads_scheduled: payload_index,
+                send_inflight: object.send_inflight + 1
+            }
+
+            record_stream_phase(config, stream_state, "mixed_object_send_window_open", %{
+              "bytes_expected" => expected_stream_bytes(config),
+              "payloads_scheduled" => object.payloads_scheduled,
+              "send_inflight" => object.send_inflight,
+              "send_window" => @stream_send_window
+            })
+
+            schedule_mixed_object_stream_sends(object, ctx, payload, config)
+
+          {:error, reason, ctx} ->
+            {%{object | failure: mixed_object_failure(object, config, reason_name(reason))}, ctx}
+        end
+    end
+  end
+
+  defp maybe_schedule_mixed_control(state, ctx, payload, config, application_started_at) do
+    if mixed_control_ready_to_send?(state.control, config, application_started_at) do
+      schedule_mixed_control_message(state, ctx, payload, config)
+    else
+      {state, ctx}
+    end
+  end
+
+  defp mixed_control_ready_to_send?(control, config, application_started_at) do
+    cond do
+      is_nil(control.stream) ->
+        false
+
+      control.failure ->
+        false
+
+      control.messages_scheduled >= config.control_message_count ->
+        false
+
+      control.messages_echoed < control.messages_scheduled ->
+        false
+
+      true ->
+        monotonic_us() >=
+          mixed_control_due_us(control.messages_scheduled + 1, config, application_started_at)
+    end
+  end
+
+  defp schedule_mixed_control_message(state, ctx, payload, config) do
+    control = state.control
+    sequence = control.messages_scheduled + 1
+    opts = if sequence == config.control_message_count, do: [finish: true], else: []
+    sent_at = monotonic_us()
+
+    case Transport.send_stream(ctx, control.stream, payload, opts) do
+      {:ok, _send, ctx} ->
+        control = %{
+          control
+          | bytes_sent: control.bytes_sent + byte_size(payload),
+            messages_scheduled: sequence,
+            send_inflight: control.send_inflight + 1,
+            sent_at_by_sequence: Map.put(control.sent_at_by_sequence, sequence, sent_at)
+        }
+
+        {%{state | control: control}, ctx}
 
       {:error, reason, ctx} ->
         failure =
           mixed_control_failure(
             config,
-            "receive_control_echo",
+            "send_control_message",
             reason,
             sequence,
-            result.bytes_received
+            control.bytes_received
           )
 
-        {:halt, {%{result | failure: failure}, ctx}}
+        {%{state | control: %{control | failure: failure}}, ctx}
     end
+  end
+
+  defp mixed_control_due_us(sequence, config, application_started_at) do
+    interval_us = div(1_000_000, config.control_rate)
+    application_started_at + (sequence - 1) * interval_us
+  end
+
+  defp mixed_event_timeout_ms(state, config, application_started_at, deadline_us) do
+    now = monotonic_us()
+    deadline_ms = max(div(deadline_us - now, 1000), 0)
+
+    next_control_ms =
+      case next_mixed_control_due_us(state, config, application_started_at) do
+        nil -> deadline_ms
+        due_us -> max(div(due_us - now, 1000), 0)
+      end
+
+    min(deadline_ms, max(next_control_ms, 1))
+  end
+
+  defp next_mixed_control_due_us(state, config, application_started_at) do
+    control = state.control
+
+    cond do
+      is_nil(control.stream) -> nil
+      control.failure -> nil
+      control.messages_scheduled >= config.control_message_count -> nil
+      control.messages_echoed < control.messages_scheduled -> nil
+      true -> mixed_control_due_us(control.messages_scheduled + 1, config, application_started_at)
+    end
+  end
+
+  defp handle_mixed_event(
+         state,
+         event,
+         object_payload,
+         object_config,
+         control_payload,
+         config,
+         started_at
+       ) do
+    state = Map.update!(state, :events_drained, &(&1 + 1))
+
+    case event do
+      {:stream_event, stream, :send_completed, _metadata} ->
+        handle_mixed_send_completion(state, stream, object_config)
+
+      {:stream_event, stream, :send_cancelled, _metadata} ->
+        handle_mixed_send_cancelled(state, stream, object_config, config)
+
+      {:stream_data, stream, data, _metadata} ->
+        handle_mixed_stream_data(
+          state,
+          stream,
+          data,
+          object_payload,
+          control_payload,
+          config,
+          started_at
+        )
+
+      {:stream_event, stream, :peer_finished_sending, _metadata} ->
+        handle_mixed_peer_finished(state, stream, config)
+
+      {:stream_event, stream, :closed, _metadata} ->
+        handle_mixed_peer_finished(state, stream, config)
+
+      _event ->
+        Map.update!(state, :ignored_events, &(&1 + 1))
+    end
+  end
+
+  defp handle_mixed_send_completion(state, stream, object_config) do
+    cond do
+      Map.has_key?(state.object_streams, stream) ->
+        state
+        |> update_in([:object_streams, stream], &complete_mixed_object_send(&1, object_config))
+        |> Map.update!(:object_send_events, &(&1 + 1))
+
+      state.control.stream == stream ->
+        state
+        |> update_in([:control], fn control ->
+          %{
+            control
+            | send_completed: control.send_completed + 1,
+              send_inflight: max(control.send_inflight - 1, 0)
+          }
+        end)
+        |> Map.update!(:control_send_events, &(&1 + 1))
+
+      true ->
+        Map.update!(state, :ignored_events, &(&1 + 1))
+    end
+  end
+
+  defp complete_mixed_object_send(object, config) do
+    payloads_completed = object.payloads_completed + 1
+    completed_at = if payloads_completed >= config.payload_count, do: monotonic_us()
+
+    object = %{
+      object
+      | payloads_completed: payloads_completed,
+        send_completed: object.send_completed + 1,
+        send_inflight: max(object.send_inflight - 1, 0),
+        completed_at: completed_at || object.completed_at
+    }
+
+    record_stream_phase(config, object.stream_state, mixed_object_send_phase(object, config), %{
+      "bytes_expected" => expected_stream_bytes(config),
+      "payloads_scheduled" => object.payloads_scheduled,
+      "payloads_completed" => object.payloads_completed,
+      "send_inflight" => object.send_inflight,
+      "send_completions_pending" => object.payloads_scheduled - object.payloads_completed
+    })
+
+    object
+  end
+
+  defp mixed_object_send_phase(object, config) do
+    if object.payloads_completed >= config.payload_count,
+      do: "mixed_object_send_complete",
+      else: "mixed_object_sending"
+  end
+
+  defp handle_mixed_send_cancelled(state, stream, object_config, config) do
+    cond do
+      Map.has_key?(state.object_streams, stream) ->
+        state
+        |> update_in([:object_streams, stream], fn object ->
+          object = %{
+            object
+            | send_cancelled: object.send_cancelled + 1,
+              send_inflight: max(object.send_inflight - 1, 0)
+          }
+
+          %{object | failure: mixed_object_failure(object, object_config, "send_cancelled")}
+        end)
+        |> Map.update!(:object_send_events, &(&1 + 1))
+
+      state.control.stream == stream ->
+        failure =
+          mixed_control_failure(
+            config,
+            "send_control_message",
+            :send_cancelled,
+            state.control.messages_scheduled,
+            state.control.bytes_received
+          )
+
+        state
+        |> put_in([:control, :failure], failure)
+        |> update_in([:control, :send_cancelled], &(&1 + 1))
+        |> update_in([:control, :send_inflight], &max(&1 - 1, 0))
+        |> Map.update!(:control_send_events, &(&1 + 1))
+
+      true ->
+        Map.update!(state, :ignored_events, &(&1 + 1))
+    end
+  end
+
+  defp handle_mixed_stream_data(
+         state,
+         stream,
+         data,
+         _object_payload,
+         control_payload,
+         config,
+         started_at
+       ) do
+    if state.control.stream == stream do
+      state
+      |> update_in([:control], fn control ->
+        handle_mixed_control_data(control, data, control_payload, config, started_at)
+      end)
+      |> Map.update!(:control_data_events, &(&1 + 1))
+    else
+      Map.update!(state, :ignored_events, &(&1 + 1))
+    end
+  end
+
+  defp handle_mixed_control_data(control, data, payload, config, started_at) do
+    received_before = control.bytes_received
+
+    if matches_payload?(data, payload, received_before) do
+      bytes_received = received_before + byte_size(data)
+      messages_echoed = min(div(bytes_received, byte_size(payload)), config.control_message_count)
+
+      %{
+        control
+        | bytes_received: bytes_received,
+          first_byte_latency_ms: control.first_byte_latency_ms || elapsed_ms(started_at),
+          messages_echoed: messages_echoed,
+          latencies: mixed_control_latencies(control, messages_echoed)
+      }
+    else
+      failure =
+        mixed_control_failure(
+          config,
+          "receive_control_echo",
+          :echo_payload_mismatch,
+          control.messages_echoed + 1,
+          received_before + byte_size(data)
+        )
+
+      %{control | failure: failure}
+    end
+  end
+
+  defp mixed_control_latencies(control, messages_echoed) do
+    if messages_echoed > control.messages_echoed do
+      new_latencies =
+        (control.messages_echoed + 1)..messages_echoed
+        |> Enum.map(fn sequence ->
+          control.sent_at_by_sequence
+          |> Map.fetch!(sequence)
+          |> elapsed_ms()
+        end)
+
+      new_latencies ++ control.latencies
+    else
+      control.latencies
+    end
+  end
+
+  defp handle_mixed_peer_finished(state, stream, config) do
+    if state.control.stream == stream and
+         state.control.bytes_received < config.control_payload_size * config.control_message_count do
+      failure =
+        mixed_control_failure(
+          config,
+          "receive_control_echo",
+          :peer_send_shutdown,
+          state.control.messages_echoed + 1,
+          state.control.bytes_received
+        )
+
+      put_in(state, [:control, :failure], failure)
+    else
+      Map.update!(state, :ignored_events, &(&1 + 1))
+    end
+  end
+
+  defp mixed_complete?(state, config) do
+    mixed_objects_complete?(state, config) and mixed_control_complete?(state, config)
+  end
+
+  defp mixed_objects_complete?(state, config) do
+    Enum.all?(state.object_streams, fn {_stream, object} ->
+      object.payloads_completed >= config.payload_count
+    end)
+  end
+
+  defp mixed_control_complete?(state, config) do
+    control = state.control
+
+    control.messages_echoed >= config.control_message_count and
+      control.send_completed >= config.control_message_count
+  end
+
+  defp first_mixed_failure(state) do
+    object_failure =
+      state.object_streams
+      |> Map.values()
+      |> Enum.map(& &1.failure)
+      |> Enum.find(&is_map/1)
+
+    object_failure || state.control.failure
+  end
+
+  defp mixed_timeout_failure(state, config) do
+    incomplete_object =
+      state.object_streams
+      |> Map.values()
+      |> Enum.find(fn object -> object.payloads_completed < config.payload_count end)
+
+    cond do
+      incomplete_object ->
+        mixed_object_failure(incomplete_object, config, "send_completion_timeout")
+
+      state.control.messages_echoed < config.control_message_count ->
+        mixed_control_failure(
+          config,
+          "receive_control_echo",
+          :timeout,
+          state.control.messages_echoed + 1,
+          state.control.bytes_received
+        )
+
+      true ->
+        mixed_control_failure(
+          config,
+          "send_control_message",
+          :send_completion_timeout,
+          state.control.messages_scheduled,
+          state.control.bytes_received
+        )
+    end
+  end
+
+  defp put_mixed_failure(state, %{"stream_id" => "control"} = failure) do
+    put_in(state, [:control, :failure], failure)
+  end
+
+  defp put_mixed_failure(state, %{"stream_index" => stream_index} = failure) do
+    {stream, object} =
+      Enum.find(state.object_streams, fn {_stream, object} ->
+        object.stream_state.index == stream_index
+      end)
+
+    put_in(state, [:object_streams, stream], %{object | failure: failure})
   end
 
   defp mixed_control_failure(config, phase, reason, sequence, bytes_received) do
@@ -1034,40 +1681,87 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     }
   end
 
-  defp empty_mixed_control_result(failure) do
+  defp mixed_object_failure(object, config, reason) do
     %{
-      bytes_sent: 0,
-      bytes_received: 0,
-      first_byte_latency_ms: nil,
-      latencies: [],
-      failure: failure
+      "phase" => "mixed_object_send",
+      "reason" => reason_name(reason),
+      "stream_index" => object.stream_state.index,
+      "stream_id" => stream_id(object.stream_state.stream),
+      "bytes_expected" => config.payload_size * config.payload_count,
+      "bytes_sent" => object.stream_state.bytes_sent,
+      "payloads_scheduled" => object.payloads_scheduled,
+      "payloads_completed" => object.payloads_completed,
+      "send_completions_pending" => object.payloads_scheduled - object.payloads_completed
     }
   end
 
-  defp object_stream_latencies(streams), do: Enum.map(streams, &elapsed_ms(&1.started_at))
+  defp mixed_control_result(control) do
+    %{
+      bytes_sent: control.bytes_sent,
+      bytes_received: control.bytes_received,
+      first_byte_latency_ms: control.first_byte_latency_ms,
+      latencies: control.latencies,
+      failure: control.failure
+    }
+  end
+
+  defp mixed_object_bytes_sent(state) do
+    state.object_streams
+    |> Map.values()
+    |> Enum.map(& &1.stream_state.bytes_sent)
+    |> Enum.sum()
+  end
+
+  defp mixed_object_stream_latencies(state) do
+    Enum.map(state.object_streams, fn {_stream, object} ->
+      finished_at = object.completed_at || monotonic_us()
+      (finished_at - object.stream_state.started_at) / 1000
+    end)
+  end
 
   defp mixed_pressure_diagnostics(
          config,
-         object_streams,
+         state,
          control_result,
          object_bytes_sent,
          application_duration_ms
        ) do
+    object_streams = Map.values(state.object_streams)
+    process = process_diagnostics(state.process)
+
     %{
       "version" => "mixed-pressure-diagnostics-v1",
       "summary" =>
         compact(%{
           "object_streams_opened" => length(object_streams),
           "object_payloads_accepted" =>
-            object_streams |> Enum.map(& &1.payloads_accepted) |> Enum.sum(),
+            object_streams |> Enum.map(& &1.payloads_scheduled) |> Enum.sum(),
+          "object_send_completions" =>
+            object_streams |> Enum.map(& &1.payloads_completed) |> Enum.sum(),
+          "object_send_completions_pending" =>
+            object_streams
+            |> Enum.map(&max(&1.payloads_scheduled - &1.payloads_completed, 0))
+            |> Enum.sum(),
+          "object_send_inflight" => object_streams |> Enum.map(& &1.send_inflight) |> Enum.sum(),
           "object_bytes_sent" => object_bytes_sent,
           "control_message_count" => config.control_message_count,
           "control_bytes_sent" => control_result.bytes_sent,
           "control_bytes_received" => control_result.bytes_received,
+          "control_send_completions" => state.control.send_completed,
+          "control_send_completions_pending" =>
+            max(state.control.messages_scheduled - state.control.send_completed, 0),
+          "events_drained" => state.events_drained,
+          "object_send_events" => state.object_send_events,
+          "control_send_events" => state.control_send_events,
+          "control_data_events" => state.control_data_events,
+          "completion_drain_events" => state.completion_drain_events,
+          "ignored_events" => state.ignored_events,
+          "unknown_events" => state.unknown_events,
+          "receive_errors" => state.receive_errors,
           "application_duration_ms" => application_duration_ms,
           "failure" => control_result.failure
         }),
-      "process" => process_diagnostics()
+      "process" => process
     }
   end
 
@@ -2513,7 +3207,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "receiver_cpu_percent" => nil,
       "sender_memory_bytes" => nil,
       "receiver_memory_bytes" => nil,
-      "sender_mailbox_depth" => nil,
+      "sender_mailbox_depth" => sender_mailbox_depth(measurement),
       "receiver_mailbox_depth" => nil,
       "send_backpressure_ms" => nil,
       "stream_stall_count" => stream_stall_count(ctx, datagram?),
@@ -2548,6 +3242,12 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp stream_count_metric(false, measurement, config),
     do: number(measurement["stream_count"]) || config.stream_count
+
+  defp sender_mailbox_depth(%{"diagnostics" => %{"process" => process}}) when is_map(process) do
+    number(process["message_queue_len"])
+  end
+
+  defp sender_mailbox_depth(_measurement), do: nil
 
   defp send_rate_packets_per_second(measurement) do
     number(measurement["send_rate_packets_per_second"]) ||
@@ -2934,14 +3634,6 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp monotonic_us, do: System.monotonic_time(:microsecond)
   defp elapsed_ms(started_at), do: (monotonic_us() - started_at) / 1000
-
-  defp wait_until_us(deadline_us) do
-    remaining_us = deadline_us - monotonic_us()
-
-    if remaining_us > 0 do
-      Process.sleep(ceil(remaining_us / 1000))
-    end
-  end
 
   defp compact(map) when is_map(map) do
     map

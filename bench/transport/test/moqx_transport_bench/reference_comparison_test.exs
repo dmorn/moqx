@@ -534,9 +534,20 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["metrics"]["bytes_sent"] == 288
     assert record["metrics"]["bytes_received"] == 32
     assert record["metrics"]["datagram_delivery_ratio"] == :null
+    assert record["metrics"]["sender_mailbox_depth"] == 0
     assert is_number(record["metrics"]["control_latency_p99_ms"])
     assert record["limits"]["first_break_symptom"] == :null
     assert record["errors"]["message"] == :null
+
+    assert record["diagnostics"]["process"]["message_queue_len"] == 0
+    assert record["diagnostics"]["process"]["message_queue_len_peak"] >= 0
+
+    assert record["diagnostics"]["summary"]["object_payloads_accepted"] == 4
+    assert record["diagnostics"]["summary"]["object_send_completions"] == 4
+    assert record["diagnostics"]["summary"]["object_send_completions_pending"] == 0
+    assert record["diagnostics"]["summary"]["events_drained"] >= 6
+    assert record["diagnostics"]["summary"]["completion_drain_events"] == 1
+    assert record["diagnostics"]["summary"]["control_data_events"] == 2
   end
 
   test "records structured diagnostics when MOQX bidirectional echo closes early" do
@@ -983,7 +994,23 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
 
     @impl true
-    def send_stream(_stream, _data, _opts), do: :ok
+    def send_stream(stream, data, opts) do
+      send(self(), {:moqx_transport, {:stream_event, stream, :send_complete, false}})
+
+      case stream do
+        {:stream, _ref, :bidirectional} ->
+          send(self(), {:moqx_transport, {:stream_data, stream, data, %{}}})
+
+          if Keyword.get(opts, :finish, false) do
+            send(self(), {:moqx_transport, {:stream_event, stream, :closed, %{}}})
+          end
+
+        _stream ->
+          :ok
+      end
+
+      :ok
+    end
 
     @impl true
     def recv_stream(_stream, byte_count), do: {:ok, :binary.copy(<<0>>, byte_count)}

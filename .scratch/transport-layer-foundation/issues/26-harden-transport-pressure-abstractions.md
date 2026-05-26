@@ -9,13 +9,15 @@ Type: AFK
 
 ## What to build
 
-Tighten the transport and benchmark abstractions that became visible while
-adding reference-comparison stream pressure, before those shapes become
-implicit constraints on larger real-network pressure tests.
+Turn the transport pressure harness into a useful performance-hardening loop
+before moving on to higher-level MOQT protocol work.
 
-This is not a blocker for the first datagram slice. It records follow-up work
-that should be designed against real benchmark evidence rather than refactored
-preemptively.
+The transport is semantically ready for protocol implementation, but the
+current real-path evidence shows that MOQX is still far enough from the
+reference peer that protocol work would risk hiding transport bottlenecks under
+session logic. This issue should make pressure, backpressure, mailbox growth,
+send-completion cadence, and listener/client limits visible enough to close the
+gap deliberately.
 
 ## Observations
 
@@ -35,6 +37,13 @@ preemptively.
 - The self-pair datagram pressure step is burst-only: it sends all datagrams as
   fast as possible, then drains received events. Real-link datagram pressure
   needs both burst and rate-stepped modes.
+- Mixed MOQT-shaped pressure exposed a concrete MOQX-client artifact:
+  run `20260526T135920Z-mixed-smoke` completed correctly but recorded
+  `message_queue_len=32234`. That is almost certainly mostly undrained async
+  object-stream send-completion traffic, because the mixed workload scheduled
+  32,000 object payload sends and then used a passive control-stream loop.
+  Mixed pressure must drain or explicitly bound those events before its
+  goodput/control-latency numbers can be used for optimization claims.
 
 ## Acceptance criteria
 
@@ -43,6 +52,11 @@ preemptively.
 - [x] Datagram benchmark records distinguish offered datagrams, locally
       accepted sends, and peer-delivered datagrams.
 - [ ] High-rate datagram runs can record or bound receiver mailbox pressure.
+- [x] Mixed MOQX-client pressure drains object-stream send completions instead
+      of leaving completion events in the caller mailbox.
+- [x] Mixed pressure records sender mailbox depth, peak mailbox depth,
+      send-completion counts, pending send-completion counts, and event-drain
+      counts.
 - [x] Reference-comparison datagram support is modeled as an explicit workload
       mode, not hidden inside stream-pressure fields.
 - [ ] Self-pair and reference-comparison datagram workloads support both burst
@@ -113,3 +127,17 @@ first.
   benchmark currently reports this through a `MatchError` and loses the
   configured payload size in failure records. That is a correctness/reporting
   bug, separate from throughput optimization.
+- 2026-05-26: Re-scoped as the next transport focus before protocol work. The
+  first implementation slice should address the mixed-workload mailbox artifact
+  by replacing the MOQX-client mixed path with a mailbox-driven event pump:
+  bounded object send windows, active control-stream reads, send-completion
+  draining, and diagnostics that make pending completions and mailbox depth
+  visible.
+- 2026-05-26: Implemented the mixed MOQX-client event pump slice. A loopback
+  quicprobe smoke run (`mixed-event-pump-loopback`) completed with no break
+  symptom, object send completions `80/80`, control send completions `5/5`,
+  pending completions `0`, final sender `message_queue_len=0`, and peak
+  observed sender `message_queue_len=74`. The result is loopback calibration
+  evidence only, but it confirms the previous `message_queue_len=32234`
+  artifact is no longer caused by undrained async send-completion traffic in
+  the mixed harness path.

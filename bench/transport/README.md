@@ -361,7 +361,10 @@ unidirectional streams. The object stream pressure uses `--stream-count`,
 `--payload-size`, and `--payload-count`; the control trickle uses
 `--control-payload-size`, `--control-message-count`, and `--control-rate`.
 The record reports `control_trickle_bps` and `control_latency_p99_ms`
-separately from aggregate stream/object goodput.
+separately from aggregate stream/object goodput. For the MOQX-client topology,
+the mixed workload uses bounded object-stream send windows and drains async
+send-completion events while the control stream is active, so object pressure
+does not silently accumulate in the caller mailbox.
 
 ```bash
 moqx-transport-bench reference-comparison \
@@ -392,7 +395,10 @@ streams, schedules payload rounds across those streams, and records
 `stream_scheduling=mixed_control_bidi_object_uni` for mixed pressure. Stream
 sends are accepted asynchronously by `MOQX.Transport.send_stream/4`; send
 completion is reported later as a transport event and is not peer-delivery
-proof.
+proof. Mixed-pressure diagnostics include object send-completion counts,
+pending completion counts, drained event counts, current sender mailbox depth,
+peak observed sender mailbox depth, and zero-wait completion-drain events
+observed after the workload success condition has been met.
 
 `moqx-transport-bench moqx-listener` is a correctness and interop peer, not yet
 a high-rate performance peer. Its stream-pressure path currently accepts the
