@@ -51,7 +51,10 @@ gap deliberately.
       call out known listener serialization limits.
 - [x] Datagram benchmark records distinguish offered datagrams, locally
       accepted sends, and peer-delivered datagrams.
-- [ ] High-rate datagram runs can record or bound receiver mailbox pressure.
+- [x] High-rate datagram runs can record or bound receiver mailbox pressure in
+      all MOQX receiver topologies.
+- [x] `moqx-listener` DATAGRAM runs record receiver mailbox pressure and bound
+      lossy-step idle waits.
 - [x] Mixed MOQX-client pressure drains object-stream send completions instead
       of leaving completion events in the caller mailbox.
 - [x] Mixed pressure records sender mailbox depth, peak mailbox depth,
@@ -141,3 +144,50 @@ first.
   evidence only, but it confirms the previous `message_queue_len=32234`
   artifact is no longer caused by undrained async send-completion traffic in
   the mixed harness path.
+- 2026-05-26: Added listener-side DATAGRAM diagnostics for
+  `moqx-transport-bench moqx-listener --workload datagram_pressure`.
+  The listener can now append `moqx-listener-diagnostics-v1` JSONL with
+  expected/received/unique/missing datagram counts, echo counts, duplicate and
+  invalid counts, stop reason, idle/observation bounds, and receiver
+  `message_queue_len`/peak/sample counts. DATAGRAM receive loops also stop
+  after a bounded post-first-datagram idle period instead of waiting for the
+  exact expected count forever in lossy steps. A loopback quicprobe smoke with
+  10 datagrams delivered all echoes and produced listener diagnostics with
+  `stop_reason=expected_datagrams_received`, `message_queue_len=22`, and
+  `message_queue_len_peak=22`; this is loopback calibration only, but confirms
+  receiver mailbox pressure is now visible for the next ARM ramp.
+- 2026-05-26: Added MOQX-client DATAGRAM receive diagnostics to
+  `reference-comparison --topology moqx-client-to-reference-server
+  --workload datagram_pressure`. Canonical records now include
+  `moqx-client-datagram-diagnostics-v1` with accepted/received/missing counts,
+  receive-loop event counters, duplicate/invalid counts, receive errors, and
+  receiver `message_queue_len`/peak/sample counts. A loopback quicprobe smoke
+  (`moqx-client-datagram-diagnostics-loopback`) delivered 10/10 echoes with no
+  break symptom, final `receiver_mailbox_depth=0`, peak
+  `message_queue_len_peak=10`, and `ignored_events=24`. This closes the
+  receiver-mailbox observability criterion for both MOQX receiver topologies;
+  the next step is to rerun the ARM private-path DATAGRAM ramp with these
+  diagnostics enabled.
+- 2026-05-26: Ran the ARM same-region private-path DATAGRAM diagnostics ramp
+  as `20260526T154951Z-datagram-diagnostics` on `cax11` nodes in `nbg1`.
+  Raw iperf3 UDP delivered 100/250 Mbps with no loss and 500 Mbps with
+  99.68% delivery, so the path can carry more than the 1192-byte QUIC steps
+  below. At 1192-byte paced DATAGRAM pressure, quicprobe-to-quicprobe delivered
+  100% at 5k and 10k pps, 99.36% at 20k pps, and 99.26% at 30k pps. The
+  MOQX-client-to-quicprobe-server topology matched reference behavior through
+  20k pps: 100% at 5k and 10k, 99.52% at 20k, final
+  `receiver_mailbox_depth=0`, and observed mailbox peaks of 25/30/311. At
+  30k pps, MOQX dropped to 79.29% delivery with 18,639 missing datagrams,
+  p99 latency about 38.7 ms, final `receiver_mailbox_depth=0`, and observed
+  mailbox peak 526. This gives a concrete next optimization target: the
+  collapse is not explained by an unbounded final mailbox backlog, so inspect
+  receive/drain cadence, quicer DATAGRAM admission/completion signals, and
+  scheduler/NIF pressure around the 20k-30k pps transition.
+- 2026-05-26: The same ARM run could not produce valid
+  reference-client-to-MOQX-listener DATAGRAM capacity numbers. quicprobe clients
+  timed out while dialing the MOQX listener at every rate, and the listener
+  only logged `:timeout`; a follow-up smoke with `--host 0.0.0.0` showed
+  `beam.smp` UDP sockets open on the port via `ss -lunp`, but quic-go still
+  timed out before the listener accepted a connection. Treat this as an
+  interop/reachability blocker for receiver-side remote capacity claims, not as
+  DATAGRAM throughput evidence.

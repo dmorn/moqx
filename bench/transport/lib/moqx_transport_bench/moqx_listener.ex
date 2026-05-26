@@ -10,11 +10,16 @@ defmodule MOQX.TransportBench.MoqxListener do
   @stream_pressure_workload "stream_pressure"
   @datagram_pressure_workload "datagram_pressure"
   @mixed_moqt_shaped_workload "mixed_moqt_shaped"
+  @listener_diagnostics_schema_version "moqx-listener-diagnostics-v1"
 
   def main(argv, opts \\ []) do
     script = Keyword.get(opts, :script, @default_script)
+    transport_backend = Keyword.get(opts, :transport_backend, MOQX.Transport.Quicer)
 
-    case parse(argv, script) do
+    ensure_quicer? =
+      Keyword.get(opts, :ensure_quicer?, transport_backend == MOQX.Transport.Quicer)
+
+    case parse(argv, script, transport_backend, ensure_quicer?) do
       {:help, message} ->
         IO.puts(message)
 
@@ -27,7 +32,7 @@ defmodule MOQX.TransportBench.MoqxListener do
     end
   end
 
-  defp parse(argv, script) do
+  defp parse(argv, script, transport_backend, ensure_quicer?) do
     {opts, _args, invalid} =
       OptionParser.parse(argv,
         strict: [
@@ -50,6 +55,8 @@ defmodule MOQX.TransportBench.MoqxListener do
           control_rate: :integer,
           connection_count: :integer,
           timeout_seconds: :integer,
+          datagram_idle_timeout_ms: :integer,
+          diagnostics_output: :string,
           help: :boolean
         ],
         aliases: [
@@ -72,12 +79,14 @@ defmodule MOQX.TransportBench.MoqxListener do
         {:error, "Missing required --keyfile PATH.\n\n#{usage(script)}"}
 
       true ->
-        build_config(opts)
+        build_config(opts, transport_backend, ensure_quicer?)
     end
   end
 
-  defp build_config(opts) do
+  defp build_config(opts, transport_backend, ensure_quicer?) do
     config = %{
+      transport_backend: transport_backend,
+      ensure_quicer?: ensure_quicer?,
       host: Keyword.get(opts, :host, "0.0.0.0"),
       port: Keyword.get(opts, :port, 4433),
       certfile: opts[:certfile],
@@ -96,7 +105,9 @@ defmodule MOQX.TransportBench.MoqxListener do
       control_message_count: Keyword.get(opts, :control_message_count, 10),
       control_rate: Keyword.get(opts, :control_rate, 10),
       connection_count: Keyword.get(opts, :connection_count, 1),
-      timeout_ms: Keyword.get(opts, :timeout_seconds, @default_timeout_seconds) * 1000
+      timeout_ms: Keyword.get(opts, :timeout_seconds, @default_timeout_seconds) * 1000,
+      datagram_idle_timeout_ms: opts[:datagram_idle_timeout_ms],
+      diagnostics_output: opts[:diagnostics_output]
     }
 
     with :ok <- validate_positive(config.port, "--port"),
@@ -109,6 +120,11 @@ defmodule MOQX.TransportBench.MoqxListener do
          :ok <- validate_paced_datagrams(config),
          :ok <- validate_mixed_control(config),
          :ok <- validate_non_negative(config.connection_count, "--connection-count"),
+         :ok <-
+           validate_optional_positive(
+             config.datagram_idle_timeout_ms,
+             "--datagram-idle-timeout-ms"
+           ),
          :ok <- validate_stream_direction(config.stream_direction),
          :ok <- validate_file(config.certfile, "--certfile"),
          :ok <- validate_file(config.keyfile, "--keyfile") do
@@ -189,8 +205,8 @@ defmodule MOQX.TransportBench.MoqxListener do
   end
 
   defp run(config) do
-    with {:ok, _apps} <- Application.ensure_all_started(:quicer),
-         {:ok, ctx} <- Transport.new(MOQX.Transport.Quicer),
+    with :ok <- ensure_transport_apps(config),
+         {:ok, ctx} <- Transport.new(config.transport_backend),
          {:ok, listener, ctx} <- start_listener(ctx, config),
          {:ok, {_ip, port}} <- Transport.local_address(ctx, listener),
          :ok <- print_ready(config, port),
@@ -209,6 +225,15 @@ defmodule MOQX.TransportBench.MoqxListener do
       {:error, reason} ->
         IO.puts(:stderr, inspect(reason))
         System.halt(1)
+    end
+  end
+
+  defp ensure_transport_apps(%{ensure_quicer?: false}), do: :ok
+
+  defp ensure_transport_apps(%{ensure_quicer?: true}) do
+    case Application.ensure_all_started(:quicer) do
+      {:ok, _apps} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -262,7 +287,17 @@ defmodule MOQX.TransportBench.MoqxListener do
          connection,
          %{workload: @datagram_pressure_workload} = config
        ) do
-    receive_datagrams(ctx, connection, config, MapSet.new())
+    state = initial_datagram_receive_state(config)
+
+    case receive_datagrams(ctx, connection, config, state) do
+      {:ok, ctx, state} ->
+        write_datagram_diagnostics(config, state)
+        {:ok, ctx}
+
+      {:error, reason, ctx, state} ->
+        write_datagram_diagnostics(config, state)
+        {:error, reason, ctx}
+    end
   end
 
   defp serve_connection_workload(
@@ -434,47 +469,281 @@ defmodule MOQX.TransportBench.MoqxListener do
     Transport.close_connection(ctx, connection, 0)
   end
 
-  defp receive_datagrams(ctx, connection, config, received) do
-    if MapSet.size(received) >= expected_datagram_count(config) do
-      {:ok, ctx}
-    else
-      receive_datagram(ctx, connection, config, received)
+  defp initial_datagram_receive_state(config) do
+    %{
+      expected_datagrams: expected_datagram_count(config),
+      received_sequences: MapSet.new(),
+      started_at: monotonic_us(),
+      stop_reason: nil,
+      datagrams_received: 0,
+      datagrams_echo_attempted: 0,
+      datagrams_echoed: 0,
+      datagram_duplicates: 0,
+      invalid_datagrams: 0,
+      ignored_events: 0,
+      unknown_events: 0,
+      receive_errors: 0,
+      echo_errors: 0,
+      echo_error_reason: nil,
+      process: %{}
+    }
+    |> sample_datagram_process()
+  end
+
+  defp receive_datagrams(ctx, connection, config, state) do
+    state = sample_datagram_process(state)
+
+    cond do
+      MapSet.size(state.received_sequences) >= state.expected_datagrams ->
+        {:ok, ctx, stop_datagram_receive(state, "expected_datagrams_received")}
+
+      datagram_observation_expired?(config, state) ->
+        {:ok, ctx, stop_datagram_receive(state, "datagram_observation_timeout")}
+
+      true ->
+        receive_datagram(ctx, connection, config, state)
     end
   end
 
-  defp receive_datagram(ctx, connection, config, received) do
-    case Transport.receive_event(ctx, config.timeout_ms) do
+  defp receive_datagram(ctx, connection, config, state) do
+    case Transport.receive_event(ctx, datagram_receive_wait_ms(config, state)) do
       {:ok, {:datagram, ^connection, payload, _metadata}, ctx} ->
-        echo_datagram(ctx, connection, config, received, payload)
+        state = record_datagram(state, payload)
+        echo_datagram(ctx, connection, config, state, payload)
 
       {:ok, _event, ctx} ->
-        receive_datagrams(ctx, connection, config, received)
+        state =
+          state
+          |> Map.update!(:ignored_events, &(&1 + 1))
+          |> sample_datagram_process()
+
+        receive_datagrams(ctx, connection, config, state)
 
       {:timeout, ctx} ->
-        {:error, "moqx-listener timed out waiting for reference client datagrams", ctx}
+        handle_datagram_timeout(ctx, state)
 
       {:unknown, _message, ctx} ->
-        receive_datagrams(ctx, connection, config, received)
+        state =
+          state
+          |> Map.update!(:unknown_events, &(&1 + 1))
+          |> sample_datagram_process()
+
+        receive_datagrams(ctx, connection, config, state)
 
       {:error, reason, ctx} ->
-        {:error, reason, ctx}
+        state =
+          state
+          |> Map.update!(:receive_errors, &(&1 + 1))
+          |> sample_datagram_process()
+          |> stop_datagram_receive("receive_error")
+
+        {:error, reason, ctx, state}
     end
   end
 
-  defp echo_datagram(ctx, connection, config, received, payload) do
-    with {:ok, ctx} <- Transport.send_datagram(ctx, connection, payload) do
-      receive_datagrams(ctx, connection, config, record_datagram(received, payload))
+  defp echo_datagram(ctx, connection, config, state, payload) do
+    state = Map.update!(state, :datagrams_echo_attempted, &(&1 + 1))
+
+    case Transport.send_datagram(ctx, connection, payload) do
+      {:ok, ctx} ->
+        state =
+          state
+          |> Map.update!(:datagrams_echoed, &(&1 + 1))
+          |> sample_datagram_process()
+
+        receive_datagrams(ctx, connection, config, state)
+
+      {:error, reason, ctx} ->
+        state =
+          state
+          |> Map.update!(:echo_errors, &(&1 + 1))
+          |> Map.put(:echo_error_reason, reason_name(reason))
+          |> sample_datagram_process()
+          |> stop_datagram_receive("echo_error")
+
+        {:error, reason, ctx, state}
     end
   end
 
-  defp record_datagram(received, payload) do
+  defp handle_datagram_timeout(ctx, %{datagrams_received: 0} = state) do
+    state = stop_datagram_receive(state, "first_datagram_timeout")
+    {:error, "moqx-listener timed out waiting for reference client datagrams", ctx, state}
+  end
+
+  defp handle_datagram_timeout(ctx, state) do
+    {:ok, ctx, stop_datagram_receive(state, "datagram_idle_timeout")}
+  end
+
+  defp record_datagram(state, payload) do
+    state = Map.update!(state, :datagrams_received, &(&1 + 1))
+
     case DatagramPayload.sequence(payload) do
-      {:ok, sequence} -> MapSet.put(received, sequence)
-      :error -> received
+      {:ok, sequence} ->
+        if MapSet.member?(state.received_sequences, sequence) do
+          Map.update!(state, :datagram_duplicates, &(&1 + 1))
+        else
+          update_in(state, [:received_sequences], &MapSet.put(&1, sequence))
+        end
+
+      :error ->
+        Map.update!(state, :invalid_datagrams, &(&1 + 1))
     end
+    |> sample_datagram_process()
   end
 
   defp stream_id(stream), do: stream.info.stream_id
+
+  defp stop_datagram_receive(state, reason) do
+    state
+    |> Map.put(:stop_reason, reason)
+    |> sample_datagram_process()
+  end
+
+  defp datagram_observation_expired?(config, state) do
+    elapsed_ms(state.started_at) >= datagram_observation_timeout_ms(config)
+  end
+
+  defp datagram_receive_wait_ms(config, state) do
+    remaining_ms =
+      max(datagram_observation_timeout_ms(config) - trunc(elapsed_ms(state.started_at)), 0)
+
+    cond do
+      remaining_ms == 0 ->
+        0
+
+      state.datagrams_received == 0 ->
+        min(config.timeout_ms, remaining_ms)
+
+      true ->
+        min(datagram_idle_timeout_ms(config), remaining_ms)
+    end
+  end
+
+  defp datagram_observation_timeout_ms(
+         %{datagram_rate: rate, duration_seconds: duration} = config
+       )
+       when is_integer(rate) and is_integer(duration) do
+    duration * 1000 + config.timeout_ms
+  end
+
+  defp datagram_observation_timeout_ms(config), do: config.timeout_ms
+
+  defp datagram_idle_timeout_ms(%{datagram_idle_timeout_ms: timeout_ms})
+       when is_integer(timeout_ms) do
+    timeout_ms
+  end
+
+  defp datagram_idle_timeout_ms(%{datagram_rate: rate, timeout_ms: timeout_ms})
+       when is_integer(rate) and rate > 0 do
+    rate_interval_bound_ms = ceil(3000 / rate)
+    min(max(rate_interval_bound_ms, 1000), timeout_ms)
+  end
+
+  defp datagram_idle_timeout_ms(config), do: min(1000, config.timeout_ms)
+
+  defp write_datagram_diagnostics(%{diagnostics_output: nil}, _state), do: :ok
+
+  defp write_datagram_diagnostics(config, state) do
+    path = config.diagnostics_output
+    dir = Path.dirname(path)
+    if dir != ".", do: File.mkdir_p!(dir)
+
+    File.write!(
+      path,
+      state
+      |> datagram_diagnostics_record(config)
+      |> encode_json()
+      |> IO.iodata_to_binary()
+      |> Kernel.<>("\n"),
+      [:append]
+    )
+  end
+
+  defp datagram_diagnostics_record(state, config) do
+    unique = MapSet.size(state.received_sequences)
+
+    %{
+      "schema_version" => @listener_diagnostics_schema_version,
+      "record_type" => "datagram_listener_run",
+      "workload" => @datagram_pressure_workload,
+      "alpn" => config.alpn,
+      "summary" => %{
+        "expected_datagrams" => state.expected_datagrams,
+        "datagrams_received" => state.datagrams_received,
+        "datagrams_unique" => unique,
+        "datagrams_missing" => max(state.expected_datagrams - unique, 0),
+        "datagrams_echo_attempted" => state.datagrams_echo_attempted,
+        "datagrams_echoed" => state.datagrams_echoed,
+        "datagram_duplicates" => state.datagram_duplicates,
+        "invalid_datagrams" => state.invalid_datagrams,
+        "ignored_events" => state.ignored_events,
+        "unknown_events" => state.unknown_events,
+        "receive_errors" => state.receive_errors,
+        "echo_errors" => state.echo_errors,
+        "echo_error_reason" => state.echo_error_reason,
+        "stop_reason" => state.stop_reason,
+        "duration_ms" => elapsed_ms(state.started_at),
+        "datagram_idle_timeout_ms" => datagram_idle_timeout_ms(config),
+        "datagram_observation_timeout_ms" => datagram_observation_timeout_ms(config)
+      },
+      "process" => process_diagnostics(state.process)
+    }
+  end
+
+  defp process_diagnostics(samples) do
+    current = message_queue_len()
+
+    peak =
+      [current, Map.get(samples, "message_queue_len_peak")]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.max(fn -> nil end)
+
+    %{
+      "message_queue_len" => current,
+      "message_queue_len_peak" => peak,
+      "message_queue_len_samples" => Map.get(samples, "message_queue_len_samples", 0)
+    }
+  end
+
+  defp sample_datagram_process(state) do
+    message_queue_len = message_queue_len()
+
+    process =
+      state.process
+      |> Map.put("message_queue_len", message_queue_len)
+      |> Map.update("message_queue_len_peak", message_queue_len, fn peak ->
+        max(peak, message_queue_len)
+      end)
+      |> Map.update("message_queue_len_samples", 1, &(&1 + 1))
+
+    %{state | process: process}
+  end
+
+  defp message_queue_len do
+    case Process.info(self(), :message_queue_len) do
+      {:message_queue_len, value} -> value
+      nil -> nil
+    end
+  end
+
+  defp monotonic_us, do: System.monotonic_time(:microsecond)
+  defp elapsed_ms(started_at), do: (monotonic_us() - started_at) / 1000
+
+  defp reason_name(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_name(reason), do: inspect(reason)
+
+  defp encode_json(value), do: value |> json_ready() |> :json.encode()
+
+  defp json_ready(nil), do: :null
+  defp json_ready(value) when value in [true, false], do: value
+
+  defp json_ready(value) when is_map(value) do
+    Map.new(value, fn {key, map_value} -> {key, json_ready(map_value)} end)
+  end
+
+  defp json_ready(value) when is_list(value), do: Enum.map(value, &json_ready/1)
+  defp json_ready(value) when is_atom(value), do: Atom.to_string(value)
+  defp json_ready(value), do: value
 
   defp expected_datagram_count(%{datagram_rate: rate, duration_seconds: duration})
        when is_integer(rate) and is_integer(duration) do
@@ -513,6 +782,8 @@ defmodule MOQX.TransportBench.MoqxListener do
       --control-rate N               target control messages/sec for mixed_moqt_shaped (default: 10)
       --connection-count N           accepted connections before exit; 0 means unlimited (default: 1)
       --timeout-seconds N            accept/read timeout per operation (default: #{@default_timeout_seconds})
+      --datagram-idle-timeout-ms N   datagram receive idle bound after first datagram
+      --diagnostics-output PATH      append listener-side diagnostics JSONL
 
     Remote reference-client-to-MOQX-listener shape:
       server$ #{script} --host 0.0.0.0 --port 4433 \\

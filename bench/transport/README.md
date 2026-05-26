@@ -239,6 +239,16 @@ For paced steps, actual send rate is part of the measurement contract:
 `--offered-rate-tolerance` and the result is tool evidence, not network
 capacity evidence.
 
+When `moqx-listener` serves `datagram_pressure`, it bounds the receiver loop by
+both expected count and post-first-datagram idle time. This keeps lossy steps
+from holding the UDP port while waiting for datagrams that were dropped. Pass
+`--diagnostics-output PATH` to append listener-side JSONL diagnostics with
+received/echoed counts, duplicate/invalid counts, stop reason, and receiver
+mailbox depth/peak/samples. For `moqx-client-to-reference-server` DATAGRAM
+runs, the canonical benchmark record includes
+`moqx-client-datagram-diagnostics-v1` with accepted/received/missing counts,
+receive-loop event counts, and the client receiver mailbox depth/peak/samples.
+
 Current MOQX/quicer DATAGRAM measurements should use `--datagram-size 1192`
 as the near-limit payload size unless the transport exposes a different
 negotiated maximum. Controlled ARM evidence from 2026-05-26 showed the current
@@ -331,7 +341,8 @@ moqx-transport-bench moqx-listener \
   --keyfile .tmp/integration-certs/server-key.pem \
   --workload datagram_pressure \
   --datagram-size 1192 \
-  --datagram-count 1000
+  --datagram-count 1000 \
+  --diagnostics-output bench/transport/results/moqx-listener-datagrams.jsonl
 ```
 
 Then run the reference client topology against it:

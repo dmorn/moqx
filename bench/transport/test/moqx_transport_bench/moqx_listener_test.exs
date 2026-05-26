@@ -1,0 +1,160 @@
+defmodule MOQX.TransportBench.MoqxListenerTest do
+  use ExUnit.Case, async: true
+
+  import ExUnit.CaptureIO
+
+  alias MOQX.TransportBench.DatagramPayload
+  alias MOQX.TransportBench.JSONL
+  alias MOQX.TransportBench.MoqxListener
+
+  test "datagram pressure writes receiver diagnostics and exits after idle timeout" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "listener-diagnostics.jsonl")
+    certfile = Path.join(dir, "server.pem")
+    keyfile = Path.join(dir, "server-key.pem")
+    File.write!(certfile, "cert")
+    File.write!(keyfile, "key")
+
+    Process.put({__MODULE__.DatagramTransport, :datagrams}, [1, 2])
+
+    stdout =
+      capture_io(fn ->
+        MoqxListener.main(
+          [
+            "--certfile",
+            certfile,
+            "--keyfile",
+            keyfile,
+            "--workload",
+            "datagram_pressure",
+            "--datagram-size",
+            "64",
+            "--datagram-count",
+            "3",
+            "--datagram-idle-timeout-ms",
+            "10",
+            "--timeout-seconds",
+            "1",
+            "--diagnostics-output",
+            output_path
+          ],
+          script: "test moqx-listener",
+          transport_backend: __MODULE__.DatagramTransport,
+          ensure_quicer?: false
+        )
+      end)
+
+    assert stdout =~ "moqx-listener ready"
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+
+    assert record["schema_version"] == "moqx-listener-diagnostics-v1"
+    assert record["record_type"] == "datagram_listener_run"
+    assert record["workload"] == "datagram_pressure"
+
+    assert record["summary"]["expected_datagrams"] == 3
+    assert record["summary"]["datagrams_received"] == 2
+    assert record["summary"]["datagrams_unique"] == 2
+    assert record["summary"]["datagrams_missing"] == 1
+    assert record["summary"]["datagrams_echo_attempted"] == 2
+    assert record["summary"]["datagrams_echoed"] == 2
+    assert record["summary"]["stop_reason"] == "datagram_idle_timeout"
+
+    assert is_integer(record["process"]["message_queue_len"])
+    assert is_integer(record["process"]["message_queue_len_peak"])
+    assert record["process"]["message_queue_len_peak"] >= record["process"]["message_queue_len"]
+  end
+
+  defp tmp_dir do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "moqx-listener-test-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    File.rm_rf!(path)
+    File.mkdir_p!(path)
+    path
+  end
+
+  defmodule DatagramTransport do
+    @behaviour MOQX.Transport
+
+    @impl true
+    def listen(_port, _opts), do: {:ok, :listener}
+
+    @impl true
+    def local_address(:listener), do: {:ok, {{127, 0, 0, 1}, 4433}}
+    def local_address(:connection), do: {:ok, {{127, 0, 0, 1}, 4433}}
+
+    @impl true
+    def close_listener(:listener, _timeout), do: :ok
+
+    @impl true
+    def accept(:listener, _opts, _timeout) do
+      Process.put({__MODULE__, :echoed}, 0)
+
+      for sequence <- Process.get({__MODULE__, :datagrams}, []) do
+        payload = DatagramPayload.encode(sequence, 64, System.monotonic_time(:microsecond))
+        send(self(), {:moqx_transport, {:datagram, :connection, payload, %{}}})
+      end
+
+      {:ok, :connection}
+    end
+
+    @impl true
+    def handshake(:connection, _timeout), do: {:ok, :connection}
+
+    @impl true
+    def connect(_host, _port, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def open_stream(_connection, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def send_stream(_stream, _data, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def recv_stream(_stream, _byte_count), do: {:error, :unsupported}
+
+    @impl true
+    def send_datagram(:connection, _data) do
+      echoed = Process.get({__MODULE__, :echoed}, 0) + 1
+      Process.put({__MODULE__, :echoed}, echoed)
+
+      Process.send_after(
+        self(),
+        {:moqx_transport, {:connection_event, :connection, :closed, %{}}},
+        20
+      )
+
+      :ok
+    end
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection(:connection, _error_code), do: :ok
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process(_handle, _pid), do: :ok
+
+    @impl true
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+  end
+end

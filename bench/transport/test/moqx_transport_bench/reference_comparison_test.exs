@@ -412,6 +412,7 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["metrics"]["offered_load_bps"] == 47_720.0
     assert record["metrics"]["bytes_sent"] == 0
     assert record["metrics"]["bytes_received"] == 0
+    assert record["metrics"]["receiver_mailbox_depth"] == 0
     assert record["limits"]["first_break_symptom"] == "datagram_send_error"
     assert record["limits"]["stopped_by"] == "datagram_send_error"
     assert record["limits"]["protocol_error"] == true
@@ -430,6 +431,12 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
              "offered_load_bps" => 47_720.0,
              "topology" => "moqx-client-to-reference-server"
            }
+
+    assert record["diagnostics"]["process"]["message_queue_len"] == 0
+    assert record["diagnostics"]["process"]["message_queue_len_peak"] >= 0
+    assert record["diagnostics"]["summary"]["datagrams_accepted"] == 0
+    assert record["diagnostics"]["summary"]["datagrams_received"] == 0
+    assert record["diagnostics"]["summary"]["send_error"] == "invalid_parameter"
   end
 
   test "records successful near-limit MOQX datagram delivery" do
@@ -473,8 +480,18 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["metrics"]["bytes_received"] == 2384
     assert record["metrics"]["datagram_delivery_ratio"] == 1.0
     assert record["metrics"]["datagram_drop_count"] == 0
+    assert record["metrics"]["receiver_mailbox_depth"] == 0
     assert record["limits"]["first_break_symptom"] == :null
     assert record["errors"]["message"] == :null
+
+    assert record["diagnostics"]["version"] == "moqx-client-datagram-diagnostics-v1"
+    assert record["diagnostics"]["process"]["message_queue_len"] == 0
+    assert record["diagnostics"]["process"]["message_queue_len_peak"] >= 0
+    assert record["diagnostics"]["summary"]["datagrams_accepted"] == 2
+    assert record["diagnostics"]["summary"]["datagrams_received"] == 2
+    assert record["diagnostics"]["summary"]["datagrams_missing"] == 0
+    assert record["diagnostics"]["summary"]["datagram_receive_events"] == 2
+    assert record["diagnostics"]["summary"]["receive_errors"] == 0
   end
 
   test "records mixed MOQT-shaped MOQX client pressure" do

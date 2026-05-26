@@ -798,7 +798,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     offered = effective_datagram_count(config)
 
     case send_and_receive_moqx_datagrams(ctx, connection, config, offered, application_started_at) do
-      {:ok, accepted, send_duration_ms, received, first_byte_latency_ms, latencies, _ctx} ->
+      {:ok, accepted, send_duration_ms, receive_state, _ctx} ->
         datagram_measurement(%{
           config: config,
           handshake_latency_ms: handshake_latency_ms,
@@ -806,13 +806,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           offered: offered,
           accepted: accepted,
           send_duration_ms: send_duration_ms,
-          received: received,
-          first_byte_latency_ms: first_byte_latency_ms,
-          latencies: latencies
+          receive_state: receive_state
         })
 
-      {:error, failure, accepted, send_duration_ms, received, first_byte_latency_ms, latencies,
-       _ctx} ->
+      {:error, failure, accepted, send_duration_ms, receive_state, _ctx} ->
         datagram_measurement(%{
           config: config,
           handshake_latency_ms: handshake_latency_ms,
@@ -820,9 +817,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           offered: offered,
           accepted: accepted,
           send_duration_ms: send_duration_ms,
-          received: received,
-          first_byte_latency_ms: first_byte_latency_ms,
-          latencies: latencies,
+          receive_state: receive_state,
           failure: failure
         })
     end
@@ -831,7 +826,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp datagram_measurement(args) do
     config = args.config
     failure = Map.get(args, :failure)
-    received_count = MapSet.size(args.received)
+    receive_state = args.receive_state
+    received_count = MapSet.size(receive_state.received)
     application_duration_ms = elapsed_ms(args.application_started_at)
     bytes_sent = args.accepted * config.datagram_size
     bytes_received = received_count * config.datagram_size
@@ -865,14 +861,22 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "bytes_sent" => bytes_sent,
       "bytes_received" => bytes_received,
       "handshake_latency_ms" => args.handshake_latency_ms,
-      "first_byte_latency_ms" => args.first_byte_latency_ms,
+      "first_byte_latency_ms" => receive_state.first_byte_latency_ms,
       "application_duration_ms" => application_duration_ms,
       "offered_load_bps" => offered_load_bps(config),
       "goodput_bps" => bits_per_second(bytes_received, application_duration_ms),
       "send_rate_packets_per_second" => send_rate,
       "send_rate_datagrams_per_second" => send_rate,
-      "datagram_latency_ms" => latency_summary(args.latencies),
-      "datagram_failure" => failure
+      "datagram_latency_ms" => latency_summary(receive_state.latencies),
+      "datagram_failure" => failure,
+      "diagnostics" =>
+        datagram_pressure_diagnostics(
+          config,
+          args,
+          receive_state,
+          received_count,
+          application_duration_ms
+        )
     }
   end
 
@@ -1765,6 +1769,38 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     }
   end
 
+  defp datagram_pressure_diagnostics(
+         config,
+         args,
+         receive_state,
+         received_count,
+         application_duration_ms
+       ) do
+    failure = Map.get(args, :failure)
+
+    %{
+      "version" => "moqx-client-datagram-diagnostics-v1",
+      "summary" =>
+        compact(%{
+          "datagrams_offered" => args.offered,
+          "datagrams_accepted" => args.accepted,
+          "datagrams_received" => received_count,
+          "datagrams_missing" => max(args.offered - received_count, 0),
+          "datagram_receive_events" => receive_state.datagram_receive_events,
+          "duplicate_datagrams" => receive_state.duplicate_datagrams,
+          "invalid_datagrams" => receive_state.invalid_datagrams,
+          "ignored_events" => receive_state.ignored_events,
+          "unknown_events" => receive_state.unknown_events,
+          "receive_errors" => receive_state.receive_errors,
+          "drain_events" => receive_state.drain_events,
+          "application_duration_ms" => application_duration_ms,
+          "target_datagrams_per_second" => target_datagram_rate(config),
+          "send_error" => failure && failure["reason"]
+        }),
+      "process" => process_diagnostics(receive_state.process)
+    }
+  end
+
   defp send_and_receive_moqx_datagrams(
          ctx,
          connection,
@@ -1775,91 +1811,83 @@ defmodule MOQX.TransportBench.ReferenceComparison do
        when is_integer(rate) and rate > 0 do
     send_started_at = monotonic_us()
     interval_us = div(1_000_000, rate)
+    receive_state = initial_moqx_datagram_receive_state()
 
     result =
       Enum.reduce_while(
         1..count,
-        {0, ctx, MapSet.new(), [], nil, send_started_at},
-        fn sequence, {accepted, ctx, received, latencies, first_byte, next_send_at} ->
-          {received, first_byte, latencies, ctx} =
+        {0, ctx, receive_state, send_started_at},
+        fn sequence, {accepted, ctx, receive_state, next_send_at} ->
+          {receive_state, ctx} =
             receive_moqx_datagrams_until(
               ctx,
               connection,
-              received,
-              latencies,
-              first_byte,
+              receive_state,
               started_at,
               next_send_at
             )
 
           case send_moqx_datagram(ctx, connection, config, sequence) do
             {:ok, ctx} ->
-              {received, first_byte, latencies, ctx} =
+              {receive_state, ctx} =
                 drain_available_moqx_datagrams(
                   ctx,
                   connection,
-                  received,
-                  latencies,
-                  first_byte,
+                  receive_state,
                   started_at
                 )
 
-              {:cont,
-               {accepted + 1, ctx, received, latencies, first_byte, next_send_at + interval_us}}
+              {:cont, {accepted + 1, ctx, receive_state, next_send_at + interval_us}}
 
             {:error, reason, ctx} ->
               failure = datagram_send_failure(config, reason, sequence, count, accepted)
               send_duration_ms = elapsed_ms(send_started_at)
 
-              {:halt,
-               {:error, failure, accepted, send_duration_ms, received, first_byte, latencies, ctx}}
+              {:halt, {:error, failure, accepted, send_duration_ms, receive_state, ctx}}
           end
         end
       )
 
     case result do
-      {:error, _failure, _accepted, _send_duration_ms, _received, _first_byte, _latencies, _ctx} =
-          error ->
+      {:error, _failure, _accepted, _send_duration_ms, _receive_state, _ctx} = error ->
         error
 
-      {accepted, ctx, received, latencies, first_byte, _next_send_at} ->
+      {accepted, ctx, receive_state, _next_send_at} ->
         send_duration_ms = elapsed_ms(send_started_at)
 
-        {received, first_byte, latencies, ctx} =
+        {receive_state, ctx} =
           receive_moqx_datagrams(
             ctx,
             connection,
             config,
             count,
-            received,
-            latencies,
-            first_byte,
+            receive_state,
             started_at
           )
 
-        {:ok, accepted, send_duration_ms, received, first_byte, latencies, ctx}
+        {:ok, accepted, send_duration_ms, receive_state, ctx}
     end
   end
 
   defp send_and_receive_moqx_datagrams(ctx, connection, config, count, started_at) do
+    receive_state = initial_moqx_datagram_receive_state()
+
     case send_moqx_datagrams(ctx, connection, config, count) do
       {:ok, accepted, send_duration_ms, ctx} ->
-        {received, first_byte, latencies, ctx} =
+        {receive_state, ctx} =
           receive_moqx_datagrams(
             ctx,
             connection,
             config,
             count,
-            MapSet.new(),
-            [],
-            nil,
+            receive_state,
             started_at
           )
 
-        {:ok, accepted, send_duration_ms, received, first_byte, latencies, ctx}
+        {:ok, accepted, send_duration_ms, receive_state, ctx}
 
       {:error, failure, accepted, send_duration_ms, ctx} ->
-        {:error, failure, accepted, send_duration_ms, MapSet.new(), nil, [], ctx}
+        {:error, failure, accepted, send_duration_ms, receive_state, ctx}
     end
   end
 
@@ -1910,12 +1938,27 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     }
   end
 
+  defp initial_moqx_datagram_receive_state do
+    %{
+      received: MapSet.new(),
+      latencies: [],
+      first_byte_latency_ms: nil,
+      process: %{},
+      datagram_receive_events: 0,
+      duplicate_datagrams: 0,
+      invalid_datagrams: 0,
+      ignored_events: 0,
+      unknown_events: 0,
+      receive_errors: 0,
+      drain_events: 0
+    }
+    |> sample_process_diagnostics()
+  end
+
   defp receive_moqx_datagrams_until(
          ctx,
          connection,
-         received,
-         latencies,
-         first_byte,
+         receive_state,
          started_at,
          target_us
        ) do
@@ -1923,96 +1966,117 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
     case Transport.receive_event(ctx, remaining_ms) do
       {:ok, {:datagram, ^connection, payload, _metadata}, ctx} ->
-        {received, latencies, first_byte} =
-          record_moqx_datagram(payload, received, latencies, first_byte, started_at)
+        receive_state = record_moqx_datagram(payload, receive_state, started_at)
 
         receive_moqx_datagrams_until(
           ctx,
           connection,
-          received,
-          latencies,
-          first_byte,
+          receive_state,
           started_at,
           target_us
         )
 
       {:ok, _event, ctx} ->
+        receive_state =
+          receive_state
+          |> Map.update!(:ignored_events, &(&1 + 1))
+          |> sample_process_diagnostics()
+
         receive_moqx_datagrams_until(
           ctx,
           connection,
-          received,
-          latencies,
-          first_byte,
+          receive_state,
           started_at,
           target_us
         )
 
       {:unknown, _message, ctx} ->
+        receive_state =
+          receive_state
+          |> Map.update!(:unknown_events, &(&1 + 1))
+          |> sample_process_diagnostics()
+
         receive_moqx_datagrams_until(
           ctx,
           connection,
-          received,
-          latencies,
-          first_byte,
+          receive_state,
           started_at,
           target_us
         )
 
       {:error, _reason, ctx} ->
-        {received, first_byte, latencies, ctx}
+        receive_state =
+          receive_state
+          |> Map.update!(:receive_errors, &(&1 + 1))
+          |> sample_process_diagnostics()
+
+        {receive_state, ctx}
 
       {:timeout, ctx} ->
-        {received, first_byte, latencies, ctx}
+        {sample_process_diagnostics(receive_state), ctx}
     end
   end
 
   defp drain_available_moqx_datagrams(
          ctx,
          connection,
-         received,
-         latencies,
-         first_byte,
+         receive_state,
          started_at
        ) do
     case Transport.receive_event(ctx, 0) do
       {:ok, {:datagram, ^connection, payload, _metadata}, ctx} ->
-        {received, latencies, first_byte} =
-          record_moqx_datagram(payload, received, latencies, first_byte, started_at)
+        receive_state =
+          payload
+          |> record_moqx_datagram(receive_state, started_at)
+          |> Map.update!(:drain_events, &(&1 + 1))
+          |> sample_process_diagnostics()
 
         drain_available_moqx_datagrams(
           ctx,
           connection,
-          received,
-          latencies,
-          first_byte,
+          receive_state,
           started_at
         )
 
       {:ok, _event, ctx} ->
+        receive_state =
+          receive_state
+          |> Map.update!(:ignored_events, &(&1 + 1))
+          |> Map.update!(:drain_events, &(&1 + 1))
+          |> sample_process_diagnostics()
+
         drain_available_moqx_datagrams(
           ctx,
           connection,
-          received,
-          latencies,
-          first_byte,
+          receive_state,
           started_at
         )
 
       {:unknown, _message, ctx} ->
+        receive_state =
+          receive_state
+          |> Map.update!(:unknown_events, &(&1 + 1))
+          |> Map.update!(:drain_events, &(&1 + 1))
+          |> sample_process_diagnostics()
+
         drain_available_moqx_datagrams(
           ctx,
           connection,
-          received,
-          latencies,
-          first_byte,
+          receive_state,
           started_at
         )
 
       {:error, _reason, ctx} ->
-        {received, first_byte, latencies, ctx}
+        receive_state =
+          receive_state
+          |> Map.update!(:receive_errors, &(&1 + 1))
+          |> Map.update!(:drain_events, &(&1 + 1))
+          |> sample_process_diagnostics()
+
+        {receive_state, ctx}
 
       {:timeout, ctx} ->
-        {received, first_byte, latencies, ctx}
+        {sample_process_diagnostics(receive_state), ctx}
     end
   end
 
@@ -2021,23 +2085,19 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          connection,
          config,
          expected,
-         received,
-         latencies,
-         first_byte,
+         receive_state,
          started_at
        ) do
-    if MapSet.size(received) >= expected or
+    if MapSet.size(receive_state.received) >= expected or
          elapsed_ms(started_at) >= datagram_receive_timeout_ms(config) do
-      {received, first_byte, latencies, ctx}
+      {sample_process_diagnostics(receive_state), ctx}
     else
       receive_moqx_datagram(
         ctx,
         connection,
         config,
         expected,
-        received,
-        latencies,
-        first_byte,
+        receive_state,
         started_at
       )
     end
@@ -2048,90 +2108,100 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          connection,
          config,
          expected,
-         received,
-         latencies,
-         first_byte,
+         receive_state,
          started_at
        ) do
     remaining_ms = max(datagram_receive_timeout_ms(config) - trunc(elapsed_ms(started_at)), 0)
 
     case Transport.receive_event(ctx, remaining_ms) do
       {:ok, {:datagram, ^connection, payload, _metadata}, ctx} ->
-        {received, latencies, first_byte} =
-          record_moqx_datagram(payload, received, latencies, first_byte, started_at)
+        receive_state = record_moqx_datagram(payload, receive_state, started_at)
 
         receive_moqx_datagrams(
           ctx,
           connection,
           config,
           expected,
-          received,
-          latencies,
-          first_byte,
+          receive_state,
           started_at
         )
 
       {:ok, _event, ctx} ->
+        receive_state =
+          receive_state
+          |> Map.update!(:ignored_events, &(&1 + 1))
+          |> sample_process_diagnostics()
+
         receive_moqx_datagrams(
           ctx,
           connection,
           config,
           expected,
-          received,
-          latencies,
-          first_byte,
+          receive_state,
           started_at
         )
 
       {:unknown, _message, ctx} ->
+        receive_state =
+          receive_state
+          |> Map.update!(:unknown_events, &(&1 + 1))
+          |> sample_process_diagnostics()
+
         receive_moqx_datagrams(
           ctx,
           connection,
           config,
           expected,
-          received,
-          latencies,
-          first_byte,
+          receive_state,
           started_at
         )
 
       {:error, _reason, ctx} ->
+        receive_state =
+          receive_state
+          |> Map.update!(:receive_errors, &(&1 + 1))
+          |> sample_process_diagnostics()
+
         receive_moqx_datagrams(
           ctx,
           connection,
           config,
           expected,
-          received,
-          latencies,
-          first_byte,
+          receive_state,
           started_at
         )
 
       {:timeout, ctx} ->
-        {received, first_byte, latencies, ctx}
+        {sample_process_diagnostics(receive_state), ctx}
     end
   end
 
   defp record_moqx_datagram(
          payload,
-         received,
-         latencies,
-         first_byte,
+         receive_state,
          started_at
        ) do
+    receive_state = Map.update!(receive_state, :datagram_receive_events, &(&1 + 1))
+
     case DatagramPayload.decode(payload) do
       {:ok, sequence, sent_at} ->
-        if MapSet.member?(received, sequence) do
-          {received, latencies, first_byte}
+        if MapSet.member?(receive_state.received, sequence) do
+          Map.update!(receive_state, :duplicate_datagrams, &(&1 + 1))
         else
           latency = elapsed_ms(sent_at)
-          first_byte = first_byte || elapsed_ms(started_at)
-          {MapSet.put(received, sequence), [latency | latencies], first_byte}
+
+          %{
+            receive_state
+            | received: MapSet.put(receive_state.received, sequence),
+              latencies: [latency | receive_state.latencies],
+              first_byte_latency_ms: receive_state.first_byte_latency_ms || elapsed_ms(started_at)
+          }
         end
 
       :error ->
-        {received, latencies, first_byte}
+        Map.update!(receive_state, :invalid_datagrams, &(&1 + 1))
     end
+    |> sample_process_diagnostics()
   end
 
   defp empty_stream_result do
@@ -3208,7 +3278,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "sender_memory_bytes" => nil,
       "receiver_memory_bytes" => nil,
       "sender_mailbox_depth" => sender_mailbox_depth(measurement),
-      "receiver_mailbox_depth" => nil,
+      "receiver_mailbox_depth" => receiver_mailbox_depth(ctx.config, measurement),
       "send_backpressure_ms" => nil,
       "stream_stall_count" => stream_stall_count(ctx, datagram?),
       "control_latency_p99_ms" => control_latency_p99_ms(measurement),
@@ -3248,6 +3318,16 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp sender_mailbox_depth(_measurement), do: nil
+
+  defp receiver_mailbox_depth(
+         %{topology: @moqx_client_topology, workload: @datagram_pressure_workload},
+         %{"diagnostics" => %{"process" => process}}
+       )
+       when is_map(process) do
+    number(process["message_queue_len"])
+  end
+
+  defp receiver_mailbox_depth(_config, _measurement), do: nil
 
   defp send_rate_packets_per_second(measurement) do
     number(measurement["send_rate_packets_per_second"]) ||
