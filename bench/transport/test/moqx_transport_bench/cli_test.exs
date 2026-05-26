@@ -23,6 +23,7 @@ defmodule MOQX.TransportBench.CLITest do
 
     assert output =~ "moqx-transport-bench moqx-listener"
     assert output =~ "reference-client-to-MOQX-listener"
+    assert output =~ "mixed_moqt_shaped"
   end
 
   test "documents inline or file path metadata input for iperf3 baseline" do
@@ -36,6 +37,7 @@ defmodule MOQX.TransportBench.CLITest do
     assert output =~ "reference-client-to-reference-server"
     assert output =~ "reference-client-to-moqx-listener"
     assert output =~ "moqx-client-to-reference-server"
+    assert output =~ "mixed_moqt_shaped"
   end
 
   test "decodes release wrapper arguments" do

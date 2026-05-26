@@ -247,6 +247,75 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert args =~ "--timeout 7s"
   end
 
+  test "emits a mixed MOQT-shaped reference comparison record" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "reference-mixed.jsonl")
+    args_path = Path.join(dir, "quicprobe-mixed.args")
+    fake_quicprobe = fake_quicprobe_command(dir, args_path, mixed_quicprobe_json())
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "reference-client-to-reference-server",
+        "--workload",
+        "mixed_moqt_shaped",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--stream-count",
+        "2",
+        "--payload-size",
+        "512",
+        "--payload-count",
+        "2",
+        "--control-payload-size",
+        "32",
+        "--control-message-count",
+        "3",
+        "--control-rate",
+        "2",
+        "--quicprobe-command",
+        fake_quicprobe,
+        "--output",
+        output_path,
+        "--run-id",
+        "reference-mixed-test"
+      ],
+      script: "test reference-comparison"
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["profile"]["settings"]["workload"] == "mixed_moqt_shaped"
+    assert record["profile"]["settings"]["stream_scheduling"] == "mixed_control_bidi_object_uni"
+    assert record["workload"]["family"] == "mixed_moqt_shaped"
+    assert record["workload"]["stream_direction"] == "mixed"
+    assert record["workload"]["stream_count"] == 2
+    assert record["workload"]["payload_size_bytes"] == 512
+    assert record["workload"]["datagram_size_bytes"] == :null
+    assert record["workload"]["datagrams_per_second"] == :null
+    assert record["workload"]["control_trickle_bps"] == 512.0
+    assert record["metrics"]["bytes_sent"] == 2144
+    assert record["metrics"]["bytes_received"] == 96
+    assert record["metrics"]["datagram_delivery_ratio"] == :null
+    assert record["metrics"]["control_latency_p99_ms"] == 3.0
+    assert record["limits"]["control_traffic_delayed"] == false
+    assert record["limits"]["first_break_symptom"] == :null
+
+    args = File.read!(args_path)
+    assert args =~ "--workload mixed_moqt_shaped"
+    assert args =~ "--stream-count 2"
+    assert args =~ "--payload-size 512"
+    assert args =~ "--payload-count 2"
+    assert args =~ "--control-payload-size 32"
+    assert args =~ "--control-message-count 3"
+    assert args =~ "--control-rate 2"
+  end
+
   test "marks paced datagram results invalid when the generator misses the target offered rate" do
     dir = tmp_dir()
     output_path = Path.join(dir, "reference-paced-invalid.jsonl")
@@ -404,6 +473,68 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["metrics"]["bytes_received"] == 2384
     assert record["metrics"]["datagram_delivery_ratio"] == 1.0
     assert record["metrics"]["datagram_drop_count"] == 0
+    assert record["limits"]["first_break_symptom"] == :null
+    assert record["errors"]["message"] == :null
+  end
+
+  test "records mixed MOQT-shaped MOQX client pressure" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-mixed.jsonl")
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "mixed_moqt_shaped",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-count",
+        "2",
+        "--payload-size",
+        "64",
+        "--payload-count",
+        "2",
+        "--control-payload-size",
+        "16",
+        "--control-message-count",
+        "2",
+        "--control-rate",
+        "100",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-mixed-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.MixedEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["profile"]["settings"]["workload"] == "mixed_moqt_shaped"
+    assert record["profile"]["settings"]["stream_scheduling"] == "mixed_control_bidi_object_uni"
+    assert record["workload"]["family"] == "mixed_moqt_shaped"
+    assert record["workload"]["tool"] == "moqx"
+    assert record["workload"]["stream_direction"] == "mixed"
+    assert record["workload"]["stream_count"] == 2
+    assert record["workload"]["payload_size_bytes"] == 64
+    assert record["workload"]["datagram_size_bytes"] == :null
+    assert record["workload"]["datagrams_per_second"] == :null
+    assert record["workload"]["control_trickle_bps"] == 12_800.0
+    assert record["metrics"]["stream_count"] == 2
+    assert record["metrics"]["payload_size_bytes"] == 64
+    assert record["metrics"]["bytes_sent"] == 288
+    assert record["metrics"]["bytes_received"] == 32
+    assert record["metrics"]["datagram_delivery_ratio"] == :null
+    assert is_number(record["metrics"]["control_latency_p99_ms"])
     assert record["limits"]["first_break_symptom"] == :null
     assert record["errors"]["message"] == :null
   end
@@ -600,6 +731,49 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     """
   end
 
+  defp mixed_quicprobe_json do
+    """
+    {
+      "schema_version": "quicprobe-v1",
+      "record_type": "client_run",
+      "tool": "quicprobe",
+      "reference_implementation": "quic-go",
+      "reference_version": "v0.50.1",
+      "started_at": "2026-05-21T10:15:13Z",
+      "finished_at": "2026-05-21T10:15:14Z",
+      "remote_addr": "127.0.0.1:4433",
+      "alpn": "moqx-test",
+      "workload": "mixed_moqt_shaped",
+      "stream_direction": "mixed",
+      "stream_count": 2,
+      "payload_size_bytes": 512,
+      "payload_count": 2,
+      "control_payload_size_bytes": 32,
+      "control_message_count": 3,
+      "control_messages_per_second": 2.0,
+      "control_trickle_bps": 512.0,
+      "bytes_sent": 2144,
+      "bytes_received": 96,
+      "handshake_latency_ms": 6.5,
+      "first_byte_latency_ms": 1.0,
+      "application_duration_ms": 2.0,
+      "goodput_bps": 8576000.0,
+      "send_rate_packets_per_second": 3500.0,
+      "stream_scheduling": "mixed_control_bidi_object_uni",
+      "stream_latency_ms": {
+        "p50": 1.0,
+        "p95": 1.4,
+        "p99": 1.4
+      },
+      "control_latency_ms": {
+        "p50": 1.0,
+        "p95": 3.0,
+        "p99": 3.0
+      }
+    }
+    """
+  end
+
   defp tmp_dir do
     dir =
       Path.join(
@@ -760,6 +934,62 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
       send(self(), {:moqx_transport, {:datagram, connection, data, %{}}})
       :ok
     end
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection(_connection, _error_code), do: :ok
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process(_handle, _pid), do: :ok
+
+    @impl true
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+  end
+
+  defmodule MixedEchoTransport do
+    @behaviour MOQX.Transport
+
+    @impl true
+    def listen(_port, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept(_listener, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def handshake(connection, _timeout), do: {:ok, connection}
+
+    @impl true
+    def connect(_host, _port, _opts, _timeout), do: {:ok, :connection}
+
+    @impl true
+    def open_stream(_connection, opts),
+      do: {:ok, {:stream, make_ref(), Keyword.fetch!(opts, :direction)}}
+
+    @impl true
+    def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def send_stream(_stream, _data, _opts), do: :ok
+
+    @impl true
+    def recv_stream(_stream, byte_count), do: {:ok, :binary.copy(<<0>>, byte_count)}
+
+    @impl true
+    def send_datagram(_connection, _data), do: {:error, :unsupported}
 
     @impl true
     def finish_sending(_stream), do: :ok

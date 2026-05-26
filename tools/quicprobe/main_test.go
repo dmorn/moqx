@@ -180,6 +180,108 @@ func TestClientServerJSONUnidirectionalStreamPressure(t *testing.T) {
 	}
 }
 
+func TestClientServerJSONMixedMOQTShapedPressure(t *testing.T) {
+	t.Parallel()
+
+	certs := writeTestCerts(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ready := make(chan string, 1)
+	errc := make(chan error, 1)
+	go func() {
+		errc <- runServer(ctx, serverConfig{
+			addr:     "127.0.0.1:0",
+			certFile: certs.serverCert,
+			keyFile:  certs.serverKey,
+			alpn:     "moqx-test",
+		}, ready)
+	}()
+
+	addr := awaitServerReady(t, ready, errc)
+	var output strings.Builder
+
+	clientCtx, clientCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer clientCancel()
+
+	err := runClient(clientCtx, clientConfig{
+		addr:                addr,
+		caFile:              certs.caCert,
+		alpn:                "moqx-test",
+		serverName:          "localhost",
+		jsonOutput:          true,
+		workload:            mixedMOQTShapedWorkload,
+		streamCount:         2,
+		payloadSize:         128,
+		payloadCount:        3,
+		controlPayloadSize:  32,
+		controlMessageCount: 3,
+		controlRate:         20,
+	}, &output)
+	if err != nil {
+		t.Fatalf("runClient() error = %v", err)
+	}
+
+	var result clientRunResult
+	if err := json.Unmarshal([]byte(output.String()), &result); err != nil {
+		t.Fatalf("JSON output did not decode: %v\n%s", err, output.String())
+	}
+
+	expectedObjectBytes := int64(2 * 128 * 3)
+	expectedControlBytes := int64(3 * 32)
+	expectedBytesSent := expectedObjectBytes + expectedControlBytes
+
+	if result.Workload != mixedMOQTShapedWorkload {
+		t.Fatalf("workload = %q, want %s", result.Workload, mixedMOQTShapedWorkload)
+	}
+	if result.StreamDirection != "mixed" {
+		t.Fatalf("stream_direction = %q, want mixed", result.StreamDirection)
+	}
+	if result.StreamCount != 2 {
+		t.Fatalf("stream_count = %d, want 2", result.StreamCount)
+	}
+	if result.PayloadSizeBytes != 128 {
+		t.Fatalf("payload_size_bytes = %d, want 128", result.PayloadSizeBytes)
+	}
+	if result.PayloadCount != 3 {
+		t.Fatalf("payload_count = %d, want 3", result.PayloadCount)
+	}
+	if result.ControlPayloadSizeBytes != 32 {
+		t.Fatalf("control_payload_size_bytes = %d, want 32", result.ControlPayloadSizeBytes)
+	}
+	if result.ControlMessageCount != 3 {
+		t.Fatalf("control_message_count = %d, want 3", result.ControlMessageCount)
+	}
+	if result.ControlMessagesPerSecond != 20 {
+		t.Fatalf("control_messages_per_second = %f, want 20", result.ControlMessagesPerSecond)
+	}
+	if result.ControlTrickleBPS != 5120 {
+		t.Fatalf("control_trickle_bps = %f, want 5120", result.ControlTrickleBPS)
+	}
+	if result.BytesSent != expectedBytesSent {
+		t.Fatalf("bytes_sent = %d, want %d", result.BytesSent, expectedBytesSent)
+	}
+	if result.BytesReceived != expectedControlBytes {
+		t.Fatalf("bytes_received = %d, want %d", result.BytesReceived, expectedControlBytes)
+	}
+	if result.FirstByteLatencyMS == nil {
+		t.Fatal("first_byte_latency_ms = nil, want measured control latency")
+	}
+	if result.ControlLatencyMS["p99"] <= 0 {
+		t.Fatalf("control_latency_ms = %#v, want p99 > 0", result.ControlLatencyMS)
+	}
+
+	cancel()
+	select {
+	case err := <-errc:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("runServer() after cancel error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop after context cancellation")
+	}
+}
+
 func TestClientServerJSONDatagramPressure(t *testing.T) {
 	t.Parallel()
 

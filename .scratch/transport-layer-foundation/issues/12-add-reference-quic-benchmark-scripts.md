@@ -19,7 +19,7 @@ This isolates client-side and listener-side behavior while measuring raw transpo
 - [x] A script measures selected reference client behavior against a `MOQX.Transport` listener.
 - [x] Scripts accept caller-provided endpoints for same-region, cross-region, and edge-to-server paths.
 - [ ] Measurements include handshake latency, first-byte latency, stream throughput, datagram behavior where available, latency percentiles, resource usage, and stall/backpressure indicators.
-- [ ] Scripts can run stream pressure, datagram pressure, and mixed control-plus-object patterns defined by issue 08.
+- [x] Scripts can run stream pressure, datagram pressure, and mixed control-plus-object patterns defined by issue 08.
 - [x] Scripts document how to start any required external reference process.
 - [x] Output follows the shared benchmark metadata/result schema defined by issue 08 and is comparable with the MOQX self-pair calibration benchmark.
 - [ ] Any protocol mismatch or unsupported feature in the selected reference implementation is documented.
@@ -461,6 +461,47 @@ shape is committed with the first local loopback reference-to-reference record.
   MOQX DATAGRAM send failures explicitly as `datagram_send_error` instead of
   emitting a `MatchError`, and the README documents 1192 bytes as the current
   near-limit MOQX/quicer DATAGRAM payload until capability metadata exists.
+- 2026-05-26: Added the first `mixed_moqt_shaped` reference-comparison
+  workload. The workload is transport-shaped, not full MOQT session semantics:
+  one low-rate bidirectional control stream plus object-like unidirectional
+  streams. It is supported by `tools/quicprobe`,
+  `moqx-client-to-reference-server`, and `reference-client-to-moqx-listener`.
+  Loopback calibration passed for all three topologies using
+  `/private/tmp/quicprobe-mixed` and fresh temporary loopback certificates:
+  `mixed-loopback-reference`, `mixed-loopback-moqx-client`, and
+  `mixed-loopback-listener`. During calibration the listener path exposed and
+  fixed a mixed-control read-size deadlock: the listener must read control
+  streams at `--control-payload-size` granularity because the reference client
+  waits for each small control echo before sending the next control message.
+- 2026-05-26: Controlled same-region ARM mixed MOQT-shaped smoke passed for
+  run `20260526T135920Z-mixed-smoke` on `arm-nbg1-tiny`: `cax11` client and
+  server in `nbg1` over the private network `10.88.0.11 -> 10.88.0.12`, MTU
+  1450. The first `hel1` same-region attempt failed Hetzner placement; the
+  successful `nbg1` run reused the same run id and partial-state retry model.
+  The client reported a Hetzner/cloud-init `network-config-v1` schema status
+  error, so the scripted `just bench-transport-private-check` failed, but
+  manual readiness checks showed Go, Elixir, iperf3, private addresses, and
+  peer routes were present on both nodes. Manual private ICMP had 0% loss, and
+  a one-second TCP iperf sample reported about 6.37 Gbps.
+- 2026-05-26: The canonical private-path `iperf3-baseline` for the same run
+  reported 6.33 Gbps TCP goodput. Aggressive raw UDP steps at 1/3/6 Gbps
+  reported delivery ratios of 95.30%/98.07%/97.54%, so they are useful as
+  lossy-path evidence for this tiny same-region shape, not as a clean UDP
+  ceiling. The mixed workload used 32 object-like unidirectional streams, 1000
+  payloads per stream, 1200-byte payloads, plus one bidirectional control
+  stream with 100 messages of 64 bytes at 20 messages/sec. All three mixed
+  topology records passed report validation with no break symptom:
+  reference-to-reference reached 62.04 Mbps, MOQX-client-to-reference reached
+  59.68 Mbps, and reference-client-to-MOQX-listener reached 53.26 Mbps.
+  MOQX-client diagnostics recorded `message_queue_len=32234` at the end of the
+  run, which is a useful hint for the remaining observability/performance
+  slice but was not classified as a break symptom by the current contract.
+  Artifacts are under
+  `bench/transport/results/20260526T135920Z-mixed-smoke/`. The release records
+  say git `b23c93c` because the smoke artifact was built from the current dirty
+  worktree before the mixed-workload changes were committed. Infrastructure
+  was destroyed afterward, and `just bench-transport-verify-clean` reported no
+  Terraform state entries or labelled Hetzner resources remaining.
 
 Remaining slices:
 
@@ -475,10 +516,10 @@ Remaining slices:
   the max-payload/error-recording bug exposed by the 1200-byte attempt. The
   remaining question is whether cross-region repetition is needed before
   closing #12.
-- Mixed MOQT-shaped pressure: low-rate control-like bidirectional traffic plus
-  object-like unidirectional streams and/or DATAGRAM pressure. This is still
-  absent as a workload, so it needs implementation plus local calibration and
-  one controlled-path smoke before #12 can claim the issue-08 matrix is covered.
+- Mixed MOQT-shaped pressure now has implementation, loopback calibration, and
+  a same-region controlled-path smoke for all three topologies. Before using it
+  for capacity claims, decide whether to run a cross-region repetition or move
+  directly to saturation sweeps.
 - Resource and pressure indicators: either implement meaningful CPU, memory,
   mailbox-depth, send-backpressure, and stream-stall observations for the
   reference-comparison records, or explicitly split the remaining observability

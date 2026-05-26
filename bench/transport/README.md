@@ -354,6 +354,32 @@ For paced datagram steps against `moqx-listener`, pass the same
 reference-comparison command so both sides agree on the expected datagram
 count.
 
+For mixed MOQT-shaped pressure, use `--workload mixed_moqt_shaped`. The first
+mixed workload is intentionally transport-shaped rather than a full MOQT
+session: one low-rate bidirectional control stream plus object-like
+unidirectional streams. The object stream pressure uses `--stream-count`,
+`--payload-size`, and `--payload-count`; the control trickle uses
+`--control-payload-size`, `--control-message-count`, and `--control-rate`.
+The record reports `control_trickle_bps` and `control_latency_p99_ms`
+separately from aggregate stream/object goodput.
+
+```bash
+moqx-transport-bench reference-comparison \
+  --topology moqx-client-to-reference-server \
+  --workload mixed_moqt_shaped \
+  --server 127.0.0.1 \
+  --port 4433 \
+  --ca .tmp/integration-certs/ca.pem \
+  --servername localhost \
+  --stream-count 4 \
+  --payload-size 1200 \
+  --payload-count 100 \
+  --control-payload-size 64 \
+  --control-message-count 100 \
+  --control-rate 10 \
+  --output bench/transport/results/moqx-client-reference-mixed.jsonl
+```
+
 The measurement command does not start the peer server. For reference server
 topologies, start `tools/quicprobe server` explicitly on the chosen endpoint
 first. For reference-client-to-MOQX-listener runs, start
@@ -362,9 +388,11 @@ serves one connection by default and then exits. Then run
 `reference-comparison` from the client side. The wrapper emits
 `transport-bench-v1` JSONL. The MOQX-client topology opens all requested
 streams, schedules payload rounds across those streams, and records
-`stream_scheduling=concurrent`. Stream sends are accepted asynchronously by
-`MOQX.Transport.send_stream/4`; send completion is reported later as a
-transport event and is not peer-delivery proof.
+`stream_scheduling=concurrent` for pure stream pressure and
+`stream_scheduling=mixed_control_bidi_object_uni` for mixed pressure. Stream
+sends are accepted asynchronously by `MOQX.Transport.send_stream/4`; send
+completion is reported later as a transport event and is not peer-delivery
+proof.
 
 `moqx-transport-bench moqx-listener` is a correctness and interop peer, not yet
 a high-rate performance peer. Its stream-pressure path currently accepts the

@@ -22,6 +22,8 @@ Use profile files to choose the server type and locations:
 | `profiles/arm-nbg1-hel1.tfvars` | `cax31` | `nbg1` to `hel1` | Alternate ARM EU path when `fsn1` ARM capacity is unavailable. |
 | `profiles/arm-nbg1-hel1-stress.tfvars` | `cax41` | `nbg1` to `hel1` | Larger alternate ARM EU path when smaller ARM capacity is unavailable. |
 | `profiles/arm-nbg1-hel1-tiny.tfvars` | `cax11` | `nbg1` to `hel1` | Smallest alternate ARM EU path for correctness smokes during regional capacity pressure. |
+| `profiles/arm-nbg1-tiny.tfvars` | `cax11` | `nbg1` to `nbg1` | Smallest same-region ARM pair for correctness smokes. |
+| `profiles/arm-hel1-tiny.tfvars` | `cax11` | `hel1` to `hel1` | Smallest same-region ARM pair for correctness smokes. |
 | `profiles/x86-control.tfvars` | `ccx23` | `fsn1` to `hel1` | Dedicated x86 control pair. |
 
 ## Usage

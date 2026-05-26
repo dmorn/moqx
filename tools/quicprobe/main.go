@@ -27,6 +27,7 @@ const defaultALPN = "moqx-test"
 const quicGoModulePath = "github.com/quic-go/quic-go"
 const streamPressureWorkload = "stream_pressure"
 const datagramPressureWorkload = "datagram_pressure"
+const mixedMOQTShapedWorkload = "mixed_moqt_shaped"
 const datagramHeaderSize = 16
 const pacedSpinThreshold = 200 * time.Microsecond
 
@@ -55,46 +56,57 @@ type clientConfig struct {
 	datagramRate    int
 	durationSeconds int
 	rateTolerance   float64
+
+	controlPayloadSize  int
+	controlMessageCount int
+	controlRate         int
 }
 
 type clientRunResult struct {
-	SchemaVersion         string             `json:"schema_version"`
-	RecordType            string             `json:"record_type"`
-	Tool                  string             `json:"tool"`
-	ReferenceImpl         string             `json:"reference_implementation"`
-	ReferenceVersion      string             `json:"reference_version"`
-	StartedAt             string             `json:"started_at"`
-	FinishedAt            string             `json:"finished_at"`
-	RemoteAddr            string             `json:"remote_addr"`
-	ALPN                  string             `json:"alpn"`
-	Workload              string             `json:"workload"`
-	StreamDirection       string             `json:"stream_direction"`
-	StreamCount           int                `json:"stream_count"`
-	PayloadSizeBytes      int                `json:"payload_size_bytes"`
-	PayloadCount          int                `json:"payload_count"`
-	DatagramSizeBytes     int                `json:"datagram_size_bytes"`
-	DatagramCount         int                `json:"datagram_count"`
-	DatagramMode          string             `json:"datagram_mode"`
-	TargetDatagramPPS     float64            `json:"target_datagrams_per_second"`
-	TargetDurationSeconds int                `json:"target_duration_seconds"`
-	OfferedRateRatio      float64            `json:"offered_rate_ratio"`
-	OfferedRateTolerance  float64            `json:"offered_rate_tolerance"`
-	OfferedRateValid      bool               `json:"offered_rate_valid"`
-	DatagramsOffered      int                `json:"datagrams_offered"`
-	DatagramsAccepted     int                `json:"datagrams_accepted"`
-	DatagramsReceived     int                `json:"datagrams_received"`
-	DatagramDeliveryRatio float64            `json:"datagram_delivery_ratio"`
-	DatagramDropCount     int                `json:"datagram_drop_count"`
-	BytesSent             int64              `json:"bytes_sent"`
-	BytesReceived         int64              `json:"bytes_received"`
-	HandshakeLatencyMS    float64            `json:"handshake_latency_ms"`
-	FirstByteLatencyMS    *float64           `json:"first_byte_latency_ms"`
-	ApplicationDurationMS float64            `json:"application_duration_ms"`
-	OfferedLoadBPS        float64            `json:"offered_load_bps"`
-	GoodputBPS            float64            `json:"goodput_bps"`
-	SendRateDatagramPPS   float64            `json:"send_rate_datagrams_per_second"`
-	StreamLatencyMS       map[string]float64 `json:"stream_latency_ms"`
-	DatagramLatencyMS     map[string]float64 `json:"datagram_latency_ms"`
+	SchemaVersion            string             `json:"schema_version"`
+	RecordType               string             `json:"record_type"`
+	Tool                     string             `json:"tool"`
+	ReferenceImpl            string             `json:"reference_implementation"`
+	ReferenceVersion         string             `json:"reference_version"`
+	StartedAt                string             `json:"started_at"`
+	FinishedAt               string             `json:"finished_at"`
+	RemoteAddr               string             `json:"remote_addr"`
+	ALPN                     string             `json:"alpn"`
+	Workload                 string             `json:"workload"`
+	StreamDirection          string             `json:"stream_direction"`
+	StreamCount              int                `json:"stream_count"`
+	PayloadSizeBytes         int                `json:"payload_size_bytes"`
+	PayloadCount             int                `json:"payload_count"`
+	ControlPayloadSizeBytes  int                `json:"control_payload_size_bytes,omitempty"`
+	ControlMessageCount      int                `json:"control_message_count,omitempty"`
+	ControlMessagesPerSecond float64            `json:"control_messages_per_second,omitempty"`
+	ControlTrickleBPS        float64            `json:"control_trickle_bps,omitempty"`
+	DatagramSizeBytes        int                `json:"datagram_size_bytes"`
+	DatagramCount            int                `json:"datagram_count"`
+	DatagramMode             string             `json:"datagram_mode"`
+	TargetDatagramPPS        float64            `json:"target_datagrams_per_second"`
+	TargetDurationSeconds    int                `json:"target_duration_seconds"`
+	OfferedRateRatio         float64            `json:"offered_rate_ratio"`
+	OfferedRateTolerance     float64            `json:"offered_rate_tolerance"`
+	OfferedRateValid         bool               `json:"offered_rate_valid"`
+	DatagramsOffered         int                `json:"datagrams_offered"`
+	DatagramsAccepted        int                `json:"datagrams_accepted"`
+	DatagramsReceived        int                `json:"datagrams_received"`
+	DatagramDeliveryRatio    float64            `json:"datagram_delivery_ratio"`
+	DatagramDropCount        int                `json:"datagram_drop_count"`
+	BytesSent                int64              `json:"bytes_sent"`
+	BytesReceived            int64              `json:"bytes_received"`
+	HandshakeLatencyMS       float64            `json:"handshake_latency_ms"`
+	FirstByteLatencyMS       *float64           `json:"first_byte_latency_ms"`
+	ApplicationDurationMS    float64            `json:"application_duration_ms"`
+	OfferedLoadBPS           float64            `json:"offered_load_bps"`
+	GoodputBPS               float64            `json:"goodput_bps"`
+	SendRatePacketsPPS       float64            `json:"send_rate_packets_per_second,omitempty"`
+	SendRateDatagramPPS      float64            `json:"send_rate_datagrams_per_second"`
+	StreamScheduling         string             `json:"stream_scheduling,omitempty"`
+	StreamLatencyMS          map[string]float64 `json:"stream_latency_ms"`
+	DatagramLatencyMS        map[string]float64 `json:"datagram_latency_ms"`
+	ControlLatencyMS         map[string]float64 `json:"control_latency_ms,omitempty"`
 }
 
 type datagramReceiveResult struct {
@@ -190,6 +202,9 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	flags.IntVar(&cfg.datagramRate, "datagram-rate", 0, "target datagrams per second for paced datagram_pressure --json runs")
 	flags.IntVar(&cfg.durationSeconds, "duration-seconds", 0, "paced datagram_pressure duration in seconds")
 	flags.Float64Var(&cfg.rateTolerance, "offered-rate-tolerance", 0.95, "minimum actual/target send rate ratio for paced datagram_pressure runs")
+	flags.IntVar(&cfg.controlPayloadSize, "control-payload-size", 64, "control message bytes for mixed_moqt_shaped --json runs")
+	flags.IntVar(&cfg.controlMessageCount, "control-message-count", 10, "control messages to send for mixed_moqt_shaped --json runs")
+	flags.IntVar(&cfg.controlRate, "control-rate", 10, "target control messages per second for mixed_moqt_shaped --json runs")
 	flags.DurationVar(&timeout, "timeout", 5*time.Second, "client timeout")
 
 	if err := flags.Parse(args); err != nil {
@@ -205,8 +220,10 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	if timeout <= 0 {
 		return clientConfig{}, 0, errors.New("client --timeout must be positive")
 	}
-	if cfg.workload != streamPressureWorkload && cfg.workload != datagramPressureWorkload {
-		return clientConfig{}, 0, errors.New("client --workload must be stream_pressure or datagram_pressure")
+	if cfg.workload != streamPressureWorkload &&
+		cfg.workload != datagramPressureWorkload &&
+		cfg.workload != mixedMOQTShapedWorkload {
+		return clientConfig{}, 0, errors.New("client --workload must be stream_pressure, datagram_pressure, or mixed_moqt_shaped")
 	}
 	if cfg.streamDirection != "bidirectional" && cfg.streamDirection != "unidirectional" {
 		return clientConfig{}, 0, errors.New("client --stream-direction must be bidirectional or unidirectional")
@@ -240,6 +257,15 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	}
 	if cfg.rateTolerance <= 0 || cfg.rateTolerance > 1 {
 		return clientConfig{}, 0, errors.New("client --offered-rate-tolerance must be greater than 0 and at most 1")
+	}
+	if cfg.workload == mixedMOQTShapedWorkload && cfg.controlPayloadSize <= 0 {
+		return clientConfig{}, 0, errors.New("client --control-payload-size must be positive")
+	}
+	if cfg.workload == mixedMOQTShapedWorkload && cfg.controlMessageCount <= 0 {
+		return clientConfig{}, 0, errors.New("client --control-message-count must be positive")
+	}
+	if cfg.workload == mixedMOQTShapedWorkload && cfg.controlRate <= 0 {
+		return clientConfig{}, 0, errors.New("client --control-rate must be positive")
 	}
 
 	return cfg, timeout, nil
@@ -452,6 +478,8 @@ func runMeasuredClient(
 		return runStreamPressureClient(ctx, cfg, conn, startedAt, handshakeLatency)
 	case datagramPressureWorkload:
 		return runDatagramPressureClient(ctx, cfg, conn, startedAt, handshakeLatency)
+	case mixedMOQTShapedWorkload:
+		return runMixedMOQTShapedClient(ctx, cfg, conn, startedAt, handshakeLatency)
 	default:
 		return clientRunResult{}, fmt.Errorf("unsupported workload %q", cfg.workload)
 	}
@@ -540,6 +568,178 @@ func runStreamPressureClient(
 		GoodputBPS:            goodputBPS(totalBytesSent, totalBytesReceived, applicationDuration, cfg.streamDirection),
 		StreamLatencyMS:       latencySummary(latencies),
 	}, nil
+}
+
+type mixedObjectStreamResult struct {
+	bytesSent int64
+	latencyMS float64
+	err       error
+}
+
+type mixedControlResult struct {
+	bytesSent     int64
+	bytesReceived int64
+	latenciesMS   []float64
+	err           error
+}
+
+func runMixedMOQTShapedClient(
+	ctx context.Context,
+	cfg clientConfig,
+	conn quic.Connection,
+	startedAt time.Time,
+	handshakeLatency time.Duration,
+) (clientRunResult, error) {
+	applicationStartedAt := time.Now()
+	objectPayload := deterministicPayload(cfg.payloadSize)
+	controlPayload := deterministicPayload(cfg.controlPayloadSize)
+	firstByte := make(chan time.Duration, 1)
+	objectResultc := make(chan mixedObjectStreamResult, cfg.streamCount)
+	controlResultc := make(chan mixedControlResult, 1)
+
+	for index := 0; index < cfg.streamCount; index++ {
+		go func() {
+			streamStartedAt := time.Now()
+			sent, _, err := runUniPressureStream(ctx, cfg, conn, objectPayload)
+			objectResultc <- mixedObjectStreamResult{
+				bytesSent: sent,
+				latencyMS: durationMillis(time.Since(streamStartedAt)),
+				err:       err,
+			}
+		}()
+	}
+
+	go func() {
+		controlResultc <- runMixedControlStream(
+			ctx,
+			cfg,
+			conn,
+			controlPayload,
+			firstByte,
+			applicationStartedAt,
+		)
+	}()
+
+	var objectBytesSent int64
+	objectLatencies := make([]float64, 0, cfg.streamCount)
+
+	for index := 0; index < cfg.streamCount; index++ {
+		result := <-objectResultc
+		if result.err != nil {
+			return clientRunResult{}, result.err
+		}
+
+		objectBytesSent += result.bytesSent
+		objectLatencies = append(objectLatencies, result.latencyMS)
+	}
+
+	controlResult := <-controlResultc
+	if controlResult.err != nil {
+		return clientRunResult{}, controlResult.err
+	}
+
+	applicationDuration := time.Since(applicationStartedAt)
+	finishedAt := time.Now()
+	firstByteLatency := firstByteLatencyMS(firstByte)
+	totalBytesSent := objectBytesSent + controlResult.bytesSent
+	totalBytesReceived := controlResult.bytesReceived
+
+	return clientRunResult{
+		SchemaVersion:            "quicprobe-v1",
+		RecordType:               "client_run",
+		Tool:                     "quicprobe",
+		ReferenceImpl:            "quic-go",
+		ReferenceVersion:         moduleVersion(quicGoModulePath),
+		StartedAt:                startedAt.UTC().Format(time.RFC3339Nano),
+		FinishedAt:               finishedAt.UTC().Format(time.RFC3339Nano),
+		RemoteAddr:               conn.RemoteAddr().String(),
+		ALPN:                     conn.ConnectionState().TLS.NegotiatedProtocol,
+		Workload:                 mixedMOQTShapedWorkload,
+		StreamDirection:          "mixed",
+		StreamCount:              cfg.streamCount,
+		PayloadSizeBytes:         cfg.payloadSize,
+		PayloadCount:             cfg.payloadCount,
+		ControlPayloadSizeBytes:  cfg.controlPayloadSize,
+		ControlMessageCount:      cfg.controlMessageCount,
+		ControlMessagesPerSecond: float64(cfg.controlRate),
+		ControlTrickleBPS:        controlTrickleBPS(cfg),
+		BytesSent:                totalBytesSent,
+		BytesReceived:            totalBytesReceived,
+		HandshakeLatencyMS:       durationMillis(handshakeLatency),
+		FirstByteLatencyMS:       firstByteLatency,
+		ApplicationDurationMS:    durationMillis(applicationDuration),
+		GoodputBPS:               throughputBPS(totalBytesSent, applicationDuration),
+		SendRatePacketsPPS:       rate(cfg.streamCount*cfg.payloadCount+cfg.controlMessageCount, applicationDuration),
+		StreamScheduling:         "mixed_control_bidi_object_uni",
+		StreamLatencyMS:          latencySummary(objectLatencies),
+		ControlLatencyMS:         latencySummary(controlResult.latenciesMS),
+	}, nil
+}
+
+func runMixedControlStream(
+	ctx context.Context,
+	cfg clientConfig,
+	conn quic.Connection,
+	payload []byte,
+	firstByte chan<- time.Duration,
+	firstByteOrigin time.Time,
+) mixedControlResult {
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		return mixedControlResult{err: fmt.Errorf("open mixed control stream: %w", err)}
+	}
+
+	startedAt := time.Now()
+	interval := time.Second / time.Duration(cfg.controlRate)
+	latencies := make([]float64, 0, cfg.controlMessageCount)
+
+	var bytesSent int64
+	var bytesReceived int64
+
+	for message := 1; message <= cfg.controlMessageCount; message++ {
+		deadline := pacedDatagramDeadline(startedAt, interval, message)
+		if err := waitUntil(ctx, deadline); err != nil {
+			return mixedControlResult{bytesSent: bytesSent, bytesReceived: bytesReceived, latenciesMS: latencies, err: err}
+		}
+
+		sentAt := time.Now()
+		n, err := writeFull(stream, payload)
+		bytesSent += int64(n)
+		if err != nil {
+			return mixedControlResult{bytesSent: bytesSent, bytesReceived: bytesReceived, latenciesMS: latencies, err: fmt.Errorf("write mixed control stream: %w", err)}
+		}
+
+		received, err := readControlEcho(stream, payload)
+		bytesReceived += int64(received)
+		if err != nil {
+			return mixedControlResult{bytesSent: bytesSent, bytesReceived: bytesReceived, latenciesMS: latencies, err: err}
+		}
+
+		if len(latencies) == 0 {
+			notifyFirstByte(firstByte, time.Since(firstByteOrigin))
+		}
+
+		latencies = append(latencies, durationMillis(time.Since(sentAt)))
+	}
+
+	if err := stream.Close(); err != nil {
+		return mixedControlResult{bytesSent: bytesSent, bytesReceived: bytesReceived, latenciesMS: latencies, err: fmt.Errorf("close mixed control stream: %w", err)}
+	}
+
+	return mixedControlResult{bytesSent: bytesSent, bytesReceived: bytesReceived, latenciesMS: latencies}
+}
+
+func readControlEcho(reader io.Reader, payload []byte) (int, error) {
+	echo := make([]byte, len(payload))
+	n, err := io.ReadFull(reader, echo)
+	if err != nil {
+		return n, fmt.Errorf("read mixed control echo: %w", err)
+	}
+	if !matchesPayload(echo, payload, 0) {
+		return n, errors.New("mixed control echo payload mismatch")
+	}
+
+	return n, nil
 }
 
 func runDatagramPressureClient(
@@ -755,6 +955,10 @@ func offeredLoadBPS(cfg clientConfig) float64 {
 	}
 
 	return 0
+}
+
+func controlTrickleBPS(cfg clientConfig) float64 {
+	return float64(cfg.controlRate * cfg.controlPayloadSize * 8)
 }
 
 func receiveDatagramEchoes(

@@ -9,6 +9,7 @@ defmodule MOQX.TransportBench.MoqxListener do
   @datagram_header_size DatagramPayload.header_size()
   @stream_pressure_workload "stream_pressure"
   @datagram_pressure_workload "datagram_pressure"
+  @mixed_moqt_shaped_workload "mixed_moqt_shaped"
 
   def main(argv, opts \\ []) do
     script = Keyword.get(opts, :script, @default_script)
@@ -44,6 +45,9 @@ defmodule MOQX.TransportBench.MoqxListener do
           datagram_count: :integer,
           datagram_rate: :integer,
           duration_seconds: :integer,
+          control_payload_size: :integer,
+          control_message_count: :integer,
+          control_rate: :integer,
           connection_count: :integer,
           timeout_seconds: :integer,
           help: :boolean
@@ -88,6 +92,9 @@ defmodule MOQX.TransportBench.MoqxListener do
       datagram_count: Keyword.get(opts, :datagram_count, 1000),
       datagram_rate: opts[:datagram_rate],
       duration_seconds: opts[:duration_seconds],
+      control_payload_size: Keyword.get(opts, :control_payload_size, 64),
+      control_message_count: Keyword.get(opts, :control_message_count, 10),
+      control_rate: Keyword.get(opts, :control_rate, 10),
       connection_count: Keyword.get(opts, :connection_count, 1),
       timeout_ms: Keyword.get(opts, :timeout_seconds, @default_timeout_seconds) * 1000
     }
@@ -100,6 +107,7 @@ defmodule MOQX.TransportBench.MoqxListener do
          :ok <- validate_datagram_size(config),
          :ok <- validate_positive(config.datagram_count, "--datagram-count"),
          :ok <- validate_paced_datagrams(config),
+         :ok <- validate_mixed_control(config),
          :ok <- validate_non_negative(config.connection_count, "--connection-count"),
          :ok <- validate_stream_direction(config.stream_direction),
          :ok <- validate_file(config.certfile, "--certfile"),
@@ -118,11 +126,15 @@ defmodule MOQX.TransportBench.MoqxListener do
   defp validate_non_negative(_value, name), do: {:error, "#{name} must be 0 or greater."}
 
   defp validate_workload(workload)
-       when workload in [@stream_pressure_workload, @datagram_pressure_workload],
+       when workload in [
+              @stream_pressure_workload,
+              @datagram_pressure_workload,
+              @mixed_moqt_shaped_workload
+            ],
        do: :ok
 
   defp validate_workload(_workload),
-    do: {:error, "--workload must be stream_pressure or datagram_pressure."}
+    do: {:error, "--workload must be stream_pressure, datagram_pressure, or mixed_moqt_shaped."}
 
   defp validate_datagram_size(%{workload: @datagram_pressure_workload, datagram_size: size})
        when is_integer(size) and size >= @datagram_header_size,
@@ -155,6 +167,15 @@ defmodule MOQX.TransportBench.MoqxListener do
   end
 
   defp validate_paced_datagrams(_config), do: :ok
+
+  defp validate_mixed_control(%{workload: @mixed_moqt_shaped_workload} = config) do
+    with :ok <- validate_positive(config.control_payload_size, "--control-payload-size"),
+         :ok <- validate_positive(config.control_message_count, "--control-message-count") do
+      validate_positive(config.control_rate, "--control-rate")
+    end
+  end
+
+  defp validate_mixed_control(_config), do: :ok
 
   defp validate_stream_direction(direction)
        when direction in ["bidirectional", "unidirectional"],
@@ -244,14 +265,26 @@ defmodule MOQX.TransportBench.MoqxListener do
     receive_datagrams(ctx, connection, config, MapSet.new())
   end
 
+  defp serve_connection_workload(
+         ctx,
+         connection,
+         %{workload: @mixed_moqt_shaped_workload} = config
+       ) do
+    with {:ok, streams, ctx} <- accept_streams(ctx, connection, config) do
+      serve_streams(ctx, streams, config)
+    end
+  end
+
   defp accept_streams(ctx, connection, config) do
-    Enum.reduce_while(1..config.stream_count, {:ok, [], ctx}, fn _index, {:ok, streams, ctx} ->
+    Enum.reduce_while(1..expected_stream_count(config), {:ok, [], ctx}, fn _index,
+                                                                           {:ok, streams, ctx} ->
       case Transport.accept_stream(ctx, connection, [], config.timeout_ms) do
         {:ok, stream, ctx} ->
           stream_state = %{
             stream: stream,
             received: 0,
-            expected_bytes: config.payload_size * config.payload_count
+            expected_bytes: expected_stream_bytes(stream, config),
+            chunk_size: stream_chunk_size(stream, config)
           }
 
           {:cont, {:ok, [stream_state | streams], ctx}}
@@ -265,6 +298,29 @@ defmodule MOQX.TransportBench.MoqxListener do
       error -> error
     end
   end
+
+  defp expected_stream_count(%{workload: @mixed_moqt_shaped_workload} = config),
+    do: config.stream_count + 1
+
+  defp expected_stream_count(config), do: config.stream_count
+
+  defp expected_stream_bytes(
+         %{info: %{direction: :bidirectional}},
+         %{workload: @mixed_moqt_shaped_workload} = config
+       ) do
+    config.control_payload_size * config.control_message_count
+  end
+
+  defp expected_stream_bytes(_stream, config), do: config.payload_size * config.payload_count
+
+  defp stream_chunk_size(
+         %{info: %{direction: :bidirectional}},
+         %{workload: @mixed_moqt_shaped_workload} = config
+       ) do
+    config.control_payload_size
+  end
+
+  defp stream_chunk_size(_stream, config), do: config.payload_size
 
   defp serve_streams(ctx, streams, config) do
     streams
@@ -299,9 +355,9 @@ defmodule MOQX.TransportBench.MoqxListener do
     end
   end
 
-  defp recv_stream_chunk(ctx, stream_state, config) do
+  defp recv_stream_chunk(ctx, stream_state, _config) do
     remaining = stream_state.expected_bytes - stream_state.received
-    chunk_size = min(config.payload_size, remaining)
+    chunk_size = min(stream_state.chunk_size, remaining)
 
     Transport.recv_stream(ctx, stream_state.stream, chunk_size)
   end
@@ -443,7 +499,7 @@ defmodule MOQX.TransportBench.MoqxListener do
       --host HOST                    listen host (default: 0.0.0.0)
       --port PORT                    UDP listen port (default: 4433)
       --alpn VALUE                   QUIC ALPN (default: moqx-test)
-      --workload VALUE               stream_pressure or datagram_pressure (default: stream_pressure)
+      --workload VALUE               stream_pressure, datagram_pressure, or mixed_moqt_shaped (default: stream_pressure)
       --stream-direction VALUE       bidirectional or unidirectional (default: bidirectional)
       --stream-count N               streams expected from the reference client (default: 1)
       --payload-size BYTES           bytes per payload write (default: 1200)
@@ -452,6 +508,9 @@ defmodule MOQX.TransportBench.MoqxListener do
       --datagram-count N             datagrams expected for datagram_pressure (default: 1000)
       --datagram-rate N              target datagrams/sec expected for paced datagram_pressure
       --duration-seconds N           paced datagram_pressure duration; expected datagrams = rate * duration
+      --control-payload-size BYTES   bytes per control message for mixed_moqt_shaped (default: 64)
+      --control-message-count N      control messages for mixed_moqt_shaped (default: 10)
+      --control-rate N               target control messages/sec for mixed_moqt_shaped (default: 10)
       --connection-count N           accepted connections before exit; 0 means unlimited (default: 1)
       --timeout-seconds N            accept/read timeout per operation (default: #{@default_timeout_seconds})
 
