@@ -98,3 +98,18 @@ first.
   scheduler pressure, mailbox depth over time, send-completion cadence, active
   event drain rate, and per-stream window occupancy are the likely first
   signals to add.
+- 2026-05-26: The same run exposed two DATAGRAM pressure hardening needs. First,
+  `moqx-listener` waits for the exact expected datagram count; once a lossy
+  step misses even one datagram, the listener can keep the UDP port occupied
+  until timeout and contaminate the next step. Future ramps should either use
+  isolated ports/processes per step, a delivery-threshold-aware listener exit,
+  or an explicit peer-control handshake. Second, high-rate DATAGRAM records
+  still do not explain where drops occur: sender admission, active event drain,
+  receiver mailbox, echo-send failure, or peer receive. Add per-step
+  observability before using these records for optimization claims.
+- 2026-05-26: The run also found a concrete max-payload bug split to #30:
+  MOQX/quicer DATAGRAM sends accept 1192-byte payloads but return
+  `{:dgram_send_error, :invalid_parameter}` at 1193 bytes and above. The
+  benchmark currently reports this through a `MatchError` and loses the
+  configured payload size in failure records. That is a correctness/reporting
+  bug, separate from throughput optimization.

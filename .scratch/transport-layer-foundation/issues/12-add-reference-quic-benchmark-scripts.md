@@ -408,6 +408,55 @@ shape is committed with the first local loopback reference-to-reference record.
   handling, so this round used manual toolchain and private-route readiness
   checks. Infrastructure was still intentionally running at the time this note
   was written.
+- 2026-05-26: The same preserved ARM pair was used for the #12 paced
+  DATAGRAM matrix on the same-region private path. The reference peer stayed
+  clean at all requested steps: 64-byte DATAGRAMs at 1k/5k/10k/20k/30k pps
+  delivered 100% with zero drops, and 1200-byte DATAGRAMs at 5k/10k/20k pps
+  delivered 100% with zero drops. This confirms the path/reference ceiling for
+  this same-region run was at least 30k pps for small DATAGRAMs and about
+  192 Mbps payload goodput for 1200-byte DATAGRAMs.
+- 2026-05-26: MOQX-involved DATAGRAM evidence is now split by payload-size
+  behavior. With 64-byte DATAGRAMs, MOQX-client-to-reference-server delivered
+  100% at 1k/5k/10k pps, then showed first loss at 20k pps with 52 drops
+  out of 200k offered and 99.974% delivery; 30k pps delivered 99.599% with
+  1203 drops. Reference-client-to-MOQX-listener, rerun with one isolated UDP
+  port per step, delivered 100% at 1k/5k/10k pps, then failed/degraded at
+  20k/30k pps. The initial listener sweep without isolated ports is retained
+  as an orchestration artifact: a lossy `moqx-listener` step can keep waiting
+  for the exact expected datagram count and contaminate the next step by
+  holding the port.
+- 2026-05-26: 1200-byte DATAGRAMs are not a valid MOQX/quicer measurement with
+  the current transport path. Reference-to-reference handles them, but both
+  MOQX-client sends and MOQX-listener echoes hit
+  `{:dgram_send_error, :invalid_parameter}`. A focused size probe found 1192
+  bytes is accepted with 100% delivery, while 1193, 1194, 1195, 1196, and
+  1200 bytes fail immediately on the MOQX send path. Follow-up #30 tracks
+  clean error handling, preserving configured size metadata in failure
+  records, and documenting or exposing the negotiated/max DATAGRAM payload
+  size.
+- 2026-05-26: The usable near-limit comparison for this run is therefore
+  1192-byte DATAGRAMs. Reference-client-to-reference-server delivered
+  5k/10k/20k pps at 100% delivery, about 47.7/95.4/190.7 Mbps payload
+  goodput. MOQX-client-to-reference-server matched reference at 5k and 10k
+  pps with 100% delivery, then first lost at 20k pps with 147 drops and
+  99.9265% delivery. Reference-client-to-MOQX-listener delivered 5k pps at
+  100%, then first lost at 10k pps with 5 drops and 99.995% delivery; 20k pps
+  also delivered 99.995% with 10 drops. Strict report validation passed for all
+  DATAGRAM JSONL artifacts.
+- 2026-05-26: DATAGRAM artifacts for this round are under
+  `bench/transport/results/20260526T075945Z-issue-29-bidi/`:
+  `reference-comparison-datagram-client-private.jsonl`,
+  `reference-comparison-datagram-listener-private.jsonl`,
+  `reference-comparison-datagram-listener-private-isolated.jsonl`,
+  `reference-comparison-datagram-size-probe-private.jsonl`,
+  `reference-comparison-datagram-size-probe-boundary-private.jsonl`,
+  `reference-comparison-datagram-1192-client-private.jsonl`, and
+  `reference-comparison-datagram-1192-listener-private.jsonl`, plus listener
+  logs for the failed/isolated runs.
+- 2026-05-26: After artifact capture and issue updates, the disposable Hetzner
+  infrastructure for `20260526T075945Z-issue-29-bidi` was destroyed.
+  `just bench-transport-verify-clean` reported no Terraform state entries or
+  labelled Hetzner resources remaining.
 
 Remaining slices:
 
@@ -417,11 +466,10 @@ Remaining slices:
   the current `moqx-listener` should remain a correctness peer for #12 or
   whether listener/client performance work belongs in #26 or a dedicated
   optimization issue.
-- MOQX-involved paced DATAGRAM sweeps on the controlled ARM private path:
-  MOQX-client-to-reference-server and reference-client-to-MOQX-listener. The
-  reference-to-reference baseline now exists for 64-byte and 1200-byte payloads;
-  the missing comparison is how much client-side and listener-side BEAM/quicer
-  behavior changes the envelope.
+- MOQX-involved paced DATAGRAM sweeps now have same-region ARM private-path
+  evidence for 64-byte and near-limit 1192-byte payloads. Remaining DATAGRAM
+  work is follow-up quality: fix #30's max-payload/error-recording bug, then
+  decide whether cross-region repetition is needed before closing #12.
 - Mixed MOQT-shaped pressure: low-rate control-like bidirectional traffic plus
   object-like unidirectional streams and/or DATAGRAM pressure. This is still
   absent as a workload, so it needs implementation plus local calibration and
