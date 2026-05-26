@@ -100,3 +100,13 @@ Artifacts are under
   records with no break symptom. This is loopback calibration only; #29 still
   needs the ARM bidirectional bracket rerun before it can be closed against the
   original real-path evidence.
+- 2026-05-26: A controlled ARM rerun was attempted with run id
+  `20260526T075945Z-issue-29-bidi` after committing the active-event fix.
+  Hetzner returned `resource_unavailable` during server placement for the
+  available EU ARM combinations tried: `arm-smoke` (`cax21`, `fsn1 -> nbg1`),
+  `arm-low-rtt` (`cax31`, `fsn1 -> nbg1`), `arm-nbg1-hel1` (`cax31`,
+  `nbg1 -> hel1`), `arm-nbg1-hel1-stress` (`cax41`, `nbg1 -> hel1`), and
+  `arm-nbg1-hel1-tiny` (`cax11`, `nbg1 -> hel1`). Each partial apply was
+  destroyed immediately and `bench-transport-verify-clean` confirmed no
+  Terraform state entries or labelled Hetzner resources remained. No remote
+  benchmark evidence was captured in this attempt.
