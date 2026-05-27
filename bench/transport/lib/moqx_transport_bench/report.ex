@@ -22,6 +22,8 @@ defmodule MOQX.TransportBench.Report do
       "",
       limits(records),
       "",
+      diagnostics(records),
+      "",
       validation(validation)
     ]
     |> Enum.reject(&(&1 == ""))
@@ -146,6 +148,34 @@ defmodule MOQX.TransportBench.Report do
 
     "Limit: #{step_name(record)} first=#{value(limits["first_break_symptom"])} stopped_by=#{value(limits["stopped_by"])} error=#{value(errors["message"])}"
   end
+
+  defp diagnostics(records) do
+    rows =
+      records
+      |> Enum.map(&diagnostic_row/1)
+      |> Enum.reject(&is_nil/1)
+
+    section("Diagnostics", rows)
+  end
+
+  defp diagnostic_row(%{"diagnostics" => %{"summary" => summary, "process" => process}} = record)
+       when is_map(summary) and is_map(process) do
+    pending =
+      summary["send_completions_pending"] || summary["object_send_completions_pending"] ||
+        summary["control_send_completions_pending"]
+
+    completed =
+      summary["send_completions"] || summary["object_send_completions"] ||
+        summary["control_send_completions"]
+
+    events =
+      summary["events_drained"] || summary["stream_receive_events"] ||
+        summary["datagram_receive_events"]
+
+    "Diag: #{step_name(record)} sent=#{value(summary["bytes_sent"])} recv=#{value(summary["bytes_received"])} send_done=#{value(completed)} pending=#{value(pending)} events=#{value(events)} mailbox=#{value(process["message_queue_len"])}/#{value(process["message_queue_len_peak"])}"
+  end
+
+  defp diagnostic_row(_record), do: nil
 
   defp validation(%{valid?: true, warnings: []}), do: "Validation\nOK"
 

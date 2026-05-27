@@ -640,6 +640,68 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
            ] = diagnostics["streams"]
   end
 
+  test "records stream-pressure runtime diagnostics for MOQX bidirectional echo" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-stream-diagnostics.jsonl")
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-direction",
+        "bidirectional",
+        "--stream-count",
+        "2",
+        "--payload-size",
+        "64",
+        "--payload-count",
+        "2",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-stream-diagnostics-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.MixedEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    diagnostics = record["diagnostics"]
+    assert diagnostics["version"] == "stream-pressure-diagnostics-v1"
+    assert diagnostics["summary"]["payloads_accepted"] == 4
+    assert diagnostics["summary"]["payloads_completed"] == 4
+    assert diagnostics["summary"]["send_completions"] == 4
+    assert diagnostics["summary"]["send_completions_pending"] == 0
+    assert diagnostics["summary"]["events_drained"] >= 8
+    assert diagnostics["summary"]["stream_data_events"] == 4
+    assert diagnostics["summary"]["send_completed_events"] == 4
+    assert is_number(diagnostics["summary"]["active_send_duration_ms"])
+    assert is_number(diagnostics["summary"]["active_echo_receive_duration_ms"])
+
+    assert diagnostics["process"]["message_queue_len_samples"] > 0
+
+    assert [%{"sample_index" => 1, "message_queue_len" => first_sample} | _] =
+             diagnostics["process"]["message_queue_len_sample_points"]
+
+    assert is_integer(first_sample)
+
+    assert Enum.all?(diagnostics["streams"], fn stream ->
+             stream["completion_status"] == "completed" and
+               stream["send_completed"] == 2 and
+               stream["send_completions_pending"] == 0
+           end)
+  end
+
   defp fake_quicprobe_command(dir, args_path) do
     fake_quicprobe_command(dir, args_path, stream_quicprobe_json())
   end

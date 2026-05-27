@@ -75,6 +75,31 @@ defmodule MOQX.TransportBench.ReportTest do
     assert report =~ "iperf3 timed out after 2s"
   end
 
+  test "renders diagnostics summary when present" do
+    record =
+      record()
+      |> Map.put("diagnostics", %{
+        "summary" => %{
+          "bytes_sent" => 2048,
+          "bytes_received" => 2048,
+          "send_completions" => 4,
+          "send_completions_pending" => 0,
+          "events_drained" => 8
+        },
+        "process" => %{
+          "message_queue_len" => 0,
+          "message_queue_len_peak" => 12
+        }
+      })
+
+    report = Report.render([record])
+
+    assert report =~ "Diagnostics"
+
+    assert report =~
+             "Diag: stream_pressure sent=2048 recv=2048 send_done=4 pending=0 events=8 mailbox=0/12"
+  end
+
   defp record do
     %{
       "schema_version" => "transport-bench-v1",

@@ -224,6 +224,15 @@ bytes echoed back, first-byte latency, aggregate goodput, and stream latency
 percentiles. Unidirectional pressure reports bytes sent and write-side stream
 latency; it has no echo bytes or first-byte latency.
 
+For `moqx-client-to-reference-server` bidirectional stream pressure, canonical
+records include `stream-pressure-diagnostics-v1`. These diagnostics separate
+send admission from send completion and echo receive: accepted payload sends,
+completed/cancelled/pending send completions, active send duration, active echo
+receive duration, stream data/FIN/send-completion/close/ignored event counts,
+per-stream completion status, and sender mailbox depth/peak/sample points.
+Human reports include a compact diagnostics row for records that carry these
+signals.
+
 For datagram pressure, use `--workload datagram_pressure`. By default the
 workload sends a burst of `--datagram-count` fixed-size QUIC DATAGRAM frames.
 For a fixed-rate step, set both `--datagram-rate` and `--duration-seconds`; the
@@ -263,6 +272,10 @@ timeout, and error reason. Remote listener runs that involve provisioning,
 capture setup, or manual dispatch should set `--accept-timeout-seconds` higher
 than `--timeout-seconds`; the former controls how long the listener waits for a
 client connection, while the latter controls workload/read bounds after accept.
+For `stream_pressure`, the same `--diagnostics-output PATH` option appends a
+`stream_listener_run` record with listener-side receive counts, echo-send
+attempt/accept counts, send-completion counts, pending completions, per-stream
+byte counts, and listener mailbox depth/peak/sample points.
 For `moqx-client-to-reference-server` DATAGRAM runs, the canonical benchmark
 record includes
 `moqx-client-datagram-diagnostics-v1` with accepted/received/missing counts,

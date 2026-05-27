@@ -285,3 +285,10 @@ seams without `Application` env.
   calibration for now: local loopback paced DATAGRAMs would mostly measure host
   scheduler/timer behavior, while real-link paced evidence belongs in
   reference-comparison after an iperf3 path baseline.
+- 2026-05-27: Closed #32. The stream-pressure harness now records the
+  MOQX-client send admission/completion gap, echo receive cadence,
+  event-drain counters, per-stream completion status, and bounded process
+  mailbox samples. `moqx-listener --workload stream_pressure` also emits
+  listener-side receive/echo/send-completion diagnostics. The next slice is
+  #33: rerun the ARM stream-pressure bracket with these diagnostics enabled and
+  classify the first optimization target from real-path evidence.

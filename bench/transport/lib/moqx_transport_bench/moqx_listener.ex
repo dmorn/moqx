@@ -341,7 +341,17 @@ defmodule MOQX.TransportBench.MoqxListener do
 
   defp serve_connection_workload(ctx, connection, %{workload: @stream_pressure_workload} = config) do
     with {:ok, streams, ctx} <- accept_streams(ctx, connection, config) do
-      serve_streams(ctx, streams, config)
+      state = initial_stream_diagnostics(config, streams)
+
+      case serve_streams(ctx, streams, config, state) do
+        {:ok, ctx, state} ->
+          write_stream_diagnostics(config, state)
+          {:ok, ctx}
+
+        {:error, reason, ctx, state} ->
+          write_stream_diagnostics(config, state)
+          {:error, reason, ctx}
+      end
     end
   end
 
@@ -369,16 +379,20 @@ defmodule MOQX.TransportBench.MoqxListener do
          %{workload: @mixed_moqt_shaped_workload} = config
        ) do
     with {:ok, streams, ctx} <- accept_streams(ctx, connection, config) do
-      serve_streams(ctx, streams, config)
+      case serve_streams(ctx, streams, config, nil) do
+        {:ok, ctx, _state} -> {:ok, ctx}
+        {:error, reason, ctx, _state} -> {:error, reason, ctx}
+      end
     end
   end
 
   defp accept_streams(ctx, connection, config) do
-    Enum.reduce_while(1..expected_stream_count(config), {:ok, [], ctx}, fn _index,
+    Enum.reduce_while(1..expected_stream_count(config), {:ok, [], ctx}, fn index,
                                                                            {:ok, streams, ctx} ->
       case Transport.accept_stream(ctx, connection, [], config.timeout_ms) do
         {:ok, stream, ctx} ->
           stream_state = %{
+            index: index,
             stream: stream,
             received: 0,
             expected_bytes: expected_stream_bytes(stream, config),
@@ -420,36 +434,93 @@ defmodule MOQX.TransportBench.MoqxListener do
 
   defp stream_chunk_size(_stream, config), do: config.payload_size
 
-  defp serve_streams(ctx, streams, config) do
+  defp initial_stream_diagnostics(config, streams) do
+    %{
+      workload: config.workload,
+      started_at: monotonic_us(),
+      stream_count_expected: expected_stream_count(config),
+      streams_accepted: map_size(streams),
+      streams_completed: 0,
+      streams_failed: 0,
+      bytes_expected: streams |> Map.values() |> Enum.map(& &1.expected_bytes) |> Enum.sum(),
+      bytes_received: 0,
+      stream_receive_events: 0,
+      echo_send_attempted: 0,
+      echo_send_accepted: 0,
+      send_completed: 0,
+      send_cancelled: 0,
+      send_completions_pending: 0,
+      ignored_events: 0,
+      unknown_events: 0,
+      receive_errors: 0,
+      stop_reason: nil,
+      error_reason: nil,
+      streams: Map.new(streams, fn {_id, stream} -> {stream_id(stream.stream), stream} end),
+      process: %{}
+    }
+    |> sample_stream_process()
+  end
+
+  defp serve_streams(ctx, streams, config, state) do
     streams
     |> Map.values()
     |> Enum.sort_by(&stream_id(&1.stream))
-    |> Enum.reduce_while({:ok, ctx}, fn stream_state, {:ok, ctx} ->
-      case serve_stream(ctx, stream_state, config) do
-        {:ok, ctx} -> {:cont, {:ok, ctx}}
-        {:error, reason, ctx} -> {:halt, {:error, reason, ctx}}
+    |> Enum.reduce_while({:ok, ctx, state}, fn stream_state, {:ok, ctx, state} ->
+      case serve_stream(ctx, stream_state, config, state) do
+        {:ok, ctx, state} -> {:cont, {:ok, ctx, state}}
+        {:error, reason, ctx, state} -> {:halt, {:error, reason, ctx, state}}
       end
     end)
   end
 
-  defp serve_stream(ctx, stream_state, config) do
-    receive_stream_chunks(ctx, stream_state, config, 0)
+  defp serve_stream(ctx, stream_state, config, state) do
+    receive_stream_chunks(ctx, stream_state, config, 0, state)
   end
 
-  defp receive_stream_chunks(ctx, stream_state, config, pending_sends) do
+  defp receive_stream_chunks(ctx, stream_state, config, pending_sends, state) do
     if stream_complete?(stream_state) do
-      drain_send_completions(ctx, stream_state.stream, pending_sends, config.timeout_ms)
+      state =
+        state
+        |> stream_diagnostics_update(fn state ->
+          state
+          |> Map.update!(:streams_completed, &(&1 + 1))
+          |> put_in([:streams, stream_id(stream_state.stream)], stream_state)
+        end)
+
+      drain_send_completions(ctx, stream_state.stream, pending_sends, config.timeout_ms, state)
     else
-      recv_echo_and_continue(ctx, stream_state, config, pending_sends)
+      recv_echo_and_continue(ctx, stream_state, config, pending_sends, state)
     end
   end
 
-  defp recv_echo_and_continue(ctx, stream_state, config, pending_sends) do
-    with {:ok, data, ctx} <- recv_stream_chunk(ctx, stream_state, config),
-         stream_state = %{stream_state | received: stream_state.received + byte_size(data)},
-         {:ok, echoed?, ctx} <- maybe_echo_stream_data(stream_state, data, ctx) do
-      pending_sends = if echoed?, do: pending_sends + 1, else: pending_sends
-      receive_stream_chunks(ctx, stream_state, config, pending_sends)
+  defp recv_echo_and_continue(ctx, stream_state, config, pending_sends, state) do
+    case recv_stream_chunk(ctx, stream_state, config) do
+      {:ok, data, ctx} ->
+        echo_stream_chunk(ctx, stream_state, data, config, pending_sends, state)
+
+      {:error, reason, ctx} ->
+        state = fail_stream_diagnostics(state, stream_state, reason)
+        {:error, reason, ctx, state}
+    end
+  end
+
+  defp echo_stream_chunk(ctx, stream_state, data, config, pending_sends, state) do
+    stream_state = %{stream_state | received: stream_state.received + byte_size(data)}
+
+    state =
+      state
+      |> record_stream_receive(stream_state, data)
+      |> record_stream_echo_attempt(stream_echo_attempted?(stream_state))
+
+    case maybe_echo_stream_data(stream_state, data, ctx) do
+      {:ok, echoed?, ctx} ->
+        state = record_stream_echo_accepted(state, echoed?)
+        pending_sends = if echoed?, do: pending_sends + 1, else: pending_sends
+        receive_stream_chunks(ctx, stream_state, config, pending_sends, state)
+
+      {:error, reason, ctx} ->
+        state = fail_stream_diagnostics(state, stream_state, reason)
+        {:error, reason, ctx, state}
     end
   end
 
@@ -483,27 +554,119 @@ defmodule MOQX.TransportBench.MoqxListener do
     end
   end
 
-  defp drain_send_completions(ctx, _stream, 0, _timeout_ms), do: {:ok, ctx}
+  defp stream_echo_attempted?(%{stream: %{info: %{send_side?: false}}}), do: false
+  defp stream_echo_attempted?(_stream_state), do: true
 
-  defp drain_send_completions(ctx, stream, pending_sends, timeout_ms) do
+  defp record_stream_receive(nil, _stream_state, _data), do: nil
+
+  defp record_stream_receive(state, stream_state, data) do
+    state
+    |> Map.update!(:bytes_received, &(&1 + byte_size(data)))
+    |> Map.update!(:stream_receive_events, &(&1 + 1))
+    |> put_in([:streams, stream_id(stream_state.stream)], stream_state)
+    |> sample_stream_process()
+  end
+
+  defp record_stream_echo_attempt(nil, _echoed?), do: nil
+  defp record_stream_echo_attempt(state, false), do: state
+
+  defp record_stream_echo_attempt(state, true) do
+    state
+    |> Map.update!(:echo_send_attempted, &(&1 + 1))
+    |> sample_stream_process()
+  end
+
+  defp record_stream_echo_accepted(nil, _echoed?), do: nil
+  defp record_stream_echo_accepted(state, false), do: state
+
+  defp record_stream_echo_accepted(state, true) do
+    state
+    |> Map.update!(:echo_send_accepted, &(&1 + 1))
+    |> Map.update!(:send_completions_pending, &(&1 + 1))
+    |> sample_stream_process()
+  end
+
+  defp fail_stream_diagnostics(nil, _stream_state, _reason), do: nil
+
+  defp fail_stream_diagnostics(state, stream_state, reason) do
+    state
+    |> Map.update!(:streams_failed, &(&1 + 1))
+    |> Map.put(:stop_reason, "stream_error")
+    |> Map.put(:error_reason, reason_name(reason))
+    |> put_in([:streams, stream_id(stream_state.stream)], stream_state)
+    |> sample_stream_process()
+  end
+
+  defp stream_diagnostics_update(nil, _fun), do: nil
+
+  defp stream_diagnostics_update(state, fun) do
+    state
+    |> fun.()
+    |> sample_stream_process()
+  end
+
+  defp drain_send_completions(ctx, _stream, 0, _timeout_ms, state), do: {:ok, ctx, state}
+
+  defp drain_send_completions(ctx, stream, pending_sends, timeout_ms, state) do
     case Transport.receive_event(ctx, timeout_ms) do
       {:ok, {:stream_event, ^stream, :send_completed, _metadata}, ctx} ->
-        drain_send_completions(ctx, stream, pending_sends - 1, timeout_ms)
+        state =
+          stream_diagnostics_update(state, fn state ->
+            state
+            |> Map.update!(:send_completed, &(&1 + 1))
+            |> Map.update!(:send_completions_pending, &max(&1 - 1, 0))
+          end)
+
+        drain_send_completions(ctx, stream, pending_sends - 1, timeout_ms, state)
 
       {:ok, {:stream_event, ^stream, :send_cancelled, metadata}, ctx} ->
-        {:error, {:stream_send_cancelled, stream_id(stream), metadata}, ctx}
+        state =
+          stream_diagnostics_update(state, fn state ->
+            state
+            |> Map.update!(:send_cancelled, &(&1 + 1))
+            |> Map.update!(:send_completions_pending, &max(&1 - 1, 0))
+            |> Map.put(:stop_reason, "send_cancelled")
+            |> Map.put(:error_reason, inspect(metadata))
+          end)
+
+        {:error, {:stream_send_cancelled, stream_id(stream), metadata}, ctx, state}
 
       {:ok, _event, ctx} ->
-        drain_send_completions(ctx, stream, pending_sends, timeout_ms)
+        state =
+          stream_diagnostics_update(state, fn state ->
+            Map.update!(state, :ignored_events, &(&1 + 1))
+          end)
+
+        drain_send_completions(ctx, stream, pending_sends, timeout_ms, state)
 
       {:unknown, _message, ctx} ->
-        drain_send_completions(ctx, stream, pending_sends, timeout_ms)
+        state =
+          stream_diagnostics_update(state, fn state ->
+            Map.update!(state, :unknown_events, &(&1 + 1))
+          end)
+
+        drain_send_completions(ctx, stream, pending_sends, timeout_ms, state)
 
       {:timeout, ctx} ->
-        {:error, "moqx-listener timed out waiting for stream send completions", ctx}
+        state =
+          stream_diagnostics_update(state, fn state ->
+            state
+            |> Map.put(:stop_reason, "send_completion_timeout")
+            |> Map.put(:error_reason, "timeout")
+          end)
+
+        {:error, "moqx-listener timed out waiting for stream send completions", ctx, state}
 
       {:error, reason, ctx} ->
-        {:error, reason, ctx}
+        state =
+          stream_diagnostics_update(state, fn state ->
+            state
+            |> Map.update!(:receive_errors, &(&1 + 1))
+            |> Map.put(:stop_reason, "receive_error")
+            |> Map.put(:error_reason, reason_name(reason))
+          end)
+
+        {:error, reason, ctx, state}
     end
   end
 
@@ -680,6 +843,11 @@ defmodule MOQX.TransportBench.MoqxListener do
 
   defp stream_id(stream), do: stream.info.stream_id
 
+  defp stream_direction_name(%{info: %{direction: direction}}) when is_atom(direction),
+    do: Atom.to_string(direction)
+
+  defp stream_direction_name(_stream), do: nil
+
   defp stop_datagram_receive(state, reason) do
     state
     |> Map.put(:stop_reason, reason)
@@ -754,6 +922,73 @@ defmodule MOQX.TransportBench.MoqxListener do
       |> Kernel.<>("\n"),
       [:append]
     )
+  end
+
+  defp write_stream_diagnostics(%{diagnostics_output: nil}, _state), do: :ok
+  defp write_stream_diagnostics(_config, nil), do: :ok
+
+  defp write_stream_diagnostics(config, state) do
+    path = config.diagnostics_output
+    dir = Path.dirname(path)
+    if dir != ".", do: File.mkdir_p!(dir)
+
+    File.write!(
+      path,
+      state
+      |> stream_diagnostics_record(config)
+      |> encode_json()
+      |> IO.iodata_to_binary()
+      |> Kernel.<>("\n"),
+      [:append]
+    )
+  end
+
+  defp stream_diagnostics_record(state, config) do
+    %{
+      "schema_version" => @listener_diagnostics_schema_version,
+      "record_type" => "stream_listener_run",
+      "workload" => @stream_pressure_workload,
+      "alpn" => config.alpn,
+      "summary" =>
+        compact(%{
+          "expected_streams" => state.stream_count_expected,
+          "streams_accepted" => state.streams_accepted,
+          "streams_completed" => state.streams_completed,
+          "streams_failed" => state.streams_failed,
+          "bytes_expected" => state.bytes_expected,
+          "bytes_received" => state.bytes_received,
+          "stream_receive_events" => state.stream_receive_events,
+          "echo_send_attempted" => state.echo_send_attempted,
+          "echo_send_accepted" => state.echo_send_accepted,
+          "send_completed" => state.send_completed,
+          "send_cancelled" => state.send_cancelled,
+          "send_completions_pending" => state.send_completions_pending,
+          "ignored_events" => state.ignored_events,
+          "unknown_events" => state.unknown_events,
+          "receive_errors" => state.receive_errors,
+          "stop_reason" => state.stop_reason || "streams_completed",
+          "error_reason" => state.error_reason,
+          "duration_ms" => elapsed_ms(state.started_at)
+        }),
+      "streams" => stream_diagnostics_list(state.streams),
+      "process" => process_diagnostics(state.process)
+    }
+  end
+
+  defp stream_diagnostics_list(streams) do
+    streams
+    |> Map.values()
+    |> Enum.sort_by(& &1.index)
+    |> Enum.map(fn stream ->
+      %{
+        "index" => stream.index,
+        "stream_id" => stream_id(stream.stream),
+        "direction" => stream_direction_name(stream.stream),
+        "bytes_expected" => stream.expected_bytes,
+        "bytes_received" => stream.received,
+        "completed" => stream.received >= stream.expected_bytes
+      }
+    end)
   end
 
   defp datagram_diagnostics_record(state, config) do
@@ -870,7 +1105,10 @@ defmodule MOQX.TransportBench.MoqxListener do
     }
   end
 
-  defp sample_datagram_process(state) do
+  defp sample_stream_process(state), do: sample_process(state)
+  defp sample_datagram_process(state), do: sample_process(state)
+
+  defp sample_process(state) do
     message_queue_len = message_queue_len()
     sample_index = Map.get(state.process, "message_queue_len_samples", 0) + 1
 
@@ -929,6 +1167,12 @@ defmodule MOQX.TransportBench.MoqxListener do
       "mean" => total_us / count / 1000,
       "max" => max_us / 1000
     }
+  end
+
+  defp compact(map) do
+    map
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
   end
 
   defp reason_name(reason) when is_atom(reason), do: Atom.to_string(reason)

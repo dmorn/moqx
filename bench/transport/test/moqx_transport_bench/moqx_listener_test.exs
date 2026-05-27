@@ -200,6 +200,125 @@ defmodule MOQX.TransportBench.MoqxListenerTest do
     assert record["summary"]["datagram_observation_timeout_ms"] == 1000
   end
 
+  test "stream pressure writes listener-side diagnostics" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "stream-listener-diagnostics.jsonl")
+    certfile = Path.join(dir, "server.pem")
+    keyfile = Path.join(dir, "server-key.pem")
+    File.write!(certfile, "cert")
+    File.write!(keyfile, "key")
+
+    Process.put({__MODULE__.StreamTransport, :accepted}, 0)
+
+    capture_io(fn ->
+      MoqxListener.main(
+        [
+          "--certfile",
+          certfile,
+          "--keyfile",
+          keyfile,
+          "--workload",
+          "stream_pressure",
+          "--stream-count",
+          "2",
+          "--payload-size",
+          "32",
+          "--payload-count",
+          "2",
+          "--timeout-seconds",
+          "1",
+          "--diagnostics-output",
+          output_path
+        ],
+        script: "test moqx-listener",
+        transport_backend: __MODULE__.StreamTransport,
+        ensure_quicer?: false
+      )
+    end)
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert record["schema_version"] == "moqx-listener-diagnostics-v1"
+    assert record["record_type"] == "stream_listener_run"
+    assert record["workload"] == "stream_pressure"
+
+    assert record["summary"]["expected_streams"] == 2
+    assert record["summary"]["streams_accepted"] == 2
+    assert record["summary"]["streams_completed"] == 2
+    assert record["summary"]["bytes_expected"] == 128
+    assert record["summary"]["bytes_received"] == 128
+    assert record["summary"]["stream_receive_events"] == 4
+    assert record["summary"]["echo_send_attempted"] == 4
+    assert record["summary"]["echo_send_accepted"] == 4
+    assert record["summary"]["send_completed"] == 4
+    assert record["summary"]["send_completions_pending"] == 0
+    assert record["summary"]["stop_reason"] == "streams_completed"
+    assert is_number(record["summary"]["duration_ms"])
+
+    assert [
+             %{"index" => 1, "bytes_received" => 64, "completed" => true},
+             %{"index" => 2, "bytes_received" => 64, "completed" => true}
+           ] = record["streams"]
+
+    assert record["process"]["message_queue_len_samples"] > 0
+
+    assert [%{"sample_index" => 1, "message_queue_len" => first_sample} | _] =
+             record["process"]["message_queue_len_sample_points"]
+
+    assert is_integer(first_sample)
+  end
+
+  test "stream pressure separates echo-send attempts from accepted sends" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "stream-listener-diagnostics.jsonl")
+    certfile = Path.join(dir, "server.pem")
+    keyfile = Path.join(dir, "server-key.pem")
+    File.write!(certfile, "cert")
+    File.write!(keyfile, "key")
+
+    Process.put({__MODULE__.StreamTransport, :accepted}, 0)
+    Process.put({__MODULE__.StreamTransport, :fail_send_after}, 0)
+
+    stderr =
+      capture_io(:stderr, fn ->
+        assert {:error, :send_failed} =
+                 MoqxListener.main(
+                   [
+                     "--certfile",
+                     certfile,
+                     "--keyfile",
+                     keyfile,
+                     "--workload",
+                     "stream_pressure",
+                     "--stream-count",
+                     "1",
+                     "--payload-size",
+                     "32",
+                     "--payload-count",
+                     "1",
+                     "--timeout-seconds",
+                     "1",
+                     "--diagnostics-output",
+                     output_path
+                   ],
+                   script: "test moqx-listener",
+                   transport_backend: __MODULE__.StreamTransport,
+                   ensure_quicer?: false,
+                   halt_on_error?: false
+                 )
+      end)
+
+    assert stderr =~ ":send_failed"
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert record["summary"]["echo_send_attempted"] == 1
+    assert record["summary"]["echo_send_accepted"] == 0
+    assert record["summary"]["send_completed"] == 0
+    assert record["summary"]["send_completions_pending"] == 0
+    assert record["summary"]["streams_failed"] == 1
+    assert record["summary"]["stop_reason"] == "stream_error"
+    assert record["summary"]["error_reason"] == "send_failed"
+  end
+
   defp tmp_dir do
     path =
       Path.join(
@@ -274,6 +393,118 @@ defmodule MOQX.TransportBench.MoqxListenerTest do
 
       :ok
     end
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection(:connection, _error_code), do: :ok
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process(_handle, _pid), do: :ok
+
+    @impl true
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+  end
+
+  defmodule StreamTransport do
+    @behaviour MOQX.Transport
+
+    alias MOQX.Transport.StreamInfo
+
+    @impl true
+    def listen(_port, _opts), do: {:ok, :listener}
+
+    @impl true
+    def local_address(:listener), do: {:ok, {{127, 0, 0, 1}, 4433}}
+    def local_address(:connection), do: {:ok, {{127, 0, 0, 1}, 4433}}
+
+    @impl true
+    def close_listener(:listener, _timeout), do: :ok
+
+    @impl true
+    def accept(:listener, _opts, _timeout) do
+      Process.send_after(
+        self(),
+        {:moqx_transport, {:connection_event, :connection, :closed, %{}}},
+        20
+      )
+
+      {:ok, :connection}
+    end
+
+    @impl true
+    def handshake(:connection, _timeout), do: {:ok, :connection}
+
+    @impl true
+    def connect(_host, _port, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def open_stream(_connection, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept_stream(:connection, _opts, _timeout) do
+      accepted = Process.get({__MODULE__, :accepted}, 0) + 1
+      Process.put({__MODULE__, :accepted}, accepted)
+      {:ok, {:stream, accepted}}
+    end
+
+    @impl true
+    def stream_info({:stream, index}, :server, :peer) do
+      {:ok,
+       %StreamInfo{
+         stream_id: index,
+         direction: :bidirectional,
+         initiator: :peer,
+         initiator_role: :client,
+         local_role: :server,
+         send_side?: true,
+         receive_side?: true
+       }}
+    end
+
+    @impl true
+    def send_stream(stream, _data, _opts) do
+      attempts = Process.get({__MODULE__, :send_attempts}, 0)
+      Process.put({__MODULE__, :send_attempts}, attempts + 1)
+
+      case Process.get({__MODULE__, :fail_send_after}) do
+        fail_after when is_integer(fail_after) and attempts >= fail_after ->
+          {:error, :send_failed}
+
+        _other ->
+          send(self(), {:moqx_transport, {:stream_event, stream, :send_completed, %{}}})
+          :ok
+      end
+    end
+
+    @impl true
+    def recv_stream({:stream, index}, byte_count) do
+      key = {__MODULE__, :received, index}
+      received = Process.get(key, 0)
+
+      if received < 64 do
+        Process.put(key, received + byte_count)
+        {:ok, :binary.copy(<<index>>, byte_count)}
+      else
+        {:error, :peer_send_shutdown}
+      end
+    end
+
+    @impl true
+    def send_datagram(_connection, _data), do: {:error, :unsupported}
 
     @impl true
     def finish_sending(_stream), do: :ok

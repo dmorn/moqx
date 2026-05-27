@@ -17,6 +17,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   @mixed_moqt_shaped_workload "mixed_moqt_shaped"
   @stream_send_window 16
   @mixed_completion_drain_limit 1024
+  @message_queue_sample_prefix_count 16
+  @message_queue_sample_stride 1_024
   @reference_client_topology "reference-client-to-reference-server"
   @reference_client_moqx_listener_topology "reference-client-to-moqx-listener"
   @moqx_client_topology "moqx-client-to-reference-server"
@@ -651,7 +653,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     compact(%{
       "message_queue_len" => current,
       "message_queue_len_peak" => peak,
-      "message_queue_len_samples" => Map.get(process_samples, "message_queue_len_samples")
+      "message_queue_len_samples" => Map.get(process_samples, "message_queue_len_samples"),
+      "message_queue_len_sample_points" =>
+        Map.get(process_samples, "message_queue_len_sample_points")
     })
   end
 
@@ -666,19 +670,45 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp sample_process_diagnostics(%{process: process} = state) do
-    message_queue_len = message_queue_len()
-
-    process =
-      process
-      |> Map.put("message_queue_len", message_queue_len)
-      |> Map.update("message_queue_len_peak", message_queue_len, fn
-        nil -> message_queue_len
-        peak -> max(peak, message_queue_len || 0)
-      end)
-      |> Map.update("message_queue_len_samples", 1, &(&1 + 1))
-
-    %{state | process: process}
+    %{state | process: sample_process_diagnostics(process)}
   end
+
+  defp sample_process_diagnostics(process) when is_map(process) do
+    message_queue_len = message_queue_len()
+    sample_index = Map.get(process, "message_queue_len_samples", 0) + 1
+
+    process
+    |> Map.put("message_queue_len", message_queue_len)
+    |> Map.update("message_queue_len_peak", message_queue_len, fn
+      nil -> message_queue_len
+      peak -> max(peak, message_queue_len || 0)
+    end)
+    |> Map.put("message_queue_len_samples", sample_index)
+    |> maybe_append_message_queue_sample(sample_index, message_queue_len)
+  end
+
+  defp maybe_append_message_queue_sample(process, sample_index, message_queue_len) do
+    if keep_message_queue_sample?(sample_index) do
+      point =
+        compact(%{
+          "sample_index" => sample_index,
+          "elapsed_ms" => sample_elapsed_ms(process),
+          "message_queue_len" => message_queue_len
+        })
+
+      Map.update(process, "message_queue_len_sample_points", [point], &(&1 ++ [point]))
+    else
+      process
+    end
+  end
+
+  defp keep_message_queue_sample?(sample_index) do
+    sample_index <= @message_queue_sample_prefix_count or
+      rem(sample_index, @message_queue_sample_stride) == 0
+  end
+
+  defp sample_elapsed_ms(%{"started_at_us" => started_at}), do: elapsed_ms(started_at)
+  defp sample_elapsed_ms(_process), do: nil
 
   defp connect_opts(config) do
     [
@@ -2309,6 +2339,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
            bytes_received: 0,
            first_byte_latency_ms: nil,
            completed_at: nil,
+           first_send_accepted_at: nil,
+           last_send_accepted_at: nil,
+           first_echo_received_at: nil,
+           last_echo_received_at: nil,
            payloads_scheduled: 0,
            payloads_completed: 0,
            send_inflight: 0,
@@ -2319,34 +2353,88 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          }}
       end)
 
+    diagnostics = initial_stream_pressure_runtime(first_byte_origin)
     {states, ctx} = prime_active_echo_sends(ctx, states, payload, config)
+    diagnostics = sample_stream_pressure_runtime(diagnostics)
     deadline_us = monotonic_us() + client_timeout_ms(config) * 1000
-    collect_active_echo_events(ctx, states, payload, config, first_byte_origin, deadline_us)
+
+    collect_active_echo_events(
+      ctx,
+      states,
+      diagnostics,
+      payload,
+      config,
+      first_byte_origin,
+      deadline_us
+    )
   end
 
-  defp collect_active_echo_events(ctx, states, payload, config, first_byte_origin, deadline_us) do
+  defp initial_stream_pressure_runtime(started_at) do
+    %{
+      process: %{"started_at_us" => started_at},
+      events_drained: 0,
+      stream_data_events: 0,
+      send_completed_events: 0,
+      send_cancelled_events: 0,
+      peer_finished_events: 0,
+      stream_closed_events: 0,
+      ignored_events: 0,
+      unknown_events: 0,
+      receive_errors: 0,
+      timeouts: 0,
+      timeout_phase: nil
+    }
+  end
+
+  defp sample_stream_pressure_runtime(diagnostics) do
+    Map.update!(diagnostics, :process, &sample_process_diagnostics/1)
+  end
+
+  defp collect_active_echo_events(
+         ctx,
+         states,
+         diagnostics,
+         payload,
+         config,
+         first_byte_origin,
+         deadline_us
+       ) do
     cond do
       all_streams_complete?(states) ->
-        active_echo_result(ctx, states, config)
+        active_echo_result(ctx, states, config, nil, diagnostics)
 
       failure = first_stream_failure(states) ->
-        active_echo_result(ctx, states, config, failure)
+        active_echo_result(ctx, states, config, failure, diagnostics)
 
       monotonic_us() >= deadline_us ->
         failure = timeout_stream_failure(states, config)
-        active_echo_result(ctx, mark_timeout_failure(states, failure), config, failure)
+        diagnostics = timeout_stream_pressure_runtime(diagnostics, "echo_receive")
+
+        active_echo_result(
+          ctx,
+          mark_timeout_failure(states, failure),
+          config,
+          failure,
+          diagnostics
+        )
 
       true ->
         timeout_ms = max(div(deadline_us - monotonic_us(), 1000), 0)
 
         case Transport.receive_event(ctx, timeout_ms) do
           {:ok, event, ctx} ->
+            diagnostics =
+              diagnostics
+              |> record_stream_pressure_event(event)
+              |> sample_stream_pressure_runtime()
+
             {states, ctx} =
               handle_active_echo_event(ctx, states, event, payload, config, first_byte_origin)
 
             collect_active_echo_events(
               ctx,
               states,
+              diagnostics,
               payload,
               config,
               first_byte_origin,
@@ -2354,9 +2442,15 @@ defmodule MOQX.TransportBench.ReferenceComparison do
             )
 
           {:unknown, _message, ctx} ->
+            diagnostics =
+              diagnostics
+              |> Map.update!(:unknown_events, &(&1 + 1))
+              |> sample_stream_pressure_runtime()
+
             collect_active_echo_events(
               ctx,
               states,
+              diagnostics,
               payload,
               config,
               first_byte_origin,
@@ -2365,13 +2459,86 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
           {:error, reason, ctx} ->
             failure = receive_event_failure(states, config, reason)
-            active_echo_result(ctx, mark_timeout_failure(states, failure), config, failure)
+
+            diagnostics =
+              diagnostics
+              |> Map.update!(:receive_errors, &(&1 + 1))
+              |> sample_stream_pressure_runtime()
+
+            active_echo_result(
+              ctx,
+              mark_timeout_failure(states, failure),
+              config,
+              failure,
+              diagnostics
+            )
 
           {:timeout, ctx} ->
             failure = timeout_stream_failure(states, config)
-            active_echo_result(ctx, mark_timeout_failure(states, failure), config, failure)
+
+            diagnostics = timeout_stream_pressure_runtime(diagnostics, "echo_receive")
+
+            active_echo_result(
+              ctx,
+              mark_timeout_failure(states, failure),
+              config,
+              failure,
+              diagnostics
+            )
         end
     end
+  end
+
+  defp record_stream_pressure_event(diagnostics, {:stream_data, _stream, _data, _metadata}) do
+    diagnostics
+    |> Map.update!(:events_drained, &(&1 + 1))
+    |> Map.update!(:stream_data_events, &(&1 + 1))
+  end
+
+  defp record_stream_pressure_event(
+         diagnostics,
+         {:stream_event, _stream, :send_completed, _metadata}
+       ) do
+    diagnostics
+    |> Map.update!(:events_drained, &(&1 + 1))
+    |> Map.update!(:send_completed_events, &(&1 + 1))
+  end
+
+  defp record_stream_pressure_event(
+         diagnostics,
+         {:stream_event, _stream, :send_cancelled, _metadata}
+       ) do
+    diagnostics
+    |> Map.update!(:events_drained, &(&1 + 1))
+    |> Map.update!(:send_cancelled_events, &(&1 + 1))
+  end
+
+  defp record_stream_pressure_event(
+         diagnostics,
+         {:stream_event, _stream, :peer_finished_sending, _metadata}
+       ) do
+    diagnostics
+    |> Map.update!(:events_drained, &(&1 + 1))
+    |> Map.update!(:peer_finished_events, &(&1 + 1))
+  end
+
+  defp record_stream_pressure_event(diagnostics, {:stream_event, _stream, :closed, _metadata}) do
+    diagnostics
+    |> Map.update!(:events_drained, &(&1 + 1))
+    |> Map.update!(:stream_closed_events, &(&1 + 1))
+  end
+
+  defp record_stream_pressure_event(diagnostics, _event) do
+    diagnostics
+    |> Map.update!(:events_drained, &(&1 + 1))
+    |> Map.update!(:ignored_events, &(&1 + 1))
+  end
+
+  defp timeout_stream_pressure_runtime(diagnostics, phase) do
+    diagnostics
+    |> Map.update!(:timeouts, &(&1 + 1))
+    |> Map.put(:timeout_phase, phase)
+    |> sample_stream_pressure_runtime()
   end
 
   defp prime_active_echo_sends(ctx, states, payload, config) do
@@ -2399,6 +2566,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
         case Transport.send_stream(ctx, state.stream_state.stream, payload, opts) do
           {:ok, _send, ctx} ->
+            accepted_at = monotonic_us()
+
             stream_state = %{
               state.stream_state
               | bytes_sent: state.stream_state.bytes_sent + byte_size(payload),
@@ -2409,7 +2578,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
               state
               | stream_state: stream_state,
                 payloads_scheduled: payload_index,
-                send_inflight: state.send_inflight + 1
+                send_inflight: state.send_inflight + 1,
+                first_send_accepted_at: state.first_send_accepted_at || accepted_at,
+                last_send_accepted_at: accepted_at
             }
 
             record_stream_phase(config, stream_state, "send_window_open", %{
@@ -2535,16 +2706,19 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp record_active_stream_data(state, byte_count, config, first_byte_origin) do
+    received_at = monotonic_us()
     received = state.bytes_received + byte_count
     first_byte_latency_ms = state.first_byte_latency_ms || elapsed_ms(first_byte_origin)
-    completed_at = if received >= expected_stream_bytes(config), do: monotonic_us()
+    completed_at = if received >= expected_stream_bytes(config), do: received_at
     phase = if completed_at, do: "echo_complete", else: "receiving_echo"
 
     state = %{
       state
       | bytes_received: received,
         first_byte_latency_ms: first_byte_latency_ms,
-        completed_at: completed_at
+        completed_at: completed_at,
+        first_echo_received_at: state.first_echo_received_at || received_at,
+        last_echo_received_at: received_at
     }
 
     record_stream_phase(config, state.stream_state, phase, %{
@@ -2586,7 +2760,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     }
   end
 
-  defp active_echo_result(ctx, states, config, failure \\ nil) do
+  defp active_echo_result(ctx, states, config, failure, runtime_diagnostics) do
     diagnostics =
       states
       |> Map.values()
@@ -2598,6 +2772,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       first_byte_latency_ms: first_observed_latency(states, :first_byte_latency_ms),
       stream_latencies_ms: active_stream_latencies(states),
       stream_diagnostics: diagnostics,
+      runtime_diagnostics: runtime_diagnostics,
+      active_send_duration_ms: active_send_duration_ms(states),
+      active_echo_receive_duration_ms: active_echo_receive_duration_ms(states),
       failure: failure
     }
 
@@ -2624,11 +2801,47 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         "payloads_completed" => state.payloads_completed,
         "send_inflight" => state.send_inflight,
         "send_completions_pending" => state.send_inflight,
+        "active_send_duration_ms" =>
+          duration_ms_between(state.first_send_accepted_at, state.last_send_accepted_at),
+        "active_echo_receive_duration_ms" =>
+          duration_ms_between(state.first_echo_received_at, state.last_echo_received_at),
         "peer_finished" => state.peer_finished?,
         "error" => state.failure && state.failure["reason"]
       }
     )
   end
+
+  defp active_send_duration_ms(states) do
+    states
+    |> Map.values()
+    |> duration_ms_between_values(:first_send_accepted_at, :last_send_accepted_at)
+  end
+
+  defp active_echo_receive_duration_ms(states) do
+    states
+    |> Map.values()
+    |> duration_ms_between_values(:first_echo_received_at, :last_echo_received_at)
+  end
+
+  defp duration_ms_between_values(values, first_key, last_key) do
+    first =
+      values
+      |> Enum.map(&Map.get(&1, first_key))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.min(fn -> nil end)
+
+    last =
+      values
+      |> Enum.map(&Map.get(&1, last_key))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.max(fn -> nil end)
+
+    duration_ms_between(first, last)
+  end
+
+  defp duration_ms_between(nil, _last), do: nil
+  defp duration_ms_between(_first, nil), do: nil
+  defp duration_ms_between(first, last), do: max(last - first, 0) / 1000
 
   defp active_stream_latencies(states) do
     states
@@ -2836,6 +3049,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         end)
       end)
 
+    runtime = Map.get(result, :runtime_diagnostics, %{})
+
     summary =
       %{
         "streams_opened" => length(streams),
@@ -2843,9 +3058,32 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         "streams_failed" => count_phase(stream_diagnostics, "echo_failed"),
         "payloads_accepted" =>
           stream_diagnostics |> Enum.map(&(&1["payloads_accepted"] || 0)) |> Enum.sum(),
+        "payloads_completed" =>
+          stream_diagnostics |> Enum.map(&(&1["payloads_completed"] || 0)) |> Enum.sum(),
+        "send_completions" =>
+          stream_diagnostics |> Enum.map(&(&1["send_completed"] || 0)) |> Enum.sum(),
+        "send_cancellations" =>
+          stream_diagnostics |> Enum.map(&(&1["send_cancelled"] || 0)) |> Enum.sum(),
+        "send_completions_pending" =>
+          stream_diagnostics
+          |> Enum.map(&(&1["send_completions_pending"] || 0))
+          |> Enum.sum(),
         "bytes_sent" => result.bytes_sent,
         "bytes_expected" => expected_stream_bytes(config) * length(streams),
         "bytes_received" => result.bytes_received,
+        "active_send_duration_ms" => Map.get(result, :active_send_duration_ms),
+        "active_echo_receive_duration_ms" => Map.get(result, :active_echo_receive_duration_ms),
+        "events_drained" => runtime[:events_drained],
+        "stream_data_events" => runtime[:stream_data_events],
+        "send_completed_events" => runtime[:send_completed_events],
+        "send_cancelled_events" => runtime[:send_cancelled_events],
+        "peer_finished_events" => runtime[:peer_finished_events],
+        "stream_closed_events" => runtime[:stream_closed_events],
+        "ignored_events" => runtime[:ignored_events],
+        "unknown_events" => runtime[:unknown_events],
+        "receive_errors" => runtime[:receive_errors],
+        "timeouts" => runtime[:timeouts],
+        "timeout_phase" => runtime[:timeout_phase],
         "application_duration_ms" => application_duration_ms,
         "failure" => result.failure
       }
@@ -2855,7 +3093,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "version" => "stream-pressure-diagnostics-v1",
       "summary" => summary,
       "streams" => stream_diagnostics,
-      "process" => process_diagnostics()
+      "process" => process_diagnostics(Map.get(runtime, :process, %{}))
     }
   end
 
@@ -2866,20 +3104,39 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp expected_stream_bytes(config), do: config.payload_size * config.payload_count
 
   defp stream_diagnostic(stream_state, expected_bytes, received, phase, extra \\ %{}) do
-    %{
-      "index" => stream_state.index,
-      "stream_id" => stream_id(stream_state.stream),
-      "direction" => stream_direction_name(stream_state.stream),
-      "phase" => phase,
-      "payloads_accepted" => stream_state.payloads_accepted,
-      "bytes_sent" => stream_state.bytes_sent,
-      "bytes_expected" => expected_bytes,
-      "bytes_received" => received,
-      "send_completions_pending" => stream_state.payloads_accepted
-    }
-    |> Map.merge(extra)
-    |> compact()
+    diagnostic =
+      %{
+        "index" => stream_state.index,
+        "stream_id" => stream_id(stream_state.stream),
+        "direction" => stream_direction_name(stream_state.stream),
+        "phase" => phase,
+        "payloads_accepted" => stream_state.payloads_accepted,
+        "bytes_sent" => stream_state.bytes_sent,
+        "bytes_expected" => expected_bytes,
+        "bytes_received" => received,
+        "send_completions_pending" => stream_state.payloads_accepted
+      }
+      |> Map.merge(extra)
+      |> compact()
+
+    Map.put(diagnostic, "completion_status", stream_completion_status(diagnostic))
   end
+
+  defp stream_completion_status(%{"error" => error}) when not is_nil(error), do: "failed"
+
+  defp stream_completion_status(%{"send_cancelled" => cancelled})
+       when is_integer(cancelled) and cancelled > 0,
+       do: "cancelled"
+
+  defp stream_completion_status(%{"send_completions_pending" => pending})
+       when is_integer(pending) and pending > 0,
+       do: "pending"
+
+  defp stream_completion_status(%{"phase" => phase})
+       when phase in ["echo_complete", "send_only_complete"],
+       do: "completed"
+
+  defp stream_completion_status(_diagnostic), do: "in_progress"
 
   defp stream_id(%{info: %{stream_id: stream_id}}), do: stream_id
 
