@@ -249,3 +249,13 @@ first.
   quicprobe server; that points toward server pacing/backpressure or echo
   timing affecting the client generator, rather than simple listener receive
   loss.
+- 2026-05-27: #12 is closed as the reference QUIC benchmark script/tooling
+  contract. The remaining work from #12 is deliberately part of this issue:
+  richer CPU/scheduler/backpressure observability, stream-pressure
+  optimization, DATAGRAM receive/drain cadence, mixed workload real-path reruns
+  after the event-pump fix, and deciding whether `moqx-listener` should become
+  a performance peer or remain a correctness peer. #31 also closed the
+  reference-client offered-rate ambiguity: invalid high-rate
+  reference-client-to-MOQX-listener DATAGRAM records above the clean range are
+  caused by quic-go `SendDatagram` call cost in the reference client consuming
+  the pacing budget, not by MOQX listener receive loss or mailbox growth.

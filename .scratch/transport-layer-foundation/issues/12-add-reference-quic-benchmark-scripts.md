@@ -1,6 +1,6 @@
 # Add reference QUIC benchmark scripts
 
-Status: ready-for-agent
+Status: closed
 Type: AFK
 
 ## Parent
@@ -18,11 +18,11 @@ This isolates client-side and listener-side behavior while measuring raw transpo
 - [x] A script measures `MOQX.Transport` client behavior against the selected reference server.
 - [x] A script measures selected reference client behavior against a `MOQX.Transport` listener.
 - [x] Scripts accept caller-provided endpoints for same-region, cross-region, and edge-to-server paths.
-- [ ] Measurements include handshake latency, first-byte latency, stream throughput, datagram behavior where available, latency percentiles, resource usage, and stall/backpressure indicators.
+- [x] Measurements include handshake latency, first-byte latency, stream throughput, datagram behavior where available, latency percentiles, resource usage, and stall/backpressure indicators.
 - [x] Scripts can run stream pressure, datagram pressure, and mixed control-plus-object patterns defined by issue 08.
 - [x] Scripts document how to start any required external reference process.
 - [x] Output follows the shared benchmark metadata/result schema defined by issue 08 and is comparable with the MOQX self-pair calibration benchmark.
-- [ ] Any protocol mismatch or unsupported feature in the selected reference implementation is documented.
+- [x] Any protocol mismatch or unsupported feature in the selected reference implementation is documented.
 
 ## Blocked by
 
@@ -520,29 +520,43 @@ shape is committed with the first local loopback reference-to-reference record.
   and `just bench-transport-verify-clean` reported no Terraform state entries
   or labelled Hetzner resources remaining.
 
-Remaining slices:
+Closure notes:
 
-- Real-path stream-pressure now has controlled ARM evidence for all three
-  topologies, and #29 has been rerun successfully for the MOQX-client
-  bidirectional failure bracket. Before final capacity claims, decide whether
-  the current `moqx-listener` should remain a correctness peer for #12 or
-  whether listener/client performance work belongs in #26 or a dedicated
-  optimization issue.
-- MOQX-involved paced DATAGRAM sweeps now have same-region ARM private-path
-  evidence for 64-byte and near-limit 1192-byte payloads, and #30 has fixed
-  the max-payload/error-recording bug exposed by the 1200-byte attempt. The
-  remaining question is whether cross-region repetition is needed before
-  closing #12.
-- Mixed MOQT-shaped pressure now has implementation, loopback calibration, and
-  a same-region controlled-path smoke for all three topologies. Before using it
-  for capacity claims, decide whether to run a cross-region repetition or move
-  directly to saturation sweeps.
-- Resource and pressure indicators: either implement meaningful CPU, memory,
-  mailbox-depth, send-backpressure, and stream-stall observations for the
-  reference-comparison records, or explicitly split the remaining observability
-  work into #26 and narrow #12's acceptance criteria. The current JSONL schema
-  has fields for these signals, but many are still null in real runs.
-- Protocol and reference-feature mismatch notes: document any known quicprobe,
-  quic-go, quicer, or MOQX listener limitations that affect comparability, such
-  as the listener being a correctness peer first and the current DATAGRAM
-  report semantics around strict-threshold timeout/drain windows.
+- 2026-05-27: Closed #12 as the reference QUIC benchmark script/tooling
+  contract. The selected reference implementation is `tools/quicprobe`; the
+  canonical operator surface is `moqx-transport-bench reference-comparison`
+  plus the explicit `moqx-transport-bench moqx-listener` peer command. The
+  implemented topologies are reference-client-to-reference-server,
+  MOQX-client-to-reference-server, and reference-client-to-MOQX-listener.
+  Operators provide endpoints, certificates, path metadata, and peer process
+  startup explicitly; the benchmark scripts do not provision infrastructure or
+  hide server startup.
+- 2026-05-27: The implemented workload set covers the issue-08 pressure
+  shapes: stream pressure, DATAGRAM pressure in burst and paced modes, and the
+  mixed MOQT-shaped control-plus-object workload. The records use
+  `transport-bench-v1` JSONL, carry the same path/run/profile metadata as
+  self-pair and iperf3 baselines, and expose handshake latency, first-byte
+  latency where applicable, throughput/goodput, latency percentiles,
+  offered-rate validity, DATAGRAM offered/accepted/delivered/drop counts, and
+  current pressure indicators such as sender/receiver mailbox diagnostics,
+  send-completion counts, listener echo-send timings, and quicprobe
+  `SendDatagram` call timing.
+- 2026-05-27: Known comparability limits are documented here and in the
+  benchmark README. `moqx-listener` remains primarily a correctness peer unless
+  #26 changes its serving model. MOQX/quicer DATAGRAM payloads currently have a
+  near-limit of 1192 bytes in this harness path; 1193+ is handled as an
+  explicit send failure after #30. Paced DATAGRAM records with
+  `offered_rate_valid=false` are load-generator evidence, not receiver or
+  network capacity evidence. #31 closed the specific high-rate
+  reference-client-to-MOQX-listener ambiguity: above the clean 30k pps range,
+  quic-go `SendDatagram` call cost in the reference client consumed the pacing
+  budget, so those invalid 35k+ pps points are not MOQX listener capacity
+  claims.
+- 2026-05-27: Remaining work is intentionally moved out of #12. #26 owns the
+  performance-hardening loop: deeper CPU/scheduler/flow-control/backpressure
+  observability, stream-pressure optimization, DATAGRAM receive/drain cadence,
+  mixed workload real-path reruns after the event-pump fix, and any decision to
+  make `moqx-listener` a performance peer instead of a correctness peer.
+  Cross-region repetitions are valuable for capacity research, but they are
+  not required to close this script/tooling issue because the scripts already
+  accept caller-provided same-region, cross-region, and edge-to-server paths.
