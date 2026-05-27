@@ -3283,9 +3283,12 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "send_datagram_call_slow_count" => number(measurement["send_datagram_call_slow_count"]),
       "send_datagram_call_slow_threshold_ms" =>
         number(measurement["send_datagram_call_slow_threshold_ms"]),
+      "send_datagram_call_total_ms" => number(measurement["send_datagram_call_total_ms"]),
       "send_datagram_call_p50_ms" => number(send_call["p50"]),
       "send_datagram_call_p95_ms" => number(send_call["p95"]),
       "send_datagram_call_p99_ms" => number(send_call["p99"]),
+      "send_datagram_call_p999_ms" => number(send_call["p999"]),
+      "send_datagram_call_max_ms" => number(send_call["max"]),
       "datagram_late_count" => number(measurement["send_pacing_late_count"]),
       "stream_count" => stream_count_metric(datagram?, measurement, ctx.config),
       "payload_size_bytes" =>

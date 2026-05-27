@@ -110,6 +110,7 @@ type clientRunResult struct {
 	SendPacingLagMS                 map[string]float64 `json:"send_pacing_lag_ms,omitempty"`
 	SendDatagramCallSlowCount       int                `json:"send_datagram_call_slow_count,omitempty"`
 	SendDatagramCallSlowThresholdMS float64            `json:"send_datagram_call_slow_threshold_ms,omitempty"`
+	SendDatagramCallTotalMS         float64            `json:"send_datagram_call_total_ms,omitempty"`
 	SendDatagramCallMS              map[string]float64 `json:"send_datagram_call_ms,omitempty"`
 	StreamScheduling                string             `json:"stream_scheduling,omitempty"`
 	StreamLatencyMS                 map[string]float64 `json:"stream_latency_ms"`
@@ -125,6 +126,7 @@ type datagramSendResult struct {
 	pacingLateCount   int
 	pacingLagMillis   []float64
 	sendCallSlowCount int
+	sendCallTotal     time.Duration
 	sendCallMillis    []float64
 }
 
@@ -846,6 +848,7 @@ func runDatagramPressureClient(
 		SendPacingLagMS:                 sendPacingLagSummary(sendResult),
 		SendDatagramCallSlowCount:       sendResult.sendCallSlowCount,
 		SendDatagramCallSlowThresholdMS: durationMillis(pacedSpinThreshold),
+		SendDatagramCallTotalMS:         durationMillis(sendResult.sendCallTotal),
 		SendDatagramCallMS:              sendDatagramCallSummary(sendResult),
 		DatagramLatencyMS:               latencySummary(receiveResult.latencies),
 	}, nil
@@ -926,6 +929,7 @@ func sendDatagramWithTiming(conn quic.Connection, payload []byte, result *datagr
 	duration := time.Since(startedAt)
 
 	result.sendCallMillis = append(result.sendCallMillis, durationMillis(duration))
+	result.sendCallTotal += duration
 	if duration > pacedSpinThreshold {
 		result.sendCallSlowCount++
 	}
@@ -966,7 +970,16 @@ func sendDatagramCallSummary(result datagramSendResult) map[string]float64 {
 		return nil
 	}
 
-	return latencySummary(result.sendCallMillis)
+	sorted := append([]float64(nil), result.sendCallMillis...)
+	sort.Float64s(sorted)
+
+	return map[string]float64{
+		"p50":  percentile(sorted, 0.50),
+		"p95":  percentile(sorted, 0.95),
+		"p99":  percentile(sorted, 0.99),
+		"p999": percentile(sorted, 0.999),
+		"max":  sorted[len(sorted)-1],
+	}
 }
 
 func waitUntil(ctx context.Context, deadline time.Time) error {

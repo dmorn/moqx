@@ -241,11 +241,12 @@ capacity evidence. Paced DATAGRAM records also expose active send duration,
 target send duration, scheduled send span, and send-loop pacing lag fields so
 operator reports can distinguish sender slippage from network or receiver
 loss. The reference-client JSON also records synchronous `SendDatagram` call
-duration percentiles and slow-call counts. In quic-go this isolates time spent
-copying/enqueueing into the library's bounded DATAGRAM send queue from time
-spent waiting for the absolute pacing deadline; high pacing lag with low
-`SendDatagram` call time points at timer/scheduler/send-loop slippage, while
-high call time points at quic-go DATAGRAM queue backpressure.
+duration percentiles, `p999`, max, total call time, and slow-call counts. In
+quic-go this isolates time spent copying/enqueueing into the library's bounded
+DATAGRAM send queue from time spent waiting for the absolute pacing deadline;
+high pacing lag with low `SendDatagram` call time points at
+timer/scheduler/send-loop slippage, while high call time points at quic-go
+DATAGRAM queue backpressure.
 
 When `moqx-listener` serves `datagram_pressure`, it bounds the receiver loop by
 both expected count and post-first-datagram idle time. This keeps lossy steps

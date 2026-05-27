@@ -143,3 +143,10 @@ None.
   client timer/scheduler/send-loop slippage versus rare `SendDatagram` stalls
   hidden above p99; the next instrumentation should add send-call max, p999,
   and total time before declaring #31 closed.
+- 2026-05-27: Added the remaining send-call diagnostics for the next run.
+  `tools/quicprobe` now emits `send_datagram_call_total_ms` plus `p999` and
+  `max` in `send_datagram_call_ms`; canonical `reference-comparison` metrics
+  carry those through as `send_datagram_call_total_ms`,
+  `send_datagram_call_p999_ms`, and `send_datagram_call_max_ms`. This should
+  expose rare stalls and total time spent inside quic-go `SendDatagram`, which
+  were the last ambiguity after the p99-only run.
