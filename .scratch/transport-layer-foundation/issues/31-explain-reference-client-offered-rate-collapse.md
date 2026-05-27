@@ -118,3 +118,28 @@ None.
   `reference-comparison` metrics now carry those values. The next remote run
   can distinguish high lag from quic-go send-queue backpressure versus high lag
   with low send-call time from scheduler/timer/send-loop slippage.
+- 2026-05-27: Ran the send-call split on ARM as
+  `20260527T101145Z-issue-31-sendcall` with build `12b25b4`, same `cax11`
+  `nbg1` private path, and destroyed the infrastructure after capture. Path
+  baseline was TCP 6.70 Gbps; 1192-byte UDP delivered 250 Mbps at 99.82% and
+  500 Mbps at 99.88%. Reference-to-reference stayed offered-rate valid at
+  35k and 40k pps across two repetitions, though 40k delivery was path-lossy
+  at about 93.4-94.9%.
+- 2026-05-27: Reference-client-to-MOQX-listener remained non-monotonic, which
+  confirms this is a client-side offered-rate issue rather than a clean
+  receiver capacity cliff. At 35k pps, repetitions offered 32.40k pps
+  (`ratio=0.926`) and 34.61k pps (`ratio=0.989`). At 40k pps, repetitions
+  offered 38.94k pps (`ratio=0.974`) and 30.19k pps (`ratio=0.755`). Delivery
+  of attempted datagrams stayed about 99.6-99.8%.
+- 2026-05-27: The new `SendDatagram` timing points away from steady quic-go
+  send-queue backpressure: across the MOQX-listener repetitions,
+  `send_datagram_call_p99_ms` stayed between 0.261 ms and 0.464 ms while
+  `send_pacing_lag_p99_ms` ranged from 49 ms to 970 ms. Listener diagnostics
+  also stayed clean: no echo errors, echo-send mean around 0.003 ms, echo-send
+  max at or below 4.887 ms, and mailbox peaks at or below 1,221. Listener
+  last-receive timestamps matched the stretched client send duration. Current
+  interpretation: not listener echo timing, not listener mailbox growth, and
+  not sustained quic-go `SendDatagram` blocking. The remaining ambiguity is
+  client timer/scheduler/send-loop slippage versus rare `SendDatagram` stalls
+  hidden above p99; the next instrumentation should add send-call max, p999,
+  and total time before declaring #31 closed.
