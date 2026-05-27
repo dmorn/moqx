@@ -11,6 +11,8 @@ defmodule MOQX.TransportBench.MoqxListener do
   @datagram_pressure_workload "datagram_pressure"
   @mixed_moqt_shaped_workload "mixed_moqt_shaped"
   @listener_diagnostics_schema_version "moqx-listener-diagnostics-v1"
+  @message_queue_sample_prefix_count 16
+  @message_queue_sample_stride 1_024
 
   def main(argv, opts \\ []) do
     script = Keyword.get(opts, :script, @default_script)
@@ -536,6 +538,10 @@ defmodule MOQX.TransportBench.MoqxListener do
       received_sequences: MapSet.new(),
       started_at: monotonic_us(),
       stop_reason: nil,
+      first_datagram_received_at: nil,
+      last_datagram_received_at: nil,
+      first_echo_attempted_at: nil,
+      last_echo_attempted_at: nil,
       datagrams_received: 0,
       datagrams_echo_attempted: 0,
       datagrams_echoed: 0,
@@ -546,6 +552,8 @@ defmodule MOQX.TransportBench.MoqxListener do
       receive_errors: 0,
       echo_errors: 0,
       echo_error_reason: nil,
+      echo_send_duration_us_total: 0,
+      echo_send_duration_us_max: 0,
       process: %{}
     }
     |> sample_datagram_process()
@@ -603,20 +611,32 @@ defmodule MOQX.TransportBench.MoqxListener do
   end
 
   defp echo_datagram(ctx, connection, config, state, payload) do
-    state = Map.update!(state, :datagrams_echo_attempted, &(&1 + 1))
+    echo_started_at = monotonic_us()
+
+    state =
+      state
+      |> Map.update!(:datagrams_echo_attempted, &(&1 + 1))
+      |> record_first_timestamp(:first_echo_attempted_at, echo_started_at)
+      |> Map.put(:last_echo_attempted_at, echo_started_at)
 
     case Transport.send_datagram(ctx, connection, payload) do
       {:ok, ctx} ->
+        echo_duration_us = monotonic_us() - echo_started_at
+
         state =
           state
+          |> record_echo_send_duration(echo_duration_us)
           |> Map.update!(:datagrams_echoed, &(&1 + 1))
           |> sample_datagram_process()
 
         receive_datagrams(ctx, connection, config, state)
 
       {:error, reason, ctx} ->
+        echo_duration_us = monotonic_us() - echo_started_at
+
         state =
           state
+          |> record_echo_send_duration(echo_duration_us)
           |> Map.update!(:echo_errors, &(&1 + 1))
           |> Map.put(:echo_error_reason, reason_name(reason))
           |> sample_datagram_process()
@@ -636,7 +656,13 @@ defmodule MOQX.TransportBench.MoqxListener do
   end
 
   defp record_datagram(state, payload) do
-    state = Map.update!(state, :datagrams_received, &(&1 + 1))
+    received_at = monotonic_us()
+
+    state =
+      state
+      |> Map.update!(:datagrams_received, &(&1 + 1))
+      |> record_first_timestamp(:first_datagram_received_at, received_at)
+      |> Map.put(:last_datagram_received_at, received_at)
 
     case DatagramPayload.sequence(payload) do
       {:ok, sequence} ->
@@ -658,6 +684,16 @@ defmodule MOQX.TransportBench.MoqxListener do
     state
     |> Map.put(:stop_reason, reason)
     |> sample_datagram_process()
+  end
+
+  defp record_first_timestamp(state, key, timestamp) do
+    if Map.get(state, key), do: state, else: Map.put(state, key, timestamp)
+  end
+
+  defp record_echo_send_duration(state, duration_us) do
+    state
+    |> Map.update!(:echo_send_duration_us_total, &(&1 + duration_us))
+    |> Map.update!(:echo_send_duration_us_max, &max(&1, duration_us))
   end
 
   defp datagram_observation_expired?(config, state) do
@@ -742,6 +778,20 @@ defmodule MOQX.TransportBench.MoqxListener do
         "receive_errors" => state.receive_errors,
         "echo_errors" => state.echo_errors,
         "echo_error_reason" => state.echo_error_reason,
+        "first_datagram_received_ms" =>
+          relative_elapsed_ms(state.first_datagram_received_at, state.started_at),
+        "last_datagram_received_ms" =>
+          relative_elapsed_ms(state.last_datagram_received_at, state.started_at),
+        "first_echo_attempted_ms" =>
+          relative_elapsed_ms(state.first_echo_attempted_at, state.started_at),
+        "last_echo_attempted_ms" =>
+          relative_elapsed_ms(state.last_echo_attempted_at, state.started_at),
+        "echo_send_duration_ms" =>
+          duration_summary_ms(
+            state.datagrams_echo_attempted,
+            state.echo_send_duration_us_total,
+            state.echo_send_duration_us_max
+          ),
         "stop_reason" => state.stop_reason,
         "duration_ms" => elapsed_ms(state.started_at),
         "datagram_idle_timeout_ms" => datagram_idle_timeout_ms(config),
@@ -815,12 +865,14 @@ defmodule MOQX.TransportBench.MoqxListener do
     %{
       "message_queue_len" => current,
       "message_queue_len_peak" => peak,
-      "message_queue_len_samples" => Map.get(samples, "message_queue_len_samples", 0)
+      "message_queue_len_samples" => Map.get(samples, "message_queue_len_samples", 0),
+      "message_queue_len_sample_points" => Map.get(samples, "message_queue_len_sample_points", [])
     }
   end
 
   defp sample_datagram_process(state) do
     message_queue_len = message_queue_len()
+    sample_index = Map.get(state.process, "message_queue_len_samples", 0) + 1
 
     process =
       state.process
@@ -828,9 +880,29 @@ defmodule MOQX.TransportBench.MoqxListener do
       |> Map.update("message_queue_len_peak", message_queue_len, fn peak ->
         max(peak, message_queue_len)
       end)
-      |> Map.update("message_queue_len_samples", 1, &(&1 + 1))
+      |> Map.put("message_queue_len_samples", sample_index)
+      |> maybe_append_message_queue_sample(state.started_at, sample_index, message_queue_len)
 
     %{state | process: process}
+  end
+
+  defp maybe_append_message_queue_sample(process, started_at, sample_index, message_queue_len) do
+    if keep_message_queue_sample?(sample_index) do
+      point = %{
+        "sample_index" => sample_index,
+        "elapsed_ms" => elapsed_ms(started_at),
+        "message_queue_len" => message_queue_len
+      }
+
+      Map.update(process, "message_queue_len_sample_points", [point], &(&1 ++ [point]))
+    else
+      process
+    end
+  end
+
+  defp keep_message_queue_sample?(sample_index) do
+    sample_index <= @message_queue_sample_prefix_count or
+      rem(sample_index, @message_queue_sample_stride) == 0
   end
 
   defp message_queue_len do
@@ -842,6 +914,22 @@ defmodule MOQX.TransportBench.MoqxListener do
 
   defp monotonic_us, do: System.monotonic_time(:microsecond)
   defp elapsed_ms(started_at), do: (monotonic_us() - started_at) / 1000
+
+  defp relative_elapsed_ms(nil, _started_at), do: nil
+  defp relative_elapsed_ms(timestamp, started_at), do: (timestamp - started_at) / 1000
+
+  defp duration_summary_ms(0, _total_us, _max_us) do
+    %{"count" => 0, "total" => 0.0, "mean" => nil, "max" => nil}
+  end
+
+  defp duration_summary_ms(count, total_us, max_us) do
+    %{
+      "count" => count,
+      "total" => total_us / 1000,
+      "mean" => total_us / count / 1000,
+      "max" => max_us / 1000
+    }
+  end
 
   defp reason_name(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp reason_name(reason), do: inspect(reason)

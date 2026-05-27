@@ -3235,6 +3235,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     %{
       "warmup_seconds" => 0,
       "step_seconds" => seconds(measurement["application_duration_ms"]),
+      "active_send_seconds" => seconds(measurement["send_duration_ms"]),
+      "target_send_seconds" => seconds(measurement["target_send_duration_ms"]),
+      "scheduled_send_span_seconds" => seconds(measurement["scheduled_send_span_ms"]),
+      "total_observation_seconds" => seconds(measurement["application_duration_ms"]),
       "timeout_seconds" => ctx.timeout_ms / 1000,
       "cooldown_seconds" => 0,
       "step_index" => 1,
@@ -3259,6 +3263,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp base_metrics(ctx, measurement, latencies, datagram?) do
+    pacing_lag = measurement["send_pacing_lag_ms"] || %{}
+
     %{
       "handshake_latency_ms" => number(measurement["handshake_latency_ms"]),
       "first_byte_latency_ms" => number(measurement["first_byte_latency_ms"]),
@@ -3266,7 +3272,14 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         number(measurement["offered_load_bps"]) || offered_load_bps(ctx.config),
       "goodput_bps" => number(measurement["goodput_bps"]),
       "send_rate_packets_per_second" => send_rate_packets_per_second(measurement),
-      "datagram_late_count" => nil,
+      "send_duration_ms" => number(measurement["send_duration_ms"]),
+      "target_send_duration_ms" => number(measurement["target_send_duration_ms"]),
+      "scheduled_send_span_ms" => number(measurement["scheduled_send_span_ms"]),
+      "send_pacing_late_count" => number(measurement["send_pacing_late_count"]),
+      "send_pacing_lag_p50_ms" => number(pacing_lag["p50"]),
+      "send_pacing_lag_p95_ms" => number(pacing_lag["p95"]),
+      "send_pacing_lag_p99_ms" => number(pacing_lag["p99"]),
+      "datagram_late_count" => number(measurement["send_pacing_late_count"]),
       "stream_count" => stream_count_metric(datagram?, measurement, ctx.config),
       "payload_size_bytes" =>
         number(measurement["payload_size_bytes"]) || workload_payload_size(ctx.config),

@@ -237,17 +237,23 @@ For paced steps, actual send rate is part of the measurement contract:
 `offered_rate_ratio` is actual send rate divided by target rate, and
 `offered_rate_valid=false` means the load generator missed
 `--offered-rate-tolerance` and the result is tool evidence, not network
-capacity evidence.
+capacity evidence. Paced DATAGRAM records also expose active send duration,
+target send duration, scheduled send span, and send-loop pacing lag fields so
+operator reports can distinguish sender slippage from network or receiver
+loss.
 
 When `moqx-listener` serves `datagram_pressure`, it bounds the receiver loop by
 both expected count and post-first-datagram idle time. This keeps lossy steps
 from holding the UDP port while waiting for datagrams that were dropped. Pass
 `--diagnostics-output PATH` to append listener-side JSONL diagnostics with
 received/echoed counts, duplicate/invalid counts, stop reason, and receiver
-mailbox depth/peak/samples. If the listener fails before a workload starts,
-for example while waiting in `accept` or `handshake`, the same diagnostics file
-gets a `listener_accept_run` record with configured/bound listener address,
-phase, timeout, and error reason. Remote listener runs that involve provisioning,
+mailbox depth/peak/samples. Listener diagnostics also include bounded mailbox
+sample points across the run and echo-send timing/error counters, which are the
+first signals to inspect when a reference client cannot sustain its target
+offered rate against MOQX. If the listener fails before a workload starts, for
+example while waiting in `accept` or `handshake`, the same diagnostics file gets
+a `listener_accept_run` record with configured/bound listener address, phase,
+timeout, and error reason. Remote listener runs that involve provisioning,
 capture setup, or manual dispatch should set `--accept-timeout-seconds` higher
 than `--timeout-seconds`; the former controls how long the listener waits for a
 client connection, while the latter controls workload/read bounds after accept.

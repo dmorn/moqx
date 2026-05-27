@@ -400,6 +400,18 @@ func TestClientServerJSONPacedDatagramPressure(t *testing.T) {
 	if result.OfferedRateTolerance != 0.95 {
 		t.Fatalf("offered_rate_tolerance = %f, want 0.95", result.OfferedRateTolerance)
 	}
+	if result.SendDurationMS <= 0 {
+		t.Fatalf("send_duration_ms = %f, want positive", result.SendDurationMS)
+	}
+	if result.TargetSendDurationMS != 1000 {
+		t.Fatalf("target_send_duration_ms = %f, want 1000", result.TargetSendDurationMS)
+	}
+	if result.ScheduledSendSpanMS != 950 {
+		t.Fatalf("scheduled_send_span_ms = %f, want 950", result.ScheduledSendSpanMS)
+	}
+	if _, ok := result.SendPacingLagMS["p99"]; !ok {
+		t.Fatalf("send pacing lag summary = %#v, want p99", result.SendPacingLagMS)
+	}
 
 	cancel()
 	select {
@@ -556,6 +568,9 @@ func assertDatagramRunResult(t *testing.T, result clientRunResult, datagramSize 
 	}
 	if result.GoodputBPS <= 0 {
 		t.Fatalf("goodput_bps = %f, want positive", result.GoodputBPS)
+	}
+	if result.SendDurationMS <= 0 {
+		t.Fatalf("send_duration_ms = %f, want positive", result.SendDurationMS)
 	}
 	if result.SendRateDatagramPPS <= 0 {
 		t.Fatalf("send_rate_datagrams_per_second = %f, want positive", result.SendRateDatagramPPS)

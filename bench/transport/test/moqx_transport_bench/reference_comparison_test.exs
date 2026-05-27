@@ -232,8 +232,18 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["profile"]["pacing"] == "paced"
     assert record["workload"]["datagrams_per_second"] == 5.0
     assert record["workload"]["offered_load_bps"] == 2560.0
+    assert record["methodology"]["active_send_seconds"] == 2.1
+    assert record["methodology"]["target_send_seconds"] == 2
+    assert record["methodology"]["scheduled_send_span_seconds"] == 1.8
+    assert record["methodology"]["total_observation_seconds"] == 2
     assert record["metrics"]["offered_load_bps"] == 2560.0
     assert record["metrics"]["offered_rate_ratio"] == 1.0
+    assert record["metrics"]["send_duration_ms"] == 2100.0
+    assert record["metrics"]["target_send_duration_ms"] == 2000.0
+    assert record["metrics"]["scheduled_send_span_ms"] == 1800.0
+    assert record["metrics"]["send_pacing_late_count"] == 2
+    assert record["metrics"]["send_pacing_lag_p99_ms"] == 0.8
+    assert record["metrics"]["datagram_late_count"] == 2
     assert record["metrics"]["datagram_delivery_ratio"] == 0.9
     assert record["metrics"]["datagram_drop_count"] == 1
     assert record["limits"]["first_break_symptom"] == "datagram_delivery_loss"
@@ -747,6 +757,15 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
       "handshake_latency_ms": 6.5,
       "first_byte_latency_ms": 0.4,
       "application_duration_ms": 2000.0,
+      "send_duration_ms": 2100.0,
+      "target_send_duration_ms": 2000.0,
+      "scheduled_send_span_ms": 1800.0,
+      "send_pacing_late_count": 2,
+      "send_pacing_lag_ms": {
+        "p50": 0.2,
+        "p95": 0.8,
+        "p99": 0.8
+      },
       "offered_load_bps": 2560.0,
       "goodput_bps": 2304.0,
       "send_rate_datagrams_per_second": 5.0,

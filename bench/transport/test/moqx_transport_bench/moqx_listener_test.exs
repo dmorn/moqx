@@ -58,10 +58,29 @@ defmodule MOQX.TransportBench.MoqxListenerTest do
     assert record["summary"]["datagrams_echo_attempted"] == 2
     assert record["summary"]["datagrams_echoed"] == 2
     assert record["summary"]["stop_reason"] == "datagram_idle_timeout"
+    assert record["summary"]["first_datagram_received_ms"] >= 0
+
+    assert record["summary"]["last_datagram_received_ms"] >=
+             record["summary"]["first_datagram_received_ms"]
+
+    assert record["summary"]["first_echo_attempted_ms"] >=
+             record["summary"]["first_datagram_received_ms"]
+
+    assert record["summary"]["last_echo_attempted_ms"] >=
+             record["summary"]["first_echo_attempted_ms"]
+
+    assert record["summary"]["echo_send_duration_ms"]["count"] == 2
+    assert record["summary"]["echo_send_duration_ms"]["total"] >= 0
+    assert record["summary"]["echo_send_duration_ms"]["max"] >= 0
 
     assert is_integer(record["process"]["message_queue_len"])
     assert is_integer(record["process"]["message_queue_len_peak"])
     assert record["process"]["message_queue_len_peak"] >= record["process"]["message_queue_len"]
+
+    assert [%{"sample_index" => 1, "message_queue_len" => first_sample} | _] =
+             record["process"]["message_queue_len_sample_points"]
+
+    assert is_integer(first_sample)
   end
 
   test "datagram pressure writes listener diagnostics when accept times out" do

@@ -502,6 +502,23 @@ shape is committed with the first local loopback reference-to-reference record.
   worktree before the mixed-workload changes were committed. Infrastructure
   was destroyed afterward, and `just bench-transport-verify-clean` reported no
   Terraform state entries or labelled Hetzner resources remaining.
+- 2026-05-27: Receiver-side DATAGRAM evidence is now valid after the
+  `moqx-listener --accept-timeout-seconds` split. ARM same-region run
+  `20260527T080234Z-receiver-dgram-ramp` used `cax11` nodes in `nbg1` over
+  private path `10.88.0.11 -> 10.88.0.12`. Raw iperf3 showed about
+  33.10 Gbps TCP goodput and 1192-byte UDP delivery of 100% at 100 Mbps,
+  99.626% at 250 Mbps, and 99.271% at 500 Mbps. The
+  reference-client-to-MOQX-listener DATAGRAM path produced clean offered-rate
+  records through 30k pps: 100% delivery at 5k/10k, 99.625% at 20k, and
+  99.489% at 30k. At 35k/40k/50k the reference client only offered about
+  87.5%/79.3%/63.3% of the requested rate against MOQX, so those records are
+  not clean capacity measurements. The listener still received nearly all
+  attempted datagrams with bounded mailbox peaks, which moves the remaining
+  question to #31: explain why the reference client cannot sustain more than
+  about 31k pps against the MOQX listener while it can sustain target offered
+  rates against the quicprobe server. Infrastructure was destroyed afterward,
+  and `just bench-transport-verify-clean` reported no Terraform state entries
+  or labelled Hetzner resources remaining.
 
 Remaining slices:
 

@@ -99,14 +99,28 @@ type clientRunResult struct {
 	HandshakeLatencyMS       float64            `json:"handshake_latency_ms"`
 	FirstByteLatencyMS       *float64           `json:"first_byte_latency_ms"`
 	ApplicationDurationMS    float64            `json:"application_duration_ms"`
+	SendDurationMS           float64            `json:"send_duration_ms"`
+	TargetSendDurationMS     float64            `json:"target_send_duration_ms,omitempty"`
+	ScheduledSendSpanMS      float64            `json:"scheduled_send_span_ms,omitempty"`
 	OfferedLoadBPS           float64            `json:"offered_load_bps"`
 	GoodputBPS               float64            `json:"goodput_bps"`
 	SendRatePacketsPPS       float64            `json:"send_rate_packets_per_second,omitempty"`
 	SendRateDatagramPPS      float64            `json:"send_rate_datagrams_per_second"`
+	SendPacingLateCount      int                `json:"send_pacing_late_count,omitempty"`
+	SendPacingLagMS          map[string]float64 `json:"send_pacing_lag_ms,omitempty"`
 	StreamScheduling         string             `json:"stream_scheduling,omitempty"`
 	StreamLatencyMS          map[string]float64 `json:"stream_latency_ms"`
 	DatagramLatencyMS        map[string]float64 `json:"datagram_latency_ms"`
 	ControlLatencyMS         map[string]float64 `json:"control_latency_ms,omitempty"`
+}
+
+type datagramSendResult struct {
+	accepted        int
+	duration        time.Duration
+	targetDuration  time.Duration
+	scheduledSpan   time.Duration
+	pacingLateCount int
+	pacingLagMillis []float64
 }
 
 type datagramReceiveResult struct {
@@ -769,7 +783,7 @@ func runDatagramPressureClient(
 		}
 	}()
 
-	accepted, sendDuration, err := sendDatagrams(ctx, conn, cfg, offered)
+	sendResult, err := sendDatagrams(ctx, conn, cfg, offered)
 	if err != nil {
 		return clientRunResult{}, err
 	}
@@ -782,9 +796,9 @@ func runDatagramPressureClient(
 	applicationDuration := time.Since(applicationStartedAt)
 	finishedAt := time.Now()
 	drops := offered - receiveResult.received
-	bytesSent := int64(accepted * cfg.datagramSize)
+	bytesSent := int64(sendResult.accepted * cfg.datagramSize)
 	bytesReceived := int64(receiveResult.received * cfg.datagramSize)
-	sendRate := rate(accepted, sendDuration)
+	sendRate := rate(sendResult.accepted, sendResult.duration)
 	offeredRateRatio := targetRateRatio(sendRate, cfg)
 
 	return clientRunResult{
@@ -808,7 +822,7 @@ func runDatagramPressureClient(
 		OfferedRateTolerance:  cfg.rateTolerance,
 		OfferedRateValid:      offeredRateValid(offeredRateRatio, cfg),
 		DatagramsOffered:      offered,
-		DatagramsAccepted:     accepted,
+		DatagramsAccepted:     sendResult.accepted,
 		DatagramsReceived:     receiveResult.received,
 		DatagramDeliveryRatio: ratio(receiveResult.received, offered),
 		DatagramDropCount:     drops,
@@ -817,14 +831,19 @@ func runDatagramPressureClient(
 		HandshakeLatencyMS:    durationMillis(handshakeLatency),
 		FirstByteLatencyMS:    receiveResult.firstByteLatency,
 		ApplicationDurationMS: durationMillis(applicationDuration),
+		SendDurationMS:        durationMillis(sendResult.duration),
+		TargetSendDurationMS:  durationMillis(sendResult.targetDuration),
+		ScheduledSendSpanMS:   durationMillis(sendResult.scheduledSpan),
 		OfferedLoadBPS:        offeredLoadBPS(cfg),
 		GoodputBPS:            throughputBPS(bytesReceived, applicationDuration),
 		SendRateDatagramPPS:   sendRate,
+		SendPacingLateCount:   sendResult.pacingLateCount,
+		SendPacingLagMS:       sendPacingLagSummary(sendResult),
 		DatagramLatencyMS:     latencySummary(receiveResult.latencies),
 	}, nil
 }
 
-func sendDatagrams(ctx context.Context, conn quic.Connection, cfg clientConfig, count int) (int, time.Duration, error) {
+func sendDatagrams(ctx context.Context, conn quic.Connection, cfg clientConfig, count int) (datagramSendResult, error) {
 	if cfg.datagramRate > 0 {
 		return sendDatagramPaced(ctx, conn, cfg, count)
 	}
@@ -832,40 +851,88 @@ func sendDatagrams(ctx context.Context, conn quic.Connection, cfg clientConfig, 
 	return sendDatagramBurst(conn, cfg, count)
 }
 
-func sendDatagramBurst(conn quic.Connection, cfg clientConfig, count int) (int, time.Duration, error) {
+func sendDatagramBurst(conn quic.Connection, cfg clientConfig, count int) (datagramSendResult, error) {
 	startedAt := time.Now()
 
 	for sequence := 1; sequence <= count; sequence++ {
 		payload := datagramPayload(uint64(sequence), cfg.datagramSize, time.Now())
 		if err := conn.SendDatagram(payload); err != nil {
-			return sequence - 1, time.Since(startedAt), fmt.Errorf("send datagram %d: %w", sequence, err)
+			return datagramSendResult{
+				accepted: sequence - 1,
+				duration: time.Since(startedAt),
+			}, fmt.Errorf("send datagram %d: %w", sequence, err)
 		}
 	}
 
-	return count, time.Since(startedAt), nil
+	return datagramSendResult{accepted: count, duration: time.Since(startedAt)}, nil
 }
 
-func sendDatagramPaced(ctx context.Context, conn quic.Connection, cfg clientConfig, count int) (int, time.Duration, error) {
+func sendDatagramPaced(ctx context.Context, conn quic.Connection, cfg clientConfig, count int) (datagramSendResult, error) {
 	startedAt := time.Now()
 	interval := time.Second / time.Duration(cfg.datagramRate)
+	result := datagramSendResult{
+		targetDuration:  targetPacedSendDuration(count, cfg),
+		scheduledSpan:   scheduledPacedSendSpan(count, interval),
+		pacingLagMillis: make([]float64, 0, count),
+	}
 
 	for sequence := 1; sequence <= count; sequence++ {
 		deadline := pacedDatagramDeadline(startedAt, interval, sequence)
 		if err := waitUntil(ctx, deadline); err != nil {
-			return sequence - 1, time.Since(startedAt), nil
+			result.accepted = sequence - 1
+			result.duration = time.Since(startedAt)
+			return result, nil
 		}
 
-		payload := datagramPayload(uint64(sequence), cfg.datagramSize, time.Now())
+		sendAt := time.Now()
+		lag := sendAt.Sub(deadline)
+		if lag < 0 {
+			lag = 0
+		}
+		if lag > pacedSpinThreshold {
+			result.pacingLateCount++
+		}
+		result.pacingLagMillis = append(result.pacingLagMillis, durationMillis(lag))
+
+		payload := datagramPayload(uint64(sequence), cfg.datagramSize, sendAt)
 		if err := conn.SendDatagram(payload); err != nil {
-			return sequence - 1, time.Since(startedAt), fmt.Errorf("send datagram %d: %w", sequence, err)
+			result.accepted = sequence - 1
+			result.duration = time.Since(startedAt)
+			return result, fmt.Errorf("send datagram %d: %w", sequence, err)
 		}
 	}
 
-	return count, time.Since(startedAt), nil
+	result.accepted = count
+	result.duration = time.Since(startedAt)
+	return result, nil
 }
 
 func pacedDatagramDeadline(startedAt time.Time, interval time.Duration, sequence int) time.Time {
 	return startedAt.Add(time.Duration(sequence-1) * interval)
+}
+
+func targetPacedSendDuration(count int, cfg clientConfig) time.Duration {
+	if cfg.datagramRate <= 0 || count <= 0 {
+		return 0
+	}
+
+	return time.Duration(count) * time.Second / time.Duration(cfg.datagramRate)
+}
+
+func scheduledPacedSendSpan(count int, interval time.Duration) time.Duration {
+	if count <= 1 {
+		return 0
+	}
+
+	return time.Duration(count-1) * interval
+}
+
+func sendPacingLagSummary(result datagramSendResult) map[string]float64 {
+	if len(result.pacingLagMillis) == 0 {
+		return nil
+	}
+
+	return latencySummary(result.pacingLagMillis)
 }
 
 func waitUntil(ctx context.Context, deadline time.Time) error {
