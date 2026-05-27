@@ -86,6 +86,8 @@ child issues in evidence order:
    fix to confirm the mailbox artifact is gone off loopback.
 5. #36 is a human design decision: keep `moqx-listener` as a correctness peer
    or build a dedicated performance-serving model.
+6. #37 attacks the first stream-pressure bottleneck identified by #33: the
+   MOQX-client caller/event pump and per-payload async completion cadence.
 
 The first implementation slice is #32. Do not start broad transport API
 refactors from this umbrella issue; any API change should be motivated by
@@ -292,3 +294,52 @@ seams without `Application` env.
   listener-side receive/echo/send-completion diagnostics. The next slice is
   #33: rerun the ARM stream-pressure bracket with these diagnostics enabled and
   classify the first optimization target from real-path evidence.
+- 2026-05-27: Closed #33 with real-path evidence from
+  `20260527T131746Z-issue-33-streamdiag`, a disposable same-region
+  `cax11` ARM pair in `nbg1 -> nbg1` over the private path
+  `10.88.0.11 -> 10.88.0.12`. iperf3 established a 6.81 Gbps TCP baseline,
+  100 Mbps UDP at 100% delivery, 500 Mbps at 99.79%, and 1 Gbps at 99.25%.
+  With the #29 stream shape, reference-client-to-reference-server reached
+  about 344.9/703.8/684.2 Mbps at 4/8/16 bidirectional streams, while
+  MOQX-client-to-reference-server completed all bytes with no break symptom
+  but only reached about 72.2/61.7/53.6 Mbps. Diagnostics showed all MOQX
+  sends completed, zero final pending completions, bounded final mailbox depth
+  3/2/2, and mailbox peaks 107/225/413. Active send and active echo-receive
+  durations matched the full application duration, while the caller drained
+  about 10k/8.9k/8.0k transport events/sec. First optimization target:
+  MOQX-client caller/event-pump throughput and per-payload async completion
+  cadence, not send admission failure, missing completions, reference-server
+  limits, or unbounded mailbox backlog. Artifacts are under
+  `bench/transport/results/20260527T131746Z-issue-33-streamdiag/`.
+  Infrastructure was destroyed and verified clean. Follow-up #37 opened.
+- 2026-05-27: #37 local diagnosis found that the first stream-pressure
+  bottleneck was benchmark-side instrumentation, not `send_stream/4`,
+  `receive_event/2`, quicer callback cadence, or the quicprobe server. In the
+  local 8-stream/1200-byte/1000-payload loopback shape, MOQX-client originally
+  delivered about 165 Mbps while `send_stream/4` admission took only about
+  19.5 ms total for 8000 sends and `receive_event/2` took only about 6.8 ms
+  total for 12,533 receives. The missing wall time came from live per-phase
+  `Agent.update/2` diagnostics and byte-by-byte payload validation. After
+  making `--stream-diagnostics-sampling final` skip live phase-agent updates
+  and replacing byte-list validation with binary/iodata comparison, the same
+  local MOQX-client run reached about 844 Mbps with strict-valid records; a
+  local reference-client-to-reference-server control reached about 747 Mbps,
+  while detailed `event` diagnostics still reached about 594 Mbps. Next:
+  rerun the #33 ARM same-region bracket in final mode to decide whether the
+  real-link bottleneck moved.
+- 2026-05-27: Closed #37 with ARM evidence from
+  `20260527T154046Z-issue-37-final`, a disposable same-region `cax11` ARM
+  pair in `nbg1 -> nbg1` over the private path
+  `10.88.0.11 -> 10.88.0.12`. The raw path was comparable to #33: 6.59 Gbps
+  TCP, 100 Mbps UDP at 100%, 500 Mbps UDP at 99.71%, and 1 Gbps UDP at
+  98.25%. Reference-client-to-reference-server reached about
+  472.5/730.2/816.9 Mbps at 4/8/16 bidirectional streams. MOQX-client with
+  `--stream-diagnostics-sampling final` reached about
+  440.9/505.5/521.8 Mbps, compared with #33's 72.2/61.7/53.6 Mbps. All MOQX
+  sends completed with zero pending completions, final mailbox depth 3/3/4,
+  and p99 latency improved to about 85/149/291 ms. Conclusion: the first
+  stream-pressure bottleneck was benchmark-side observer/validation overhead,
+  now fixed. The remaining gap versus reference at 8 and 16 streams is the
+  next transport-pressure target. Artifacts are under
+  `bench/transport/results/20260527T154046Z-issue-37-final/`. Infrastructure
+  was destroyed and verified clean.

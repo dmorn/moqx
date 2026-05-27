@@ -233,6 +233,20 @@ per-stream completion status, and sender mailbox depth/peak/sample points.
 Human reports include a compact diagnostics row for records that carry these
 signals.
 
+The MOQX-client stream-pressure path also exposes benchmark-only diagnostic
+knobs for performance isolation:
+
+- `--stream-send-window N` controls max in-flight async sends per stream.
+- `--stream-event-batch-size N` drains up to `N` ready transport events before
+  taking another mailbox sample.
+- `--stream-diagnostics-sampling event|final` keeps the default per-event
+  mailbox and live phase sampling, or records only the final stream/process
+  snapshot.
+
+These knobs are not protocol semantics. Use them to distinguish benchmark
+event-pump overhead, event granularity, and transport/NIF behavior while
+preserving send admission and completion accounting.
+
 For datagram pressure, use `--workload datagram_pressure`. By default the
 workload sends a burst of `--datagram-count` fixed-size QUIC DATAGRAM frames.
 For a fixed-rate step, set both `--datagram-rate` and `--duration-seconds`; the

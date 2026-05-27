@@ -702,6 +702,68 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
            end)
   end
 
+  test "records stream-pressure pump tuning knobs" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-stream-pump-tuning.jsonl")
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-direction",
+        "bidirectional",
+        "--stream-count",
+        "1",
+        "--stream-send-window",
+        "1",
+        "--stream-event-batch-size",
+        "4",
+        "--stream-diagnostics-sampling",
+        "final",
+        "--payload-size",
+        "64",
+        "--payload-count",
+        "3",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-stream-pump-tuning-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.MixedEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["profile"]["settings"]["stream_send_window"] == 1
+    assert record["profile"]["settings"]["stream_event_batch_size"] == 4
+    assert record["profile"]["settings"]["stream_diagnostics_sampling"] == "final"
+
+    diagnostics = record["diagnostics"]
+    assert diagnostics["summary"]["stream_send_window"] == 1
+    assert diagnostics["summary"]["stream_event_batch_size"] == 4
+    assert diagnostics["summary"]["stream_diagnostics_sampling"] == "final"
+    assert diagnostics["summary"]["payloads_completed"] == 3
+    assert diagnostics["summary"]["send_completions_pending"] == 0
+    assert diagnostics["summary"]["send_stream_call_ms"]["count"] == 3
+    assert is_number(diagnostics["summary"]["send_stream_call_ms"]["total"])
+    assert diagnostics["summary"]["receive_event_call_ms"]["count"] > 0
+    assert is_number(diagnostics["summary"]["receive_event_call_ms"]["total"])
+    assert hd(diagnostics["streams"])["send_stream_call_ms"]["count"] == 3
+    assert is_number(record["metrics"]["send_stream_call_total_ms"])
+    assert is_integer(diagnostics["process"]["message_queue_len"])
+    refute Map.has_key?(diagnostics["process"], "message_queue_len_sample_points")
+  end
+
   defp fake_quicprobe_command(dir, args_path) do
     fake_quicprobe_command(dir, args_path, stream_quicprobe_json())
   end
