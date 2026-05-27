@@ -59,6 +59,7 @@ defmodule MOQX.TransportBench.MoqxListener do
           control_rate: :integer,
           connection_count: :integer,
           timeout_seconds: :integer,
+          accept_timeout_seconds: :integer,
           datagram_idle_timeout_ms: :integer,
           diagnostics_output: :string,
           help: :boolean
@@ -110,6 +111,12 @@ defmodule MOQX.TransportBench.MoqxListener do
       control_rate: Keyword.get(opts, :control_rate, 10),
       connection_count: Keyword.get(opts, :connection_count, 1),
       timeout_ms: Keyword.get(opts, :timeout_seconds, @default_timeout_seconds) * 1000,
+      accept_timeout_ms:
+        Keyword.get(
+          opts,
+          :accept_timeout_seconds,
+          Keyword.get(opts, :timeout_seconds, @default_timeout_seconds)
+        ) * 1000,
       datagram_idle_timeout_ms: opts[:datagram_idle_timeout_ms],
       diagnostics_output: opts[:diagnostics_output]
     }
@@ -124,6 +131,7 @@ defmodule MOQX.TransportBench.MoqxListener do
          :ok <- validate_paced_datagrams(config),
          :ok <- validate_mixed_control(config),
          :ok <- validate_non_negative(config.connection_count, "--connection-count"),
+         :ok <- validate_positive(config.accept_timeout_ms, "--accept-timeout-seconds"),
          :ok <-
            validate_optional_positive(
              config.datagram_idle_timeout_ms,
@@ -286,7 +294,7 @@ defmodule MOQX.TransportBench.MoqxListener do
        do: {:ok, ctx}
 
   defp serve_connections(ctx, listener, config, listener_metadata, served) do
-    case Transport.accept(ctx, listener, [], config.timeout_ms) do
+    case Transport.accept(ctx, listener, [], config.accept_timeout_ms) do
       {:ok, connection, ctx} ->
         handshake_connection(ctx, listener, connection, config, listener_metadata, served)
 
@@ -295,7 +303,8 @@ defmodule MOQX.TransportBench.MoqxListener do
           phase: "accept",
           served: served,
           stop_reason: "accept_error",
-          error_reason: reason_name(reason)
+          error_reason: reason_name(reason),
+          timeout_ms: config.accept_timeout_ms
         })
 
         {:error, reason, ctx}
@@ -312,7 +321,8 @@ defmodule MOQX.TransportBench.MoqxListener do
           phase: "handshake",
           served: served,
           stop_reason: "handshake_error",
-          error_reason: reason_name(reason)
+          error_reason: reason_name(reason),
+          timeout_ms: config.timeout_ms
         })
 
         {:error, reason, ctx}
@@ -773,7 +783,7 @@ defmodule MOQX.TransportBench.MoqxListener do
         "error_reason" => summary.error_reason,
         "connections_served" => summary.served,
         "connection_count_limit" => config.connection_count,
-        "timeout_ms" => config.timeout_ms
+        "timeout_ms" => summary.timeout_ms
       },
       "process" => process_diagnostics(%{})
     }
@@ -885,7 +895,8 @@ defmodule MOQX.TransportBench.MoqxListener do
       --control-message-count N      control messages for mixed_moqt_shaped (default: 10)
       --control-rate N               target control messages/sec for mixed_moqt_shaped (default: 10)
       --connection-count N           accepted connections before exit; 0 means unlimited (default: 1)
-      --timeout-seconds N            accept/read timeout per operation (default: #{@default_timeout_seconds})
+      --timeout-seconds N            read/workload timeout per operation after accept (default: #{@default_timeout_seconds})
+      --accept-timeout-seconds N     connection accept timeout; defaults to --timeout-seconds
       --datagram-idle-timeout-ms N   datagram receive idle bound after first datagram
       --diagnostics-output PATH      append listener-side diagnostics JSONL
 

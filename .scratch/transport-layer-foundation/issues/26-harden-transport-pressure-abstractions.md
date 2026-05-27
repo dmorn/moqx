@@ -218,3 +218,11 @@ first.
   a generous listener accept window when external capture/setup is involved.
   Artifacts are under
   `bench/transport/results/20260527T073033Z-listener-tcpdump/`.
+- 2026-05-27: Implemented the harness split implied by the tcpdump smoke.
+  `moqx-transport-bench moqx-listener` now accepts
+  `--accept-timeout-seconds` for the listener readiness/connection accept
+  window, while `--timeout-seconds` remains the workload/read timeout after
+  accept. Existing commands remain compatible because the accept timeout
+  defaults to `--timeout-seconds`. Regression coverage verifies that an
+  overridden accept timeout is passed only to `Transport.accept/4` and does not
+  inflate DATAGRAM observation/read bounds.

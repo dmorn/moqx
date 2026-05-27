@@ -138,6 +138,49 @@ defmodule MOQX.TransportBench.MoqxListenerTest do
     assert is_integer(record["process"]["message_queue_len_peak"])
   end
 
+  test "datagram pressure keeps accept timeout separate from workload timeout" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "listener-diagnostics.jsonl")
+    certfile = Path.join(dir, "server.pem")
+    keyfile = Path.join(dir, "server-key.pem")
+    File.write!(certfile, "cert")
+    File.write!(keyfile, "key")
+
+    Process.put({__MODULE__.DatagramTransport, :datagrams}, [1])
+
+    capture_io(fn ->
+      MoqxListener.main(
+        [
+          "--certfile",
+          certfile,
+          "--keyfile",
+          keyfile,
+          "--workload",
+          "datagram_pressure",
+          "--datagram-size",
+          "64",
+          "--datagram-count",
+          "1",
+          "--timeout-seconds",
+          "1",
+          "--accept-timeout-seconds",
+          "60",
+          "--diagnostics-output",
+          output_path
+        ],
+        script: "test moqx-listener",
+        transport_backend: __MODULE__.DatagramTransport,
+        ensure_quicer?: false
+      )
+    end)
+
+    assert Process.get({__MODULE__.DatagramTransport, :accept_timeout}) == 60_000
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert record["record_type"] == "datagram_listener_run"
+    assert record["summary"]["datagram_observation_timeout_ms"] == 1000
+  end
+
   defp tmp_dir do
     path =
       Path.join(
@@ -164,7 +207,9 @@ defmodule MOQX.TransportBench.MoqxListenerTest do
     def close_listener(:listener, _timeout), do: :ok
 
     @impl true
-    def accept(:listener, _opts, _timeout) do
+    def accept(:listener, _opts, timeout) do
+      Process.put({__MODULE__, :accept_timeout}, timeout)
+
       if reason = Process.get({__MODULE__, :accept_error}) do
         {:error, reason}
       else

@@ -247,8 +247,12 @@ received/echoed counts, duplicate/invalid counts, stop reason, and receiver
 mailbox depth/peak/samples. If the listener fails before a workload starts,
 for example while waiting in `accept` or `handshake`, the same diagnostics file
 gets a `listener_accept_run` record with configured/bound listener address,
-phase, timeout, and error reason. For `moqx-client-to-reference-server`
-DATAGRAM runs, the canonical benchmark record includes
+phase, timeout, and error reason. Remote listener runs that involve provisioning,
+capture setup, or manual dispatch should set `--accept-timeout-seconds` higher
+than `--timeout-seconds`; the former controls how long the listener waits for a
+client connection, while the latter controls workload/read bounds after accept.
+For `moqx-client-to-reference-server` DATAGRAM runs, the canonical benchmark
+record includes
 `moqx-client-datagram-diagnostics-v1` with accepted/received/missing counts,
 receive-loop event counts, and the client receiver mailbox depth/peak/samples.
 
@@ -345,6 +349,7 @@ moqx-transport-bench moqx-listener \
   --workload datagram_pressure \
   --datagram-size 1192 \
   --datagram-count 1000 \
+  --accept-timeout-seconds 120 \
   --diagnostics-output bench/transport/results/moqx-listener-datagrams.jsonl
 ```
 
@@ -366,7 +371,9 @@ moqx-transport-bench reference-comparison \
 For paced datagram steps against `moqx-listener`, pass the same
 `--datagram-rate` and `--duration-seconds` pair to the listener and the
 reference-comparison command so both sides agree on the expected datagram
-count.
+count. Keep the listener `--accept-timeout-seconds` generous enough to cover
+remote command dispatch and tcpdump/setup time; do not use the client
+measurement timeout as the listener readiness timeout.
 
 For mixed MOQT-shaped pressure, use `--workload mixed_moqt_shaped`. The first
 mixed workload is intentionally transport-shaped rather than a full MOQT
