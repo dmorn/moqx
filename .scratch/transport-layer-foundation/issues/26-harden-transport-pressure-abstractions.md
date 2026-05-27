@@ -226,3 +226,26 @@ first.
   defaults to `--timeout-seconds`. Regression coverage verifies that an
   overridden accept timeout is passed only to `Transport.accept/4` and does not
   inflate DATAGRAM observation/read bounds.
+- 2026-05-27: Reran the ARM same-region receiver-side DATAGRAM ramp as
+  `20260527T080234Z-receiver-dgram-ramp` after the accept-timeout split. The
+  path was `cax11` private `10.88.0.11 -> 10.88.0.12` in `nbg1`. Raw iperf3
+  showed TCP goodput around 33.10 Gbps; UDP with 1192-byte datagrams delivered
+  100 Mbps at 100%, 250 Mbps at 99.626%, and 500 Mbps at 99.271%. The
+  quicprobe-to-quicprobe control sustained target offered rate through
+  50k pps, with delivery 100% at 5k/10k, 99.40% at 20k, 99.00% at 30k,
+  99.26% at 35k, 97.71% at 40k, and 90.13% at 50k
+  (`datagram_delivery_loss`). Reference-client-to-MOQX-listener produced clean
+  offered-rate evidence through 30k pps: 100% delivery at 5k/10k, 99.625% at
+  20k, and 99.489% at 30k, with listener mailbox peaks of 42/75/221/473. At
+  35k, 40k, and 50k, quicprobe only offered about 0.875/0.793/0.633 of the
+  target rate against the MOQX listener, so those records are not clean
+  capacity measurements. Listener diagnostics still showed bounded receive and
+  echo behavior under that attempted load: 104,830/105,000,
+  119,713/120,000, and 149,577/150,000 datagrams received with mailbox peaks
+  536/800/752. Conclusion: the remote receiver-side timeout blocker is closed,
+  and the MOQX listener is competitive through 30k pps on this path. The next
+  question is why the reference client cannot sustain more than about
+  31k pps against MOQX while it can sustain target offered rates against the
+  quicprobe server; that points toward server pacing/backpressure or echo
+  timing affecting the client generator, rather than simple listener receive
+  loss.
