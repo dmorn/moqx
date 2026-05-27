@@ -49,7 +49,7 @@ not just a raw sender pacing limit.
       echo cadence can backpressure the client.
 - [x] Listener mailbox diagnostics include sampled depth over the workload, not
       only final and peak depth.
-- [ ] A narrow ARM same-region bracket around 25k/30k/32k/35k/40k pps is run
+- [x] A narrow ARM same-region bracket around 25k/30k/32k/35k/40k pps is run
       with the new diagnostics and reference-to-reference controls.
 - [ ] The issue records whether the collapse is caused by sender pacing,
       quic-go peer backpressure, MOQX echo timing, BEAM/quicer scheduling, or a
@@ -73,3 +73,40 @@ None.
   timings, echo-send duration summaries, and bounded mailbox sample points
   across the workload. Focused quicprobe and benchmark tests pass. The next
   step is the narrow ARM bracket with these fields enabled.
+- 2026-05-27: Ran the narrow ARM same-region bracket as
+  `20260527T094212Z-issue-31-dgram` on `cax11` nodes in `nbg1`, private path
+  `10.88.0.11 -> 10.88.0.12`, using build `45a53cf`. Hetzner placement was
+  temporarily unavailable at first, so the run preserved partial resources and
+  retried until both nodes were available. The client node reported the known
+  cloud-init schema error, but manual checks showed Go/Elixir/iperf3 installed,
+  private addresses/routes present, ICMP private-path loss 0%, average ping
+  RTT about 1.26 ms, and a one-second private TCP probe around 7.1 Gbps.
+  Canonical `iperf3-baseline` over the private path showed TCP goodput about
+  7.10 Gbps; 1192-byte UDP delivered 100 Mbps at 100%, 250 Mbps at 99.98%,
+  and 500 Mbps at 99.96%.
+- 2026-05-27: Reference-to-reference controls stayed offered-rate valid for
+  the whole bracket. Delivery ratios were 99.929% at 25k pps, 99.803% at 30k,
+  99.535% at 32k, 98.302% at 35k, and 98.277% at 40k. Send pacing lag was
+  small through 35k (`p99` up to about 2.54 ms) and larger but still
+  offered-rate valid at 40k (`p99` about 21.4 ms, offered-rate ratio
+  1.000004).
+- 2026-05-27: Reference-client-to-MOQX-listener stayed offered-rate valid and
+  above delivery threshold through 35k pps in this run: 99.708% at 25k,
+  99.011% at 30k, 99.171% at 32k, and 99.716% at 35k. The only invalid
+  offered-rate record was 40k pps: the client delivered 99.849% of its
+  attempted datagrams, but only offered about 31.40k pps
+  (`offered_rate_ratio=0.785`). The new quicprobe pacing fields make this
+  visible directly: active send duration stretched to 3821 ms for a 3000 ms
+  target, `send_pacing_lag_p50_ms` was about 474 ms, and
+  `send_pacing_lag_p99_ms` was about 813 ms.
+- 2026-05-27: MOQX listener diagnostics do not support listener receive loss or
+  echo-send latency as the 40k offered-rate-collapse cause. At 40k, the
+  listener received and echoed 119,932/120,000 datagrams with no echo errors;
+  its last receive/echo timestamp was about 3829 ms, matching the stretched
+  client send duration rather than the nominal 3000 ms target. Echo-send timing
+  stayed tiny: mean about 0.0029 ms and max about 1.81 ms. Listener mailbox
+  peak was bounded at 672. Current interpretation: the collapse is on the
+  reference client pacing/backpressure side when the peer is MOQX, not a MOQX
+  listener mailbox blow-up or slow echo-send loop. A further slice is needed to
+  distinguish quic-go datagram-send backpressure from local Go scheduler/send
+  loop delay at the 35k-40k transition.
