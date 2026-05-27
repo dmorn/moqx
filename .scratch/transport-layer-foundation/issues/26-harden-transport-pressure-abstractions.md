@@ -1,6 +1,6 @@
 # Harden transport pressure abstractions
 
-Status: needs-triage
+Status: ready-for-agent
 Type: AFK
 
 ## Parent
@@ -31,9 +31,9 @@ gap deliberately.
 - Stream sends now expose accepted-send tokens and completion events, but
   datagram sends only expose local admission. Datagram pressure must keep
   offered, locally accepted, and peer-delivered counts distinct.
-- `reference-comparison` is stream-shaped today. Datagram pressure should add a
-  workload adapter rather than stretching the current stream-path assumptions
-  too far.
+- `reference-comparison` now has explicit stream, DATAGRAM, and mixed workload
+  modes. The next risk is not workload shape; it is whether those workloads
+  expose enough runtime pressure signals to guide optimization.
 - The self-pair datagram pressure step is burst-only: it sends all datagrams as
   fast as possible, then drains received events. Real-link datagram pressure
   needs both burst and rate-stepped modes.
@@ -62,15 +62,35 @@ gap deliberately.
       counts.
 - [x] Reference-comparison datagram support is modeled as an explicit workload
       mode, not hidden inside stream-pressure fields.
-- [ ] Self-pair and reference-comparison datagram workloads support both burst
+- [x] Self-pair and reference-comparison datagram workloads support both burst
       and rate-stepped modes, or document why one mode is intentionally absent.
 - [ ] Any transport API refactor preserves explicit dependency seams and does
       not introduce `Application` environment as mutable configuration.
 
 ## Blocked by
 
-None. Use #12 datagram results to decide which parts are worth implementing
-first.
+None. Start with #32.
+
+## Roadmap
+
+Use this issue as the performance-hardening umbrella. Implement the focused
+child issues in evidence order:
+
+1. #32 adds stream-pressure diagnostics to explain the MOQX-client
+   bidirectional gap without guessing.
+2. #33 reruns the ARM stream-pressure bracket with those diagnostics and
+   classifies the first optimization target.
+3. #34 adds DATAGRAM receive/drain cadence diagnostics around the 20k-30k pps
+   MOQX-client transition.
+4. #35 reruns mixed MOQT-shaped pressure on real ARM nodes after the event-pump
+   fix to confirm the mailbox artifact is gone off loopback.
+5. #36 is a human design decision: keep `moqx-listener` as a correctness peer
+   or build a dedicated performance-serving model.
+
+The first implementation slice is #32. Do not start broad transport API
+refactors from this umbrella issue; any API change should be motivated by
+evidence from the focused child issues and must preserve explicit dependency
+seams without `Application` env.
 
 ## Comments
 
@@ -259,3 +279,9 @@ first.
   reference-client-to-MOQX-listener DATAGRAM records above the clean range are
   caused by quic-go `SendDatagram` call cost in the reference client consuming
   the pacing budget, not by MOQX listener receive loss or mailbox growth.
+- 2026-05-27: Refined #26 into a focused roadmap and split the next work into
+  child issues #32-#36. Reference-comparison DATAGRAM pressure already supports
+  burst and paced modes. Self-pair remains intentionally burst-only
+  calibration for now: local loopback paced DATAGRAMs would mostly measure host
+  scheduler/timer behavior, while real-link paced evidence belongs in
+  reference-comparison after an iperf3 path baseline.
