@@ -412,6 +412,12 @@ func TestClientServerJSONPacedDatagramPressure(t *testing.T) {
 	if _, ok := result.SendPacingLagMS["p99"]; !ok {
 		t.Fatalf("send pacing lag summary = %#v, want p99", result.SendPacingLagMS)
 	}
+	if result.SendDatagramCallSlowThresholdMS != 0.2 {
+		t.Fatalf("send_datagram_call_slow_threshold_ms = %f, want 0.2", result.SendDatagramCallSlowThresholdMS)
+	}
+	if _, ok := result.SendDatagramCallMS["p99"]; !ok {
+		t.Fatalf("send datagram call summary = %#v, want p99", result.SendDatagramCallMS)
+	}
 
 	cancel()
 	select {

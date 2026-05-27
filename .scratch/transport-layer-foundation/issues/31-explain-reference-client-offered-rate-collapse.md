@@ -110,3 +110,11 @@ None.
   listener mailbox blow-up or slow echo-send loop. A further slice is needed to
   distinguish quic-go datagram-send backpressure from local Go scheduler/send
   loop delay at the 35k-40k transition.
+- 2026-05-27: Added that next client-side split for future runs. quic-go
+  `SendDatagram` enqueues into a bounded 32-frame DATAGRAM send queue and can
+  block once that queue is full, so `tools/quicprobe` now records synchronous
+  `SendDatagram` call duration percentiles, slow-call count, and the slow-call
+  threshold separately from absolute-schedule pacing lag. Canonical
+  `reference-comparison` metrics now carry those values. The next remote run
+  can distinguish high lag from quic-go send-queue backpressure versus high lag
+  with low send-call time from scheduler/timer/send-loop slippage.

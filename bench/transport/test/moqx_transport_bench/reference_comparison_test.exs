@@ -243,6 +243,9 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["metrics"]["scheduled_send_span_ms"] == 1800.0
     assert record["metrics"]["send_pacing_late_count"] == 2
     assert record["metrics"]["send_pacing_lag_p99_ms"] == 0.8
+    assert record["metrics"]["send_datagram_call_slow_count"] == 3
+    assert record["metrics"]["send_datagram_call_slow_threshold_ms"] == 0.2
+    assert record["metrics"]["send_datagram_call_p99_ms"] == 1.4
     assert record["metrics"]["datagram_late_count"] == 2
     assert record["metrics"]["datagram_delivery_ratio"] == 0.9
     assert record["metrics"]["datagram_drop_count"] == 1
@@ -765,6 +768,13 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
         "p50": 0.2,
         "p95": 0.8,
         "p99": 0.8
+      },
+      "send_datagram_call_slow_count": 3,
+      "send_datagram_call_slow_threshold_ms": 0.2,
+      "send_datagram_call_ms": {
+        "p50": 0.3,
+        "p95": 1.4,
+        "p99": 1.4
       },
       "offered_load_bps": 2560.0,
       "goodput_bps": 2304.0,

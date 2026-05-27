@@ -63,64 +63,69 @@ type clientConfig struct {
 }
 
 type clientRunResult struct {
-	SchemaVersion            string             `json:"schema_version"`
-	RecordType               string             `json:"record_type"`
-	Tool                     string             `json:"tool"`
-	ReferenceImpl            string             `json:"reference_implementation"`
-	ReferenceVersion         string             `json:"reference_version"`
-	StartedAt                string             `json:"started_at"`
-	FinishedAt               string             `json:"finished_at"`
-	RemoteAddr               string             `json:"remote_addr"`
-	ALPN                     string             `json:"alpn"`
-	Workload                 string             `json:"workload"`
-	StreamDirection          string             `json:"stream_direction"`
-	StreamCount              int                `json:"stream_count"`
-	PayloadSizeBytes         int                `json:"payload_size_bytes"`
-	PayloadCount             int                `json:"payload_count"`
-	ControlPayloadSizeBytes  int                `json:"control_payload_size_bytes,omitempty"`
-	ControlMessageCount      int                `json:"control_message_count,omitempty"`
-	ControlMessagesPerSecond float64            `json:"control_messages_per_second,omitempty"`
-	ControlTrickleBPS        float64            `json:"control_trickle_bps,omitempty"`
-	DatagramSizeBytes        int                `json:"datagram_size_bytes"`
-	DatagramCount            int                `json:"datagram_count"`
-	DatagramMode             string             `json:"datagram_mode"`
-	TargetDatagramPPS        float64            `json:"target_datagrams_per_second"`
-	TargetDurationSeconds    int                `json:"target_duration_seconds"`
-	OfferedRateRatio         float64            `json:"offered_rate_ratio"`
-	OfferedRateTolerance     float64            `json:"offered_rate_tolerance"`
-	OfferedRateValid         bool               `json:"offered_rate_valid"`
-	DatagramsOffered         int                `json:"datagrams_offered"`
-	DatagramsAccepted        int                `json:"datagrams_accepted"`
-	DatagramsReceived        int                `json:"datagrams_received"`
-	DatagramDeliveryRatio    float64            `json:"datagram_delivery_ratio"`
-	DatagramDropCount        int                `json:"datagram_drop_count"`
-	BytesSent                int64              `json:"bytes_sent"`
-	BytesReceived            int64              `json:"bytes_received"`
-	HandshakeLatencyMS       float64            `json:"handshake_latency_ms"`
-	FirstByteLatencyMS       *float64           `json:"first_byte_latency_ms"`
-	ApplicationDurationMS    float64            `json:"application_duration_ms"`
-	SendDurationMS           float64            `json:"send_duration_ms"`
-	TargetSendDurationMS     float64            `json:"target_send_duration_ms,omitempty"`
-	ScheduledSendSpanMS      float64            `json:"scheduled_send_span_ms,omitempty"`
-	OfferedLoadBPS           float64            `json:"offered_load_bps"`
-	GoodputBPS               float64            `json:"goodput_bps"`
-	SendRatePacketsPPS       float64            `json:"send_rate_packets_per_second,omitempty"`
-	SendRateDatagramPPS      float64            `json:"send_rate_datagrams_per_second"`
-	SendPacingLateCount      int                `json:"send_pacing_late_count,omitempty"`
-	SendPacingLagMS          map[string]float64 `json:"send_pacing_lag_ms,omitempty"`
-	StreamScheduling         string             `json:"stream_scheduling,omitempty"`
-	StreamLatencyMS          map[string]float64 `json:"stream_latency_ms"`
-	DatagramLatencyMS        map[string]float64 `json:"datagram_latency_ms"`
-	ControlLatencyMS         map[string]float64 `json:"control_latency_ms,omitempty"`
+	SchemaVersion                   string             `json:"schema_version"`
+	RecordType                      string             `json:"record_type"`
+	Tool                            string             `json:"tool"`
+	ReferenceImpl                   string             `json:"reference_implementation"`
+	ReferenceVersion                string             `json:"reference_version"`
+	StartedAt                       string             `json:"started_at"`
+	FinishedAt                      string             `json:"finished_at"`
+	RemoteAddr                      string             `json:"remote_addr"`
+	ALPN                            string             `json:"alpn"`
+	Workload                        string             `json:"workload"`
+	StreamDirection                 string             `json:"stream_direction"`
+	StreamCount                     int                `json:"stream_count"`
+	PayloadSizeBytes                int                `json:"payload_size_bytes"`
+	PayloadCount                    int                `json:"payload_count"`
+	ControlPayloadSizeBytes         int                `json:"control_payload_size_bytes,omitempty"`
+	ControlMessageCount             int                `json:"control_message_count,omitempty"`
+	ControlMessagesPerSecond        float64            `json:"control_messages_per_second,omitempty"`
+	ControlTrickleBPS               float64            `json:"control_trickle_bps,omitempty"`
+	DatagramSizeBytes               int                `json:"datagram_size_bytes"`
+	DatagramCount                   int                `json:"datagram_count"`
+	DatagramMode                    string             `json:"datagram_mode"`
+	TargetDatagramPPS               float64            `json:"target_datagrams_per_second"`
+	TargetDurationSeconds           int                `json:"target_duration_seconds"`
+	OfferedRateRatio                float64            `json:"offered_rate_ratio"`
+	OfferedRateTolerance            float64            `json:"offered_rate_tolerance"`
+	OfferedRateValid                bool               `json:"offered_rate_valid"`
+	DatagramsOffered                int                `json:"datagrams_offered"`
+	DatagramsAccepted               int                `json:"datagrams_accepted"`
+	DatagramsReceived               int                `json:"datagrams_received"`
+	DatagramDeliveryRatio           float64            `json:"datagram_delivery_ratio"`
+	DatagramDropCount               int                `json:"datagram_drop_count"`
+	BytesSent                       int64              `json:"bytes_sent"`
+	BytesReceived                   int64              `json:"bytes_received"`
+	HandshakeLatencyMS              float64            `json:"handshake_latency_ms"`
+	FirstByteLatencyMS              *float64           `json:"first_byte_latency_ms"`
+	ApplicationDurationMS           float64            `json:"application_duration_ms"`
+	SendDurationMS                  float64            `json:"send_duration_ms"`
+	TargetSendDurationMS            float64            `json:"target_send_duration_ms,omitempty"`
+	ScheduledSendSpanMS             float64            `json:"scheduled_send_span_ms,omitempty"`
+	OfferedLoadBPS                  float64            `json:"offered_load_bps"`
+	GoodputBPS                      float64            `json:"goodput_bps"`
+	SendRatePacketsPPS              float64            `json:"send_rate_packets_per_second,omitempty"`
+	SendRateDatagramPPS             float64            `json:"send_rate_datagrams_per_second"`
+	SendPacingLateCount             int                `json:"send_pacing_late_count,omitempty"`
+	SendPacingLagMS                 map[string]float64 `json:"send_pacing_lag_ms,omitempty"`
+	SendDatagramCallSlowCount       int                `json:"send_datagram_call_slow_count,omitempty"`
+	SendDatagramCallSlowThresholdMS float64            `json:"send_datagram_call_slow_threshold_ms,omitempty"`
+	SendDatagramCallMS              map[string]float64 `json:"send_datagram_call_ms,omitempty"`
+	StreamScheduling                string             `json:"stream_scheduling,omitempty"`
+	StreamLatencyMS                 map[string]float64 `json:"stream_latency_ms"`
+	DatagramLatencyMS               map[string]float64 `json:"datagram_latency_ms"`
+	ControlLatencyMS                map[string]float64 `json:"control_latency_ms,omitempty"`
 }
 
 type datagramSendResult struct {
-	accepted        int
-	duration        time.Duration
-	targetDuration  time.Duration
-	scheduledSpan   time.Duration
-	pacingLateCount int
-	pacingLagMillis []float64
+	accepted          int
+	duration          time.Duration
+	targetDuration    time.Duration
+	scheduledSpan     time.Duration
+	pacingLateCount   int
+	pacingLagMillis   []float64
+	sendCallSlowCount int
+	sendCallMillis    []float64
 }
 
 type datagramReceiveResult struct {
@@ -802,44 +807,47 @@ func runDatagramPressureClient(
 	offeredRateRatio := targetRateRatio(sendRate, cfg)
 
 	return clientRunResult{
-		SchemaVersion:         "quicprobe-v1",
-		RecordType:            "client_run",
-		Tool:                  "quicprobe",
-		ReferenceImpl:         "quic-go",
-		ReferenceVersion:      moduleVersion(quicGoModulePath),
-		StartedAt:             startedAt.UTC().Format(time.RFC3339Nano),
-		FinishedAt:            finishedAt.UTC().Format(time.RFC3339Nano),
-		RemoteAddr:            conn.RemoteAddr().String(),
-		ALPN:                  conn.ConnectionState().TLS.NegotiatedProtocol,
-		Workload:              datagramPressureWorkload,
-		PayloadSizeBytes:      cfg.datagramSize,
-		DatagramSizeBytes:     cfg.datagramSize,
-		DatagramCount:         offered,
-		DatagramMode:          mode,
-		TargetDatagramPPS:     targetDatagramRate(cfg),
-		TargetDurationSeconds: targetDurationSeconds(cfg),
-		OfferedRateRatio:      offeredRateRatio,
-		OfferedRateTolerance:  cfg.rateTolerance,
-		OfferedRateValid:      offeredRateValid(offeredRateRatio, cfg),
-		DatagramsOffered:      offered,
-		DatagramsAccepted:     sendResult.accepted,
-		DatagramsReceived:     receiveResult.received,
-		DatagramDeliveryRatio: ratio(receiveResult.received, offered),
-		DatagramDropCount:     drops,
-		BytesSent:             bytesSent,
-		BytesReceived:         bytesReceived,
-		HandshakeLatencyMS:    durationMillis(handshakeLatency),
-		FirstByteLatencyMS:    receiveResult.firstByteLatency,
-		ApplicationDurationMS: durationMillis(applicationDuration),
-		SendDurationMS:        durationMillis(sendResult.duration),
-		TargetSendDurationMS:  durationMillis(sendResult.targetDuration),
-		ScheduledSendSpanMS:   durationMillis(sendResult.scheduledSpan),
-		OfferedLoadBPS:        offeredLoadBPS(cfg),
-		GoodputBPS:            throughputBPS(bytesReceived, applicationDuration),
-		SendRateDatagramPPS:   sendRate,
-		SendPacingLateCount:   sendResult.pacingLateCount,
-		SendPacingLagMS:       sendPacingLagSummary(sendResult),
-		DatagramLatencyMS:     latencySummary(receiveResult.latencies),
+		SchemaVersion:                   "quicprobe-v1",
+		RecordType:                      "client_run",
+		Tool:                            "quicprobe",
+		ReferenceImpl:                   "quic-go",
+		ReferenceVersion:                moduleVersion(quicGoModulePath),
+		StartedAt:                       startedAt.UTC().Format(time.RFC3339Nano),
+		FinishedAt:                      finishedAt.UTC().Format(time.RFC3339Nano),
+		RemoteAddr:                      conn.RemoteAddr().String(),
+		ALPN:                            conn.ConnectionState().TLS.NegotiatedProtocol,
+		Workload:                        datagramPressureWorkload,
+		PayloadSizeBytes:                cfg.datagramSize,
+		DatagramSizeBytes:               cfg.datagramSize,
+		DatagramCount:                   offered,
+		DatagramMode:                    mode,
+		TargetDatagramPPS:               targetDatagramRate(cfg),
+		TargetDurationSeconds:           targetDurationSeconds(cfg),
+		OfferedRateRatio:                offeredRateRatio,
+		OfferedRateTolerance:            cfg.rateTolerance,
+		OfferedRateValid:                offeredRateValid(offeredRateRatio, cfg),
+		DatagramsOffered:                offered,
+		DatagramsAccepted:               sendResult.accepted,
+		DatagramsReceived:               receiveResult.received,
+		DatagramDeliveryRatio:           ratio(receiveResult.received, offered),
+		DatagramDropCount:               drops,
+		BytesSent:                       bytesSent,
+		BytesReceived:                   bytesReceived,
+		HandshakeLatencyMS:              durationMillis(handshakeLatency),
+		FirstByteLatencyMS:              receiveResult.firstByteLatency,
+		ApplicationDurationMS:           durationMillis(applicationDuration),
+		SendDurationMS:                  durationMillis(sendResult.duration),
+		TargetSendDurationMS:            durationMillis(sendResult.targetDuration),
+		ScheduledSendSpanMS:             durationMillis(sendResult.scheduledSpan),
+		OfferedLoadBPS:                  offeredLoadBPS(cfg),
+		GoodputBPS:                      throughputBPS(bytesReceived, applicationDuration),
+		SendRateDatagramPPS:             sendRate,
+		SendPacingLateCount:             sendResult.pacingLateCount,
+		SendPacingLagMS:                 sendPacingLagSummary(sendResult),
+		SendDatagramCallSlowCount:       sendResult.sendCallSlowCount,
+		SendDatagramCallSlowThresholdMS: durationMillis(pacedSpinThreshold),
+		SendDatagramCallMS:              sendDatagramCallSummary(sendResult),
+		DatagramLatencyMS:               latencySummary(receiveResult.latencies),
 	}, nil
 }
 
@@ -853,18 +861,22 @@ func sendDatagrams(ctx context.Context, conn quic.Connection, cfg clientConfig, 
 
 func sendDatagramBurst(conn quic.Connection, cfg clientConfig, count int) (datagramSendResult, error) {
 	startedAt := time.Now()
+	result := datagramSendResult{
+		sendCallMillis: make([]float64, 0, count),
+	}
 
 	for sequence := 1; sequence <= count; sequence++ {
 		payload := datagramPayload(uint64(sequence), cfg.datagramSize, time.Now())
-		if err := conn.SendDatagram(payload); err != nil {
-			return datagramSendResult{
-				accepted: sequence - 1,
-				duration: time.Since(startedAt),
-			}, fmt.Errorf("send datagram %d: %w", sequence, err)
+		if err := sendDatagramWithTiming(conn, payload, &result); err != nil {
+			result.accepted = sequence - 1
+			result.duration = time.Since(startedAt)
+			return result, fmt.Errorf("send datagram %d: %w", sequence, err)
 		}
 	}
 
-	return datagramSendResult{accepted: count, duration: time.Since(startedAt)}, nil
+	result.accepted = count
+	result.duration = time.Since(startedAt)
+	return result, nil
 }
 
 func sendDatagramPaced(ctx context.Context, conn quic.Connection, cfg clientConfig, count int) (datagramSendResult, error) {
@@ -874,6 +886,7 @@ func sendDatagramPaced(ctx context.Context, conn quic.Connection, cfg clientConf
 		targetDuration:  targetPacedSendDuration(count, cfg),
 		scheduledSpan:   scheduledPacedSendSpan(count, interval),
 		pacingLagMillis: make([]float64, 0, count),
+		sendCallMillis:  make([]float64, 0, count),
 	}
 
 	for sequence := 1; sequence <= count; sequence++ {
@@ -895,7 +908,7 @@ func sendDatagramPaced(ctx context.Context, conn quic.Connection, cfg clientConf
 		result.pacingLagMillis = append(result.pacingLagMillis, durationMillis(lag))
 
 		payload := datagramPayload(uint64(sequence), cfg.datagramSize, sendAt)
-		if err := conn.SendDatagram(payload); err != nil {
+		if err := sendDatagramWithTiming(conn, payload, &result); err != nil {
 			result.accepted = sequence - 1
 			result.duration = time.Since(startedAt)
 			return result, fmt.Errorf("send datagram %d: %w", sequence, err)
@@ -905,6 +918,19 @@ func sendDatagramPaced(ctx context.Context, conn quic.Connection, cfg clientConf
 	result.accepted = count
 	result.duration = time.Since(startedAt)
 	return result, nil
+}
+
+func sendDatagramWithTiming(conn quic.Connection, payload []byte, result *datagramSendResult) error {
+	startedAt := time.Now()
+	err := conn.SendDatagram(payload)
+	duration := time.Since(startedAt)
+
+	result.sendCallMillis = append(result.sendCallMillis, durationMillis(duration))
+	if duration > pacedSpinThreshold {
+		result.sendCallSlowCount++
+	}
+
+	return err
 }
 
 func pacedDatagramDeadline(startedAt time.Time, interval time.Duration, sequence int) time.Time {
@@ -933,6 +959,14 @@ func sendPacingLagSummary(result datagramSendResult) map[string]float64 {
 	}
 
 	return latencySummary(result.pacingLagMillis)
+}
+
+func sendDatagramCallSummary(result datagramSendResult) map[string]float64 {
+	if len(result.sendCallMillis) == 0 {
+		return nil
+	}
+
+	return latencySummary(result.sendCallMillis)
 }
 
 func waitUntil(ctx context.Context, deadline time.Time) error {

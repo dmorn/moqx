@@ -3264,6 +3264,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp base_metrics(ctx, measurement, latencies, datagram?) do
     pacing_lag = measurement["send_pacing_lag_ms"] || %{}
+    send_call = measurement["send_datagram_call_ms"] || %{}
 
     %{
       "handshake_latency_ms" => number(measurement["handshake_latency_ms"]),
@@ -3279,6 +3280,12 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "send_pacing_lag_p50_ms" => number(pacing_lag["p50"]),
       "send_pacing_lag_p95_ms" => number(pacing_lag["p95"]),
       "send_pacing_lag_p99_ms" => number(pacing_lag["p99"]),
+      "send_datagram_call_slow_count" => number(measurement["send_datagram_call_slow_count"]),
+      "send_datagram_call_slow_threshold_ms" =>
+        number(measurement["send_datagram_call_slow_threshold_ms"]),
+      "send_datagram_call_p50_ms" => number(send_call["p50"]),
+      "send_datagram_call_p95_ms" => number(send_call["p95"]),
+      "send_datagram_call_p99_ms" => number(send_call["p99"]),
       "datagram_late_count" => number(measurement["send_pacing_late_count"]),
       "stream_count" => stream_count_metric(datagram?, measurement, ctx.config),
       "payload_size_bytes" =>
