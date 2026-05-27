@@ -244,8 +244,11 @@ both expected count and post-first-datagram idle time. This keeps lossy steps
 from holding the UDP port while waiting for datagrams that were dropped. Pass
 `--diagnostics-output PATH` to append listener-side JSONL diagnostics with
 received/echoed counts, duplicate/invalid counts, stop reason, and receiver
-mailbox depth/peak/samples. For `moqx-client-to-reference-server` DATAGRAM
-runs, the canonical benchmark record includes
+mailbox depth/peak/samples. If the listener fails before a workload starts,
+for example while waiting in `accept` or `handshake`, the same diagnostics file
+gets a `listener_accept_run` record with configured/bound listener address,
+phase, timeout, and error reason. For `moqx-client-to-reference-server`
+DATAGRAM runs, the canonical benchmark record includes
 `moqx-client-datagram-diagnostics-v1` with accepted/received/missing counts,
 receive-loop event counts, and the client receiver mailbox depth/peak/samples.
 

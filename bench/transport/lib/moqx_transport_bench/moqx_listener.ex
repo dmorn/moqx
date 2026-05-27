@@ -15,6 +15,7 @@ defmodule MOQX.TransportBench.MoqxListener do
   def main(argv, opts \\ []) do
     script = Keyword.get(opts, :script, @default_script)
     transport_backend = Keyword.get(opts, :transport_backend, MOQX.Transport.Quicer)
+    halt_on_error? = Keyword.get(opts, :halt_on_error?, true)
 
     ensure_quicer? =
       Keyword.get(opts, :ensure_quicer?, transport_backend == MOQX.Transport.Quicer)
@@ -28,7 +29,10 @@ defmodule MOQX.TransportBench.MoqxListener do
         System.halt(2)
 
       {:ok, config} ->
-        run(config)
+        config
+        |> Map.put(:halt_on_error?, halt_on_error?)
+        |> run()
+        |> handle_run_result(halt_on_error?)
     end
   end
 
@@ -208,24 +212,39 @@ defmodule MOQX.TransportBench.MoqxListener do
     with :ok <- ensure_transport_apps(config),
          {:ok, ctx} <- Transport.new(config.transport_backend),
          {:ok, listener, ctx} <- start_listener(ctx, config),
-         {:ok, {_ip, port}} <- Transport.local_address(ctx, listener),
+         {:ok, local_address} <- Transport.local_address(ctx, listener),
+         listener_metadata = listener_metadata(config, local_address),
+         {_ip, port} = local_address,
          :ok <- print_ready(config, port),
-         {:ok, ctx} <- serve_connections(ctx, listener, config),
+         {:ok, ctx} <- serve_connections(ctx, listener, config, listener_metadata),
          {:ok, _ctx} <- Transport.close_listener(ctx, listener, 0) do
       :ok
     else
-      {:error, message} when is_binary(message) ->
-        IO.puts(:stderr, message)
-        System.halt(1)
-
-      {:error, reason, _ctx} ->
-        IO.puts(:stderr, inspect(reason))
-        System.halt(1)
-
-      {:error, reason} ->
-        IO.puts(:stderr, inspect(reason))
-        System.halt(1)
+      {:error, reason, _ctx} -> {:error, reason}
+      {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp handle_run_result(:ok, _halt_on_error?), do: :ok
+
+  defp handle_run_result({:error, message} = error, false) when is_binary(message) do
+    IO.puts(:stderr, message)
+    error
+  end
+
+  defp handle_run_result({:error, reason} = error, false) do
+    IO.puts(:stderr, inspect(reason))
+    error
+  end
+
+  defp handle_run_result({:error, message}, true) when is_binary(message) do
+    IO.puts(:stderr, message)
+    System.halt(1)
+  end
+
+  defp handle_run_result({:error, reason}, true) do
+    IO.puts(:stderr, inspect(reason))
+    System.halt(1)
   end
 
   defp ensure_transport_apps(%{ensure_quicer?: false}), do: :ok
@@ -258,21 +277,53 @@ defmodule MOQX.TransportBench.MoqxListener do
     :ok
   end
 
-  defp serve_connections(ctx, listener, config) do
-    serve_connections(ctx, listener, config, 0)
+  defp serve_connections(ctx, listener, config, listener_metadata) do
+    serve_connections(ctx, listener, config, listener_metadata, 0)
   end
 
-  defp serve_connections(ctx, _listener, %{connection_count: limit}, served)
+  defp serve_connections(ctx, _listener, %{connection_count: limit}, _listener_metadata, served)
        when limit > 0 and served >= limit,
        do: {:ok, ctx}
 
-  defp serve_connections(ctx, listener, config, served) do
-    with {:ok, connection, ctx} <- Transport.accept(ctx, listener, [], config.timeout_ms),
-         {:ok, connection, ctx} <- Transport.handshake(ctx, connection, config.timeout_ms),
-         {:ok, ctx} <- serve_connection_workload(ctx, connection, config),
+  defp serve_connections(ctx, listener, config, listener_metadata, served) do
+    case Transport.accept(ctx, listener, [], config.timeout_ms) do
+      {:ok, connection, ctx} ->
+        handshake_connection(ctx, listener, connection, config, listener_metadata, served)
+
+      {:error, reason, ctx} ->
+        write_listener_diagnostics(config, listener_metadata, %{
+          phase: "accept",
+          served: served,
+          stop_reason: "accept_error",
+          error_reason: reason_name(reason)
+        })
+
+        {:error, reason, ctx}
+    end
+  end
+
+  defp handshake_connection(ctx, listener, connection, config, listener_metadata, served) do
+    case Transport.handshake(ctx, connection, config.timeout_ms) do
+      {:ok, connection, ctx} ->
+        serve_connection(ctx, listener, connection, config, listener_metadata, served)
+
+      {:error, reason, ctx} ->
+        write_listener_diagnostics(config, listener_metadata, %{
+          phase: "handshake",
+          served: served,
+          stop_reason: "handshake_error",
+          error_reason: reason_name(reason)
+        })
+
+        {:error, reason, ctx}
+    end
+  end
+
+  defp serve_connection(ctx, listener, connection, config, listener_metadata, served) do
+    with {:ok, ctx} <- serve_connection_workload(ctx, connection, config),
          {:ok, close_mode, ctx} <- wait_for_peer_connection_close(ctx, connection, config),
          {:ok, ctx} <- close_connection_if_needed(ctx, connection, close_mode) do
-      serve_connections(ctx, listener, config, served + 1)
+      serve_connections(ctx, listener, config, listener_metadata, served + 1)
     end
   end
 
@@ -688,6 +739,59 @@ defmodule MOQX.TransportBench.MoqxListener do
       },
       "process" => process_diagnostics(state.process)
     }
+  end
+
+  defp write_listener_diagnostics(%{diagnostics_output: nil}, _listener_metadata, _summary),
+    do: :ok
+
+  defp write_listener_diagnostics(config, listener_metadata, summary) do
+    path = config.diagnostics_output
+    dir = Path.dirname(path)
+    if dir != ".", do: File.mkdir_p!(dir)
+
+    File.write!(
+      path,
+      config
+      |> listener_diagnostics_record(listener_metadata, summary)
+      |> encode_json()
+      |> IO.iodata_to_binary()
+      |> Kernel.<>("\n"),
+      [:append]
+    )
+  end
+
+  defp listener_diagnostics_record(config, listener_metadata, summary) do
+    %{
+      "schema_version" => @listener_diagnostics_schema_version,
+      "record_type" => "listener_accept_run",
+      "workload" => config.workload,
+      "alpn" => config.alpn,
+      "listener" => listener_metadata,
+      "summary" => %{
+        "phase" => summary.phase,
+        "stop_reason" => summary.stop_reason,
+        "error_reason" => summary.error_reason,
+        "connections_served" => summary.served,
+        "connection_count_limit" => config.connection_count,
+        "timeout_ms" => config.timeout_ms
+      },
+      "process" => process_diagnostics(%{})
+    }
+  end
+
+  defp listener_metadata(config, {ip, port}) do
+    %{
+      "configured_host" => config.host,
+      "configured_port" => config.port,
+      "bound_ip" => format_ip(ip),
+      "bound_port" => port
+    }
+  end
+
+  defp format_ip(ip) do
+    ip
+    |> :inet.ntoa()
+    |> to_string()
   end
 
   defp process_diagnostics(samples) do

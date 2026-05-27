@@ -191,3 +191,30 @@ first.
   timed out before the listener accepted a connection. Treat this as an
   interop/reachability blocker for receiver-side remote capacity claims, not as
   DATAGRAM throughput evidence.
+- 2026-05-27: Added pre-workload listener diagnostics for
+  `moqx-transport-bench moqx-listener`. When the listener fails while waiting
+  in accept or handshake, `--diagnostics-output` now appends a
+  `moqx-listener-diagnostics-v1` `listener_accept_run` record with the
+  configured/bound listener address, phase, timeout, error reason, served
+  connection count, and process mailbox snapshot.
+- 2026-05-27: Remote ARM same-region tcpdump smoke
+  `20260527T073033Z-listener-tcpdump` narrowed the
+  reference-client-to-MOQX-listener blocker. On `cax11` nodes in `nbg1`,
+  quicprobe-to-quicprobe control traffic succeeded and tcpdump showed
+  bidirectional UDP on the private interface. Reference-client-to-MOQX-listener
+  burst mode also succeeded: 10/10 DATAGRAM echoes, listener
+  `stop_reason=expected_datagrams_received`, and tcpdump showing server
+  replies. Paced `1192` byte DATAGRAMs at `5k` pps for `3s` succeeded with a
+  generous listener accept window (`--timeout-seconds 30`) and with immediate
+  launch at `10s`/`12s`, delivering `15000/15000` echoes with listener mailbox
+  peaks `36`-`46`. The reproduced `8s` failure emitted
+  `listener_accept_run phase=accept error_reason=timeout connections_served=0`;
+  tcpdump showed client Initial packets reaching `10.88.0.12:55560` but no
+  server UDP response. The prior failure was therefore an orchestration timeout
+  artifact: the listener accept timeout was consumed by setup/capture/client
+  dispatch delay, not evidence that quicprobe cannot reach or interoperate with
+  the MOQX listener. Future remote receiver-side ramps should decouple
+  listener readiness/accept lifetime from per-step measurement timeouts, or use
+  a generous listener accept window when external capture/setup is involved.
+  Artifacts are under
+  `bench/transport/results/20260527T073033Z-listener-tcpdump/`.

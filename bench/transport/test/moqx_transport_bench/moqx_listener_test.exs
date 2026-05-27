@@ -64,6 +64,80 @@ defmodule MOQX.TransportBench.MoqxListenerTest do
     assert record["process"]["message_queue_len_peak"] >= record["process"]["message_queue_len"]
   end
 
+  test "datagram pressure writes listener diagnostics when accept times out" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "listener-diagnostics.jsonl")
+    certfile = Path.join(dir, "server.pem")
+    keyfile = Path.join(dir, "server-key.pem")
+    File.write!(certfile, "cert")
+    File.write!(keyfile, "key")
+
+    Process.put({__MODULE__.DatagramTransport, :accept_error}, :timeout)
+
+    stderr =
+      capture_io(:stderr, fn ->
+        stdout =
+          capture_io(fn ->
+            assert {:error, :timeout} =
+                     MoqxListener.main(
+                       [
+                         "--host",
+                         "0.0.0.0",
+                         "--port",
+                         "55455",
+                         "--certfile",
+                         certfile,
+                         "--keyfile",
+                         keyfile,
+                         "--workload",
+                         "datagram_pressure",
+                         "--datagram-size",
+                         "64",
+                         "--datagram-count",
+                         "3",
+                         "--timeout-seconds",
+                         "1",
+                         "--diagnostics-output",
+                         output_path
+                       ],
+                       script: "test moqx-listener",
+                       transport_backend: __MODULE__.DatagramTransport,
+                       ensure_quicer?: false,
+                       halt_on_error?: false
+                     )
+          end)
+
+        send(self(), {:moqx_listener_stdout, stdout})
+      end)
+
+    assert stderr =~ ":timeout"
+    assert_receive {:moqx_listener_stdout, stdout}
+    assert stdout =~ "moqx-listener ready"
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert record["schema_version"] == "moqx-listener-diagnostics-v1"
+    assert record["record_type"] == "listener_accept_run"
+    assert record["workload"] == "datagram_pressure"
+    assert record["alpn"] == "moqx-test"
+
+    assert record["listener"] == %{
+             "configured_host" => "0.0.0.0",
+             "configured_port" => 55_455,
+             "bound_ip" => "127.0.0.1",
+             "bound_port" => 4433
+           }
+
+    assert record["summary"]["phase"] == "accept"
+    assert record["summary"]["stop_reason"] == "accept_error"
+    assert record["summary"]["error_reason"] == "timeout"
+    assert record["summary"]["connections_served"] == 0
+    assert record["summary"]["connection_count_limit"] == 1
+    assert record["summary"]["timeout_ms"] == 1000
+
+    assert is_integer(record["process"]["message_queue_len"])
+    assert is_integer(record["process"]["message_queue_len_peak"])
+  end
+
   defp tmp_dir do
     path =
       Path.join(
@@ -91,14 +165,18 @@ defmodule MOQX.TransportBench.MoqxListenerTest do
 
     @impl true
     def accept(:listener, _opts, _timeout) do
-      Process.put({__MODULE__, :echoed}, 0)
+      if reason = Process.get({__MODULE__, :accept_error}) do
+        {:error, reason}
+      else
+        Process.put({__MODULE__, :echoed}, 0)
 
-      for sequence <- Process.get({__MODULE__, :datagrams}, []) do
-        payload = DatagramPayload.encode(sequence, 64, System.monotonic_time(:microsecond))
-        send(self(), {:moqx_transport, {:datagram, :connection, payload, %{}}})
+        for sequence <- Process.get({__MODULE__, :datagrams}, []) do
+          payload = DatagramPayload.encode(sequence, 64, System.monotonic_time(:microsecond))
+          send(self(), {:moqx_transport, {:datagram, :connection, payload, %{}}})
+        end
+
+        {:ok, :connection}
       end
-
-      {:ok, :connection}
     end
 
     @impl true
