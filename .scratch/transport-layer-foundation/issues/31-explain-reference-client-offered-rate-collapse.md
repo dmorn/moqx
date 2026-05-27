@@ -1,6 +1,6 @@
 # Explain reference-client offered-rate collapse
 
-Status: ready-for-agent
+Status: closed
 Type: AFK
 
 ## Parent
@@ -51,7 +51,7 @@ not just a raw sender pacing limit.
       only final and peak depth.
 - [x] A narrow ARM same-region bracket around 25k/30k/32k/35k/40k pps is run
       with the new diagnostics and reference-to-reference controls.
-- [ ] The issue records whether the collapse is caused by sender pacing,
+- [x] The issue records whether the collapse is caused by sender pacing,
       quic-go peer backpressure, MOQX echo timing, BEAM/quicer scheduling, or a
       remaining measurement artifact.
 
@@ -150,3 +150,33 @@ None.
   `send_datagram_call_p999_ms`, and `send_datagram_call_max_ms`. This should
   expose rare stalls and total time spent inside quic-go `SendDatagram`, which
   were the last ambiguity after the p99-only run.
+- 2026-05-27: Closed the remaining #31 ambiguity with run
+  `20260527T103305Z-issue-31-tail`, build `7de83d2`, same-region ARM `cax11`
+  nodes in `nbg1`, private path `10.88.0.11 -> 10.88.0.12`. The disposable
+  infrastructure was destroyed after capture and `bench-transport-verify-clean`
+  reported no Terraform state entries or labelled Hetzner resources remaining.
+  The path baseline for this run was TCP 6.26 Gbps; 1192-byte UDP delivered
+  250 Mbps at 99.85% and 500 Mbps at 98.44%.
+- 2026-05-27: The valid comparison used ALPN `moqx-test`; an earlier
+  `moq-00` attempt failed at TLS ALPN negotiation and is ignored. Against the
+  reference quicprobe server, the client remained offered-rate valid at 35k and
+  40k pps: ratios 1.000023 and 0.999992, active send duration about 3000 ms,
+  and send-call total time 426.619 ms and 1696.688 ms. Delivery was path-lossy
+  at 40k, 94.509%, but the offered rate itself held.
+- 2026-05-27: Against the MOQX listener, 35k pps was still offered-rate valid
+  (`ratio=0.984885`, delivery 99.399%). At 40k pps, the client only offered
+  about 34.18k pps (`ratio=0.854407`) while delivering 99.667% of the datagrams
+  it attempted. The new tail fields show the cause: `SendDatagram` synchronous
+  call time rose to 2801.507 ms across a 3000 ms target window, with p99
+  0.459 ms, p999 2.196 ms, max 13.951 ms, and 2699 slow calls. That is not a
+  single rare outlier and not merely scheduler/timer slippage; the reference
+  client's send loop is spending enough wall time inside quic-go `SendDatagram`
+  to consume the pacing budget when the peer is the MOQX listener.
+- 2026-05-27: MOQX listener diagnostics stayed clean in the valid run. At
+  35k/40k pps it received 104,848/105,000 and 119,946/120,000 datagrams,
+  echoed every received datagram, recorded zero echo errors, and kept echo-send
+  duration tiny: mean about 0.0037/0.0029 ms, max 0.967/2.325 ms. Mailbox peaks
+  were 1186 and 1026. Final conclusion: #31 is explained as reference-client
+  quic-go `SendDatagram` backpressure/call-cost under the MOQX-peer DATAGRAM
+  exchange, not MOQX listener echo timing, BEAM/quicer mailbox growth,
+  listener receive loss, or a report-format measurement artifact.
