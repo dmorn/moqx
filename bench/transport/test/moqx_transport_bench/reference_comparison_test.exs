@@ -586,8 +586,12 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert is_integer(record["metrics"]["send_pacing_late_count"])
     assert is_number(record["metrics"]["send_pacing_lag_p99_ms"])
     assert is_number(record["metrics"]["send_datagram_call_total_ms"])
+    assert is_number(record["metrics"]["send_payload_encode_call_total_ms"])
+    assert is_number(record["metrics"]["send_datagram_outer_call_total_ms"])
+    assert is_number(record["metrics"]["send_datagram_wrapper_overhead_total_ms"])
     assert is_number(record["metrics"]["send_loop_overrun_ms"])
     assert is_number(record["metrics"]["send_loop_unmeasured_overhead_ms"])
+    assert is_number(record["metrics"]["send_loop_residual_overhead_ms"])
     assert record["metrics"]["datagram_delivery_ratio"] == 0.0
     assert record["limits"]["first_break_symptom"] == "datagram_delivery_loss"
     refute record["limits"]["first_break_symptom"] == "tool_output_invalid"
@@ -597,7 +601,11 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert summary["datagrams_received"] == 0
     assert summary["datagram_send_errors"] == 0
     assert summary["send_pacing_late_count"] == record["metrics"]["send_pacing_late_count"]
+    assert summary["send_payload_encode_call_ms"]["count"] == 3000
+    assert summary["send_datagram_outer_call_ms"]["count"] == 3000
+    assert is_number(summary["send_datagram_wrapper_overhead_ms"])
     assert is_number(summary["send_loop_unmeasured_overhead_ms"])
+    assert is_number(summary["send_loop_residual_overhead_ms"])
   end
 
   test "records mixed MOQT-shaped MOQX client pressure" do

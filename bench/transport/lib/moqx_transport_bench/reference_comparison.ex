@@ -810,8 +810,21 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     send_datagram_call_ms =
       duration_summary_ms(args.collector_snapshot.send_datagram_call_durations_us)
 
+    send_payload_encode_call_ms =
+      duration_summary_ms_or_nil(receive_state.send_payload_encode_durations_us)
+
+    send_datagram_outer_call_ms =
+      duration_summary_ms_or_nil(receive_state.send_datagram_outer_call_durations_us)
+
     scheduled_send_span_ms = scheduled_datagram_send_span_ms(args.accepted, config)
     send_loop_overrun_ms = send_loop_overrun_ms(args.send_duration_ms, scheduled_send_span_ms)
+
+    send_loop_residual_overhead_ms =
+      send_loop_residual_overhead_ms(
+        send_loop_overrun_ms,
+        send_payload_encode_call_ms,
+        send_datagram_outer_call_ms
+      )
 
     bytes_sent = args.accepted * config.datagram_size
     bytes_received = received_count * config.datagram_size
@@ -860,9 +873,16 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "send_datagram_call_slow_threshold_ms" => datagram_send_call_slow_threshold_ms(config),
       "send_datagram_call_total_ms" => send_datagram_call_ms["total"],
       "send_datagram_call_ms" => send_datagram_call_ms,
+      "send_payload_encode_call_total_ms" => total_duration_ms(send_payload_encode_call_ms),
+      "send_payload_encode_call_ms" => send_payload_encode_call_ms,
+      "send_datagram_outer_call_total_ms" => total_duration_ms(send_datagram_outer_call_ms),
+      "send_datagram_outer_call_ms" => send_datagram_outer_call_ms,
+      "send_datagram_wrapper_overhead_total_ms" =>
+        send_datagram_wrapper_overhead_ms(send_datagram_outer_call_ms, send_datagram_call_ms),
       "send_loop_overrun_ms" => send_loop_overrun_ms,
       "send_loop_unmeasured_overhead_ms" =>
         send_loop_unmeasured_overhead_ms(send_loop_overrun_ms, send_datagram_call_ms),
+      "send_loop_residual_overhead_ms" => send_loop_residual_overhead_ms,
       "offered_load_bps" => offered_load_bps(config),
       "goodput_bps" => bits_per_second(bytes_received, application_duration_ms),
       "send_rate_packets_per_second" => send_rate,
@@ -1783,6 +1803,15 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           "drain_events" => length(runtime[:receive_event_drain_call_durations_us] || []),
           "send_datagram_call_ms" =>
             duration_summary_ms(collector_snapshot.send_datagram_call_durations_us),
+          "send_payload_encode_call_ms" =>
+            duration_summary_ms_or_nil(receive_state.send_payload_encode_durations_us),
+          "send_datagram_outer_call_ms" =>
+            duration_summary_ms_or_nil(receive_state.send_datagram_outer_call_durations_us),
+          "send_datagram_wrapper_overhead_ms" =>
+            send_datagram_wrapper_overhead_ms(
+              duration_summary_ms_or_nil(receive_state.send_datagram_outer_call_durations_us),
+              duration_summary_ms(collector_snapshot.send_datagram_call_durations_us)
+            ),
           "send_pacing_late_count" => datagram_send_pacing_late_count(config, receive_state),
           "send_pacing_lag_ms" => datagram_send_pacing_lag_ms(config, receive_state),
           "target_send_duration_ms" => target_datagram_send_duration_ms(config),
@@ -1799,6 +1828,15 @@ defmodule MOQX.TransportBench.ReferenceComparison do
                 scheduled_datagram_send_span_ms(args.accepted, config)
               ),
               duration_summary_ms(collector_snapshot.send_datagram_call_durations_us)
+            ),
+          "send_loop_residual_overhead_ms" =>
+            send_loop_residual_overhead_ms(
+              send_loop_overrun_ms(
+                args.send_duration_ms,
+                scheduled_datagram_send_span_ms(args.accepted, config)
+              ),
+              duration_summary_ms_or_nil(receive_state.send_payload_encode_durations_us),
+              duration_summary_ms_or_nil(receive_state.send_datagram_outer_call_durations_us)
             ),
           "receive_event_call_ms" =>
             duration_summary_ms(runtime[:receive_event_call_durations_us] || []),
@@ -1855,7 +1893,16 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           receive_state =
             record_moqx_datagram_send_schedule(receive_state, send_at, monotonic_us())
 
-          case send_moqx_datagram(ctx, connection, config, sequence) do
+          {send_result, receive_state} =
+            send_moqx_datagram_with_phase_diagnostics(
+              ctx,
+              connection,
+              config,
+              sequence,
+              receive_state
+            )
+
+          case send_result do
             {:ok, ctx} ->
               receive_state = record_moqx_datagram_accepted(receive_state, accepted + 1)
 
@@ -1997,10 +2044,35 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       cadence_last_received: 0,
       cadence_samples: [],
       send_pacing_late_count: 0,
-      send_pacing_lags_us: []
+      send_pacing_lags_us: [],
+      send_payload_encode_durations_us: [],
+      send_datagram_outer_call_durations_us: []
     }
 
     record_datagram_cadence(state, "start", true)
+  end
+
+  defp send_moqx_datagram_with_phase_diagnostics(
+         ctx,
+         connection,
+         config,
+         sequence,
+         receive_state
+       ) do
+    payload_started_at = monotonic_us()
+    payload = DatagramPayload.encode(sequence, config.datagram_size, payload_started_at)
+    payload_duration_us = monotonic_us() - payload_started_at
+
+    send_started_at = monotonic_us()
+    result = Transport.send_datagram(ctx, connection, payload)
+    send_duration_us = monotonic_us() - send_started_at
+
+    receive_state =
+      receive_state
+      |> record_send_payload_encode_duration(payload_duration_us)
+      |> record_send_datagram_outer_call_duration(send_duration_us)
+
+    {result, receive_state}
   end
 
   defp record_moqx_datagram_send_schedule(receive_state, scheduled_at_us, actual_at_us) do
@@ -2015,6 +2087,24 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp late_count(lag_us) when lag_us > 0, do: 1
   defp late_count(_lag_us), do: 0
+
+  defp record_send_payload_encode_duration(receive_state, duration_us) do
+    %{
+      receive_state
+      | send_payload_encode_durations_us: [
+          duration_us | receive_state.send_payload_encode_durations_us
+        ]
+    }
+  end
+
+  defp record_send_datagram_outer_call_duration(receive_state, duration_us) do
+    %{
+      receive_state
+      | send_datagram_outer_call_durations_us: [
+          duration_us | receive_state.send_datagram_outer_call_durations_us
+        ]
+    }
+  end
 
   defp datagram_send_pacing_late_count(%{datagram_rate: rate}, receive_state)
        when is_integer(rate) and rate > 0 do
@@ -3748,9 +3838,16 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "send_datagram_call_p99_ms" => number(send_call["p99"]),
       "send_datagram_call_p999_ms" => number(send_call["p999"]),
       "send_datagram_call_max_ms" => number(send_call["max"]),
+      "send_payload_encode_call_total_ms" =>
+        number(measurement["send_payload_encode_call_total_ms"]),
+      "send_datagram_outer_call_total_ms" =>
+        number(measurement["send_datagram_outer_call_total_ms"]),
+      "send_datagram_wrapper_overhead_total_ms" =>
+        number(measurement["send_datagram_wrapper_overhead_total_ms"]),
       "send_loop_overrun_ms" => number(measurement["send_loop_overrun_ms"]),
       "send_loop_unmeasured_overhead_ms" =>
         number(measurement["send_loop_unmeasured_overhead_ms"]),
+      "send_loop_residual_overhead_ms" => number(measurement["send_loop_residual_overhead_ms"]),
       "send_stream_call_total_ms" => number(stream_send_call["total"]),
       "send_stream_call_mean_ms" => number(stream_send_call["mean"]),
       "send_stream_call_p50_ms" => number(stream_send_call["p50"]),
@@ -4199,6 +4296,32 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp send_loop_unmeasured_overhead_ms(_send_loop_overrun_ms, _send_call_ms), do: nil
 
+  defp send_datagram_wrapper_overhead_ms(
+         %{"total" => outer_call_total_ms},
+         %{"total" => send_call_total_ms}
+       )
+       when is_number(outer_call_total_ms) and is_number(send_call_total_ms) do
+    max(outer_call_total_ms - send_call_total_ms, 0)
+  end
+
+  defp send_datagram_wrapper_overhead_ms(_outer_call_ms, _send_call_ms), do: nil
+
+  defp send_loop_residual_overhead_ms(
+         send_loop_overrun_ms,
+         %{"total" => payload_encode_total_ms},
+         %{"total" => outer_call_total_ms}
+       )
+       when is_number(send_loop_overrun_ms) and is_number(payload_encode_total_ms) and
+              is_number(outer_call_total_ms) do
+    max(send_loop_overrun_ms - payload_encode_total_ms - outer_call_total_ms, 0)
+  end
+
+  defp send_loop_residual_overhead_ms(_send_loop_overrun_ms, _payload_encode_ms, _outer_call_ms),
+    do: nil
+
+  defp total_duration_ms(%{"total" => total}) when is_number(total), do: total
+  defp total_duration_ms(_summary), do: nil
+
   defp offered_load_bps(%{workload: @datagram_pressure_workload} = config) do
     case target_datagram_rate(config) do
       nil -> nil
@@ -4263,6 +4386,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "max" => List.last(sorted)
     }
   end
+
+  defp duration_summary_ms_or_nil([]), do: nil
+  defp duration_summary_ms_or_nil(values_us), do: duration_summary_ms(values_us)
 
   defp mean(_total, 0), do: nil
   defp mean(total, count), do: total / count

@@ -105,3 +105,21 @@ requested load on the link.
   beyond 20k, scheduler/event-loop pressure or another per-iteration cost also
   dominates. Infrastructure was destroyed and `just bench-transport-verify-clean`
   reported no Terraform state entries or labelled Hetzner resources.
+- 2026-05-28: Added a low-overhead phase split for the paced DATAGRAM sender
+  hot path. Canonical records now keep the existing `transport-bench-v1`
+  contract but add metrics/diagnostics for payload encode timing, outer
+  `Transport.send_datagram/3` wall-clock timing, wrapper/telemetry overhead,
+  and residual loop overhead after accounting for payload encode plus the
+  outer send call. This lets the next remote run distinguish benchmark payload
+  allocation, public transport-call overhead, telemetry/collector overhead,
+  receive-drain/event-pump cost, and backend admission cost before changing the
+  transport API or quicer backend.
+- 2026-05-28: Loopback calibration
+  (`/tmp/moqx-issue-40-phase-split.jsonl`) against `tools/quicprobe` at
+  3k pps, 1192-byte DATAGRAMs, and 1 second was strict-valid with no break
+  symptom: offered-rate ratio 0.9998, 3000/3000 delivered, send-loop overrun
+  about 0.53 ms, internal DATAGRAM send-call total about 6.83 ms, payload
+  encode total about 27.84 ms, outer send-call total about 12.63 ms, and
+  wrapper/telemetry overhead about 5.80 ms. This is loopback calibration only,
+  but it proves the new split is populated and shows that benchmark payload
+  allocation can be a meaningful part of the per-DATAGRAM cost.
