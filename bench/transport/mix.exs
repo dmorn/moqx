@@ -15,7 +15,7 @@ defmodule MOQX.TransportBench.MixProject do
 
   def application do
     [
-      extra_applications: [:logger],
+      extra_applications: [:logger, :telemetry],
       mod: {MOQX.TransportBench.Application, []}
     ]
   end
@@ -29,6 +29,7 @@ defmodule MOQX.TransportBench.MixProject do
   defp deps do
     [
       {:moqx, path: "../.."},
+      {:telemetry_metrics, "~> 1.1"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end

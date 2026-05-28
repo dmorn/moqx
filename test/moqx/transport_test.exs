@@ -165,6 +165,110 @@ defmodule MOQX.TransportTest do
                receive_context_stream_data(ctx, server_stream, "hello", 100)
     end
 
+    test "emits telemetry for stream sends and normalized receive events" do
+      {ctx, client, server} = support_pair(:moq_lite_04)
+
+      assert {:ok, client_stream, ctx} =
+               MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
+
+      assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+      ctx = flush_context_events(ctx)
+
+      attach_test_telemetry([
+        [:moqx, :transport, :stream, :send, :stop],
+        [:moqx, :transport, :event, :receive, :stop]
+      ])
+
+      assert {:ok, ctx} = MOQX.Transport.set_active(ctx, server_stream, true)
+      assert {:ok, _send, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "hello", [])
+
+      assert_receive {:test_telemetry, [:moqx, :transport, :stream, :send, :stop],
+                      stream_measurements, stream_metadata}
+
+      assert stream_measurements.byte_size == 5
+      assert is_integer(stream_measurements.duration_us)
+      assert stream_measurements.duration_us >= 0
+      assert stream_metadata.backend == Support
+      assert stream_metadata.result == :ok
+      assert stream_metadata.reason == nil
+      assert stream_metadata.finish? == false
+      assert stream_metadata.stream_id == 0
+      assert stream_metadata.stream_direction == :bidirectional
+      assert stream_metadata.stream_initiator == :local
+      assert stream_metadata.local_role == :client
+
+      assert {:ok, {:stream_data, ^server_stream, "hello", %{}}, _ctx} =
+               receive_context_stream_data(ctx, server_stream, "hello", 100)
+
+      {receive_measurements, receive_metadata} =
+        assert_receive_test_telemetry(
+          [:moqx, :transport, :event, :receive, :stop],
+          fn _measurements, metadata -> metadata.event_kind == :stream_data end
+        )
+
+      assert receive_measurements.byte_size == 5
+      assert is_integer(receive_measurements.duration_us)
+      assert receive_measurements.duration_us >= 0
+      assert receive_measurements.timeout_ms in [0, 100]
+      assert receive_metadata.backend == Support
+      assert receive_metadata.result == :ok
+      assert receive_metadata.event_kind == :stream_data
+      assert receive_metadata.event_name == nil
+      assert receive_metadata.stream_id == 0
+      assert receive_metadata.stream_direction == :bidirectional
+      assert receive_metadata.stream_initiator == :peer
+      assert receive_metadata.local_role == :server
+    end
+
+    test "emits telemetry for datagram send admission and receive timeouts" do
+      {ctx, client, _server} = support_pair(:draft_14)
+      ctx = flush_context_events(ctx)
+
+      attach_test_telemetry([
+        [:moqx, :transport, :datagram, :send, :stop],
+        [:moqx, :transport, :event, :receive, :stop]
+      ])
+
+      assert {:ok, ctx} = MOQX.Transport.send_datagram(ctx, client, "dgram")
+
+      assert_receive {:test_telemetry, [:moqx, :transport, :datagram, :send, :stop],
+                      datagram_measurements, datagram_metadata}
+
+      assert datagram_measurements.byte_size == 5
+      assert is_integer(datagram_measurements.duration_us)
+      assert datagram_metadata.backend == Support
+      assert datagram_metadata.result == :ok
+      assert datagram_metadata.reason == nil
+      assert datagram_metadata.local_role == :client
+
+      assert {:ok, {:datagram, _connection, "dgram", %{}}, ctx} =
+               MOQX.Transport.receive_event(ctx, 100)
+
+      {receive_measurements, receive_metadata} =
+        assert_receive_test_telemetry(
+          [:moqx, :transport, :event, :receive, :stop],
+          fn _measurements, metadata -> metadata.event_kind == :datagram end
+        )
+
+      assert receive_measurements.byte_size == 5
+      assert receive_metadata.backend == Support
+      assert receive_metadata.result == :ok
+      assert receive_metadata.event_kind == :datagram
+      assert receive_metadata.local_role == :server
+
+      assert {:timeout, ^ctx} = MOQX.Transport.receive_event(ctx, 0)
+
+      assert_receive {:test_telemetry, [:moqx, :transport, :event, :receive, :stop],
+                      timeout_measurements, timeout_metadata}
+
+      assert timeout_measurements.timeout_ms == 0
+      assert is_integer(timeout_measurements.duration_us)
+      assert timeout_metadata.backend == Support
+      assert timeout_metadata.result == :timeout
+      assert timeout_metadata.event_kind == :timeout
+      assert timeout_metadata.event_name == nil
+    end
+
     test "controlling_process transfers whole context handles" do
       {ctx, _client, _server} = support_pair(:moq_lite_04)
 
@@ -218,6 +322,47 @@ defmodule MOQX.TransportTest do
       {:ok, _event, ctx} -> receive_context_stream_data(ctx, stream, payload, 0)
       {:unknown, _message, ctx} -> receive_context_stream_data(ctx, stream, payload, 0)
       {:timeout, ctx} -> {:timeout, ctx}
+    end
+  end
+
+  defp attach_test_telemetry(events) do
+    test_pid = self()
+    handler_id = {__MODULE__, test_pid, make_ref()}
+
+    :ok =
+      :telemetry.attach_many(
+        handler_id,
+        events,
+        &__MODULE__.telemetry_test_handler/4,
+        {test_pid, test_pid}
+      )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+  end
+
+  defp assert_receive_test_telemetry(event, predicate, remaining \\ 8)
+
+  defp assert_receive_test_telemetry(event, predicate, remaining) when remaining > 0 do
+    receive do
+      {:test_telemetry, ^event, measurements, metadata} ->
+        if predicate.(measurements, metadata) do
+          {measurements, metadata}
+        else
+          assert_receive_test_telemetry(event, predicate, remaining - 1)
+        end
+    after
+      100 ->
+        flunk("expected telemetry event #{inspect(event)}")
+    end
+  end
+
+  defp assert_receive_test_telemetry(event, _predicate, 0) do
+    flunk("expected telemetry event #{inspect(event)}")
+  end
+
+  def telemetry_test_handler(event, measurements, metadata, {target_pid, emitter_pid}) do
+    if self() == emitter_pid do
+      send(target_pid, {:test_telemetry, event, measurements, metadata})
     end
   end
 

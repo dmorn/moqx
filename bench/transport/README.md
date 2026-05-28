@@ -237,11 +237,11 @@ The MOQX-client stream-pressure path also exposes benchmark-only diagnostic
 knobs for performance isolation:
 
 - `--stream-send-window N` controls max in-flight async sends per stream.
-- `--stream-event-batch-size N` drains up to `N` ready transport events before
-  taking another mailbox sample.
-- `--stream-diagnostics-sampling event|final` keeps the default per-event
-  mailbox and live phase sampling, or records only the final stream/process
-  snapshot.
+- `--stream-event-batch-size N` drains up to `N` ready transport events after
+  each blocking receive before waiting again.
+- `--stream-diagnostics-sampling event|final` keeps the default fixed-interval
+  mailbox sampler while the stream-pressure step runs, or records only the
+  final stream/process snapshot.
 
 These knobs are not protocol semantics. Use them to distinguish benchmark
 event-pump overhead, event granularity, and transport/NIF behavior while

@@ -5,6 +5,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   alias MOQX.TransportBench.BuildInfo
   alias MOQX.TransportBench.DatagramPayload
   alias MOQX.TransportBench.PathMetadata
+  alias MOQX.TransportBench.StreamPressureCollector
 
   @default_script "moqx-transport-bench reference-comparison"
   @script_version "v1"
@@ -384,29 +385,23 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp run_moqx_client(config) do
     args = moqx_client_step_args(config)
     timeout_ms = step_timeout_ms(config)
-    {diagnostics_agent, config} = maybe_start_diagnostics_agent(config)
 
-    try do
-      task =
-        Task.async(fn ->
-          do_run_moqx_client(config)
-        end)
+    task =
+      Task.async(fn ->
+        do_run_moqx_client(config)
+      end)
 
-      case Task.yield(task, timeout_ms) do
-        {:ok, {:ok, measurement}} ->
-          {measurement, "", 0, args, false, timeout_ms}
+    case Task.yield(task, timeout_ms) do
+      {:ok, {:ok, measurement}} ->
+        {measurement, "", 0, args, false, timeout_ms}
 
-        {:ok, {:error, message}} ->
-          measurement = diagnostic_measurement(config, diagnostics_agent)
-          {measurement, message, 1, args, false, timeout_ms}
+      {:ok, {:error, message}} ->
+        {diagnostic_measurement(config), message, 1, args, false, timeout_ms}
 
-        nil ->
-          measurement = diagnostic_measurement(config, diagnostics_agent)
-          _result = Task.shutdown(task, :brutal_kill)
-          {measurement, "", @timeout_exit_status, args, true, timeout_ms}
-      end
-    after
-      stop_diagnostics_agent(diagnostics_agent)
+      nil ->
+        measurement = diagnostic_measurement(config)
+        _result = Task.shutdown(task, :brutal_kill)
+        {measurement, "", @timeout_exit_status, args, true, timeout_ms}
     end
   end
 
@@ -522,63 +517,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       {:error, Exception.format(kind, reason, __STACKTRACE__)}
   end
 
-  defp maybe_start_diagnostics_agent(%{topology: @moqx_client_topology} = config) do
-    if live_stream_diagnostics?(config) do
-      start_diagnostics_agent(config)
-    else
-      {nil, config}
-    end
-  end
-
-  defp maybe_start_diagnostics_agent(config), do: {nil, config}
-
-  defp live_stream_diagnostics?(%{stream_diagnostics_sampling: "final"}), do: false
-  defp live_stream_diagnostics?(_config), do: true
-
-  defp start_diagnostics_agent(config) do
-    case Agent.start_link(fn -> initial_diagnostics(config) end) do
-      {:ok, agent} -> {agent, Map.put(config, :diagnostics_agent, agent)}
-      {:error, _reason} -> {nil, config}
-    end
-  end
-
-  defp stop_diagnostics_agent(nil), do: :ok
-
-  defp stop_diagnostics_agent(agent) do
-    if Process.alive?(agent), do: Agent.stop(agent), else: :ok
-  end
-
-  defp initial_diagnostics(config) do
-    %{
-      "version" => "stream-pressure-diagnostics-v1",
-      "summary" => %{
-        "topology" => config.topology,
-        "workload" => config.workload,
-        "stream_direction" => config.stream_direction,
-        "stream_count" => config.stream_count,
-        "stream_send_window" => config.stream_send_window,
-        "stream_event_batch_size" => config.stream_event_batch_size,
-        "stream_diagnostics_sampling" => config.stream_diagnostics_sampling,
-        "payload_size_bytes" => config.payload_size,
-        "payload_count" => config.payload_count
-      },
-      "streams" => %{},
-      "process" => %{}
-    }
-  end
-
-  defp diagnostic_measurement(config, nil), do: diagnostic_measurement(config, %{})
-
-  defp diagnostic_measurement(config, diagnostics_agent) when is_pid(diagnostics_agent) do
-    diagnostics =
-      if Process.alive?(diagnostics_agent) do
-        Agent.get(diagnostics_agent, & &1)
-      else
-        %{}
-      end
-
-    diagnostic_measurement(config, diagnostics)
-  end
+  defp diagnostic_measurement(config), do: diagnostic_measurement(config, %{})
 
   defp diagnostic_measurement(config, diagnostics) do
     summary = Map.get(diagnostics, "summary", %{})
@@ -622,38 +561,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp diagnostics_stream_list(diagnostics), do: diagnostics
 
-  defp record_diagnostics_summary(%{diagnostics_agent: agent}, summary) when is_pid(agent) do
-    Agent.update(agent, fn diagnostics ->
-      update_in(diagnostics, ["summary"], &Map.merge(&1 || %{}, summary))
-    end)
-  end
-
   defp record_diagnostics_summary(_config, _summary), do: :ok
 
   defp record_stream_phase(config, stream_state, phase, attrs \\ %{})
-
-  defp record_stream_phase(%{diagnostics_agent: agent}, stream_state, phase, attrs)
-       when is_pid(agent) do
-    diagnostic =
-      stream_diagnostic(
-        stream_state,
-        Map.get(attrs, "bytes_expected", stream_state.bytes_sent),
-        Map.get(attrs, "bytes_received", 0),
-        phase,
-        attrs
-      )
-
-    Agent.update(agent, fn diagnostics ->
-      diagnostics
-      |> put_in(["streams", stream_state.index], diagnostic)
-      |> update_in(["summary"], fn summary ->
-        summary
-        |> Map.put("last_phase", phase)
-        |> Map.put("bytes_sent", summary_bytes_sent(diagnostics, diagnostic))
-        |> Map.put("bytes_received", summary_bytes_received(diagnostics, diagnostic))
-      end)
-    end)
-  end
 
   defp record_stream_phase(_config, _stream_state, _phase, _attrs), do: :ok
 
@@ -665,24 +575,6 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         "bytes_expected" => expected_bytes
       })
     end)
-  end
-
-  defp summary_bytes_sent(diagnostics, diagnostic) do
-    diagnostics
-    |> Map.get("streams", %{})
-    |> Map.put(diagnostic["index"], diagnostic)
-    |> Map.values()
-    |> Enum.map(&(&1["bytes_sent"] || 0))
-    |> Enum.sum()
-  end
-
-  defp summary_bytes_received(diagnostics, diagnostic) do
-    diagnostics
-    |> Map.get("streams", %{})
-    |> Map.put(diagnostic["index"], diagnostic)
-    |> Map.values()
-    |> Enum.map(&(&1["bytes_received"] || 0))
-    |> Enum.sum()
   end
 
   defp process_diagnostics(process_samples \\ %{}) do
@@ -811,6 +703,17 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp measure_moqx_stream_pressure(ctx, connection, config, handshake_latency_ms) do
+    {:ok, collector} =
+      StreamPressureCollector.start(sample_process?: stream_pressure_process_sampling?(config))
+
+    try do
+      do_measure_moqx_stream_pressure(ctx, connection, config, handshake_latency_ms, collector)
+    after
+      StreamPressureCollector.close(collector)
+    end
+  end
+
+  defp do_measure_moqx_stream_pressure(ctx, connection, config, handshake_latency_ms, collector) do
     application_started_at = monotonic_us()
     payload = binary_payload(config.payload_size)
 
@@ -830,6 +733,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         do: result,
         else: %{result | bytes_sent: Enum.sum(Enum.map(streams, & &1.bytes_sent))}
 
+    collector_snapshot = StreamPressureCollector.snapshot(collector)
+    result = apply_stream_pressure_collector(result, collector_snapshot)
     application_duration_ms = elapsed_ms(application_started_at)
     first_byte_latency_ms = result.first_byte_latency_ms
 
@@ -869,6 +774,40 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         stream_pressure_diagnostics(config, streams, result, application_duration_ms)
     }
   end
+
+  defp stream_pressure_process_sampling?(%{stream_diagnostics_sampling: "final"}), do: false
+  defp stream_pressure_process_sampling?(_config), do: true
+
+  defp apply_stream_pressure_collector(result, snapshot) do
+    result
+    |> Map.put(:send_stream_call_durations_us, snapshot.send_stream_call_durations_us)
+    |> Map.put(:stream_send_accepted, snapshot.stream_send_accepted)
+    |> Map.put(:stream_send_bytes_accepted, snapshot.stream_send_bytes_accepted)
+    |> Map.put(:stream_send_errors, snapshot.stream_send_errors)
+    |> Map.put(
+      :runtime_diagnostics,
+      merge_runtime_diagnostics(
+        Map.get(result, :runtime_diagnostics, %{}),
+        snapshot.runtime_diagnostics
+      )
+    )
+  end
+
+  defp merge_runtime_diagnostics(base, collected) do
+    Map.merge(base, collected, &merge_runtime_diagnostic/3)
+  end
+
+  defp merge_runtime_diagnostic(:process, base, collected)
+       when is_map(base) and is_map(collected) do
+    Map.merge(base, collected)
+  end
+
+  defp merge_runtime_diagnostic(_key, base, collected)
+       when is_integer(base) and is_integer(collected) do
+    max(base, collected)
+  end
+
+  defp merge_runtime_diagnostic(_key, _base, collected), do: collected
 
   defp measure_moqx_datagram_pressure(ctx, connection, config, handshake_latency_ms) do
     application_started_at = monotonic_us()
@@ -2437,13 +2376,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     }
   end
 
-  defp sample_stream_pressure_runtime(diagnostics, %{stream_diagnostics_sampling: "final"}) do
-    diagnostics
-  end
-
-  defp sample_stream_pressure_runtime(diagnostics, _config) do
-    Map.update!(diagnostics, :process, &sample_process_diagnostics/1)
-  end
+  defp sample_stream_pressure_runtime(diagnostics, _config), do: diagnostics
 
   defp collect_active_echo_events(
          ctx,
@@ -2476,8 +2409,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       true ->
         timeout_ms = max(div(deadline_us - monotonic_us(), 1000), 0)
 
-        {receive_result, receive_call_duration_us} = timed_receive_event(ctx, timeout_ms)
-        diagnostics = record_receive_event_call(diagnostics, receive_call_duration_us, timeout_ms)
+        receive_result = Transport.receive_event(ctx, timeout_ms)
 
         case receive_result do
           {:ok, event, ctx} ->
@@ -2571,8 +2503,6 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          config,
          first_byte_origin
        ) do
-    diagnostics = record_stream_pressure_event(diagnostics, event)
-
     {states, ctx} =
       handle_active_echo_event(ctx, states, event, payload, config, first_byte_origin)
 
@@ -2644,8 +2574,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          first_byte_origin,
          remaining
        ) do
-    {receive_result, receive_call_duration_us} = timed_receive_event(ctx, 0)
-    diagnostics = record_receive_event_call(diagnostics, receive_call_duration_us, 0)
+    receive_result = Transport.receive_event(ctx, 0)
 
     case receive_result do
       {:ok, event, ctx} ->
@@ -2691,69 +2620,6 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         diagnostics = Map.update!(diagnostics, :receive_errors, &(&1 + 1))
         {ctx, mark_timeout_failure(states, failure), diagnostics}
     end
-  end
-
-  defp record_stream_pressure_event(diagnostics, {:stream_data, _stream, _data, _metadata}) do
-    diagnostics
-    |> Map.update!(:events_drained, &(&1 + 1))
-    |> Map.update!(:stream_data_events, &(&1 + 1))
-  end
-
-  defp record_stream_pressure_event(
-         diagnostics,
-         {:stream_event, _stream, :send_completed, _metadata}
-       ) do
-    diagnostics
-    |> Map.update!(:events_drained, &(&1 + 1))
-    |> Map.update!(:send_completed_events, &(&1 + 1))
-  end
-
-  defp record_stream_pressure_event(
-         diagnostics,
-         {:stream_event, _stream, :send_cancelled, _metadata}
-       ) do
-    diagnostics
-    |> Map.update!(:events_drained, &(&1 + 1))
-    |> Map.update!(:send_cancelled_events, &(&1 + 1))
-  end
-
-  defp record_stream_pressure_event(
-         diagnostics,
-         {:stream_event, _stream, :peer_finished_sending, _metadata}
-       ) do
-    diagnostics
-    |> Map.update!(:events_drained, &(&1 + 1))
-    |> Map.update!(:peer_finished_events, &(&1 + 1))
-  end
-
-  defp record_stream_pressure_event(diagnostics, {:stream_event, _stream, :closed, _metadata}) do
-    diagnostics
-    |> Map.update!(:events_drained, &(&1 + 1))
-    |> Map.update!(:stream_closed_events, &(&1 + 1))
-  end
-
-  defp record_stream_pressure_event(diagnostics, _event) do
-    diagnostics
-    |> Map.update!(:events_drained, &(&1 + 1))
-    |> Map.update!(:ignored_events, &(&1 + 1))
-  end
-
-  defp timed_receive_event(ctx, timeout_ms) do
-    started_at = monotonic_us()
-    result = Transport.receive_event(ctx, timeout_ms)
-    {result, monotonic_us() - started_at}
-  end
-
-  defp record_receive_event_call(diagnostics, duration_us, 0) do
-    diagnostics
-    |> Map.update!(:receive_event_call_durations_us, &[duration_us | &1])
-    |> Map.update!(:receive_event_drain_call_durations_us, &[duration_us | &1])
-  end
-
-  defp record_receive_event_call(diagnostics, duration_us, _timeout_ms) do
-    diagnostics
-    |> Map.update!(:receive_event_call_durations_us, &[duration_us | &1])
-    |> Map.update!(:receive_event_blocking_call_durations_us, &[duration_us | &1])
   end
 
   defp timeout_stream_pressure_runtime(diagnostics, config, phase) do
@@ -3314,8 +3180,12 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           |> Enum.map(&(&1["send_completions_pending"] || 0))
           |> Enum.sum(),
         "bytes_sent" => result.bytes_sent,
+        "stream_send_accepted" => Map.get(result, :stream_send_accepted),
+        "stream_send_bytes_accepted" => Map.get(result, :stream_send_bytes_accepted),
+        "stream_send_errors" => Map.get(result, :stream_send_errors),
         "bytes_expected" => expected_stream_bytes(config) * length(streams),
         "bytes_received" => result.bytes_received,
+        "stream_data_bytes_received" => runtime[:stream_data_bytes_received],
         "send_stream_call_ms" => duration_summary_ms(result.send_stream_call_durations_us),
         "active_send_duration_ms" => Map.get(result, :active_send_duration_ms),
         "active_echo_receive_duration_ms" => Map.get(result, :active_echo_receive_duration_ms),
@@ -4481,9 +4351,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       --stream-direction VALUE       bidirectional or unidirectional (default: bidirectional)
       --stream-count N               concurrent streams (default: 1)
       --stream-send-window N         max in-flight sends per MOQX stream (default: #{@default_stream_send_window})
-      --stream-event-batch-size N    ready events to drain before resampling (default: #{@default_stream_event_batch_size})
+      --stream-event-batch-size N    ready events to drain after each blocking receive (default: #{@default_stream_event_batch_size})
       --stream-diagnostics-sampling VALUE
-                                     event or final diagnostics sampling for MOQX streams (default: event)
+                                     event sampler or final diagnostics snapshot for MOQX streams (default: event)
       --payload-size BYTES           bytes per payload write (default: 1200)
       --payload-count N              payload writes per stream (default: 1)
       --datagram-size BYTES          bytes per datagram for datagram_pressure (default: 1200)

@@ -248,14 +248,24 @@ defmodule MOQX.Transport do
   """
   def send_stream(ctx, stream, data, opts \\ [])
 
-  def send_stream(%Context{} = ctx, %Stream{info: %{send_side?: false}}, _data, _opts) do
-    {:error, :send_side_unavailable, ctx}
+  def send_stream(%Context{} = ctx, %Stream{info: %{send_side?: false}} = stream, data, opts) do
+    started_at = monotonic_us()
+    result = {:error, :send_side_unavailable, ctx}
+
+    emit_stream_send_stop(ctx, stream, data, opts, started_at, result)
+    result
   end
 
   def send_stream(%Context{} = ctx, %Stream{} = stream, data, opts) do
-    require_same_backend(ctx, stream, fn ->
-      schedule_stream_send(ctx, stream.backend.data, data, opts)
-    end)
+    started_at = monotonic_us()
+
+    result =
+      require_same_backend(ctx, stream, fn ->
+        schedule_stream_send(ctx, stream.backend.data, data, opts)
+      end)
+
+    emit_stream_send_stop(ctx, stream, data, opts, started_at, result)
+    result
   end
 
   defp schedule_stream_send(ctx, raw_stream, data, opts) do
@@ -375,12 +385,18 @@ defmodule MOQX.Transport do
   connection events where available.
   """
   def send_datagram(%Context{} = ctx, %Connection{} = connection, data) when is_binary(data) do
-    require_same_backend(ctx, connection, fn ->
-      case ctx.backend.module.send_datagram(connection.backend.data, data) do
-        :ok -> {:ok, ctx}
-        {:error, reason} -> {:error, reason, ctx}
-      end
-    end)
+    started_at = monotonic_us()
+
+    result =
+      require_same_backend(ctx, connection, fn ->
+        case ctx.backend.module.send_datagram(connection.backend.data, data) do
+          :ok -> {:ok, ctx}
+          {:error, reason} -> {:error, reason, ctx}
+        end
+      end)
+
+    emit_datagram_send_stop(ctx, connection, data, started_at, result)
+    result
   end
 
   @doc """
@@ -496,11 +512,17 @@ defmodule MOQX.Transport do
   def receive_event(ctx, timeout \\ :infinity)
 
   def receive_event(%Context{} = ctx, timeout) do
-    receive do
-      message -> normalize_context_message(ctx, message)
-    after
-      timeout_value(timeout) -> {:timeout, ctx}
-    end
+    started_at = monotonic_us()
+
+    result =
+      receive do
+        message -> normalize_context_message(ctx, message)
+      after
+        timeout_value(timeout) -> {:timeout, ctx}
+      end
+
+    emit_receive_event_stop(ctx, timeout, started_at, result)
+    result
   end
 
   defp timeout_value(:infinity), do: :infinity
@@ -880,4 +902,157 @@ defmodule MOQX.Transport do
 
   defp option(opts, key, default) when is_map(opts), do: Map.get(opts, key, default)
   defp option(opts, key, default) when is_list(opts), do: Keyword.get(opts, key, default)
+
+  defp emit_stream_send_stop(ctx, stream, data, opts, started_at, result) do
+    measurements =
+      %{
+        duration_us: monotonic_us() - started_at,
+        byte_size: stream_send_byte_size(result, data)
+      }
+      |> compact_measurements()
+
+    metadata =
+      stream_metadata(ctx, stream)
+      |> Map.merge(result_metadata(result))
+      |> Map.put(:finish?, option(opts, :finish, false) == true)
+
+    :telemetry.execute([:moqx, :transport, :stream, :send, :stop], measurements, metadata)
+  end
+
+  defp stream_send_byte_size({:ok, %Send{byte_size: byte_size}, _ctx}, _data), do: byte_size
+  defp stream_send_byte_size(_result, data), do: safe_iodata_size(data)
+
+  defp emit_datagram_send_stop(ctx, connection, data, started_at, result) do
+    measurements = %{
+      duration_us: monotonic_us() - started_at,
+      byte_size: byte_size(data)
+    }
+
+    metadata =
+      connection_metadata(ctx, connection)
+      |> Map.merge(result_metadata(result))
+
+    :telemetry.execute([:moqx, :transport, :datagram, :send, :stop], measurements, metadata)
+  end
+
+  defp emit_receive_event_stop(ctx, timeout, started_at, result) do
+    measurements =
+      %{
+        duration_us: monotonic_us() - started_at,
+        timeout_ms: telemetry_timeout_ms(timeout),
+        byte_size: receive_event_byte_size(result)
+      }
+      |> compact_measurements()
+
+    metadata =
+      %{backend: ctx.backend.module}
+      |> Map.merge(receive_result_metadata(result))
+
+    :telemetry.execute([:moqx, :transport, :event, :receive, :stop], measurements, metadata)
+  end
+
+  defp result_metadata({:ok, _value, _ctx}), do: %{result: :ok, reason: nil}
+  defp result_metadata({:ok, _ctx}), do: %{result: :ok, reason: nil}
+
+  defp result_metadata({:error, reason, _ctx}),
+    do: %{result: :error, reason: telemetry_reason(reason)}
+
+  defp receive_result_metadata({:ok, event, _ctx}) do
+    event
+    |> event_metadata()
+    |> Map.merge(%{result: :ok, reason: nil})
+  end
+
+  defp receive_result_metadata({:timeout, _ctx}) do
+    %{result: :timeout, event_kind: :timeout, event_name: nil, reason: nil}
+  end
+
+  defp receive_result_metadata({:unknown, _message, _ctx}) do
+    %{result: :unknown, event_kind: :unknown, event_name: nil, reason: nil}
+  end
+
+  defp receive_result_metadata({:error, reason, _ctx}) do
+    %{result: :error, event_kind: :error, event_name: nil, reason: telemetry_reason(reason)}
+  end
+
+  defp event_metadata({:stream_data, stream, _data, _metadata}) do
+    stream_metadata(stream)
+    |> Map.merge(%{event_kind: :stream_data, event_name: nil})
+  end
+
+  defp event_metadata({:datagram, connection, _data, _metadata}) do
+    connection_metadata(connection)
+    |> Map.merge(%{event_kind: :datagram, event_name: nil})
+  end
+
+  defp event_metadata({:stream_event, stream, event, _metadata}) do
+    stream_metadata(stream)
+    |> Map.merge(%{event_kind: :stream_event, event_name: event})
+  end
+
+  defp event_metadata({:connection_event, connection, event, _metadata}) do
+    connection_metadata(connection)
+    |> Map.merge(%{event_kind: :connection_event, event_name: event})
+  end
+
+  defp event_metadata({:listener_event, _listener_or_connection, event, _metadata}) do
+    %{event_kind: :listener_event, event_name: event}
+  end
+
+  defp event_metadata(_event), do: %{event_kind: :unknown, event_name: nil}
+
+  defp stream_metadata(ctx, %Stream{} = stream) do
+    %{backend: ctx.backend.module}
+    |> Map.merge(stream_metadata(stream))
+  end
+
+  defp stream_metadata(%Stream{info: info}) do
+    %{
+      stream_id: info.stream_id,
+      stream_direction: info.direction,
+      stream_initiator: info.initiator,
+      local_role: info.local_role
+    }
+  end
+
+  defp connection_metadata(ctx, %Connection{} = connection) do
+    %{backend: ctx.backend.module}
+    |> Map.merge(connection_metadata(connection))
+  end
+
+  defp connection_metadata(%Connection{local_role: local_role}) do
+    %{local_role: local_role}
+  end
+
+  defp receive_event_byte_size({:ok, {:stream_data, _stream, data, _metadata}, _ctx}),
+    do: byte_size(data)
+
+  defp receive_event_byte_size({:ok, {:datagram, _connection, data, _metadata}, _ctx}),
+    do: byte_size(data)
+
+  defp receive_event_byte_size(_result), do: nil
+
+  defp telemetry_timeout_ms(:infinity), do: nil
+  defp telemetry_timeout_ms(timeout), do: timeout
+
+  defp safe_iodata_size(data) do
+    :erlang.iolist_size(data)
+  rescue
+    _error -> nil
+  end
+
+  defp telemetry_reason({:unknown_transport_handle, _raw_handle}), do: :unknown_transport_handle
+
+  defp telemetry_reason({reason, detail}) when is_atom(reason) and is_atom(detail),
+    do: {reason, detail}
+
+  defp telemetry_reason({reason, _details}) when is_atom(reason), do: reason
+  defp telemetry_reason(reason) when is_atom(reason), do: reason
+  defp telemetry_reason(_reason), do: :error
+
+  defp compact_measurements(measurements) do
+    Map.reject(measurements, fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp monotonic_us, do: System.monotonic_time(:microsecond)
 end

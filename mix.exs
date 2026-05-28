@@ -20,7 +20,7 @@ defmodule MOQX.MixProject do
 
   def application do
     [
-      extra_applications: [:logger]
+      extra_applications: [:logger, :telemetry]
     ]
   end
 
@@ -35,6 +35,7 @@ defmodule MOQX.MixProject do
 
   defp deps do
     [
+      {:telemetry, "~> 1.4"},
       {:quicer,
        git: "https://github.com/dmorn/quic.git", branch: "fix/macos-cmake-arch-detection"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}

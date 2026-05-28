@@ -363,3 +363,16 @@ seams without `Application` env.
 - 2026-05-28: Closed #38 by recording the design in ADR-0005 and linking it
   from the benchmark README. #39 is now unblocked as the first implementation
   slice.
+- 2026-05-28: Closed #39. The MOQX-client stream-pressure measurement path now
+  uses root `MOQX.Transport` `:telemetry` emitters plus an ETS-backed
+  benchmark collector instead of live `Agent` diagnostics in the hot path.
+  The collector reconstructs accepted sends, accepted send bytes, stream-data
+  received bytes, send/receive timing, event counts, and bounded process
+  samples while still emitting the existing `transport-bench-v1`
+  step-summary/report diagnostics. Local loopback calibration against
+  `tools/quicprobe` (`/tmp/moqx-telemetry-reference-comparison.jsonl`) reached
+  46.02 Mbps for a tiny 1-stream/20x256-byte smoke with 5120 sent/received
+  bytes, 20 accepted sends, 0 send errors, strict-valid JSONL, and no break
+  symptom. The next #26 slice can now migrate DATAGRAM/mixed pressure onto the
+  same telemetry collector pattern or rerun the ARM stream-pressure bracket
+  with the cleaner measurement path.

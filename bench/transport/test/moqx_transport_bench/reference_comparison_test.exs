@@ -754,6 +754,10 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert diagnostics["summary"]["stream_diagnostics_sampling"] == "final"
     assert diagnostics["summary"]["payloads_completed"] == 3
     assert diagnostics["summary"]["send_completions_pending"] == 0
+    assert diagnostics["summary"]["stream_send_accepted"] == 3
+    assert diagnostics["summary"]["stream_send_bytes_accepted"] == 192
+    assert diagnostics["summary"]["stream_send_errors"] == 0
+    assert diagnostics["summary"]["stream_data_bytes_received"] == 192
     assert diagnostics["summary"]["send_stream_call_ms"]["count"] == 3
     assert is_number(diagnostics["summary"]["send_stream_call_ms"]["total"])
     assert diagnostics["summary"]["receive_event_call_ms"]["count"] > 0

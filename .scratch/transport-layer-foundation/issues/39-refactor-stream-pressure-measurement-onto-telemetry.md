@@ -1,6 +1,6 @@
 # Refactor stream-pressure measurement onto telemetry collector
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 
 ## Parent
@@ -20,29 +20,29 @@ without changing what the benchmark measures.
 
 ## Acceptance criteria
 
-- [ ] Root `moqx` adds only the dependency needed to emit stable telemetry
+- [x] Root `moqx` adds only the dependency needed to emit stable telemetry
       events from `MOQX.Transport`.
-- [ ] `bench/transport` owns the `telemetry_metrics` dependency and defines
+- [x] `bench/transport` owns the `telemetry_metrics` dependency and defines
       benchmark metric declarations separately from transport-library code.
-- [ ] `MOQX.Transport` emits the minimal stable events required for
+- [x] `MOQX.Transport` emits the minimal stable events required for
       MOQX-client stream pressure, starting with stream send admission and
       normalized event receive timing.
-- [ ] The benchmark collector attaches for a single step or run and always
+- [x] The benchmark collector attaches for a single step or run and always
       detaches in `after`.
-- [ ] The collector handler does not perform file IO, JSON encoding, payload
+- [x] The collector handler does not perform file IO, JSON encoding, payload
       copies, synchronous `Agent` or GenServer calls, or per-event
       `Process.info/2`.
-- [ ] MOQX-client stream-pressure records still emit valid
+- [x] MOQX-client stream-pressure records still emit valid
       `transport-bench-v1` `step_summary` records with the same key metrics and
       diagnostics currently used by reports.
-- [ ] The old live `Agent`-backed stream diagnostics path is removed or no
+- [x] The old live `Agent`-backed stream diagnostics path is removed or no
       longer used by the MOQX-client stream-pressure hot path.
-- [ ] Regression tests prove the collector can reconstruct accepted sends,
+- [x] Regression tests prove the collector can reconstruct accepted sends,
       completed sends, event counts, send/receive timing summaries, and bytes
       sent/received from emitted events.
-- [ ] Local calibration confirms the refactor does not regress strict JSONL
+- [x] Local calibration confirms the refactor does not regress strict JSONL
       validity or obvious loopback throughput versus the post-#37 path.
-- [ ] The implementation preserves explicit dependency seams and does not
+- [x] The implementation preserves explicit dependency seams and does not
       introduce `Application` environment as mutable configuration.
 
 ## Blocked by
@@ -65,3 +65,24 @@ process state inside every telemetry handler.
   telemetry/`telemetry_metrics`/custom-collector split on the MOQX-client
   stream-pressure path first, then migrate DATAGRAM and mixed pressure only
   after the first slice is validated.
+- 2026-05-28: Implemented the first telemetry-backed stream-pressure slice.
+  Root `moqx` now depends on and starts `:telemetry`; `MOQX.Transport` emits
+  stable stream-send, datagram-send, and normalized receive-event stop events
+  from the facade. `bench/transport` now declares `telemetry_metrics` metrics
+  and owns `MOQX.TransportBench.StreamPressureCollector`, an ETS-backed
+  step-scoped collector whose handler only updates counters/durations.
+- 2026-05-28: MOQX-client stream pressure now attaches the collector for the
+  step, detaches in `after`, and feeds the existing `transport-bench-v1`
+  diagnostics/report path. The old live `Agent` stream diagnostics path was
+  removed from the hot path. The collector exports accepted sends, accepted
+  send bytes, send errors, stream-data received bytes, event counts, and
+  receive/send timing samples.
+- 2026-05-28: Verification passed: root `mix format`, `mix test` (69 tests, 0
+  failures, 18 excluded), root `mix credo --strict`; bench `mix format`,
+  `mix test` (45 tests, 0 failures), bench `mix credo --strict`. Local
+  loopback calibration against `tools/quicprobe` produced a strict-valid
+  `moqx-client-to-reference-server` stream-pressure record at
+  `/tmp/moqx-telemetry-reference-comparison.jsonl`: 1 stream, 20 payloads,
+  256-byte payloads, 5120 sent bytes, 5120 received bytes, 20 accepted sends,
+  0 stream send errors, 46.02 Mbps, no break symptom. This remains loopback
+  calibration only, not real network evidence.
