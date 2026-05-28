@@ -56,3 +56,12 @@ wait for peer delivery or backend completion.
   993 ms, `receive_loop_stop_reason=expected_datagrams_received`, and
   11 cadence samples. This remains loopback calibration only, not real network
   evidence.
+- 2026-05-28: Remote validation in
+  `20260528T115506Z-issue-26-dgram-cadence` confirmed that the diagnostics
+  classify the previous 20k-30k pps ambiguity. MOQX-client was contract-valid
+  at 15k and 18k pps, then failed at 20k/25k/30k because offered-rate ratios
+  fell to 0.891/0.673/0.595. The same records showed high delivery
+  (99.49%/97.97%/99.49%), zero DATAGRAM send errors, final mailbox depth 0,
+  bounded mailbox peaks, and stretched active-send duration. That points the
+  next work at the paced sender/event pump rather than peer loss, unbounded
+  receiver backlog, or send-admission errors.

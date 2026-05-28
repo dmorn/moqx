@@ -95,6 +95,10 @@ child issues in evidence order:
    measurements move onto `:telemetry` events, `telemetry_metrics`
    declarations, and a custom benchmark collector while preserving the
    existing `transport-bench-v1` output.
+9. #40 attacks the next DATAGRAM bottleneck identified after the telemetry
+   migration: MOQX-client paced-send/event-pump throughput falls below the
+   offered-rate contract around 20k pps even while delivery, mailbox depth,
+   and send-admission errors remain healthy.
 
 The first implementation slice is #32. Do not start broad transport API
 refactors from this umbrella issue; any API change should be motivated by
@@ -413,3 +417,27 @@ seams without `Application` env.
   was destroyed and verified clean. Observation for a later diagnostics slice:
   `moqx-listener --diagnostics-output` currently emits stream/DATAGRAM
   listener sidecars but not a mixed-workload diagnostics sidecar.
+- 2026-05-28: Ran the remote MOQX-client DATAGRAM cadence bracket as
+  `20260528T115506Z-issue-26-dgram-cadence`, a disposable same-region
+  `cax11` ARM pair in `fsn1 -> fsn1` over the private path
+  `10.88.0.11 -> 10.88.0.12`. The path baseline reported 6.07 Gbps TCP.
+  UDP with 1192-byte datagrams delivered 100 Mbps at 100%, 500 Mbps at
+  96.95%, and 1 Gbps at 91.49%, so the path is lossy at aggressive UDP rates
+  but well above the QUIC goodput produced below. The quicprobe-to-quicprobe
+  control sustained the requested offered rate through 30k pps with no break
+  symptom, delivering 99.93% at 10k, 98.94% at 20k, 98.28% at 25k, and
+  97.60% at 30k. MOQX-client-to-quicprobe-server with the #34 cadence
+  diagnostics was contract-valid at 10k, 15k, and 18k pps: 100.00%,
+  99.50%, and 99.15% delivery, offered-rate ratios 1.000, 1.010, and
+  0.988, and final mailbox depth 0. At 20k, 25k, and 30k pps, the records
+  became invalid because the sender did not sustain the offered-rate contract:
+  offered-rate ratios were 0.891, 0.673, and 0.595. Those invalid records
+  still showed high delivery ratios of 99.49%, 97.97%, and 99.49%, zero
+  DATAGRAM send errors, final mailbox depth 0, and bounded mailbox peaks of
+  273, 352, and 132. Active send duration stretched from about 3.04 s at
+  18k to 3.37 s, 4.46 s, and 5.04 s at 20k/25k/30k. Conclusion: the next
+  DATAGRAM target is MOQX-client paced-send/event-pump throughput around the
+  18k-20k pps transition, not peer delivery loss, unbounded receiver mailbox
+  growth, or DATAGRAM admission errors. Artifacts are under
+  `bench/transport/results/20260528T115506Z-issue-26-dgram-cadence/`.
+  Infrastructure was destroyed and verified clean. Follow-up #40 opened.
