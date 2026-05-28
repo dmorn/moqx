@@ -441,3 +441,23 @@ seams without `Application` env.
   growth, or DATAGRAM admission errors. Artifacts are under
   `bench/transport/results/20260528T115506Z-issue-26-dgram-cadence/`.
   Infrastructure was destroyed and verified clean. Follow-up #40 opened.
+- 2026-05-28: #40 reran the DATAGRAM bracket after the exact send-scheduler
+  fix and paced-send diagnostics as
+  `20260528T124052Z-issue-40-dgram-paced` on a disposable same-region
+  `cax11` ARM pair in `fsn1 -> fsn1` over private path
+  `10.88.0.11 -> 10.88.0.12`. iperf3 reported a 6.64 Gbps TCP baseline and
+  UDP 1192-byte delivery of 100 Mbps at 100%, 500 Mbps at 99.84%, and
+  1 Gbps at 97.53%. The quicprobe-to-quicprobe control sustained target
+  offered rate through 30k pps with no break symptom. MOQX-client was
+  contract-valid at 18k pps after the scheduler fix, but 18.5k, 19k, 20k,
+  25k, and 30k pps all failed the offered-rate contract. At 20k, the sender
+  achieved only 0.900 of the target offered rate and the send-loop overrun was
+  mostly explained by cumulative DATAGRAM send-call time. At 25k and 30k,
+  large unmeasured loop overhead appeared on top of send-call time. Peer
+  delivery stayed high, final mailbox depth was 0, mailbox peaks stayed
+  bounded, and DATAGRAM send errors stayed at 0. This keeps #40 focused on
+  MOQX-client paced sender/event-pump throughput rather than peer loss,
+  unbounded receiver mailbox growth, or failed DATAGRAM admission. Artifacts
+  are under
+  `bench/transport/results/20260528T124052Z-issue-40-dgram-paced/`.
+  Infrastructure was destroyed and verified clean.
