@@ -88,6 +88,13 @@ child issues in evidence order:
    or build a dedicated performance-serving model.
 6. #37 attacks the first stream-pressure bottleneck identified by #33: the
    MOQX-client caller/event pump and per-payload async completion cadence.
+7. #38 designs the next measurement layer so transport and benchmark
+   diagnostics can move to structured telemetry and cheap collectors without
+   turning the observer into the bottleneck again.
+8. #39 implements the first low-impact refactor: MOQX-client stream-pressure
+   measurements move onto `:telemetry` events, `telemetry_metrics`
+   declarations, and a custom benchmark collector while preserving the
+   existing `transport-bench-v1` output.
 
 The first implementation slice is #32. Do not start broad transport API
 refactors from this umbrella issue; any API change should be motivated by
@@ -343,3 +350,16 @@ seams without `Application` env.
   next transport-pressure target. Artifacts are under
   `bench/transport/results/20260527T154046Z-issue-37-final/`. Infrastructure
   was destroyed and verified clean.
+- 2026-05-28: Opened #38 to turn the measurement refactor discussion into a
+  contract issue before adding more ad-hoc diagnostics. The intent is layered
+  `:telemetry` for transport and benchmark events, a cheap in-process
+  collector first, stable compact JSONL summaries, richer diagnostics as
+  sidecars, and remote collector or daemon work only as later phases.
+- 2026-05-28: Added the settled measurement-refactor decision to #38 and
+  opened #39 as the first implementation slice. The agreed split is root
+  `:telemetry` emitters at `MOQX.Transport`, `telemetry_metrics` declarations
+  in `bench/transport`, and a custom low-impact collector that emits the same
+  benchmark measurement maps consumed by current `transport-bench-v1` records.
+- 2026-05-28: Closed #38 by recording the design in ADR-0005 and linking it
+  from the benchmark README. #39 is now unblocked as the first implementation
+  slice.

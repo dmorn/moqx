@@ -607,6 +607,12 @@ mix moqx.transport.report /path/to/run.jsonl --strict
 The report command is a reader and validator only. JSONL remains the canonical
 benchmark artifact.
 
+Measurement plumbing is defined in
+[`ADR-0005`](../../docs/adr/0005-telemetry-backed-transport-benchmark-measurement.md).
+In short: `transport-bench-v1` JSONL remains the stable output contract, while
+transport and benchmark measurements may be collected through `:telemetry`,
+`telemetry_metrics` declarations, and benchmark-owned collectors.
+
 ### Record Types
 
 - `run_summary`: one record for a complete run.
