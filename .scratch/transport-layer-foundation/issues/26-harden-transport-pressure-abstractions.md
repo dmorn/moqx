@@ -393,3 +393,23 @@ seams without `Application` env.
   next remote #26 DATAGRAM run can use those samples to classify sender
   admission, receiver drain cadence, and peer delivery loss around the known
   20k-30k pps transition.
+- 2026-05-28: Closed #35 with real-path mixed MOQT-shaped evidence from
+  `20260528T101939Z-issue-35-mixed`. Hetzner ARM placement was unavailable in
+  `hel1` for `cax11` and in `nbg1` for `cax11`, `cax31`, and `cax41`; the
+  successful disposable path used same-region `cax11` nodes in `fsn1` over
+  private path `10.88.0.11 -> 10.88.0.12`. The private baseline reported
+  8.74 Gbps TCP. Aggressive 1200-byte UDP baselines were lossy: 1 Gbps offered
+  delivered 92.23%, 3 Gbps delivered 76.45%, and 6 Gbps delivered 75.83%.
+  The established mixed workload reran across all three topologies with no
+  break symptom: reference-client-to-reference-server reached 62.05 Mbps,
+  MOQX-client-to-reference-server reached 62.02 Mbps, and
+  reference-client-to-MOQX-listener reached 52.23 Mbps. The previous remote
+  `message_queue_len=32234` artifact is gone: the MOQX-client mixed record
+  ended at `message_queue_len=1`, peaked at 528, sampled process depth 458
+  times, drained 32,337 events, recorded 32,000 object send completions and
+  100 control send completions, and had zero pending object/control
+  completions. Artifacts are under
+  `bench/transport/results/20260528T101939Z-issue-35-mixed/`. Infrastructure
+  was destroyed and verified clean. Observation for a later diagnostics slice:
+  `moqx-listener --diagnostics-output` currently emits stream/DATAGRAM
+  listener sidecars but not a mixed-workload diagnostics sidecar.
