@@ -509,7 +509,32 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["diagnostics"]["summary"]["bytes_sent"] == 2384
     assert record["diagnostics"]["summary"]["bytes_received"] == 2384
     assert record["diagnostics"]["summary"]["datagram_receive_events"] == 2
+    assert is_number(record["diagnostics"]["summary"]["active_send_duration_ms"])
+    assert is_number(record["diagnostics"]["summary"]["active_receive_duration_ms"])
+    assert is_number(record["diagnostics"]["summary"]["observation_duration_ms"])
+
+    assert record["diagnostics"]["summary"]["receive_loop_stop_reason"] ==
+             "expected_datagrams_received"
+
     assert record["diagnostics"]["summary"]["receive_errors"] == 0
+
+    assert [
+             %{
+               "sample_index" => 1,
+               "phase" => "start",
+               "datagrams_accepted" => 0,
+               "datagrams_received" => 0,
+               "accepted_delta" => 0,
+               "received_delta" => 0
+             }
+             | _
+           ] = record["diagnostics"]["cadence"]
+
+    final_cadence = List.last(record["diagnostics"]["cadence"])
+    assert final_cadence["phase"] == "final"
+    assert final_cadence["datagrams_accepted"] == 2
+    assert final_cadence["datagrams_received"] == 2
+    assert final_cadence["delivery_gap_to_accepted"] == 0
   end
 
   test "records mixed MOQT-shaped MOQX client pressure" do

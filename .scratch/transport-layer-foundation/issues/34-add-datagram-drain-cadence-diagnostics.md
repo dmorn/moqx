@@ -1,6 +1,6 @@
 # Add DATAGRAM drain-cadence diagnostics
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 
 ## Parent
@@ -19,16 +19,16 @@ completion behavior, scheduler/NIF pressure, or peer receive behavior.
 
 ## Acceptance criteria
 
-- [ ] MOQX-client DATAGRAM records expose active send duration, active receive
+- [x] MOQX-client DATAGRAM records expose active send duration, active receive
       duration, total observation duration, and receive-loop stop reason.
-- [ ] MOQX-client DATAGRAM diagnostics expose datagram event counts, duplicate
+- [x] MOQX-client DATAGRAM diagnostics expose datagram event counts, duplicate
       and invalid counts, receive errors, ignored events, and bounded mailbox
       samples across the run.
-- [ ] Diagnostics include enough cadence information to compare expected
+- [x] Diagnostics include enough cadence information to compare expected
       arrival rate with actual drain progress over time, not only final counts.
-- [ ] quicer DATAGRAM send/admission errors remain distinct from peer-delivery
+- [x] quicer DATAGRAM send/admission errors remain distinct from peer-delivery
       loss and receive-loop loss.
-- [ ] A loopback calibration or focused test proves the new diagnostics are
+- [x] A loopback calibration or focused test proves the new diagnostics are
       emitted without changing existing JSONL consumers incompatibly.
 
 ## Blocked by
@@ -40,3 +40,19 @@ completion behavior, scheduler/NIF pressure, or peer receive behavior.
 Preserve the async DATAGRAM admission model. Do not make `send_datagram/3`
 wait for peer delivery or backend completion.
 
+## Comments
+
+- 2026-05-28: Implemented the first local diagnostics slice. MOQX-client
+  DATAGRAM diagnostics now expose active send duration, active receive
+  duration, observation duration, receive-loop stop reason, and a bounded
+  `diagnostics.cadence` trace with accepted/received totals and deltas. The
+  cadence trace is optional diagnostics under existing `transport-bench-v1`
+  records, not a new required top-level contract.
+- 2026-05-28: Loopback calibration passed with
+  `/tmp/moqx-cadence-datagram.jsonl`: `datagram_rate=100`,
+  `duration_seconds=1`, 100 offered/accepted/received, 100% delivery, no break
+  symptom, strict-valid `transport-bench-v1`, active send duration about
+  990 ms, active receive duration about 990 ms, observation duration about
+  993 ms, `receive_loop_stop_reason=expected_datagrams_received`, and
+  11 cadence samples. This remains loopback calibration only, not real network
+  evidence.

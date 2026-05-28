@@ -20,6 +20,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   @default_stream_event_batch_size 1
   @stream_diagnostics_sampling_modes ~w(event final)
   @mixed_completion_drain_limit 1024
+  @datagram_cadence_sample_interval_us 100_000
+  @datagram_cadence_max_samples 512
   @reference_client_topology "reference-client-to-reference-server"
   @reference_client_moqx_listener_topology "reference-client-to-moqx-listener"
   @moqx_client_topology "moqx-client-to-reference-server"
@@ -1764,10 +1766,21 @@ defmodule MOQX.TransportBench.ReferenceComparison do
             duration_summary_ms(runtime[:receive_event_blocking_call_durations_us] || []),
           "receive_event_drain_call_ms" =>
             duration_summary_ms(runtime[:receive_event_drain_call_durations_us] || []),
+          "active_send_duration_ms" => args.send_duration_ms,
+          "active_receive_duration_ms" =>
+            duration_ms_between(
+              receive_state.receive_started_at_us,
+              receive_state.receive_finished_at_us
+            ),
+          "observation_duration_ms" => application_duration_ms,
+          "receive_loop_stop_reason" => receive_state.stop_reason,
+          "cadence_sample_interval_ms" => @datagram_cadence_sample_interval_us / 1000,
+          "cadence_sample_count" => receive_state.cadence_sample_count,
           "application_duration_ms" => application_duration_ms,
           "target_datagrams_per_second" => target_datagram_rate(config),
           "send_error" => failure && failure["reason"]
         }),
+      "cadence" => receive_state.cadence_samples,
       "process" => process_diagnostics(runtime.process)
     }
   end
@@ -1782,7 +1795,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
        when is_integer(rate) and rate > 0 do
     send_started_at = monotonic_us()
     interval_us = div(1_000_000, rate)
-    receive_state = initial_moqx_datagram_receive_state()
+    receive_state = initial_moqx_datagram_receive_state(config, started_at, count)
 
     result =
       Enum.reduce_while(
@@ -1800,6 +1813,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
           case send_moqx_datagram(ctx, connection, config, sequence) do
             {:ok, ctx} ->
+              receive_state = record_moqx_datagram_accepted(receive_state, accepted + 1)
+
               {receive_state, ctx} =
                 drain_available_moqx_datagrams(
                   ctx,
@@ -1813,6 +1828,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
             {:error, reason, ctx} ->
               failure = datagram_send_failure(config, reason, sequence, count, accepted)
               send_duration_ms = elapsed_ms(send_started_at)
+              receive_state = finish_moqx_datagram_receive(receive_state, "send_error")
 
               {:halt, {:error, failure, accepted, send_duration_ms, receive_state, ctx}}
           end
@@ -1841,10 +1857,13 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp send_and_receive_moqx_datagrams(ctx, connection, config, count, started_at) do
-    receive_state = initial_moqx_datagram_receive_state()
+    receive_state = initial_moqx_datagram_receive_state(config, started_at, count)
 
     case send_moqx_datagrams(ctx, connection, config, count) do
       {:ok, accepted, send_duration_ms, ctx} ->
+        receive_state =
+          record_moqx_datagram_accepted(receive_state, accepted, "send_complete", true)
+
         {receive_state, ctx} =
           receive_moqx_datagrams(
             ctx,
@@ -1858,6 +1877,11 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         {:ok, accepted, send_duration_ms, receive_state, ctx}
 
       {:error, failure, accepted, send_duration_ms, ctx} ->
+        receive_state =
+          receive_state
+          |> record_moqx_datagram_accepted(accepted, "send_error", true)
+          |> finish_moqx_datagram_receive("send_error")
+
         {:error, failure, accepted, send_duration_ms, receive_state, ctx}
     end
   end
@@ -1909,14 +1933,39 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     }
   end
 
-  defp initial_moqx_datagram_receive_state do
-    %{
+  defp initial_moqx_datagram_receive_state(config, started_at, offered) do
+    state = %{
       received: MapSet.new(),
+      accepted: 0,
+      offered: offered,
+      target_datagrams_per_second: target_datagram_rate(config),
+      started_at_us: started_at,
+      receive_started_at_us: nil,
+      receive_finished_at_us: nil,
+      stop_reason: nil,
       latencies: [],
       first_byte_latency_ms: nil,
       duplicate_datagrams: 0,
-      invalid_datagrams: 0
+      invalid_datagrams: 0,
+      cadence_next_sample_at_us: started_at + @datagram_cadence_sample_interval_us,
+      cadence_sample_count: 0,
+      cadence_last_accepted: 0,
+      cadence_last_received: 0,
+      cadence_samples: []
     }
+
+    record_datagram_cadence(state, "start", true)
+  end
+
+  defp record_moqx_datagram_accepted(
+         receive_state,
+         accepted,
+         phase \\ "send",
+         force? \\ false
+       ) do
+    receive_state
+    |> Map.put(:accepted, accepted)
+    |> record_datagram_cadence(phase, force?)
   end
 
   defp receive_moqx_datagrams_until(
@@ -1926,6 +1975,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          started_at,
          target_us
        ) do
+    receive_state = mark_moqx_datagram_receive_started(receive_state)
     remaining_ms = max(ceil((target_us - monotonic_us()) / 1000), 0)
 
     case Transport.receive_event(ctx, remaining_ms) do
@@ -1972,9 +2022,11 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          receive_state,
          started_at
        ) do
+    receive_state = mark_moqx_datagram_receive_started(receive_state)
+
     case Transport.receive_event(ctx, 0) do
       {:ok, {:datagram, ^connection, payload, _metadata}, ctx} ->
-        receive_state = record_moqx_datagram(payload, receive_state, started_at)
+        receive_state = record_moqx_datagram(payload, receive_state, started_at, "drain")
 
         drain_available_moqx_datagrams(
           ctx,
@@ -2015,18 +2067,22 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          receive_state,
          started_at
        ) do
-    if MapSet.size(receive_state.received) >= expected or
-         elapsed_ms(started_at) >= datagram_receive_timeout_ms(config) do
-      {receive_state, ctx}
-    else
-      receive_moqx_datagram(
-        ctx,
-        connection,
-        config,
-        expected,
-        receive_state,
-        started_at
-      )
+    cond do
+      MapSet.size(receive_state.received) >= expected ->
+        {finish_moqx_datagram_receive(receive_state, "expected_datagrams_received"), ctx}
+
+      elapsed_ms(started_at) >= datagram_receive_timeout_ms(config) ->
+        {finish_moqx_datagram_receive(receive_state, "observation_timeout"), ctx}
+
+      true ->
+        receive_moqx_datagram(
+          ctx,
+          connection,
+          config,
+          expected,
+          receive_state,
+          started_at
+        )
     end
   end
 
@@ -2038,6 +2094,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          receive_state,
          started_at
        ) do
+    receive_state = mark_moqx_datagram_receive_started(receive_state)
     remaining_ms = max(datagram_receive_timeout_ms(config) - trunc(elapsed_ms(started_at)), 0)
 
     case Transport.receive_event(ctx, remaining_ms) do
@@ -2084,34 +2141,111 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         )
 
       {:timeout, ctx} ->
-        {receive_state, ctx}
+        {finish_moqx_datagram_receive(receive_state, "observation_timeout"), ctx}
     end
   end
 
   defp record_moqx_datagram(
          payload,
          receive_state,
-         started_at
+         started_at,
+         phase \\ "receive"
        ) do
-    case DatagramPayload.decode(payload) do
-      {:ok, sequence, sent_at} ->
-        if MapSet.member?(receive_state.received, sequence) do
-          Map.update!(receive_state, :duplicate_datagrams, &(&1 + 1))
-        else
-          latency = elapsed_ms(sent_at)
+    receive_state =
+      case DatagramPayload.decode(payload) do
+        {:ok, sequence, sent_at} ->
+          if MapSet.member?(receive_state.received, sequence) do
+            Map.update!(receive_state, :duplicate_datagrams, &(&1 + 1))
+          else
+            latency = elapsed_ms(sent_at)
 
-          %{
-            receive_state
-            | received: MapSet.put(receive_state.received, sequence),
-              latencies: [latency | receive_state.latencies],
-              first_byte_latency_ms: receive_state.first_byte_latency_ms || elapsed_ms(started_at)
-          }
-        end
+            %{
+              receive_state
+              | received: MapSet.put(receive_state.received, sequence),
+                latencies: [latency | receive_state.latencies],
+                first_byte_latency_ms:
+                  receive_state.first_byte_latency_ms || elapsed_ms(started_at)
+            }
+          end
 
-      :error ->
-        Map.update!(receive_state, :invalid_datagrams, &(&1 + 1))
+        :error ->
+          Map.update!(receive_state, :invalid_datagrams, &(&1 + 1))
+      end
+
+    record_datagram_cadence(receive_state, phase)
+  end
+
+  defp mark_moqx_datagram_receive_started(%{receive_started_at_us: nil} = receive_state) do
+    %{receive_state | receive_started_at_us: monotonic_us()}
+  end
+
+  defp mark_moqx_datagram_receive_started(receive_state), do: receive_state
+
+  defp finish_moqx_datagram_receive(%{stop_reason: nil} = receive_state, reason) do
+    receive_state
+    |> mark_moqx_datagram_receive_started()
+    |> Map.put(:receive_finished_at_us, monotonic_us())
+    |> Map.put(:stop_reason, reason)
+    |> record_datagram_cadence("final", true)
+  end
+
+  defp finish_moqx_datagram_receive(receive_state, _reason), do: receive_state
+
+  defp record_datagram_cadence(receive_state, phase, force? \\ false) do
+    now = monotonic_us()
+
+    if force? or now >= receive_state.cadence_next_sample_at_us do
+      received_count = MapSet.size(receive_state.received)
+      sample_index = receive_state.cadence_sample_count + 1
+
+      sample =
+        compact(%{
+          "sample_index" => sample_index,
+          "elapsed_ms" => (now - receive_state.started_at_us) / 1000,
+          "phase" => phase,
+          "datagrams_offered" => receive_state.offered,
+          "datagrams_accepted" => receive_state.accepted,
+          "datagrams_received" => received_count,
+          "accepted_delta" => receive_state.accepted - receive_state.cadence_last_accepted,
+          "received_delta" => received_count - receive_state.cadence_last_received,
+          "expected_datagrams_at_target_rate" =>
+            expected_datagrams_at_target_rate(receive_state, now),
+          "delivery_gap_to_accepted" => max(receive_state.accepted - received_count, 0),
+          "duplicate_datagrams" => receive_state.duplicate_datagrams,
+          "invalid_datagrams" => receive_state.invalid_datagrams
+        })
+
+      %{
+        receive_state
+        | cadence_next_sample_at_us: now + @datagram_cadence_sample_interval_us,
+          cadence_sample_count: sample_index,
+          cadence_last_accepted: receive_state.accepted,
+          cadence_last_received: received_count,
+          cadence_samples: append_cadence_sample(receive_state.cadence_samples, sample)
+      }
+    else
+      receive_state
     end
   end
+
+  defp append_cadence_sample(samples, sample) do
+    if length(samples) < @datagram_cadence_max_samples do
+      samples ++ [sample]
+    else
+      List.replace_at(samples, -1, sample)
+    end
+  end
+
+  defp expected_datagrams_at_target_rate(
+         %{target_datagrams_per_second: rate} = receive_state,
+         now
+       )
+       when is_number(rate) and rate > 0 do
+    expected = trunc(rate * max(now - receive_state.started_at_us, 0) / 1_000_000)
+    min(expected, receive_state.offered)
+  end
+
+  defp expected_datagrams_at_target_rate(_receive_state, _now), do: nil
 
   defp empty_stream_result do
     %{

@@ -385,3 +385,11 @@ seams without `Application` env.
   inline per-event mailbox sampling were removed. Remaining workload loops now
   keep only the semantic state needed to drive the benchmark, validate
   payloads, and decide stop/failure conditions.
+- 2026-05-28: Closed #34 locally. MOQX-client DATAGRAM diagnostics now include
+  active send/receive/observation durations, receive-loop stop reason, and a
+  bounded cadence trace under optional diagnostics. A paced loopback calibration
+  at 100 dps for 1 second produced 100 offered/accepted/received, 100%
+  delivery, no break symptom, strict-valid JSONL, and 11 cadence samples. The
+  next remote #26 DATAGRAM run can use those samples to classify sender
+  admission, receiver drain cadence, and peer delivery loss around the known
+  20k-30k pps transition.
