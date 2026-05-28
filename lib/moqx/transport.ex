@@ -353,17 +353,27 @@ defmodule MOQX.Transport do
   @doc """
   Receives bytes from stream in passive mode.
   """
-  def recv_stream(%Context{} = ctx, %Stream{info: %{receive_side?: false}}, _byte_count) do
-    {:error, :receive_side_unavailable, ctx}
+  def recv_stream(%Context{} = ctx, %Stream{info: %{receive_side?: false}} = stream, byte_count) do
+    started_at = monotonic_us()
+    result = {:error, :receive_side_unavailable, ctx}
+
+    emit_stream_recv_stop(ctx, stream, byte_count, started_at, result)
+    result
   end
 
   def recv_stream(%Context{} = ctx, %Stream{} = stream, byte_count) do
-    require_same_backend(ctx, stream, fn ->
-      case ctx.backend.module.recv_stream(stream.backend.data, byte_count) do
-        {:ok, data} -> {:ok, data, ctx}
-        {:error, reason} -> {:error, reason, ctx}
-      end
-    end)
+    started_at = monotonic_us()
+
+    result =
+      require_same_backend(ctx, stream, fn ->
+        case ctx.backend.module.recv_stream(stream.backend.data, byte_count) do
+          {:ok, data} -> {:ok, data, ctx}
+          {:error, reason} -> {:error, reason, ctx}
+        end
+      end)
+
+    emit_stream_recv_stop(ctx, stream, byte_count, started_at, result)
+    result
   end
 
   @doc """
@@ -921,6 +931,25 @@ defmodule MOQX.Transport do
 
   defp stream_send_byte_size({:ok, %Send{byte_size: byte_size}, _ctx}, _data), do: byte_size
   defp stream_send_byte_size(_result, data), do: safe_iodata_size(data)
+
+  defp emit_stream_recv_stop(ctx, stream, byte_count, started_at, result) do
+    measurements =
+      %{
+        duration_us: monotonic_us() - started_at,
+        requested_byte_count: byte_count,
+        byte_size: stream_recv_byte_size(result)
+      }
+      |> compact_measurements()
+
+    metadata =
+      stream_metadata(ctx, stream)
+      |> Map.merge(result_metadata(result))
+
+    :telemetry.execute([:moqx, :transport, :stream, :recv, :stop], measurements, metadata)
+  end
+
+  defp stream_recv_byte_size({:ok, data, _ctx}), do: byte_size(data)
+  defp stream_recv_byte_size(_result), do: nil
 
   defp emit_datagram_send_stop(ctx, connection, data, started_at, result) do
     measurements = %{

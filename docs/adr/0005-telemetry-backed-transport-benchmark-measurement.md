@@ -223,6 +223,11 @@ handler overhead and cardinality behavior are understood.
 The benchmark collector attaches for one run or one step and detaches in
 `after`.
 
+As of the first migration, `MOQX.TransportBench.TransportTelemetryCollector`
+is the shared collector for self-pair calibration, MOQX-client stream,
+DATAGRAM, and mixed pressure, plus `moqx-listener` stream/DATAGRAM diagnostics.
+The older stream-only collector and live phase diagnostics path are removed.
+
 Telemetry handlers run in the process that emits the event. Therefore handler
 work is hot-path work. Handlers must be bounded and cheap:
 
@@ -275,21 +280,22 @@ Raw stream ids may be used inside a short-lived in-process collector when
 needed to reconstruct per-stream benchmark state, but they must not become
 high-cardinality exported metric labels.
 
-### Implementation Order
+### Implementation Status
 
-1. Document this ADR and link it from the benchmark README.
-2. Add root `:telemetry` emitters for the minimal stream-pressure path:
-   `send_stream/4` and `receive_event/2`.
-3. Add `telemetry_metrics` declarations under `bench/transport`.
-4. Add a benchmark-owned collector that reconstructs the current MOQX-client
-   stream-pressure measurement map.
-5. Move MOQX-client stream-pressure measurement onto the collector without
-   changing workload behavior or `transport-bench-v1` output.
-6. Validate locally against the post-#37 stream-pressure path.
-7. Migrate DATAGRAM pressure and mixed pressure only after the first stream
-   slice is stable.
-8. Consider sidecars, remote collectors, dashboards, or a benchmark daemon only
-   after local collection proves useful and cheap.
+The first implementation kept the staged order from this ADR but then removed
+the intermediate mixed state. The benchmark now uses a single
+`MOQX.TransportBench.TransportTelemetryCollector` for MOQX-client stream,
+DATAGRAM, mixed pressure, and `moqx-listener` stream/DATAGRAM diagnostics.
+
+Root `moqx` emits transport-facade telemetry for `send_stream/4`,
+`recv_stream/3`, `send_datagram/3`, and `receive_event/2`. `bench/transport`
+owns `telemetry_metrics` declarations and the collector that converts those
+events into the existing `transport-bench-v1` summaries and listener-side
+diagnostic JSONL.
+
+The remaining future phases are sidecar artifacts, remote collectors,
+dashboards, or a benchmark daemon. Those should still wait until local
+collection remains useful and cheap under real-path pressure.
 
 ## Consequences
 
@@ -299,8 +305,9 @@ Positive:
   sees.
 - Benchmark metrics become structured and reusable without replacing the
   existing JSONL evidence contract.
-- The first implementation slice can prove that measurement plumbing can change
-  while benchmark behavior and reports stay stable.
+- The implementation proves that measurement plumbing can change while
+  benchmark behavior and reports stay stable across stream, DATAGRAM, mixed,
+  and listener-side pressure paths.
 - Future dashboards or remote collectors can reuse the metric declarations
   instead of reverse-engineering ad-hoc diagnostics.
 

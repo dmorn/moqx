@@ -376,3 +376,12 @@ seams without `Application` env.
   symptom. The next #26 slice can now migrate DATAGRAM/mixed pressure onto the
   same telemetry collector pattern or rerun the ARM stream-pressure bracket
   with the cleaner measurement path.
+- 2026-05-28: Completed the full measurement migration without keeping the
+  temporary mixed state. `MOQX.TransportBench.TransportTelemetryCollector` now
+  backs self-pair calibration, MOQX-client stream, DATAGRAM, mixed pressure,
+  and `moqx-listener` stream/DATAGRAM diagnostics. The root transport facade
+  emits `recv_stream/3` telemetry in addition to stream send, DATAGRAM send,
+  and normalized `receive_event/2`; old no-op live phase scaffolding and
+  inline per-event mailbox sampling were removed. Remaining workload loops now
+  keep only the semantic state needed to drive the benchmark, validate
+  payloads, and decide stop/failure conditions.

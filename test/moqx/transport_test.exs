@@ -220,6 +220,38 @@ defmodule MOQX.TransportTest do
       assert receive_metadata.local_role == :server
     end
 
+    test "emits telemetry for passive stream receives" do
+      {ctx, client, server} = support_pair(:moq_lite_04)
+
+      assert {:ok, client_stream, ctx} =
+               MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
+
+      assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+      ctx = flush_context_events(ctx)
+
+      attach_test_telemetry([
+        [:moqx, :transport, :stream, :recv, :stop]
+      ])
+
+      assert {:ok, _send, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "hello", [])
+      assert {:ok, "hello", _ctx} = MOQX.Transport.recv_stream(ctx, server_stream, 5)
+
+      assert_receive {:test_telemetry, [:moqx, :transport, :stream, :recv, :stop],
+                      recv_measurements, recv_metadata}
+
+      assert recv_measurements.byte_size == 5
+      assert recv_measurements.requested_byte_count == 5
+      assert is_integer(recv_measurements.duration_us)
+      assert recv_measurements.duration_us >= 0
+      assert recv_metadata.backend == Support
+      assert recv_metadata.result == :ok
+      assert recv_metadata.reason == nil
+      assert recv_metadata.stream_id == 0
+      assert recv_metadata.stream_direction == :bidirectional
+      assert recv_metadata.stream_initiator == :peer
+      assert recv_metadata.local_role == :server
+    end
+
     test "emits telemetry for datagram send admission and receive timeouts" do
       {ctx, client, _server} = support_pair(:draft_14)
       ctx = flush_context_events(ctx)

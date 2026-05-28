@@ -69,7 +69,7 @@ process state inside every telemetry handler.
   Root `moqx` now depends on and starts `:telemetry`; `MOQX.Transport` emits
   stable stream-send, datagram-send, and normalized receive-event stop events
   from the facade. `bench/transport` now declares `telemetry_metrics` metrics
-  and owns `MOQX.TransportBench.StreamPressureCollector`, an ETS-backed
+  and owns `MOQX.TransportBench.TransportTelemetryCollector`, an ETS-backed
   step-scoped collector whose handler only updates counters/durations.
 - 2026-05-28: MOQX-client stream pressure now attaches the collector for the
   step, detaches in `after`, and feeds the existing `transport-bench-v1`
@@ -86,3 +86,14 @@ process state inside every telemetry handler.
   256-byte payloads, 5120 sent bytes, 5120 received bytes, 20 accepted sends,
   0 stream send errors, 46.02 Mbps, no break symptom. This remains loopback
   calibration only, not real network evidence.
+- 2026-05-28: Follow-up migration removed the intermediate stream-only state.
+  The collector is now the shared transport telemetry collector for MOQX-client
+  stream, DATAGRAM, mixed pressure, and `moqx-listener` stream/DATAGRAM
+  diagnostics. Root `MOQX.Transport` also emits passive `recv_stream/3`
+  telemetry so listener-side stream receive timing and byte counts use the
+  same collection path. Dead `record_stream_phase/4`/live phase scaffolding and
+  inline per-event process sampling were removed.
+- 2026-05-28: Extended the same collector path to self-pair calibration as
+  well, so all transport benchmark calibration/pressure paths now derive
+  optional diagnostics from `TransportTelemetryCollector` instead of keeping a
+  direct-measurement-only exception.

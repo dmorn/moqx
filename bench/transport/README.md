@@ -612,6 +612,10 @@ Measurement plumbing is defined in
 In short: `transport-bench-v1` JSONL remains the stable output contract, while
 transport and benchmark measurements may be collected through `:telemetry`,
 `telemetry_metrics` declarations, and benchmark-owned collectors.
+Self-pair calibration, MOQX-client stream, DATAGRAM, mixed pressure, and
+`moqx-listener` stream/DATAGRAM diagnostics all use the same
+`MOQX.TransportBench.TransportTelemetryCollector` path for transport timings,
+event counts, and bounded mailbox samples.
 
 ### Record Types
 

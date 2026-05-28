@@ -4,6 +4,7 @@ defmodule MOQX.TransportBench.Telemetry do
   import Telemetry.Metrics
 
   @stream_send_event [:moqx, :transport, :stream, :send, :stop]
+  @stream_recv_event [:moqx, :transport, :stream, :recv, :stop]
   @datagram_send_event [:moqx, :transport, :datagram, :send, :stop]
   @receive_event [:moqx, :transport, :event, :receive, :stop]
 
@@ -20,6 +21,20 @@ defmodule MOQX.TransportBench.Telemetry do
       ),
       summary("moqx.transport.stream.send.stop.duration.us",
         event_name: @stream_send_event,
+        measurement: :duration_us,
+        tags: [:result, :stream_direction, :local_role]
+      ),
+      counter("moqx.transport.stream.recv.stop.count",
+        event_name: @stream_recv_event,
+        tags: [:result, :stream_direction, :local_role]
+      ),
+      sum("moqx.transport.stream.recv.stop.bytes",
+        event_name: @stream_recv_event,
+        measurement: :byte_size,
+        tags: [:result, :stream_direction, :local_role]
+      ),
+      summary("moqx.transport.stream.recv.stop.duration.us",
+        event_name: @stream_recv_event,
         measurement: :duration_us,
         tags: [:result, :stream_direction, :local_role]
       ),

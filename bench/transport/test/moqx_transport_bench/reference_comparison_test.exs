@@ -506,6 +506,8 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["diagnostics"]["summary"]["datagrams_accepted"] == 2
     assert record["diagnostics"]["summary"]["datagrams_received"] == 2
     assert record["diagnostics"]["summary"]["datagrams_missing"] == 0
+    assert record["diagnostics"]["summary"]["bytes_sent"] == 2384
+    assert record["diagnostics"]["summary"]["bytes_received"] == 2384
     assert record["diagnostics"]["summary"]["datagram_receive_events"] == 2
     assert record["diagnostics"]["summary"]["receive_errors"] == 0
   end
@@ -578,6 +580,8 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["diagnostics"]["summary"]["object_payloads_accepted"] == 4
     assert record["diagnostics"]["summary"]["object_send_completions"] == 4
     assert record["diagnostics"]["summary"]["object_send_completions_pending"] == 0
+    assert record["diagnostics"]["summary"]["bytes_sent"] == 288
+    assert record["diagnostics"]["summary"]["bytes_received"] == 32
     assert record["diagnostics"]["summary"]["events_drained"] >= 6
     assert record["diagnostics"]["summary"]["completion_drain_events"] == 1
     assert record["diagnostics"]["summary"]["control_data_events"] == 2

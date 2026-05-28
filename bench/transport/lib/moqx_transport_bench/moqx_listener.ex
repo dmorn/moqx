@@ -3,6 +3,7 @@ defmodule MOQX.TransportBench.MoqxListener do
 
   alias MOQX.Transport
   alias MOQX.TransportBench.DatagramPayload
+  alias MOQX.TransportBench.TransportTelemetryCollector
 
   @default_script "moqx-transport-bench moqx-listener"
   @default_timeout_seconds 30
@@ -11,8 +12,6 @@ defmodule MOQX.TransportBench.MoqxListener do
   @datagram_pressure_workload "datagram_pressure"
   @mixed_moqt_shaped_workload "mixed_moqt_shaped"
   @listener_diagnostics_schema_version "moqx-listener-diagnostics-v1"
-  @message_queue_sample_prefix_count 16
-  @message_queue_sample_stride 1_024
 
   def main(argv, opts \\ []) do
     script = Keyword.get(opts, :script, @default_script)
@@ -340,18 +339,34 @@ defmodule MOQX.TransportBench.MoqxListener do
   end
 
   defp serve_connection_workload(ctx, connection, %{workload: @stream_pressure_workload} = config) do
-    with {:ok, streams, ctx} <- accept_streams(ctx, connection, config) do
-      state = initial_stream_diagnostics(config, streams)
+    {:ok, collector} = TransportTelemetryCollector.start(sample_process?: true)
 
-      case serve_streams(ctx, streams, config, state) do
-        {:ok, ctx, state} ->
-          write_stream_diagnostics(config, state)
-          {:ok, ctx}
+    try do
+      with {:ok, streams, ctx} <- accept_streams(ctx, connection, config) do
+        state = initial_stream_diagnostics(config, streams)
 
-        {:error, reason, ctx, state} ->
-          write_stream_diagnostics(config, state)
-          {:error, reason, ctx}
+        case serve_streams(ctx, streams, config, state) do
+          {:ok, ctx, state} ->
+            write_stream_diagnostics(
+              config,
+              state,
+              TransportTelemetryCollector.snapshot(collector)
+            )
+
+            {:ok, ctx}
+
+          {:error, reason, ctx, state} ->
+            write_stream_diagnostics(
+              config,
+              state,
+              TransportTelemetryCollector.snapshot(collector)
+            )
+
+            {:error, reason, ctx}
+        end
       end
+    after
+      TransportTelemetryCollector.close(collector)
     end
   end
 
@@ -360,16 +375,32 @@ defmodule MOQX.TransportBench.MoqxListener do
          connection,
          %{workload: @datagram_pressure_workload} = config
        ) do
-    state = initial_datagram_receive_state(config)
+    {:ok, collector} = TransportTelemetryCollector.start(sample_process?: true)
 
-    case receive_datagrams(ctx, connection, config, state) do
-      {:ok, ctx, state} ->
-        write_datagram_diagnostics(config, state)
-        {:ok, ctx}
+    try do
+      state = initial_datagram_receive_state(config)
 
-      {:error, reason, ctx, state} ->
-        write_datagram_diagnostics(config, state)
-        {:error, reason, ctx}
+      case receive_datagrams(ctx, connection, config, state) do
+        {:ok, ctx, state} ->
+          write_datagram_diagnostics(
+            config,
+            state,
+            TransportTelemetryCollector.snapshot(collector)
+          )
+
+          {:ok, ctx}
+
+        {:error, reason, ctx, state} ->
+          write_datagram_diagnostics(
+            config,
+            state,
+            TransportTelemetryCollector.snapshot(collector)
+          )
+
+          {:error, reason, ctx}
+      end
+    after
+      TransportTelemetryCollector.close(collector)
     end
   end
 
@@ -444,21 +475,10 @@ defmodule MOQX.TransportBench.MoqxListener do
       streams_failed: 0,
       bytes_expected: streams |> Map.values() |> Enum.map(& &1.expected_bytes) |> Enum.sum(),
       bytes_received: 0,
-      stream_receive_events: 0,
-      echo_send_attempted: 0,
-      echo_send_accepted: 0,
-      send_completed: 0,
-      send_cancelled: 0,
-      send_completions_pending: 0,
-      ignored_events: 0,
-      unknown_events: 0,
-      receive_errors: 0,
       stop_reason: nil,
       error_reason: nil,
-      streams: Map.new(streams, fn {_id, stream} -> {stream_id(stream.stream), stream} end),
-      process: %{}
+      streams: Map.new(streams, fn {_id, stream} -> {stream_id(stream.stream), stream} end)
     }
-    |> sample_stream_process()
   end
 
   defp serve_streams(ctx, streams, config, state) do
@@ -507,14 +527,10 @@ defmodule MOQX.TransportBench.MoqxListener do
   defp echo_stream_chunk(ctx, stream_state, data, config, pending_sends, state) do
     stream_state = %{stream_state | received: stream_state.received + byte_size(data)}
 
-    state =
-      state
-      |> record_stream_receive(stream_state, data)
-      |> record_stream_echo_attempt(stream_echo_attempted?(stream_state))
+    state = record_stream_receive(state, stream_state, data)
 
     case maybe_echo_stream_data(stream_state, data, ctx) do
       {:ok, echoed?, ctx} ->
-        state = record_stream_echo_accepted(state, echoed?)
         pending_sends = if echoed?, do: pending_sends + 1, else: pending_sends
         receive_stream_chunks(ctx, stream_state, config, pending_sends, state)
 
@@ -554,36 +570,12 @@ defmodule MOQX.TransportBench.MoqxListener do
     end
   end
 
-  defp stream_echo_attempted?(%{stream: %{info: %{send_side?: false}}}), do: false
-  defp stream_echo_attempted?(_stream_state), do: true
-
   defp record_stream_receive(nil, _stream_state, _data), do: nil
 
   defp record_stream_receive(state, stream_state, data) do
     state
     |> Map.update!(:bytes_received, &(&1 + byte_size(data)))
-    |> Map.update!(:stream_receive_events, &(&1 + 1))
     |> put_in([:streams, stream_id(stream_state.stream)], stream_state)
-    |> sample_stream_process()
-  end
-
-  defp record_stream_echo_attempt(nil, _echoed?), do: nil
-  defp record_stream_echo_attempt(state, false), do: state
-
-  defp record_stream_echo_attempt(state, true) do
-    state
-    |> Map.update!(:echo_send_attempted, &(&1 + 1))
-    |> sample_stream_process()
-  end
-
-  defp record_stream_echo_accepted(nil, _echoed?), do: nil
-  defp record_stream_echo_accepted(state, false), do: state
-
-  defp record_stream_echo_accepted(state, true) do
-    state
-    |> Map.update!(:echo_send_accepted, &(&1 + 1))
-    |> Map.update!(:send_completions_pending, &(&1 + 1))
-    |> sample_stream_process()
   end
 
   defp fail_stream_diagnostics(nil, _stream_state, _reason), do: nil
@@ -594,15 +586,12 @@ defmodule MOQX.TransportBench.MoqxListener do
     |> Map.put(:stop_reason, "stream_error")
     |> Map.put(:error_reason, reason_name(reason))
     |> put_in([:streams, stream_id(stream_state.stream)], stream_state)
-    |> sample_stream_process()
   end
 
   defp stream_diagnostics_update(nil, _fun), do: nil
 
   defp stream_diagnostics_update(state, fun) do
-    state
-    |> fun.()
-    |> sample_stream_process()
+    fun.(state)
   end
 
   defp drain_send_completions(ctx, _stream, 0, _timeout_ms, state), do: {:ok, ctx, state}
@@ -610,21 +599,12 @@ defmodule MOQX.TransportBench.MoqxListener do
   defp drain_send_completions(ctx, stream, pending_sends, timeout_ms, state) do
     case Transport.receive_event(ctx, timeout_ms) do
       {:ok, {:stream_event, ^stream, :send_completed, _metadata}, ctx} ->
-        state =
-          stream_diagnostics_update(state, fn state ->
-            state
-            |> Map.update!(:send_completed, &(&1 + 1))
-            |> Map.update!(:send_completions_pending, &max(&1 - 1, 0))
-          end)
-
         drain_send_completions(ctx, stream, pending_sends - 1, timeout_ms, state)
 
       {:ok, {:stream_event, ^stream, :send_cancelled, metadata}, ctx} ->
         state =
           stream_diagnostics_update(state, fn state ->
             state
-            |> Map.update!(:send_cancelled, &(&1 + 1))
-            |> Map.update!(:send_completions_pending, &max(&1 - 1, 0))
             |> Map.put(:stop_reason, "send_cancelled")
             |> Map.put(:error_reason, inspect(metadata))
           end)
@@ -632,19 +612,9 @@ defmodule MOQX.TransportBench.MoqxListener do
         {:error, {:stream_send_cancelled, stream_id(stream), metadata}, ctx, state}
 
       {:ok, _event, ctx} ->
-        state =
-          stream_diagnostics_update(state, fn state ->
-            Map.update!(state, :ignored_events, &(&1 + 1))
-          end)
-
         drain_send_completions(ctx, stream, pending_sends, timeout_ms, state)
 
       {:unknown, _message, ctx} ->
-        state =
-          stream_diagnostics_update(state, fn state ->
-            Map.update!(state, :unknown_events, &(&1 + 1))
-          end)
-
         drain_send_completions(ctx, stream, pending_sends, timeout_ms, state)
 
       {:timeout, ctx} ->
@@ -661,7 +631,6 @@ defmodule MOQX.TransportBench.MoqxListener do
         state =
           stream_diagnostics_update(state, fn state ->
             state
-            |> Map.update!(:receive_errors, &(&1 + 1))
             |> Map.put(:stop_reason, "receive_error")
             |> Map.put(:error_reason, reason_name(reason))
           end)
@@ -706,25 +675,14 @@ defmodule MOQX.TransportBench.MoqxListener do
       first_echo_attempted_at: nil,
       last_echo_attempted_at: nil,
       datagrams_received: 0,
-      datagrams_echo_attempted: 0,
-      datagrams_echoed: 0,
       datagram_duplicates: 0,
       invalid_datagrams: 0,
-      ignored_events: 0,
-      unknown_events: 0,
-      receive_errors: 0,
       echo_errors: 0,
-      echo_error_reason: nil,
-      echo_send_duration_us_total: 0,
-      echo_send_duration_us_max: 0,
-      process: %{}
+      echo_error_reason: nil
     }
-    |> sample_datagram_process()
   end
 
   defp receive_datagrams(ctx, connection, config, state) do
-    state = sample_datagram_process(state)
-
     cond do
       MapSet.size(state.received_sequences) >= state.expected_datagrams ->
         {:ok, ctx, stop_datagram_receive(state, "expected_datagrams_received")}
@@ -744,30 +702,16 @@ defmodule MOQX.TransportBench.MoqxListener do
         echo_datagram(ctx, connection, config, state, payload)
 
       {:ok, _event, ctx} ->
-        state =
-          state
-          |> Map.update!(:ignored_events, &(&1 + 1))
-          |> sample_datagram_process()
-
         receive_datagrams(ctx, connection, config, state)
 
       {:timeout, ctx} ->
         handle_datagram_timeout(ctx, state)
 
       {:unknown, _message, ctx} ->
-        state =
-          state
-          |> Map.update!(:unknown_events, &(&1 + 1))
-          |> sample_datagram_process()
-
         receive_datagrams(ctx, connection, config, state)
 
       {:error, reason, ctx} ->
-        state =
-          state
-          |> Map.update!(:receive_errors, &(&1 + 1))
-          |> sample_datagram_process()
-          |> stop_datagram_receive("receive_error")
+        state = stop_datagram_receive(state, "receive_error")
 
         {:error, reason, ctx, state}
     end
@@ -778,31 +722,18 @@ defmodule MOQX.TransportBench.MoqxListener do
 
     state =
       state
-      |> Map.update!(:datagrams_echo_attempted, &(&1 + 1))
       |> record_first_timestamp(:first_echo_attempted_at, echo_started_at)
       |> Map.put(:last_echo_attempted_at, echo_started_at)
 
     case Transport.send_datagram(ctx, connection, payload) do
       {:ok, ctx} ->
-        echo_duration_us = monotonic_us() - echo_started_at
-
-        state =
-          state
-          |> record_echo_send_duration(echo_duration_us)
-          |> Map.update!(:datagrams_echoed, &(&1 + 1))
-          |> sample_datagram_process()
-
         receive_datagrams(ctx, connection, config, state)
 
       {:error, reason, ctx} ->
-        echo_duration_us = monotonic_us() - echo_started_at
-
         state =
           state
-          |> record_echo_send_duration(echo_duration_us)
           |> Map.update!(:echo_errors, &(&1 + 1))
           |> Map.put(:echo_error_reason, reason_name(reason))
-          |> sample_datagram_process()
           |> stop_datagram_receive("echo_error")
 
         {:error, reason, ctx, state}
@@ -838,7 +769,6 @@ defmodule MOQX.TransportBench.MoqxListener do
       :error ->
         Map.update!(state, :invalid_datagrams, &(&1 + 1))
     end
-    |> sample_datagram_process()
   end
 
   defp stream_id(stream), do: stream.info.stream_id
@@ -849,19 +779,11 @@ defmodule MOQX.TransportBench.MoqxListener do
   defp stream_direction_name(_stream), do: nil
 
   defp stop_datagram_receive(state, reason) do
-    state
-    |> Map.put(:stop_reason, reason)
-    |> sample_datagram_process()
+    Map.put(state, :stop_reason, reason)
   end
 
   defp record_first_timestamp(state, key, timestamp) do
     if Map.get(state, key), do: state, else: Map.put(state, key, timestamp)
-  end
-
-  defp record_echo_send_duration(state, duration_us) do
-    state
-    |> Map.update!(:echo_send_duration_us_total, &(&1 + duration_us))
-    |> Map.update!(:echo_send_duration_us_max, &max(&1, duration_us))
   end
 
   defp datagram_observation_expired?(config, state) do
@@ -906,9 +828,10 @@ defmodule MOQX.TransportBench.MoqxListener do
 
   defp datagram_idle_timeout_ms(config), do: min(1000, config.timeout_ms)
 
-  defp write_datagram_diagnostics(%{diagnostics_output: nil}, _state), do: :ok
+  defp write_datagram_diagnostics(%{diagnostics_output: nil}, _state, _collector_snapshot),
+    do: :ok
 
-  defp write_datagram_diagnostics(config, state) do
+  defp write_datagram_diagnostics(config, state, collector_snapshot) do
     path = config.diagnostics_output
     dir = Path.dirname(path)
     if dir != ".", do: File.mkdir_p!(dir)
@@ -916,7 +839,7 @@ defmodule MOQX.TransportBench.MoqxListener do
     File.write!(
       path,
       state
-      |> datagram_diagnostics_record(config)
+      |> datagram_diagnostics_record(config, collector_snapshot)
       |> encode_json()
       |> IO.iodata_to_binary()
       |> Kernel.<>("\n"),
@@ -924,10 +847,10 @@ defmodule MOQX.TransportBench.MoqxListener do
     )
   end
 
-  defp write_stream_diagnostics(%{diagnostics_output: nil}, _state), do: :ok
-  defp write_stream_diagnostics(_config, nil), do: :ok
+  defp write_stream_diagnostics(%{diagnostics_output: nil}, _state, _collector_snapshot), do: :ok
+  defp write_stream_diagnostics(_config, nil, _collector_snapshot), do: :ok
 
-  defp write_stream_diagnostics(config, state) do
+  defp write_stream_diagnostics(config, state, collector_snapshot) do
     path = config.diagnostics_output
     dir = Path.dirname(path)
     if dir != ".", do: File.mkdir_p!(dir)
@@ -935,7 +858,7 @@ defmodule MOQX.TransportBench.MoqxListener do
     File.write!(
       path,
       state
-      |> stream_diagnostics_record(config)
+      |> stream_diagnostics_record(config, collector_snapshot)
       |> encode_json()
       |> IO.iodata_to_binary()
       |> Kernel.<>("\n"),
@@ -943,7 +866,9 @@ defmodule MOQX.TransportBench.MoqxListener do
     )
   end
 
-  defp stream_diagnostics_record(state, config) do
+  defp stream_diagnostics_record(state, config, collector_snapshot) do
+    runtime = collector_snapshot.runtime_diagnostics
+
     %{
       "schema_version" => @listener_diagnostics_schema_version,
       "record_type" => "stream_listener_run",
@@ -957,21 +882,36 @@ defmodule MOQX.TransportBench.MoqxListener do
           "streams_failed" => state.streams_failed,
           "bytes_expected" => state.bytes_expected,
           "bytes_received" => state.bytes_received,
-          "stream_receive_events" => state.stream_receive_events,
-          "echo_send_attempted" => state.echo_send_attempted,
-          "echo_send_accepted" => state.echo_send_accepted,
-          "send_completed" => state.send_completed,
-          "send_cancelled" => state.send_cancelled,
-          "send_completions_pending" => state.send_completions_pending,
-          "ignored_events" => state.ignored_events,
-          "unknown_events" => state.unknown_events,
-          "receive_errors" => state.receive_errors,
+          "stream_receive_events" => collector_snapshot.stream_recv_ok,
+          "stream_recv_bytes" => collector_snapshot.stream_recv_bytes,
+          "stream_recv_errors" => collector_snapshot.stream_recv_errors,
+          "recv_stream_call_ms" =>
+            duration_summary_ms(collector_snapshot.recv_stream_call_durations_us),
+          "echo_send_attempted" =>
+            collector_snapshot.stream_send_accepted + collector_snapshot.stream_send_errors,
+          "echo_send_accepted" => collector_snapshot.stream_send_accepted,
+          "echo_send_errors" => collector_snapshot.stream_send_errors,
+          "send_stream_call_ms" =>
+            duration_summary_ms(collector_snapshot.send_stream_call_durations_us),
+          "send_completed" => runtime[:send_completed_events],
+          "send_cancelled" => runtime[:send_cancelled_events],
+          "send_completions_pending" =>
+            max(
+              collector_snapshot.stream_send_accepted - runtime[:send_completed_events] -
+                runtime[:send_cancelled_events],
+              0
+            ),
+          "ignored_events" => runtime[:ignored_events],
+          "unknown_events" => runtime[:unknown_events],
+          "receive_errors" => runtime[:receive_errors],
+          "receive_event_call_ms" =>
+            duration_summary_ms(runtime[:receive_event_call_durations_us] || []),
           "stop_reason" => state.stop_reason || "streams_completed",
           "error_reason" => state.error_reason,
           "duration_ms" => elapsed_ms(state.started_at)
         }),
       "streams" => stream_diagnostics_list(state.streams),
-      "process" => process_diagnostics(state.process)
+      "process" => process_diagnostics(runtime.process)
     }
   end
 
@@ -991,8 +931,9 @@ defmodule MOQX.TransportBench.MoqxListener do
     end)
   end
 
-  defp datagram_diagnostics_record(state, config) do
+  defp datagram_diagnostics_record(state, config, collector_snapshot) do
     unique = MapSet.size(state.received_sequences)
+    runtime = collector_snapshot.runtime_diagnostics
 
     %{
       "schema_version" => @listener_diagnostics_schema_version,
@@ -1004,13 +945,17 @@ defmodule MOQX.TransportBench.MoqxListener do
         "datagrams_received" => state.datagrams_received,
         "datagrams_unique" => unique,
         "datagrams_missing" => max(state.expected_datagrams - unique, 0),
-        "datagrams_echo_attempted" => state.datagrams_echo_attempted,
-        "datagrams_echoed" => state.datagrams_echoed,
+        "datagrams_echo_attempted" =>
+          collector_snapshot.datagram_send_accepted + collector_snapshot.datagram_send_errors,
+        "datagrams_echoed" => collector_snapshot.datagram_send_accepted,
+        "datagram_send_errors" => collector_snapshot.datagram_send_errors,
         "datagram_duplicates" => state.datagram_duplicates,
         "invalid_datagrams" => state.invalid_datagrams,
-        "ignored_events" => state.ignored_events,
-        "unknown_events" => state.unknown_events,
-        "receive_errors" => state.receive_errors,
+        "datagram_receive_events" => runtime[:datagram_events],
+        "datagram_bytes_received" => runtime[:datagram_bytes_received],
+        "ignored_events" => runtime[:ignored_events],
+        "unknown_events" => runtime[:unknown_events],
+        "receive_errors" => runtime[:receive_errors],
         "echo_errors" => state.echo_errors,
         "echo_error_reason" => state.echo_error_reason,
         "first_datagram_received_ms" =>
@@ -1022,17 +967,15 @@ defmodule MOQX.TransportBench.MoqxListener do
         "last_echo_attempted_ms" =>
           relative_elapsed_ms(state.last_echo_attempted_at, state.started_at),
         "echo_send_duration_ms" =>
-          duration_summary_ms(
-            state.datagrams_echo_attempted,
-            state.echo_send_duration_us_total,
-            state.echo_send_duration_us_max
-          ),
+          duration_summary_ms(collector_snapshot.send_datagram_call_durations_us),
+        "receive_event_call_ms" =>
+          duration_summary_ms(runtime[:receive_event_call_durations_us] || []),
         "stop_reason" => state.stop_reason,
         "duration_ms" => elapsed_ms(state.started_at),
         "datagram_idle_timeout_ms" => datagram_idle_timeout_ms(config),
         "datagram_observation_timeout_ms" => datagram_observation_timeout_ms(config)
       },
-      "process" => process_diagnostics(state.process)
+      "process" => process_diagnostics(runtime.process)
     }
   end
 
@@ -1105,44 +1048,6 @@ defmodule MOQX.TransportBench.MoqxListener do
     }
   end
 
-  defp sample_stream_process(state), do: sample_process(state)
-  defp sample_datagram_process(state), do: sample_process(state)
-
-  defp sample_process(state) do
-    message_queue_len = message_queue_len()
-    sample_index = Map.get(state.process, "message_queue_len_samples", 0) + 1
-
-    process =
-      state.process
-      |> Map.put("message_queue_len", message_queue_len)
-      |> Map.update("message_queue_len_peak", message_queue_len, fn peak ->
-        max(peak, message_queue_len)
-      end)
-      |> Map.put("message_queue_len_samples", sample_index)
-      |> maybe_append_message_queue_sample(state.started_at, sample_index, message_queue_len)
-
-    %{state | process: process}
-  end
-
-  defp maybe_append_message_queue_sample(process, started_at, sample_index, message_queue_len) do
-    if keep_message_queue_sample?(sample_index) do
-      point = %{
-        "sample_index" => sample_index,
-        "elapsed_ms" => elapsed_ms(started_at),
-        "message_queue_len" => message_queue_len
-      }
-
-      Map.update(process, "message_queue_len_sample_points", [point], &(&1 ++ [point]))
-    else
-      process
-    end
-  end
-
-  defp keep_message_queue_sample?(sample_index) do
-    sample_index <= @message_queue_sample_prefix_count or
-      rem(sample_index, @message_queue_sample_stride) == 0
-  end
-
   defp message_queue_len do
     case Process.info(self(), :message_queue_len) do
       {:message_queue_len, value} -> value
@@ -1156,17 +1061,40 @@ defmodule MOQX.TransportBench.MoqxListener do
   defp relative_elapsed_ms(nil, _started_at), do: nil
   defp relative_elapsed_ms(timestamp, started_at), do: (timestamp - started_at) / 1000
 
-  defp duration_summary_ms(0, _total_us, _max_us) do
-    %{"count" => 0, "total" => 0.0, "mean" => nil, "max" => nil}
-  end
+  defp duration_summary_ms(values_us) do
+    values_ms = Enum.map(values_us, &(&1 / 1000))
+    sorted = Enum.sort(values_ms)
+    count = length(sorted)
+    total = Enum.sum(sorted)
 
-  defp duration_summary_ms(count, total_us, max_us) do
     %{
       "count" => count,
-      "total" => total_us / 1000,
-      "mean" => total_us / count / 1000,
-      "max" => max_us / 1000
+      "total" => total,
+      "mean" => mean(total, count),
+      "p50" => percentile(sorted, 0.50),
+      "p95" => percentile(sorted, 0.95),
+      "p99" => percentile(sorted, 0.99),
+      "max" => List.last(sorted)
     }
+  end
+
+  defp mean(_total, 0), do: nil
+  defp mean(total, count), do: total / count
+
+  defp percentile([], _p), do: nil
+  defp percentile([value], _p), do: value
+
+  defp percentile(sorted, p) do
+    index =
+      sorted
+      |> length()
+      |> Kernel.*(p)
+      |> Float.ceil()
+      |> trunc()
+      |> max(1)
+      |> Kernel.-(1)
+
+    Enum.at(sorted, index)
   end
 
   defp compact(map) do

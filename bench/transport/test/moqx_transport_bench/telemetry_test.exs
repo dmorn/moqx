@@ -3,12 +3,16 @@ defmodule MOQX.TransportBench.TelemetryTest do
 
   alias MOQX.TransportBench.Telemetry, as: BenchTelemetry
 
-  test "declares transport metrics for the first collector slice" do
+  test "declares transport metrics for telemetry-backed benchmark collection" do
     metrics = BenchTelemetry.metrics()
 
     assert_metric(metrics, Telemetry.Metrics.Counter, [:moqx, :transport, :stream, :send, :stop])
     assert_metric(metrics, Telemetry.Metrics.Summary, [:moqx, :transport, :stream, :send, :stop])
     assert_metric(metrics, Telemetry.Metrics.Sum, [:moqx, :transport, :stream, :send, :stop])
+
+    assert_metric(metrics, Telemetry.Metrics.Counter, [:moqx, :transport, :stream, :recv, :stop])
+    assert_metric(metrics, Telemetry.Metrics.Summary, [:moqx, :transport, :stream, :recv, :stop])
+    assert_metric(metrics, Telemetry.Metrics.Sum, [:moqx, :transport, :stream, :recv, :stop])
 
     assert_metric(metrics, Telemetry.Metrics.Counter, [:moqx, :transport, :event, :receive, :stop])
 

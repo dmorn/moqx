@@ -1,8 +1,10 @@
-defmodule MOQX.TransportBench.StreamPressureCollector do
+defmodule MOQX.TransportBench.TransportTelemetryCollector do
   @moduledoc false
 
   @events [
     [:moqx, :transport, :stream, :send, :stop],
+    [:moqx, :transport, :stream, :recv, :stop],
+    [:moqx, :transport, :datagram, :send, :stop],
     [:moqx, :transport, :event, :receive, :stop]
   ]
 
@@ -10,7 +12,7 @@ defmodule MOQX.TransportBench.StreamPressureCollector do
   @message_queue_sample_stride 1_024
   @sample_interval_ms 10
 
-  defstruct [:handler_id, :owner_pid, :sampler_pid, :sampler_ref, :table]
+  defstruct [:handler_id, :owner_pid, :sampler_pid, :sampler_ref, :sampler_monitor_ref, :table]
 
   def start(opts \\ []) do
     with {:ok, _apps} <- Application.ensure_all_started(:telemetry) do
@@ -33,7 +35,7 @@ defmodule MOQX.TransportBench.StreamPressureCollector do
     started_at_us = monotonic_us()
     :ets.insert(table, {:started_at_us, started_at_us})
 
-    {sampler_pid, sampler_ref} =
+    {sampler_pid, sampler_ref, sampler_monitor_ref} =
       maybe_start_sampler(
         table,
         owner_pid,
@@ -46,6 +48,7 @@ defmodule MOQX.TransportBench.StreamPressureCollector do
       owner_pid: owner_pid,
       sampler_pid: sampler_pid,
       sampler_ref: sampler_ref,
+      sampler_monitor_ref: sampler_monitor_ref,
       table: table
     }
 
@@ -68,11 +71,21 @@ defmodule MOQX.TransportBench.StreamPressureCollector do
       stream_send_bytes_accepted: counter(table, {:stream_send, :bytes_accepted}),
       stream_send_accepted: counter(table, {:stream_send, :accepted}),
       stream_send_errors: counter(table, {:stream_send, :errors}),
+      recv_stream_call_durations_us: duration_values(table, :stream_recv_call),
+      stream_recv_bytes: counter(table, {:stream_recv, :bytes}),
+      stream_recv_ok: counter(table, {:stream_recv, :ok}),
+      stream_recv_errors: counter(table, {:stream_recv, :errors}),
+      send_datagram_call_durations_us: duration_values(table, :datagram_send_call),
+      datagram_send_bytes_accepted: counter(table, {:datagram_send, :bytes_accepted}),
+      datagram_send_accepted: counter(table, {:datagram_send, :accepted}),
+      datagram_send_errors: counter(table, {:datagram_send, :errors}),
       runtime_diagnostics: %{
         process: process_samples(table),
         events_drained: counter(table, {:receive_event, :events_drained}),
         stream_data_events: counter(table, {:receive_event, :stream_data}),
         stream_data_bytes_received: counter(table, {:receive_event, :stream_data_bytes}),
+        datagram_events: counter(table, {:receive_event, :datagram}),
+        datagram_bytes_received: counter(table, {:receive_event, :datagram_bytes}),
         send_completed_events: counter(table, {:receive_event, {:stream_event, :send_completed}}),
         send_cancelled_events: counter(table, {:receive_event, {:stream_event, :send_cancelled}}),
         peer_finished_events:
@@ -100,6 +113,43 @@ defmodule MOQX.TransportBench.StreamPressureCollector do
   def handle_event(event, measurements, metadata, %{owner_pid: owner_pid, table: table}) do
     if self() == owner_pid do
       do_handle_event(event, measurements, metadata, table)
+    end
+  end
+
+  defp do_handle_event([:moqx, :transport, :stream, :recv, :stop], measurements, metadata, table) do
+    add_duration(table, :stream_recv_call, measurements[:duration_us])
+
+    case metadata[:result] do
+      :ok ->
+        increment(table, {:stream_recv, :ok})
+        increment(table, {:stream_recv, :bytes}, measurements[:byte_size] || 0)
+
+      :error ->
+        increment(table, {:stream_recv, :errors})
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport, :datagram, :send, :stop],
+         measurements,
+         metadata,
+         table
+       ) do
+    add_duration(table, :datagram_send_call, measurements[:duration_us])
+
+    case metadata[:result] do
+      :ok ->
+        increment(table, {:datagram_send, :accepted})
+        increment(table, {:datagram_send, :bytes_accepted}, measurements[:byte_size] || 0)
+
+      :error ->
+        increment(table, {:datagram_send, :errors})
+
+      _other ->
+        :ok
     end
   end
 
@@ -147,6 +197,10 @@ defmodule MOQX.TransportBench.StreamPressureCollector do
       {:stream_data, _event_name} ->
         increment(table, {:receive_event, :stream_data})
         increment(table, {:receive_event, :stream_data_bytes}, measurements[:byte_size] || 0)
+
+      {:datagram, _event_name} ->
+        increment(table, {:receive_event, :datagram})
+        increment(table, {:receive_event, :datagram_bytes}, measurements[:byte_size] || 0)
 
       {:stream_event, event_name}
       when event_name in [:send_completed, :send_cancelled, :peer_finished_sending, :closed] ->
@@ -203,24 +257,26 @@ defmodule MOQX.TransportBench.StreamPressureCollector do
     end
   end
 
-  defp maybe_start_sampler(_table, _owner_pid, _started_at_us, false), do: {nil, nil}
+  defp maybe_start_sampler(_table, _owner_pid, _started_at_us, false), do: {nil, nil, nil}
 
   defp maybe_start_sampler(table, owner_pid, started_at_us, true) do
     ref = make_ref()
 
-    pid =
-      spawn_link(fn ->
+    {pid, monitor_ref} =
+      spawn_monitor(fn ->
         sampler_loop(table, owner_pid, started_at_us, ref)
       end)
 
-    {pid, ref}
+    {pid, ref, monitor_ref}
   end
 
   defp sampler_loop(table, owner_pid, started_at_us, ref) do
     sample_process(table, owner_pid, started_at_us)
 
     receive do
-      {:stop_sampler, ^ref} -> :ok
+      {:stop_sampler, ^ref, caller} ->
+        send(caller, {:sampler_stopped, ref})
+        :ok
     after
       @sample_interval_ms -> sampler_loop(table, owner_pid, started_at_us, ref)
     end
@@ -228,9 +284,25 @@ defmodule MOQX.TransportBench.StreamPressureCollector do
 
   defp stop_sampler(%__MODULE__{sampler_pid: nil}), do: :ok
 
-  defp stop_sampler(%__MODULE__{sampler_pid: pid, sampler_ref: ref}) do
-    send(pid, {:stop_sampler, ref})
-    :ok
+  defp stop_sampler(%__MODULE__{
+         sampler_pid: pid,
+         sampler_ref: ref,
+         sampler_monitor_ref: monitor_ref
+       }) do
+    send(pid, {:stop_sampler, ref, self()})
+
+    receive do
+      {:sampler_stopped, ^ref} ->
+        Process.demonitor(monitor_ref, [:flush])
+        :ok
+
+      {:DOWN, ^monitor_ref, :process, ^pid, _reason} ->
+        :ok
+    after
+      @sample_interval_ms * 2 ->
+        Process.demonitor(monitor_ref, [:flush])
+        :ok
+    end
   end
 
   defp sample_process(table, owner_pid, started_at_us) do

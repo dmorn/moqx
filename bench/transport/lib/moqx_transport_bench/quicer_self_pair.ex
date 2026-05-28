@@ -2,6 +2,7 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
   @moduledoc false
 
   alias MOQX.TransportBench.BuildInfo
+  alias MOQX.TransportBench.TransportTelemetryCollector
 
   alias MOQX.Transport
   alias MOQX.Transport.Profile
@@ -355,10 +356,14 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
 
   defp run_step(pair, config, step, index, step_count, run_started_at) do
     step_started_at = timestamp()
+    {:ok, collector} = TransportTelemetryCollector.start(sample_process?: true)
 
     try do
       {measurement, pair} = measure_step(step.name, pair, config)
       step_finished_at = timestamp()
+
+      measurement =
+        attach_diagnostics(measurement, TransportTelemetryCollector.snapshot(collector))
 
       record =
         build_record(%{
@@ -378,6 +383,7 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
       exception ->
         {error, stacktrace} = {exception, __STACKTRACE__}
         step_finished_at = timestamp()
+        measurement = attach_diagnostics(%{}, TransportTelemetryCollector.snapshot(collector))
 
         record =
           build_record(%{
@@ -388,11 +394,13 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
             run_started_at: run_started_at,
             step_started_at: step_started_at,
             step_finished_at: step_finished_at,
-            measurement: %{},
+            measurement: measurement,
             error: Exception.format(:error, error, stacktrace)
           })
 
         {record, pair, true}
+    after
+      TransportTelemetryCollector.close(collector)
     end
   end
 
@@ -559,7 +567,7 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
   end
 
   defp build_record(ctx) do
-    %{
+    record = %{
       "schema_version" => @schema_version,
       "record_type" => "step_summary",
       "run" => run_metadata(ctx),
@@ -572,6 +580,11 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
       "limits" => limits(ctx),
       "errors" => errors(ctx)
     }
+
+    case diagnostics(ctx) do
+      nil -> record
+      diagnostics -> Map.put(record, "diagnostics", diagnostics)
+    end
   end
 
   defp run_metadata(ctx) do
@@ -705,7 +718,7 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
       "receiver_cpu_percent" => nil,
       "sender_memory_bytes" => nil,
       "receiver_memory_bytes" => nil,
-      "sender_mailbox_depth" => mailbox_depth(),
+      "sender_mailbox_depth" => sender_mailbox_depth(ctx),
       "receiver_mailbox_depth" => nil,
       "send_backpressure_ms" => nil,
       "stream_stall_count" => 0,
@@ -732,6 +745,71 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
     }
 
     Map.merge(defaults, Map.get(ctx.measurement, "limits", %{}))
+  end
+
+  defp attach_diagnostics(measurement, collector_snapshot) do
+    Map.put(measurement, "diagnostics", self_pair_diagnostics(collector_snapshot))
+  end
+
+  defp self_pair_diagnostics(collector_snapshot) do
+    runtime = collector_snapshot.runtime_diagnostics
+
+    %{
+      "version" => "self-pair-diagnostics-v1",
+      "summary" => %{
+        "bytes_sent" =>
+          collector_snapshot.stream_send_bytes_accepted +
+            collector_snapshot.datagram_send_bytes_accepted,
+        "bytes_received" =>
+          collector_snapshot.stream_recv_bytes + runtime.datagram_bytes_received,
+        "stream_bytes_sent" => collector_snapshot.stream_send_bytes_accepted,
+        "stream_bytes_received" => collector_snapshot.stream_recv_bytes,
+        "stream_send_accepted" => collector_snapshot.stream_send_accepted,
+        "stream_send_errors" => collector_snapshot.stream_send_errors,
+        "stream_receive_events" => collector_snapshot.stream_recv_ok,
+        "stream_receive_errors" => collector_snapshot.stream_recv_errors,
+        "datagrams_accepted" => collector_snapshot.datagram_send_accepted,
+        "datagram_send_errors" => collector_snapshot.datagram_send_errors,
+        "datagram_receive_events" => runtime.datagram_events,
+        "datagram_bytes_received" => runtime.datagram_bytes_received,
+        "ignored_events" => runtime.ignored_events,
+        "unknown_events" => runtime.unknown_events,
+        "receive_errors" => runtime.receive_errors,
+        "send_stream_call_ms" =>
+          duration_summary_ms(collector_snapshot.send_stream_call_durations_us),
+        "recv_stream_call_ms" =>
+          duration_summary_ms(collector_snapshot.recv_stream_call_durations_us),
+        "send_datagram_call_ms" =>
+          duration_summary_ms(collector_snapshot.send_datagram_call_durations_us),
+        "receive_event_call_ms" => duration_summary_ms(runtime.receive_event_call_durations_us)
+      },
+      "process" => process_diagnostics(runtime.process)
+    }
+  end
+
+  defp diagnostics(ctx), do: Map.get(ctx.measurement, "diagnostics")
+
+  defp sender_mailbox_depth(ctx) do
+    case diagnostics(ctx) do
+      %{"process" => %{"message_queue_len" => value}} -> value
+      _other -> mailbox_depth()
+    end
+  end
+
+  defp process_diagnostics(samples) do
+    current = mailbox_depth()
+
+    peak =
+      [current, Map.get(samples, "message_queue_len_peak")]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.max(fn -> nil end)
+
+    %{
+      "message_queue_len" => current,
+      "message_queue_len_peak" => peak,
+      "message_queue_len_samples" => Map.get(samples, "message_queue_len_samples", 0),
+      "message_queue_len_sample_points" => Map.get(samples, "message_queue_len_sample_points", [])
+    }
   end
 
   defp errors(ctx) do
@@ -927,6 +1005,41 @@ defmodule MOQX.TransportBench.QuicerSelfPair do
 
   defp seconds(nil), do: nil
   defp seconds(milliseconds), do: milliseconds / 1000
+
+  defp duration_summary_ms(values_us) do
+    values_ms = Enum.map(values_us, &(&1 / 1000))
+    sorted = Enum.sort(values_ms)
+    count = length(sorted)
+    total = Enum.sum(sorted)
+
+    %{
+      "count" => count,
+      "total" => total,
+      "mean" => mean(total, count),
+      "p50" => percentile(sorted, 0.50),
+      "p95" => percentile(sorted, 0.95),
+      "p99" => percentile(sorted, 0.99),
+      "max" => List.last(sorted)
+    }
+  end
+
+  defp mean(_total, 0), do: nil
+  defp mean(total, count), do: total / count
+
+  defp percentile([], _percentile), do: nil
+
+  defp percentile(sorted, percentile) do
+    index =
+      sorted
+      |> length()
+      |> Kernel.*(percentile)
+      |> Float.ceil()
+      |> trunc()
+      |> max(1)
+      |> Kernel.-(1)
+
+    Enum.at(sorted, index)
+  end
 
   defp monotonic_us, do: System.monotonic_time(:microsecond)
   defp elapsed_ms(started_at), do: (monotonic_us() - started_at) / 1000
