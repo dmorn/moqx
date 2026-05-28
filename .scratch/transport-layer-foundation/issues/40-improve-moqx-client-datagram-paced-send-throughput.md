@@ -1,6 +1,6 @@
 # Improve MOQX-client DATAGRAM paced-send throughput
 
-Status: ready-for-agent
+Status: in-progress
 Type: AFK
 
 ## Parent
@@ -53,3 +53,27 @@ The current target is offered-rate capacity, not delivery semantics. A run that
 receives almost every DATAGRAM but stretches a 3-second send phase into 5
 seconds is still a failed pressure measurement because it did not put the
 requested load on the link.
+
+## Progress
+
+- 2026-05-28: Started the first local #40 slice. Added MOQX-client paced
+  DATAGRAM send-schedule diagnostics without changing the root transport API:
+  target send duration, exact scheduled send span, send pacing lag summary,
+  late-send count, DATAGRAM send-call total/percentiles, send-loop overrun, and
+  unmeasured send-loop overhead now flow into the existing
+  `transport-bench-v1` metrics/diagnostics fields.
+- 2026-05-28: Fixed a scheduler accounting bug while adding the diagnostics.
+  Paced DATAGRAM sends now compute each send deadline from the absolute start
+  time and sequence number instead of accumulating a truncated integer interval.
+  This matters for rates such as 30k pps where `1_000_000 / rate` is
+  fractional; the previous cumulative truncation scheduled the 1-second span at
+  about 990 ms for 30k pps instead of the intended ~999.967 ms.
+- 2026-05-28: Local loopback calibration against `tools/quicprobe`
+  (`/tmp/moqx-issue-40-local-dgram.jsonl`) at 3k pps, 1192-byte DATAGRAMs, and
+  1 second was strict-valid with no break symptom: 3000/3000 delivered,
+  offered-rate ratio 0.9993, scheduled send span 999.666 ms, active send
+  duration about 1000.658 ms, send DATAGRAM call total about 11.209 ms,
+  send-loop overrun about 0.992 ms, and unmeasured send-loop overhead 0. This
+  remains loopback calibration only. The next meaningful #40 check is a remote
+  rerun around 18k/20k/25k/30k pps to see whether exact scheduling and the new
+  diagnostics explain or move the real-path ceiling.

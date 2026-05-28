@@ -806,6 +806,13 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     receive_state = args.receive_state
     received_count = MapSet.size(receive_state.received)
     application_duration_ms = elapsed_ms(args.application_started_at)
+
+    send_datagram_call_ms =
+      duration_summary_ms(args.collector_snapshot.send_datagram_call_durations_us)
+
+    scheduled_send_span_ms = scheduled_datagram_send_span_ms(args.accepted, config)
+    send_loop_overrun_ms = send_loop_overrun_ms(args.send_duration_ms, scheduled_send_span_ms)
+
     bytes_sent = args.accepted * config.datagram_size
     bytes_received = received_count * config.datagram_size
     send_rate = rate(args.accepted, seconds(args.send_duration_ms))
@@ -840,6 +847,22 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "handshake_latency_ms" => args.handshake_latency_ms,
       "first_byte_latency_ms" => receive_state.first_byte_latency_ms,
       "application_duration_ms" => application_duration_ms,
+      "send_duration_ms" => args.send_duration_ms,
+      "target_send_duration_ms" => target_datagram_send_duration_ms(config),
+      "scheduled_send_span_ms" => scheduled_send_span_ms,
+      "send_pacing_late_count" => datagram_send_pacing_late_count(config, receive_state),
+      "send_pacing_lag_ms" => datagram_send_pacing_lag_ms(config, receive_state),
+      "send_datagram_call_slow_count" =>
+        slow_datagram_send_call_count(
+          args.collector_snapshot.send_datagram_call_durations_us,
+          config
+        ),
+      "send_datagram_call_slow_threshold_ms" => datagram_send_call_slow_threshold_ms(config),
+      "send_datagram_call_total_ms" => send_datagram_call_ms["total"],
+      "send_datagram_call_ms" => send_datagram_call_ms,
+      "send_loop_overrun_ms" => send_loop_overrun_ms,
+      "send_loop_unmeasured_overhead_ms" =>
+        send_loop_unmeasured_overhead_ms(send_loop_overrun_ms, send_datagram_call_ms),
       "offered_load_bps" => offered_load_bps(config),
       "goodput_bps" => bits_per_second(bytes_received, application_duration_ms),
       "send_rate_packets_per_second" => send_rate,
@@ -1760,6 +1783,23 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           "drain_events" => length(runtime[:receive_event_drain_call_durations_us] || []),
           "send_datagram_call_ms" =>
             duration_summary_ms(collector_snapshot.send_datagram_call_durations_us),
+          "send_pacing_late_count" => datagram_send_pacing_late_count(config, receive_state),
+          "send_pacing_lag_ms" => datagram_send_pacing_lag_ms(config, receive_state),
+          "target_send_duration_ms" => target_datagram_send_duration_ms(config),
+          "scheduled_send_span_ms" => scheduled_datagram_send_span_ms(args.accepted, config),
+          "send_loop_overrun_ms" =>
+            send_loop_overrun_ms(
+              args.send_duration_ms,
+              scheduled_datagram_send_span_ms(args.accepted, config)
+            ),
+          "send_loop_unmeasured_overhead_ms" =>
+            send_loop_unmeasured_overhead_ms(
+              send_loop_overrun_ms(
+                args.send_duration_ms,
+                scheduled_datagram_send_span_ms(args.accepted, config)
+              ),
+              duration_summary_ms(collector_snapshot.send_datagram_call_durations_us)
+            ),
           "receive_event_call_ms" =>
             duration_summary_ms(runtime[:receive_event_call_durations_us] || []),
           "receive_event_blocking_call_ms" =>
@@ -1794,22 +1834,26 @@ defmodule MOQX.TransportBench.ReferenceComparison do
        )
        when is_integer(rate) and rate > 0 do
     send_started_at = monotonic_us()
-    interval_us = div(1_000_000, rate)
     receive_state = initial_moqx_datagram_receive_state(config, started_at, count)
 
     result =
       Enum.reduce_while(
         1..count,
-        {0, ctx, receive_state, send_started_at},
-        fn sequence, {accepted, ctx, receive_state, next_send_at} ->
+        {0, ctx, receive_state},
+        fn sequence, {accepted, ctx, receive_state} ->
+          send_at = scheduled_datagram_send_at(send_started_at, sequence, rate)
+
           {receive_state, ctx} =
             receive_moqx_datagrams_until(
               ctx,
               connection,
               receive_state,
               started_at,
-              next_send_at
+              send_at
             )
+
+          receive_state =
+            record_moqx_datagram_send_schedule(receive_state, send_at, monotonic_us())
 
           case send_moqx_datagram(ctx, connection, config, sequence) do
             {:ok, ctx} ->
@@ -1823,7 +1867,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
                   started_at
                 )
 
-              {:cont, {accepted + 1, ctx, receive_state, next_send_at + interval_us}}
+              {:cont, {accepted + 1, ctx, receive_state}}
 
             {:error, reason, ctx} ->
               failure = datagram_send_failure(config, reason, sequence, count, accepted)
@@ -1839,7 +1883,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       {:error, _failure, _accepted, _send_duration_ms, _receive_state, _ctx} = error ->
         error
 
-      {accepted, ctx, receive_state, _next_send_at} ->
+      {accepted, ctx, receive_state} ->
         send_duration_ms = elapsed_ms(send_started_at)
 
         {receive_state, ctx} =
@@ -1951,11 +1995,40 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       cadence_sample_count: 0,
       cadence_last_accepted: 0,
       cadence_last_received: 0,
-      cadence_samples: []
+      cadence_samples: [],
+      send_pacing_late_count: 0,
+      send_pacing_lags_us: []
     }
 
     record_datagram_cadence(state, "start", true)
   end
+
+  defp record_moqx_datagram_send_schedule(receive_state, scheduled_at_us, actual_at_us) do
+    lag_us = max(actual_at_us - scheduled_at_us, 0)
+
+    %{
+      receive_state
+      | send_pacing_late_count: receive_state.send_pacing_late_count + late_count(lag_us),
+        send_pacing_lags_us: [lag_us | receive_state.send_pacing_lags_us]
+    }
+  end
+
+  defp late_count(lag_us) when lag_us > 0, do: 1
+  defp late_count(_lag_us), do: 0
+
+  defp datagram_send_pacing_late_count(%{datagram_rate: rate}, receive_state)
+       when is_integer(rate) and rate > 0 do
+    receive_state.send_pacing_late_count
+  end
+
+  defp datagram_send_pacing_late_count(_config, _receive_state), do: nil
+
+  defp datagram_send_pacing_lag_ms(%{datagram_rate: rate}, receive_state)
+       when is_integer(rate) and rate > 0 do
+    duration_summary_ms(receive_state.send_pacing_lags_us)
+  end
+
+  defp datagram_send_pacing_lag_ms(_config, _receive_state), do: nil
 
   defp record_moqx_datagram_accepted(
          receive_state,
@@ -3675,6 +3748,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "send_datagram_call_p99_ms" => number(send_call["p99"]),
       "send_datagram_call_p999_ms" => number(send_call["p999"]),
       "send_datagram_call_max_ms" => number(send_call["max"]),
+      "send_loop_overrun_ms" => number(measurement["send_loop_overrun_ms"]),
+      "send_loop_unmeasured_overhead_ms" =>
+        number(measurement["send_loop_unmeasured_overhead_ms"]),
       "send_stream_call_total_ms" => number(stream_send_call["total"]),
       "send_stream_call_mean_ms" => number(stream_send_call["mean"]),
       "send_stream_call_p50_ms" => number(stream_send_call["p50"]),
@@ -4072,6 +4148,56 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       config.datagram_count
     end
   end
+
+  defp target_datagram_send_duration_ms(%{datagram_rate: rate, duration_seconds: duration})
+       when is_integer(rate) and rate > 0 and is_integer(duration) and duration > 0 do
+    duration * 1000
+  end
+
+  defp target_datagram_send_duration_ms(_config), do: nil
+
+  defp scheduled_datagram_send_span_ms(accepted, %{datagram_rate: rate})
+       when is_integer(accepted) and accepted > 0 and is_integer(rate) and rate > 0 do
+    div((accepted - 1) * 1_000_000, rate) / 1000
+  end
+
+  defp scheduled_datagram_send_span_ms(_accepted, _config), do: nil
+
+  defp scheduled_datagram_send_at(started_at_us, sequence, rate)
+       when is_integer(sequence) and sequence > 0 and is_integer(rate) and rate > 0 do
+    started_at_us + div((sequence - 1) * 1_000_000, rate)
+  end
+
+  defp datagram_send_interval_us(rate), do: div(1_000_000, rate)
+
+  defp datagram_send_call_slow_threshold_ms(%{datagram_rate: rate})
+       when is_integer(rate) and rate > 0 do
+    datagram_send_interval_us(rate) / 1000
+  end
+
+  defp datagram_send_call_slow_threshold_ms(_config), do: nil
+
+  defp slow_datagram_send_call_count(values_us, %{datagram_rate: rate})
+       when is_list(values_us) and is_integer(rate) and rate > 0 do
+    threshold_us = datagram_send_interval_us(rate)
+    Enum.count(values_us, &(&1 > threshold_us))
+  end
+
+  defp slow_datagram_send_call_count(_values_us, _config), do: nil
+
+  defp send_loop_overrun_ms(send_duration_ms, scheduled_send_span_ms)
+       when is_number(send_duration_ms) and is_number(scheduled_send_span_ms) do
+    max(send_duration_ms - scheduled_send_span_ms, 0)
+  end
+
+  defp send_loop_overrun_ms(_send_duration_ms, _scheduled_send_span_ms), do: nil
+
+  defp send_loop_unmeasured_overhead_ms(send_loop_overrun_ms, %{"total" => send_call_total_ms})
+       when is_number(send_loop_overrun_ms) and is_number(send_call_total_ms) do
+    max(send_loop_overrun_ms - send_call_total_ms, 0)
+  end
+
+  defp send_loop_unmeasured_overhead_ms(_send_loop_overrun_ms, _send_call_ms), do: nil
 
   defp offered_load_bps(%{workload: @datagram_pressure_workload} = config) do
     case target_datagram_rate(config) do

@@ -294,13 +294,14 @@ For `moqx-client-to-reference-server` DATAGRAM runs, the canonical benchmark
 record includes
 `moqx-client-datagram-diagnostics-v1` with accepted/received/missing counts,
 receive-loop event counts, active send/receive/observation durations, receive
-stop reason, and the client receiver mailbox depth/peak/samples. These records
-also include a bounded `diagnostics.cadence` trace. Cadence samples record
-elapsed time, accepted/received totals and deltas, duplicate/invalid counts,
-delivery gap to locally accepted sends, and, for paced workloads, the expected
-datagram count at the target offered rate. Use this trace to distinguish
-sender admission, receiver drain cadence, and peer delivery loss without
-changing the stable `transport-bench-v1` top-level fields.
+stop reason, paced send schedule lag, send-loop overrun, DATAGRAM send-call
+timing, and the client receiver mailbox depth/peak/samples. These records also
+include a bounded `diagnostics.cadence` trace. Cadence samples record elapsed
+time, accepted/received totals and deltas, duplicate/invalid counts, delivery
+gap to locally accepted sends, and, for paced workloads, the expected datagram
+count at the target offered rate. Use this trace to distinguish sender
+admission, pacing/scheduler lag, receiver drain cadence, and peer delivery loss
+without changing the stable `transport-bench-v1` top-level fields.
 
 Current MOQX/quicer DATAGRAM measurements should use `--datagram-size 1192`
 as the near-limit payload size unless the transport exposes a different

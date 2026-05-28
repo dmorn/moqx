@@ -537,6 +537,69 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert final_cadence["delivery_gap_to_accepted"] == 0
   end
 
+  test "keeps paced MOQX datagram sending on schedule when no receive events are pending" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-paced-datagram-silent-peer.jsonl")
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "datagram_pressure",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--datagram-size",
+        "64",
+        "--datagram-rate",
+        "3000",
+        "--duration-seconds",
+        "1",
+        "--timeout-seconds",
+        "1",
+        "--timeout-margin-seconds",
+        "1",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-paced-datagram-silent-peer-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.DatagramSilentTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["profile"]["settings"]["datagram_mode"] == "paced"
+    assert record["workload"]["datagrams_per_second"] == 3000.0
+    assert record["metrics"]["offered_rate_ratio"] >= 0.95
+    assert record["metrics"]["send_rate_datagrams_per_second"] >= 2850.0
+    assert record["metrics"]["target_send_duration_ms"] == 1000.0
+    assert_in_delta record["metrics"]["scheduled_send_span_ms"], 999.666, 0.1
+    assert is_integer(record["metrics"]["send_pacing_late_count"])
+    assert is_number(record["metrics"]["send_pacing_lag_p99_ms"])
+    assert is_number(record["metrics"]["send_datagram_call_total_ms"])
+    assert is_number(record["metrics"]["send_loop_overrun_ms"])
+    assert is_number(record["metrics"]["send_loop_unmeasured_overhead_ms"])
+    assert record["metrics"]["datagram_delivery_ratio"] == 0.0
+    assert record["limits"]["first_break_symptom"] == "datagram_delivery_loss"
+    refute record["limits"]["first_break_symptom"] == "tool_output_invalid"
+
+    summary = record["diagnostics"]["summary"]
+    assert summary["datagrams_accepted"] == 3000
+    assert summary["datagrams_received"] == 0
+    assert summary["datagram_send_errors"] == 0
+    assert summary["send_pacing_late_count"] == record["metrics"]["send_pacing_late_count"]
+    assert is_number(summary["send_loop_unmeasured_overhead_ms"])
+  end
+
   test "records mixed MOQT-shaped MOQX client pressure" do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-mixed.jsonl")
@@ -1154,6 +1217,61 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
       send(self(), {:moqx_transport, {:datagram, connection, data, %{}}})
       :ok
     end
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection(_connection, _error_code), do: :ok
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process(_handle, _pid), do: :ok
+
+    @impl true
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+  end
+
+  defmodule DatagramSilentTransport do
+    @behaviour MOQX.Transport
+
+    @impl true
+    def listen(_port, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept(_listener, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def handshake(connection, _timeout), do: {:ok, connection}
+
+    @impl true
+    def connect(_host, _port, _opts, _timeout), do: {:ok, :connection}
+
+    @impl true
+    def open_stream(_connection, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def send_stream(_stream, _data, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def recv_stream(_stream, _byte_count), do: {:error, :unsupported}
+
+    @impl true
+    def send_datagram(_connection, _data), do: :ok
 
     @impl true
     def finish_sending(_stream), do: :ok
