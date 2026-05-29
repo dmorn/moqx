@@ -176,3 +176,15 @@ requested load on the link.
   back to the remote paced load-generator shape, path/MSQUIC admission near the
   real limit, and listener/event-loop behavior rather than proving an immediate
   BEAM-to-NIF boundary ceiling.
+- 2026-05-29: Follow-up interpretation of the local sender-admission delta:
+  `MOQX.Transport.send_datagram/3` is measurably slower than direct
+  `MOQX.Transport.Quicer.send_datagram/2` because the public facade adds the
+  context/connection backend check, dynamic backend dispatch, public result
+  wrapping, timing, metadata construction, and `:telemetry.execute/3` around
+  the same quicer DATAGRAM admission call. A fake-backend microbenchmark put
+  the facade-only delta at about 0.39 us/send on this host, matching the
+  observed public-vs-direct sender-admission gap of about 0.42 us/send. At
+  32k pps this is roughly 13 ms of CPU time per second, so it is worth keeping
+  in mind but is not a current optimization target. Preserve the public facade
+  and telemetry path; revisit only if future real-path evidence shows this
+  overhead has become the limiting factor.
