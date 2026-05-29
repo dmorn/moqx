@@ -183,6 +183,38 @@ By default the task creates short-lived localhost certificates under ignored
 `.tmp/transport-bench-certs/`. Pass `--certfile`, `--keyfile`, and
 `--cacertfile` together to use existing certificates explicitly.
 
+### Sender Admission
+
+Run the local sender-only DATAGRAM admission microbenchmark when the question is
+whether the local sender can call into the transport stack fast enough before
+network delivery, peer echo, or listener behavior enter the measurement.
+
+```bash
+cd bench/transport
+mix moqx.transport.sender_admission \
+  --mode moqx \
+  --mode quicer \
+  --schedule paced \
+  --tick-ms 1 \
+  --datagram-size 1180 \
+  --datagram-count 96000 \
+  --burst-size 32 \
+  --target-rate 32000 \
+  --output /private/tmp/moqx-sender-admission.jsonl
+```
+
+The command opens a local quicer pair, hands the server-side connection to a
+dedicated sink process, reuses one fixed DATAGRAM payload, and records per-burst
+admission timing. Before sending, it waits for the client-side DATAGRAM-ready
+event and rejects payload sizes above the negotiated local maximum. It emits
+`sender-admission-v1` JSONL, not `transport-bench-v1`, because this is a local
+microbenchmark for the load generator and transport sender path. Treat the
+output as loopback calibration only. `--burst-size` represents the number of
+DATAGRAM admission calls the future paced sink would need to pay in one tick;
+`--target-rate` defines the per-burst time budget, for example 32 DATAGRAMs in
+1 ms at 32k pps. Use `--schedule burst` to measure raw admission capacity and
+`--schedule paced --tick-ms 1` to measure the absolute-timer burst pacer shape.
+
 ### Reference Comparison
 
 Run the selected reference QUIC implementation on controlled server paths:
@@ -323,13 +355,16 @@ wrapper/telemetry overhead, pacing/scheduler lag, receiver drain cadence, and
 peer delivery loss without changing the stable `transport-bench-v1` top-level
 fields.
 
-Current MOQX/quicer DATAGRAM measurements should use `--datagram-size 1192`
-as the near-limit payload size unless the transport exposes a different
-negotiated maximum. Controlled ARM evidence from 2026-05-26 showed the current
-MOQX send path accepts 1192-byte DATAGRAM payloads and rejects 1193 bytes and
-above with `:invalid_parameter`. `tools/quicprobe` reference-to-reference runs
-can still use larger payloads, such as 1200 bytes, to establish the reference
-path ceiling.
+Controlled ARM MOQX/quicer DATAGRAM measurements have used
+`--datagram-size 1192` as a near-limit payload size, but this is not universal:
+the sender-admission loopback harness observed a 1187-byte negotiated local
+maximum on 2026-05-29. Prefer the negotiated maximum when the harness exposes
+one; otherwise keep 1192 as the current real-path near-limit default.
+Controlled ARM evidence from 2026-05-26 showed the current MOQX send path
+accepts 1192-byte DATAGRAM payloads and rejects 1193 bytes and above with
+`:invalid_parameter`. `tools/quicprobe` reference-to-reference runs can still
+use larger payloads, such as 1200 bytes, to establish the reference path
+ceiling.
 
 ```bash
 go run ./tools/quicprobe client --addr 127.0.0.1:4433 \

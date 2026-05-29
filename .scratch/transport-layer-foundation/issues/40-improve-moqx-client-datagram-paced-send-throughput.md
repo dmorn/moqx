@@ -150,3 +150,29 @@ requested load on the link.
   from the paced sink in one NIF call, loop inside the NIF, and measure whether
   reducing scheduler/NIF boundary crossings gives enough headroom before
   touching listener-side performance.
+- 2026-05-29: Added the local `sender-admission` microbenchmark under
+  `bench/transport`. It opens a loopback quicer pair, waits for the client
+  DATAGRAM-ready event, hands the server connection to a sink process, reuses a
+  fixed payload, and compares public `MOQX.Transport.send_datagram/3` against
+  direct quicer admission in raw-burst and absolute-timer paced modes. This
+  remains loopback calibration only and emits `sender-admission-v1` rather than
+  `transport-bench-v1`.
+- 2026-05-29: The first local 1192-byte run produced intermittent
+  `{:dgram_send_error, :invalid_parameter}` failures. After recording
+  negotiated DATAGRAM metadata, the harness showed this local pair advertised a
+  1187-byte maximum, so the 1192-byte result was payload-limit evidence rather
+  than sender-throughput evidence. The stable local sample used 1180-byte
+  payloads.
+- 2026-05-29: Local 1180-byte sender-admission evidence does not support
+  "one NIF call per DATAGRAM is already impossible" at the 32k pps target on
+  this Apple ARM loopback host. In paced mode, both MOQX and direct quicer
+  admitted 96,000/96,000 DATAGRAMs across three 3-second repetitions with zero
+  send errors. MOQX averaged about 31,999 dgram/s, direct quicer about 32,003
+  dgram/s, burst p99 was about 0.085 ms for MOQX and 0.051 ms for direct
+  quicer, and no burst exceeded the 1 ms budget. In raw-burst mode, MOQX
+  averaged about 1.04M dgram/s with ~32.6x target headroom, while direct quicer
+  averaged about 1.43M dgram/s with ~44.7x headroom. Batching may still be a
+  useful future optimization, but this local evidence shifts the next question
+  back to the remote paced load-generator shape, path/MSQUIC admission near the
+  real limit, and listener/event-loop behavior rather than proving an immediate
+  BEAM-to-NIF boundary ceiling.

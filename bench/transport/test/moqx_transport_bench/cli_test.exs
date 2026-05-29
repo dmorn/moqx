@@ -11,11 +11,20 @@ defmodule MOQX.TransportBench.CLITest do
 
     assert output =~ "moqx-transport-bench COMMAND"
     assert output =~ "moqx-listener"
+    assert output =~ "sender-admission"
   end
 
   test "prints command-specific runtime usage" do
     assert capture_io(fn -> CLI.main(["help", "report"]) end) =~
              "moqx-transport-bench report PATH"
+  end
+
+  test "prints sender admission usage" do
+    output = capture_io(fn -> CLI.main(["help", "sender-admission"]) end)
+
+    assert output =~ "moqx-transport-bench sender-admission"
+    assert output =~ "--burst-size"
+    assert output =~ "--target-rate"
   end
 
   test "prints MOQX listener usage" do
