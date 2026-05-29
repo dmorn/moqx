@@ -170,15 +170,26 @@ Transport performance and limit analysis belongs in a separate benchmark/researc
 Use:
 
 ```text
-bench/transport/
+bench/infra/
+bench/ledger/
+bench/quicprobe/
+bench/moqxprobe/
+bench/probed/
 ```
 
-Benchmark tooling should live in a standalone `bench/transport` Mix project
-with root `moqx` consumed as a path dependency. The canonical operator surface
-is the `moqx-transport-bench` runtime CLI; legacy `.exs` paths may remain as
-compatibility delegates. Tools should accept caller-provided endpoints so the
-same harness can run against same-region server pairs, cross-region server
-pairs, and asymmetric edge-to-server paths.
+Benchmark artifact specs should live in a slim `bench/ledger` Mix project
+with no dependency on `moqx`, quicer, HTTP servers, or infrastructure tooling.
+Benchmark execution tooling should live in a standalone `bench/moqxprobe`
+Mix project with root `moqx` consumed as a path dependency. The canonical
+operator surface is the `moqxprobe` runtime CLI; legacy `.exs` paths
+may remain as compatibility delegates. Tools should accept caller-provided
+endpoints so the same harness can run against same-region server pairs,
+cross-region server pairs, and asymmetric edge-to-server paths.
+
+Infrastructure provisioning belongs in `bench/infra/` rather than inside the
+CLI project. Reference tools live under `bench/quicprobe/`. A future remote
+control-plane daemon belongs in `bench/probed/` so orchestration and API
+concerns stay separate from the benchmark CLI.
 
 The harness should eventually compare:
 
@@ -200,14 +211,14 @@ Local loopback and same-host self-pair runs are calibration only. They are usefu
 Each benchmark run should emit machine-readable results with enough metadata to compare runs: run id, timestamp, git SHA, host identifiers, region/provider, instance/network class, OS/kernel, CPU/memory, quicer/msquic versions where available, protocol profile, ALPN, congestion-control/pacing/settings, command parameters, offered load, goodput, latency percentiles, datagram delivery/loss/late counts, stream count, payload size, CPU, memory, mailbox depth, backpressure/stall time, and close/error reason.
 
 2026-05-19 amendment: the harness may include short-lived, caller-operated
-cloud infrastructure under `bench/transport/infra/` for controlled server-pair
+cloud infrastructure under `bench/infra/` for controlled server-pair
 benchmarks. This does not change the script contract: benchmark scripts accept
 endpoints and must not start or destroy infrastructure implicitly. The first
 such setup targets Hetzner Cloud with profile-based Terraform variants, minimal
 cloud-init, and strict benchmark firewalls.
 
 2026-05-20 amendment: remote benchmark nodes should receive a target-specific
-`moqx-transport-bench` release artifact built with Docker for the target
+`moqxprobe` release artifact built with Docker for the target
 OS/architecture. Deployment tooling may copy and smoke-test that release over
 SSH, but must receive explicit targets and must not call Terraform or start
 benchmark traffic implicitly.

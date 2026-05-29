@@ -1,0 +1,121 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+
+write_files:
+  - path: /etc/profile.d/moqx-bench-toolchain.sh
+    permissions: "0644"
+    content: |
+      export PATH="/usr/local/go/bin:/root/.elixir-install/installs/otp/${otp_version}/bin:/root/.elixir-install/installs/elixir/${elixir_version}-otp-${split(".", otp_version)[0]}/bin:$PATH"
+  - path: /opt/moqx-bench/README.md
+    permissions: "0644"
+    content: |
+      # MOQX transport benchmark node
+
+      profile: ${profile_name}
+      role: ${role}
+
+      Provisioning installs only the base build toolchain, iperf3, Go, Erlang,
+      and Elixir. Deploy a moqxprobe release artifact when you are
+      ready to run a benchmark.
+%{ if private_network_enabled }
+  - path: /etc/netplan/60-moqx-bench-private-network.yaml
+    permissions: "0644"
+    content: |
+      network:
+        version: 2
+        renderer: networkd
+        ethernets:
+          ${private_network_interface}:
+            dhcp4: false
+            mtu: 1450
+            addresses:
+              - ${private_ip}/32
+            routes:
+              - to: ${private_network_cidr}
+                via: ${private_gateway_ip}
+                on-link: true
+%{ endif }
+
+runcmd:
+  - |
+      set -eu
+      export HOME=/root
+      export DEBIAN_FRONTEND=noninteractive
+%{ if private_network_enabled }
+      private_iface="${private_network_interface}"
+
+      for _ in $(seq 1 30); do
+        if ip link show dev "$private_iface" >/dev/null 2>&1; then
+          break
+        fi
+        sleep 1
+      done
+
+      ip link show dev "$private_iface"
+      systemctl stop "hc-net-ifup@$private_iface.service" || true
+      systemctl mask "hc-net-ifup@$private_iface.service" || true
+      ip address flush dev "$private_iface" scope global || true
+      netplan generate
+      netplan apply
+      ip -4 address show dev "$private_iface"
+      ip route get "${private_gateway_ip}"
+%{ endif }
+      apt-get update
+      apt-get install -y \
+        autoconf \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        iperf3 \
+        jq \
+        libncurses-dev \
+        libpng-dev \
+        libssl-dev \
+        libssh-dev \
+        libxml2-utils \
+        m4 \
+        ninja-build \
+        pkg-config \
+        tar \
+        unzip \
+        unixodbc-dev \
+        xsltproc
+
+      go_arch="$(dpkg --print-architecture)"
+      case "$go_arch" in
+        amd64) go_arch="amd64" ;;
+        arm64) go_arch="arm64" ;;
+        *) echo "unsupported Go architecture: $go_arch" >&2; exit 1 ;;
+      esac
+
+      go_version="${go_version}"
+      if [ "$go_version" = "stable" ] || [ "$go_version" = "latest" ]; then
+        go_archive="$(
+          curl -fsSL 'https://go.dev/dl/?mode=json' |
+            jq -r --arg arch "$go_arch" '.[0].files[] | select(.os == "linux" and .arch == $arch and .kind == "archive") | .filename' |
+            head -n 1
+        )"
+      else
+        go_archive="go$go_version.linux-$go_arch.tar.gz"
+      fi
+
+      curl -fsSLo "/tmp/$go_archive" "https://go.dev/dl/$go_archive"
+      rm -rf /usr/local/go
+      tar -C /usr/local -xzf "/tmp/$go_archive"
+      ln -sf /usr/local/go/bin/go /usr/local/bin/go
+      ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+
+      cd /tmp
+      curl -fsSO https://elixir-lang.org/install.sh
+      sh install.sh elixir@${elixir_version} otp@${otp_version}
+      installs_dir="/root/.elixir-install/installs"
+      otp_major="${split(".", otp_version)[0]}"
+      ln -sf "$installs_dir/otp/${otp_version}/bin/"* /usr/local/bin/
+      ln -sf "$installs_dir/elixir/${elixir_version}-otp-$otp_major/bin/"* /usr/local/bin/
+
+      go version
+      elixir --version
+      iperf3 --version | head -1

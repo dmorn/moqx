@@ -66,7 +66,7 @@ services:
       - -eu
       - -c
       - |
-        go build -o /tmp/quicprobe ./tools/quicprobe
+        go build -o /tmp/quicprobe ./bench/quicprobe
         exec /tmp/quicprobe server \
           --addr :4433 \
           --cert /certs/server.pem \

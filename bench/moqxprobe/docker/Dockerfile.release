@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1
+
+ARG ELIXIR_IMAGE=elixir:1.19.5-otp-28
+
+FROM ${ELIXIR_IMAGE} AS builder
+
+ARG ARTIFACT_NAME=moqxprobe.tar.gz
+ARG BUILD_GIT_SHA=unknown
+ARG RELEASE_NAME=moqxprobe_runtime
+
+ENV MIX_ENV=prod \
+    LANG=C.UTF-8 \
+    MOQXPROBE_BUILD_GIT_SHA=${BUILD_GIT_SHA}
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      ca-certificates \
+      cmake \
+      curl \
+      git \
+      liblttng-ust-dev \
+      libssl-dev \
+      ninja-build \
+      openssl \
+      pkg-config \
+      python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+RUN mix local.hex --force && mix local.rebar --force
+
+COPY mix.exs mix.lock README.md CHANGELOG.md LICENSE ./
+COPY lib ./lib
+COPY bench/ledger/mix.exs bench/ledger/mix.lock ./bench/ledger/
+COPY bench/ledger/lib ./bench/ledger/lib
+COPY bench/moqxprobe/mix.exs bench/moqxprobe/mix.lock ./bench/moqxprobe/
+
+WORKDIR /workspace/bench/moqxprobe
+RUN mix deps.get --only prod
+
+COPY bench/moqxprobe/lib ./lib
+COPY bench/moqxprobe/rel ./rel
+
+RUN mix release --overwrite && \
+    test -x "_build/prod/rel/${RELEASE_NAME}/bin/moqxprobe" && \
+    mkdir -p /out && \
+    tar -C "_build/prod/rel/${RELEASE_NAME}" -czf "/out/${ARTIFACT_NAME}" .
+
+FROM scratch AS artifact
+COPY --from=builder /out/ /

@@ -53,17 +53,17 @@ docker compose -f docker-compose.integration.yml down
 
 The harness provisions self-signed certificates under
 `.tmp/integration-certs/` and runs the repo-owned reference QUIC server from
-`tools/quicprobe` on UDP port 4433.
+`bench/quicprobe` on UDP port 4433.
 
 For manual debugging, run the reference CLI directly:
 
 ```bash
-go run ./tools/quicprobe server --addr :4433 \
+go run ./bench/quicprobe server --addr :4433 \
   --cert .tmp/integration-certs/server.pem \
   --key .tmp/integration-certs/server-key.pem \
   --alpn moqx-test
 
-go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
+go run ./bench/quicprobe client --addr 127.0.0.1:4433 \
   --ca .tmp/integration-certs/ca.pem \
   --alpn moqx-test \
   --bidi-echo hello
@@ -73,7 +73,7 @@ For reference stream-pressure experiments, the client can emit structured
 `quicprobe-v1` JSON:
 
 ```bash
-go run ./tools/quicprobe client --addr 127.0.0.1:4433 \
+go run ./bench/quicprobe client --addr 127.0.0.1:4433 \
   --ca .tmp/integration-certs/ca.pem \
   --alpn moqx-test \
   --json \

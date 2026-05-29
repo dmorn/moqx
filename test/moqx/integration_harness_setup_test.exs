@@ -19,7 +19,7 @@ defmodule MOQX.IntegrationHarnessSetupTest do
 
     probe_cli = Keyword.fetch!(integration, :probe_cli)
     assert Keyword.fetch!(probe_cli, :command) == "go"
-    assert Keyword.fetch!(probe_cli, :args_prefix) == ["run", "./tools/quicprobe"]
+    assert Keyword.fetch!(probe_cli, :args_prefix) == ["run", "./bench/quicprobe"]
   end
 
   test "integration tests are excluded by default" do
@@ -33,7 +33,7 @@ defmodule MOQX.IntegrationHarnessSetupTest do
     assert compose =~ "quic-ref-server"
     assert compose =~ "4433:4433/udp"
     assert compose =~ "healthcheck:"
-    assert compose =~ "tools/quicprobe"
+    assert compose =~ "bench/quicprobe"
     assert compose =~ "DNS.1 = localhost"
     assert compose =~ "IP.1 = 127.0.0.1"
   end

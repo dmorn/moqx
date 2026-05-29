@@ -39,12 +39,13 @@ stable library events.
 
 The root `moqx` library must not depend on `telemetry_metrics`.
 
-The `bench/transport` Mix project may depend on `telemetry_metrics` and define
-the metric declarations needed by benchmark tooling.
+The `bench/ledger` Mix project owns shared benchmark artifact specs such as
+`transport-bench-v1` validation and JSONL/path metadata helpers.
 
-The `bench/transport` project owns the collector/reporter that turns emitted
-events into the measurement maps already consumed by the existing
-`transport-bench-v1` record builder.
+The `bench/moqxprobe` Mix project may depend on `telemetry_metrics` and
+define the metric declarations needed by benchmark tooling. It owns the
+collector/reporter that turns emitted events into measurement maps and
+`transport-bench-v1` records validated by `bench/ledger`.
 
 ### Output Contract
 
@@ -195,7 +196,7 @@ expected workload counts. They should not duplicate large transport payloads.
 
 ### Metric Declarations
 
-`bench/transport` defines metric declarations with `Telemetry.Metrics`.
+`bench/moqxprobe` defines metric declarations with `Telemetry.Metrics`.
 
 The declarations are the benchmark metric schema. They should describe the
 counters, sums, summaries, and last values that the collector can aggregate
@@ -223,7 +224,7 @@ handler overhead and cardinality behavior are understood.
 The benchmark collector attaches for one run or one step and detaches in
 `after`.
 
-As of the first migration, `MOQX.TransportBench.TransportTelemetryCollector`
+As of the first migration, `MOQXProbe.TransportTelemetryCollector`
 is the shared collector for self-pair calibration, MOQX-client stream,
 DATAGRAM, and mixed pressure, plus `moqx-listener` stream/DATAGRAM diagnostics.
 The older stream-only collector and live phase diagnostics path are removed.
@@ -284,14 +285,14 @@ high-cardinality exported metric labels.
 
 The first implementation kept the staged order from this ADR but then removed
 the intermediate mixed state. The benchmark now uses a single
-`MOQX.TransportBench.TransportTelemetryCollector` for MOQX-client stream,
+`MOQXProbe.TransportTelemetryCollector` for MOQX-client stream,
 DATAGRAM, mixed pressure, and `moqx-listener` stream/DATAGRAM diagnostics.
 
 Root `moqx` emits transport-facade telemetry for `send_stream/4`,
-`recv_stream/3`, `send_datagram/3`, and `receive_event/2`. `bench/transport`
+`recv_stream/3`, `send_datagram/3`, and `receive_event/2`. `bench/moqxprobe`
 owns `telemetry_metrics` declarations and the collector that converts those
-events into the existing `transport-bench-v1` summaries and listener-side
-diagnostic JSONL.
+events into `transport-bench-v1` summaries validated by `bench/ledger` plus
+listener-side diagnostic JSONL.
 
 The remaining future phases are sidecar artifacts, remote collectors,
 dashboards, or a benchmark daemon. Those should still wait until local
@@ -327,6 +328,6 @@ This ADR does not implement:
 - a remote collector;
 - Prometheus/OpenMetrics export;
 - Grafana dashboards;
-- a persistent `moqx_transport_benchd` daemon;
+- a persistent `probed` daemon;
 - a new benchmark output schema replacing `transport-bench-v1`;
 - full MOQT protocol instrumentation above the raw transport layer.

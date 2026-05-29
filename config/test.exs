@@ -16,5 +16,5 @@ config :moqx, :integration,
   ],
   probe_cli: [
     command: "go",
-    args_prefix: ["run", "./tools/quicprobe"]
+    args_prefix: ["run", "./bench/quicprobe"]
   ]

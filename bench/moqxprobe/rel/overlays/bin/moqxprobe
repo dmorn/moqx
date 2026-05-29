@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+set -eu
+
+bin_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+argv_b64=""
+
+for arg do
+  encoded="$(printf '%s' "$arg" | base64 | tr -d '\n')"
+  argv_b64="${argv_b64}${encoded}
+"
+done
+
+export MOQXPROBE_ARGV_B64="$argv_b64"
+export MOQXPROBE_RELEASE_CLI=1
+export RELEASE_DISTRIBUTION="${RELEASE_DISTRIBUTION:-none}"
+export RELEASE_NODE="${RELEASE_NODE:-moqxprobe_cli_$$}"
+exec "$bin_dir/moqxprobe_runtime" start

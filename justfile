@@ -1,12 +1,12 @@
 set dotenv-load
 
-bench_dir := "bench/transport"
-infra_dir := bench_dir + "/infra/hetzner"
+bench_dir := "bench/moqxprobe"
+infra_dir := "bench/infra/hetzner"
 run_file := bench_dir + "/.run/current"
 
-release_name := "moqx_transport_bench"
-release_cli := "moqx-transport-bench"
-release_version := `sed -n 's/.*version: "\([^"]*\)".*/\1/p' bench/transport/mix.exs | head -1`
+release_name := "moqxprobe_runtime"
+release_cli := "moqxprobe"
+release_version := `sed -n 's/.*version: "\([^"]*\)".*/\1/p' bench/moqxprobe/mix.exs | head -1`
 git_sha := `git rev-parse --short HEAD 2>/dev/null || echo unknown`
 
 target_os := env('TARGET_OS', 'linux')
@@ -19,12 +19,12 @@ artifact_dir := "build/artifacts"
 artifact_name := release_cli + "-" + release_version + "-" + git_sha + "-" + target_os + "-" + target_arch + ".tar.gz"
 artifact_rel := artifact_dir + "/" + artifact_name
 artifact := bench_dir + "/" + artifact_rel
-remote_dir := "/opt/moqx-bench/moqx-transport-bench"
+remote_dir := "/opt/moqx-bench/moqxprobe"
 quicprobe_artifact_name := "quicprobe-" + git_sha + "-" + target_os + "-" + target_arch + ".tar.gz"
 quicprobe_artifact_rel := artifact_dir + "/" + quicprobe_artifact_name
 quicprobe_artifact := bench_dir + "/" + quicprobe_artifact_rel
 quicprobe_remote_dir := "/opt/moqx-bench/quicprobe"
-current_run := `if [ -f bench/transport/.run/current ]; then cat bench/transport/.run/current; fi`
+current_run := `if [ -f bench/moqxprobe/.run/current ]; then cat bench/moqxprobe/.run/current; fi`
 
 # Show available recipes.
 default:
@@ -52,7 +52,7 @@ bench-transport-new-run suffix="smoke":
     key_dir="{{ bench_dir }}/.keys/$run_id"
     mkdir -p "$(dirname "$run_file")" "$key_dir"
     printf '%s\n' "$run_id" > "$run_file"
-    ssh-keygen -t ed25519 -N '' -C "moqx-transport-bench-$run_id" -f "$key_dir/id_ed25519"
+    ssh-keygen -t ed25519 -N '' -C "moqxprobe-$run_id" -f "$key_dir/id_ed25519"
     printf '%s\n' "$run_id"
 
 # Print the current benchmark run id.
@@ -94,7 +94,7 @@ bench-transport-plan run_id=current_run profile="arm-smoke": bench-transport-tf-
     terraform plan \
       -var-file="profiles/{{ profile }}.tfvars" \
       -var="run_id={{ run_id }}" \
-      -var="ssh_public_key_path=../../.keys/{{ run_id }}/id_ed25519.pub" \
+      -var="ssh_public_key_path=../../moqxprobe/.keys/{{ run_id }}/id_ed25519.pub" \
       -out="/private/tmp/moqx-{{ run_id }}.tfplan"
 
 # Apply a previously reviewed Terraform plan.
@@ -128,7 +128,7 @@ bench-transport-destroy run_id=current_run profile="arm-smoke":
     terraform destroy -auto-approve \
       -var-file="profiles/{{ profile }}.tfvars" \
       -var="run_id={{ run_id }}" \
-      -var="ssh_public_key_path=../../.keys/{{ run_id }}/id_ed25519.pub"
+      -var="ssh_public_key_path=../../moqxprobe/.keys/{{ run_id }}/id_ed25519.pub"
 
 # Print Terraform outputs for the current benchmark pair.
 bench-transport-outputs:
@@ -201,7 +201,7 @@ bench-transport-verify-clean:
     fi
 
     for kind in server firewall network ssh-key; do
-      found="$(hcloud "$kind" list -l purpose=moqx-transport-bench -o noheader)"
+      found="$(hcloud "$kind" list -l purpose=moqxprobe -o noheader)"
       if [ -n "$found" ]; then
         printf '%s resources remain:\n%s\n' "$kind" "$found" >&2
         exit 1
