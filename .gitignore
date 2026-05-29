@@ -47,6 +47,7 @@ bench/moqxprobe/_build/
 bench/moqxprobe/cover/
 bench/moqxprobe/deps/
 bench/moqxprobe/doc/
+bench/moqxprobe/burrito_out/
 bench/moqxprobe/tmp/
 bench/moqxprobe/.tmp/
 bench/moqxprobe/*.srl

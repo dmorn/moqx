@@ -948,6 +948,47 @@ not need to call release internals manually. Release artifacts are
 target-specific because the project includes the `quicer` NIF; build the release on the same
 OS/architecture/ABI as the remote benchmark node or in a matching container.
 
+### Burrito Packaging Spike
+
+`moqxprobe` also has an experimental Burrito release target. Burrito packages
+the BEAM release plus ERTS into a single self-extracting binary and reads CLI
+arguments through `Burrito.Util.Args.argv/0`.
+
+Build one target explicitly:
+
+```bash
+just bench-transport-build-burrito darwin_arm64
+```
+
+The `just` recipe delegates to the root mise task:
+
+```bash
+mise run bench:moqxprobe:burrito --target darwin_arm64
+```
+
+On macOS, Burrito still requires Zig 0.15.2, but the official Zig tarball used
+by mise's normal Zig backend does not link correctly on macOS 26/Xcode 26. The
+mise task therefore checks for Homebrew's patched `zig@0.15` formula and puts
+that binary first in `PATH` only for the Burrito build. Install or verify it
+with:
+
+```bash
+mise run tools:zig:install-patched
+mise run tools:zig:doctor
+```
+
+The current target aliases are:
+
+- `darwin_arm64`
+- `linux_arm64`
+- `linux_x86_64`
+
+This path is a spike, not the default remote deployment path yet. The gating
+question is whether Burrito can package and load the `quicer`/msquic NIF for
+the target architecture. If cross-target NIF handling is brittle, keep using
+the Docker-built release artifacts and revisit Burrito later with custom target
+steps.
+
 For Hetzner ARM nodes, build the Linux/ARM64 artifact with Docker:
 
 ```bash

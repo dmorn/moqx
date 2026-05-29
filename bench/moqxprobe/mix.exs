@@ -30,6 +30,7 @@ defmodule MOQXProbe.MixProject do
     [
       {:probe_ledger, path: "../ledger"},
       {:moqx, path: "../.."},
+      {:burrito, "~> 1.5"},
       {:telemetry_metrics, "~> 1.1"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
@@ -42,6 +43,19 @@ defmodule MOQXProbe.MixProject do
         include_executables_for: [:unix],
         applications: [
           moqxprobe: :permanent
+        ]
+      ],
+      moqxprobe_burrito: [
+        steps: [:assemble, &Burrito.wrap/1],
+        applications: [
+          moqxprobe: :permanent
+        ],
+        burrito: [
+          targets: [
+            darwin_arm64: [os: :darwin, cpu: :aarch64],
+            linux_arm64: [os: :linux, cpu: :aarch64],
+            linux_x86_64: [os: :linux, cpu: :x86_64]
+          ]
         ]
       ]
     ]

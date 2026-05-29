@@ -1,6 +1,7 @@
 defmodule MOQXProbe.ReleaseCLI do
   @moduledoc false
 
+  alias Burrito.Util.Args
   alias MOQXProbe.CLI
 
   @argv_env "MOQXPROBE_ARGV_B64"
@@ -9,6 +10,11 @@ defmodule MOQXProbe.ReleaseCLI do
     @argv_env
     |> System.get_env("")
     |> decode_argv()
+    |> CLI.main()
+  end
+
+  def main_from_burrito(argv_fun \\ &Args.argv/0) do
+    argv_fun.()
     |> CLI.main()
   end
 

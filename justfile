@@ -226,6 +226,10 @@ bench-transport-build-release:
     @test -f "{{ artifact }}"
     @printf 'Built %s\n' "{{ artifact }}"
 
+# Build an experimental Burrito-wrapped moqxprobe binary for one target.
+bench-transport-build-burrito target="darwin_arm64":
+    mise run bench:moqxprobe:burrito --target "{{ target }}"
+
 # Build the Linux/ARM64 quicprobe reference peer artifact with Docker.
 bench-transport-build-quicprobe:
     mkdir -p "{{ bench_dir }}/{{ artifact_dir }}"
