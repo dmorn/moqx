@@ -38,6 +38,10 @@ Source of truth:
   with `just bench-transport-deploy-burrito linux_arm64`. Do not use
   host-local Burrito output for Linux deployment when native dependencies such
   as `quicer` are present.
+- Build `quicprobe` with native Go cross-compilation through mise via
+  `just bench-transport-build-quicprobe <target>`, where target is one of
+  `linux_arm64`, `linux_x86_64`, `darwin_arm64`, or `darwin_x86_64`. Deploys
+  are Linux-only and use the same Linux target alias as the first argument.
 - Destroy disposable infrastructure immediately after validation or data
   capture, then verify no provider resources remain.
 - For transport decisions, consult quicer and the relevant MOQT draft text

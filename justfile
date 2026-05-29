@@ -14,6 +14,7 @@ target_arch := env('TARGET_ARCH', 'arm64')
 docker_platform := target_os + "/" + target_arch
 elixir_image := env('ELIXIR_IMAGE', 'elixir:1.19.5-otp-28')
 go_image := env('GO_IMAGE', 'golang:1.23-bookworm')
+quicprobe_go_version := env('QUICPROBE_GO_VERSION', '1.25.6')
 
 artifact_dir := "build/artifacts"
 artifact_name := release_cli + "-" + release_version + "-" + git_sha + "-" + target_os + "-" + target_arch + ".tar.gz"
@@ -24,6 +25,7 @@ quicprobe_artifact_name := "quicprobe-" + git_sha + "-" + target_os + "-" + targ
 quicprobe_artifact_rel := artifact_dir + "/" + quicprobe_artifact_name
 quicprobe_artifact := bench_dir + "/" + quicprobe_artifact_rel
 quicprobe_remote_dir := "/opt/moqx-bench/quicprobe"
+quicprobe_go_cache := bench_dir + "/tmp/go-build-cache"
 current_run := `if [ -f bench/moqxprobe/.run/current ]; then cat bench/moqxprobe/.run/current; fi`
 
 # Show available recipes.
@@ -286,27 +288,123 @@ bench-transport-build-burrito-release burrito_target="linux_arm64":
     test -f "$artifact_rel"
     printf 'Built %s\n' "{{ bench_dir }}/$artifact_rel"
 
-# Build the Linux/ARM64 quicprobe reference peer artifact with Docker.
-bench-transport-build-quicprobe:
+# Print the quicprobe artifact path for one target.
+bench-transport-quicprobe-artifact-rel quicprobe_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ quicprobe_target }}" in
+      linux_arm64) artifact_target="linux-arm64" ;;
+      linux_x86_64) artifact_target="linux-x86_64" ;;
+      darwin_arm64) artifact_target="darwin-arm64" ;;
+      darwin_x86_64) artifact_target="darwin-x86_64" ;;
+      *)
+        printf 'Unsupported quicprobe target: %s\n' "{{ quicprobe_target }}" >&2
+        exit 2
+        ;;
+    esac
+
+    printf '%s/quicprobe-%s-%s.tar.gz\n' \
+      "{{ artifact_dir }}" \
+      "{{ git_sha }}" \
+      "$artifact_target"
+
+# Build the quicprobe reference peer artifact natively with mise-managed Go.
+bench-transport-build-quicprobe quicprobe_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ quicprobe_target }}" in
+      linux_arm64)
+        goos="linux"
+        goarch="arm64"
+        ;;
+      linux_x86_64)
+        goos="linux"
+        goarch="amd64"
+        ;;
+      darwin_arm64)
+        goos="darwin"
+        goarch="arm64"
+        ;;
+      darwin_x86_64)
+        goos="darwin"
+        goarch="amd64"
+        ;;
+      *)
+        printf 'Unsupported quicprobe target: %s\n' "{{ quicprobe_target }}" >&2
+        printf '%s\n' 'Use linux_arm64, linux_x86_64, darwin_arm64, or darwin_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    repo_root="$(pwd)"
+    cache_dir="$repo_root/{{ quicprobe_go_cache }}"
+    artifact_rel="$(just --quiet bench-transport-quicprobe-artifact-rel "{{ quicprobe_target }}")"
+    artifact_path="$repo_root/{{ bench_dir }}/$artifact_rel"
+    staging="$(mktemp -d "${TMPDIR:-/tmp}/moqx-quicprobe.XXXXXX")"
+
+    cleanup() {
+      rm -rf "$staging"
+    }
+    trap cleanup EXIT
+
+    mkdir -p "$(dirname "$artifact_path")" "$cache_dir" "$staging/bin"
+
+    cd "$repo_root/bench/quicprobe"
+    GOCACHE="$cache_dir" mise exec go@"{{ quicprobe_go_version }}" -- go test ./...
+    GOCACHE="$cache_dir" CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+      mise exec go@"{{ quicprobe_go_version }}" -- \
+      go build -trimpath -ldflags "-s -w" -o "$staging/bin/quicprobe" .
+
+    tar -C "$staging" -czf "$artifact_path" .
+    printf 'Built %s\n' "{{ bench_dir }}/$artifact_rel"
+
+# Build the quicprobe reference peer artifact with Docker.
+bench-transport-build-quicprobe-docker quicprobe_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ quicprobe_target }}" in
+      linux_arm64)
+        docker_platform="linux/arm64"
+        ;;
+      linux_x86_64)
+        docker_platform="linux/amd64"
+        ;;
+      *)
+        printf 'Unsupported quicprobe target: %s\n' "{{ quicprobe_target }}" >&2
+        printf '%s\n' 'Docker quicprobe builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    artifact_rel="$(just --quiet bench-transport-quicprobe-artifact-rel "{{ quicprobe_target }}")"
+    artifact_name="$(basename "$artifact_rel")"
+
     mkdir -p "{{ bench_dir }}/{{ artifact_dir }}"
     docker buildx build \
-      --platform "{{ docker_platform }}" \
+      --platform "$docker_platform" \
       --file "{{ bench_dir }}/docker/Dockerfile.quicprobe" \
       --target artifact \
       --output "type=local,dest={{ bench_dir }}/{{ artifact_dir }}" \
       --build-arg "GO_IMAGE={{ go_image }}" \
-      --build-arg "ARTIFACT_NAME={{ quicprobe_artifact_name }}" \
+      --build-arg "ARTIFACT_NAME=$artifact_name" \
       .
-    @test -f "{{ quicprobe_artifact }}"
-    @printf 'Built %s\n' "{{ quicprobe_artifact }}"
+    test -f "{{ bench_dir }}/$artifact_rel"
+    printf 'Built %s\n' "{{ bench_dir }}/$artifact_rel"
 
 # Print the release artifact path for the current defaults.
 bench-transport-artifact-path:
     @printf '%s\n' "{{ artifact }}"
 
-# Print the quicprobe artifact path for the current defaults.
-bench-transport-quicprobe-artifact-path:
-    @printf '%s\n' "{{ quicprobe_artifact }}"
+# Print the quicprobe artifact path for one target.
+bench-transport-quicprobe-artifact-path quicprobe_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    artifact_rel="$(just --quiet bench-transport-quicprobe-artifact-rel "{{ quicprobe_target }}")"
+    printf '%s/%s\n' "{{ bench_dir }}" "$artifact_rel"
 
 # Deploy the release artifact to both Terraform roles in parallel.
 [parallel]
@@ -318,7 +416,7 @@ bench-transport-deploy-burrito burrito_target="linux_arm64" run_id=current_run: 
 
 # Deploy the quicprobe reference peer artifact to both Terraform roles in parallel.
 [parallel]
-bench-transport-deploy-quicprobe run_id=current_run artifact=quicprobe_artifact_rel: (bench-transport-deploy-quicprobe-role run_id "client" artifact) (bench-transport-deploy-quicprobe-role run_id "server" artifact)
+bench-transport-deploy-quicprobe quicprobe_target="linux_arm64" run_id=current_run: (bench-transport-deploy-quicprobe-role quicprobe_target run_id "client") (bench-transport-deploy-quicprobe-role quicprobe_target run_id "server")
 
 # Deploy the release artifact to one Terraform role.
 bench-transport-deploy-role run_id role artifact=artifact_rel:
@@ -348,17 +446,27 @@ bench-transport-deploy-burrito-role burrito_target run_id role:
     just bench-transport-deploy-target "$target" "{{ run_id }}" "$artifact"
 
 # Deploy the quicprobe artifact to one Terraform role.
-bench-transport-deploy-quicprobe-role run_id role artifact=quicprobe_artifact_rel:
+bench-transport-deploy-quicprobe-role quicprobe_target run_id role:
     #!/usr/bin/env bash
     set -euo pipefail
+
+    case "{{ quicprobe_target }}" in
+      linux_arm64|linux_x86_64) ;;
+      *)
+        printf 'Unsupported deploy target for quicprobe: %s\n' "{{ quicprobe_target }}" >&2
+        printf '%s\n' 'Remote deploys are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
 
     if [ -z "{{ run_id }}" ]; then
       printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
       exit 2
     fi
 
+    artifact="$(just --quiet bench-transport-quicprobe-artifact-rel "{{ quicprobe_target }}")"
     target="$(just --quiet bench-transport-target {{ role }})"
-    just bench-transport-deploy-quicprobe-target "$target" "{{ run_id }}" "{{ artifact }}"
+    just bench-transport-deploy-quicprobe-target "$target" "{{ run_id }}" "$artifact"
 
 # Print the public SSH target for a Terraform role.
 bench-transport-target role:

@@ -1030,10 +1030,10 @@ change. The recipe accepts `linux_arm64` and `linux_x86_64`; the x86_64 target
 uses an amd64 Docker builder, so build it on native amd64 or on a builder where
 the amd64 OTP image can start reliably.
 
-Build the matching Linux/ARM64 `bench/quicprobe` reference peer artifact:
+Build the matching `bench/quicprobe` reference peer artifact:
 
 ```bash
-just bench-transport-build-quicprobe
+just bench-transport-build-quicprobe linux_arm64
 ```
 
 The default artifact path is:
@@ -1044,7 +1044,11 @@ bench/moqxprobe/build/artifacts/quicprobe-<git>-linux-arm64.tar.gz
 
 `quicprobe` is packaged separately from the Elixir release so reference peer
 deployment stays explicit and the benchmark release does not need a Go runtime.
-The Docker build runs `go test ./...` before producing the tarball.
+The default build cross-compiles locally with mise-managed Go and runs
+`go test ./...` before producing the tarball. Supported native build targets
+are `linux_arm64`, `linux_x86_64`, `darwin_arm64`, and `darwin_x86_64`.
+The Docker fallback is Linux-only:
+`just bench-transport-build-quicprobe-docker <target>`.
 
 Deploy a built artifact to the Terraform `client` and `server` roles in
 parallel:
@@ -1062,8 +1066,11 @@ just bench-transport-deploy-burrito linux_arm64
 Deploy the built `quicprobe` artifact to the same roles:
 
 ```bash
-just bench-transport-deploy-quicprobe
+just bench-transport-deploy-quicprobe linux_arm64
 ```
+
+`quicprobe` deploy targets are Linux-only because Terraform benchmark nodes are
+Linux hosts.
 
 The deploy recipe reads the current run id from
 `bench/moqxprobe/.run/current`, resolves public SSH targets from Terraform

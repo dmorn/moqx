@@ -135,11 +135,12 @@ just bench-transport-deploy
 ```
 
 Reference-comparison runs also need the repo-owned `bench/quicprobe` binary on
-the benchmark nodes. Build and deploy it separately:
+the benchmark nodes. Build the Linux target that matches the nodes and deploy it
+separately:
 
 ```bash
-just bench-transport-build-quicprobe
-just bench-transport-deploy-quicprobe
+just bench-transport-build-quicprobe linux_arm64
+just bench-transport-deploy-quicprobe linux_arm64
 ```
 
 The deploy step only resolves already-provisioned Terraform outputs,
