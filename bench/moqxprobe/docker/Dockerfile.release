@@ -43,7 +43,7 @@ RUN mix deps.get --only prod
 COPY bench/moqxprobe/lib ./lib
 COPY bench/moqxprobe/rel ./rel
 
-RUN mix release --overwrite && \
+RUN mix release "${RELEASE_NAME}" --overwrite && \
     test -x "_build/prod/rel/${RELEASE_NAME}/bin/moqxprobe" && \
     mkdir -p /out && \
     tar -C "_build/prod/rel/${RELEASE_NAME}" -czf "/out/${ARTIFACT_NAME}" .

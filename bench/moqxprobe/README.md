@@ -983,11 +983,9 @@ The current target aliases are:
 - `linux_arm64`
 - `linux_x86_64`
 
-This path is a spike, not the default remote deployment path yet. The gating
-question is whether Burrito can package and load the `quicer`/msquic NIF for
-the target architecture. If cross-target NIF handling is brittle, keep using
-the Docker-built release artifacts and revisit Burrito later with custom target
-steps.
+The host-local Burrito task is useful for smoke-testing wrapper behavior on the
+current machine. It is not sufficient for Linux deployment from macOS because
+the release payload would still contain the locally compiled `quicer` NIF.
 
 For Hetzner ARM nodes, build the Linux/ARM64 artifact with Docker:
 
@@ -1011,6 +1009,27 @@ ELIXIR_IMAGE=elixir:1.19.5-otp-28 TARGET_ARCH=arm64 \
   just bench-transport-build-release
 ```
 
+For Burrito deployment, build inside the target Linux Docker image so native
+dependencies are compiled for the same OS/architecture as the remote node:
+
+```bash
+just bench-transport-build-burrito-release linux_arm64
+```
+
+The artifact is still a deploy-compatible tarball containing
+`bin/moqxprobe`, but that executable is the Burrito self-extracting binary:
+
+```text
+bench/moqxprobe/build/artifacts/moqxprobe-burrito-<version>-<git>-linux-arm64.tar.gz
+```
+
+The Dockerfile stages dependency resolution and `mix deps.compile quicer`
+before copying application source, so the expensive `libquicer_nif.so` layer is
+reused unless the target, OTP image, lockfiles, or native dependency inputs
+change. The recipe accepts `linux_arm64` and `linux_x86_64`; the x86_64 target
+uses an amd64 Docker builder, so build it on native amd64 or on a builder where
+the amd64 OTP image can start reliably.
+
 Build the matching Linux/ARM64 `bench/quicprobe` reference peer artifact:
 
 ```bash
@@ -1032,6 +1051,12 @@ parallel:
 
 ```bash
 just bench-transport-deploy
+```
+
+Deploy a built Burrito artifact to the same roles:
+
+```bash
+just bench-transport-deploy-burrito linux_arm64
 ```
 
 Deploy the built `quicprobe` artifact to the same roles:

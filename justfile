@@ -230,6 +230,62 @@ bench-transport-build-release:
 bench-transport-build-burrito target="darwin_arm64":
     mise run bench:moqxprobe:burrito --target "{{ target }}"
 
+# Print the deployable Burrito artifact path for one Linux target.
+bench-transport-burrito-artifact-rel burrito_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ burrito_target }}" in
+      linux_arm64) artifact_target="linux-arm64" ;;
+      linux_x86_64) artifact_target="linux-x86_64" ;;
+      *)
+        printf 'Unsupported Burrito target: %s\n' "{{ burrito_target }}" >&2
+        exit 2
+        ;;
+    esac
+
+    printf '%s/moqxprobe-burrito-%s-%s-%s.tar.gz\n' \
+      "{{ artifact_dir }}" \
+      "{{ release_version }}" \
+      "{{ git_sha }}" \
+      "$artifact_target"
+
+# Build a deployable Burrito-wrapped moqxprobe artifact inside a target Linux Docker image.
+bench-transport-build-burrito-release burrito_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ burrito_target }}" in
+      linux_arm64)
+        docker_platform="linux/arm64"
+        ;;
+      linux_x86_64)
+        docker_platform="linux/amd64"
+        ;;
+      *)
+        printf 'Unsupported Burrito target: %s\n' "{{ burrito_target }}" >&2
+        exit 2
+        ;;
+    esac
+
+    artifact_rel="$(just --quiet bench-transport-burrito-artifact-rel "{{ burrito_target }}")"
+    artifact_name="$(basename "$artifact_rel")"
+
+    mkdir -p "{{ bench_dir }}/{{ artifact_dir }}"
+    cd "{{ bench_dir }}"
+    docker buildx build \
+      --platform "$docker_platform" \
+      --file docker/Dockerfile.burrito \
+      --target artifact \
+      --output "type=local,dest={{ artifact_dir }}" \
+      --build-arg "ELIXIR_IMAGE={{ elixir_image }}" \
+      --build-arg "BURRITO_TARGET={{ burrito_target }}" \
+      --build-arg "BUILD_GIT_SHA={{ git_sha }}" \
+      --build-arg "ARTIFACT_NAME=$artifact_name" \
+      ../..
+    test -f "$artifact_rel"
+    printf 'Built %s\n' "{{ bench_dir }}/$artifact_rel"
+
 # Build the Linux/ARM64 quicprobe reference peer artifact with Docker.
 bench-transport-build-quicprobe:
     mkdir -p "{{ bench_dir }}/{{ artifact_dir }}"
@@ -256,6 +312,10 @@ bench-transport-quicprobe-artifact-path:
 [parallel]
 bench-transport-deploy run_id=current_run artifact=artifact_rel: (bench-transport-deploy-role run_id "client" artifact) (bench-transport-deploy-role run_id "server" artifact)
 
+# Deploy the Burrito release artifact to both Terraform roles in parallel.
+[parallel]
+bench-transport-deploy-burrito burrito_target="linux_arm64" run_id=current_run: (bench-transport-deploy-burrito-role burrito_target run_id "client") (bench-transport-deploy-burrito-role burrito_target run_id "server")
+
 # Deploy the quicprobe reference peer artifact to both Terraform roles in parallel.
 [parallel]
 bench-transport-deploy-quicprobe run_id=current_run artifact=quicprobe_artifact_rel: (bench-transport-deploy-quicprobe-role run_id "client" artifact) (bench-transport-deploy-quicprobe-role run_id "server" artifact)
@@ -272,6 +332,20 @@ bench-transport-deploy-role run_id role artifact=artifact_rel:
 
     target="$(just --quiet bench-transport-target {{ role }})"
     just bench-transport-deploy-target "$target" "{{ run_id }}" "{{ artifact }}"
+
+# Deploy the Burrito release artifact to one Terraform role.
+bench-transport-deploy-burrito-role burrito_target run_id role:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    artifact="$(just --quiet bench-transport-burrito-artifact-rel "{{ burrito_target }}")"
+    target="$(just --quiet bench-transport-target {{ role }})"
+    just bench-transport-deploy-target "$target" "{{ run_id }}" "$artifact"
 
 # Deploy the quicprobe artifact to one Terraform role.
 bench-transport-deploy-quicprobe-role run_id role artifact=quicprobe_artifact_rel:

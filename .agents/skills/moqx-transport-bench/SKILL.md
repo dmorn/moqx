@@ -33,6 +33,11 @@ Source of truth:
   `just bench-transport-build-release`; deploy them to Terraform `client` and
   `server` roles with `just bench-transport-deploy`, or to one explicit target
   with `just bench-transport-deploy-target`.
+- Build Burrito-wrapped Linux artifacts inside the target Linux Docker image
+  with `just bench-transport-build-burrito-release linux_arm64`; deploy them
+  with `just bench-transport-deploy-burrito linux_arm64`. Do not use
+  host-local Burrito output for Linux deployment when native dependencies such
+  as `quicer` are present.
 - Destroy disposable infrastructure immediately after validation or data
   capture, then verify no provider resources remain.
 - For transport decisions, consult quicer and the relevant MOQT draft text
