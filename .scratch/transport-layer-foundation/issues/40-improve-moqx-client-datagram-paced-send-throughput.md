@@ -123,3 +123,30 @@ requested load on the link.
   wrapper/telemetry overhead about 5.80 ms. This is loopback calibration only,
   but it proves the new split is populated and shows that benchmark payload
   allocation can be a meaningful part of the per-DATAGRAM cost.
+- 2026-05-29: Stopped the remote tuning loop after the 32k pps phase started
+  producing low-leverage repetitions. The live lab was torn down by the
+  operator before the next experiment. Current evidence says the original
+  18k-20k offered-rate ceiling was moved substantially by reducing benchmark
+  observer overhead, using a dedicated DATAGRAM receiver process, suppressing
+  quicer DATAGRAM send-state messages, and disabling MsQuic pacing for the
+  paced load-generator path. A 30k pps near-MTU MOQX-client run became
+  contract-valid, but 32k pps remained unstable.
+- 2026-05-29: Added `tools/quicprobe server --stats-output` during the live
+  lab to distinguish echo-return loss from loss before the reference server
+  application. The sidecar showed the server echoed every DATAGRAM it received,
+  while failing 32k MOQX-client samples often reached the server application
+  with fewer than the intended 96,000 DATAGRAMs. This shifts the remaining
+  suspect away from receiver mailbox growth and toward sender burst shape,
+  BEAM/NIF admission overhead, MsQuic/path admission, or lab variance near the
+  path limit.
+- 2026-05-29: Narrowed the next experiment before any more infrastructure.
+  Local quicer inspection found that the current public API only exposes one
+  DATAGRAM send request per NIF call: `async_send_dgram/2|3` routes to
+  `quicer_nif:send_dgram/3`, whose C implementation allocates one send
+  context and calls `MsQuic->DatagramSend` once with `BufferCount = 1`.
+  MsQuic's `BufferCount` is scatter/gather for one logical DATAGRAM payload,
+  not a batch of DATAGRAM frames. The next hypothesis is therefore a
+  benchmark-only sender experiment around BEAM-to-NIF batching: accept a burst
+  from the paced sink in one NIF call, loop inside the NIF, and measure whether
+  reducing scheduler/NIF boundary crossings gives enough headroom before
+  touching listener-side performance.

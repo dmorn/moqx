@@ -247,6 +247,23 @@ These knobs are not protocol semantics. Use them to distinguish benchmark
 event-pump overhead, event granularity, and transport/NIF behavior while
 preserving send admission and completion accounting.
 
+Paced MOQX-client DATAGRAM pressure uses benchmark defaults tuned for stable
+high-rate load generation rather than protocol semantics:
+
+- `--datagram-receive-mode process` moves DATAGRAM receive ownership to a
+  dedicated process.
+- `--datagram-pacing-mode coarse` uses coarse absolute-deadline sleeps for the
+  application pacing loop. `--datagram-pacing-mode smooth` keeps the same
+  absolute target rate but caps catch-up bursts after scheduler delays; use it
+  when server-side evidence shows inbound loss from bursty application pacing.
+- `--datagram-diagnostics summary` avoids per-send timing collectors on the hot
+  path. Use `--datagram-diagnostics full` only when diagnosing a lower-rate
+  reproduction or when the observer effect is acceptable.
+- `--quicer-setting pacing_enabled=0` disables MsQuic pacing for this paced
+  load-generator path so the benchmark's own offered-rate scheduler controls
+  timing. Pass `--quicer-setting KEY=VALUE` to override or add whitelisted
+  quicer connection settings for an experiment.
+
 For datagram pressure, use `--workload datagram_pressure`. By default the
 workload sends a burst of `--datagram-count` fixed-size QUIC DATAGRAM frames.
 For a fixed-rate step, set both `--datagram-rate` and `--duration-seconds`; the

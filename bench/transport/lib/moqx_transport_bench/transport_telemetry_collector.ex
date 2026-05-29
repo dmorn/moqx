@@ -11,8 +11,49 @@ defmodule MOQX.TransportBench.TransportTelemetryCollector do
   @message_queue_sample_prefix_count 16
   @message_queue_sample_stride 1_024
   @sample_interval_ms 10
+  @duration_keys [
+    :stream_send_call,
+    :stream_recv_call,
+    :datagram_send_call,
+    :receive_event_call,
+    :receive_event_blocking_call,
+    :receive_event_drain_call
+  ]
+  @counter_keys [
+    {:stream_send, :bytes_accepted},
+    {:stream_send, :accepted},
+    {:stream_send, :errors},
+    {:stream_recv, :bytes},
+    {:stream_recv, :ok},
+    {:stream_recv, :errors},
+    {:datagram_send, :bytes_accepted},
+    {:datagram_send, :accepted},
+    {:datagram_send, :errors},
+    {:receive_event, :events_drained},
+    {:receive_event, :stream_data},
+    {:receive_event, :stream_data_bytes},
+    {:receive_event, :datagram},
+    {:receive_event, :datagram_bytes},
+    {:receive_event, {:stream_event, :send_completed}},
+    {:receive_event, {:stream_event, :send_cancelled}},
+    {:receive_event, {:stream_event, :peer_finished_sending}},
+    {:receive_event, {:stream_event, :closed}},
+    {:receive_event, :ignored},
+    {:receive_event, :unknown},
+    {:receive_event, :errors},
+    {:receive_event, :timeouts}
+  ]
 
-  defstruct [:handler_id, :owner_pid, :sampler_pid, :sampler_ref, :sampler_monitor_ref, :table]
+  defstruct [
+    :attached?,
+    :handler_id,
+    :owner_pid,
+    :sampler_pid,
+    :sampler_ref,
+    :sampler_monitor_ref,
+    :store_key,
+    :table
+  ]
 
   def start(opts \\ []) do
     with {:ok, _apps} <- Application.ensure_all_started(:telemetry) do
@@ -23,6 +64,8 @@ defmodule MOQX.TransportBench.TransportTelemetryCollector do
   defp start_collector(opts) do
     owner_pid = Keyword.get(opts, :owner_pid, self())
     handler_id = {__MODULE__, owner_pid, make_ref()}
+    store_key = {__MODULE__, handler_id}
+    init_owner_store(store_key)
 
     table =
       :ets.new(__MODULE__, [
@@ -44,88 +87,114 @@ defmodule MOQX.TransportBench.TransportTelemetryCollector do
       )
 
     collector = %__MODULE__{
+      attached?: false,
       handler_id: handler_id,
       owner_pid: owner_pid,
       sampler_pid: sampler_pid,
       sampler_ref: sampler_ref,
       sampler_monitor_ref: sampler_monitor_ref,
+      store_key: store_key,
       table: table
     }
 
-    case :telemetry.attach_many(handler_id, @events, &__MODULE__.handle_event/4, %{
-           owner_pid: owner_pid,
-           table: table
-         }) do
-      :ok ->
-        {:ok, collector}
+    events =
+      case Keyword.get(opts, :events, @events) do
+        nil -> @events
+        :default -> @events
+        events -> events
+      end
 
-      {:error, reason} ->
-        close(collector)
-        {:error, reason}
+    if events == [] do
+      {:ok, collector}
+    else
+      case :telemetry.attach_many(handler_id, events, &__MODULE__.handle_event/4, %{
+             owner_pid: owner_pid,
+             store_key: store_key,
+             table: table
+           }) do
+        :ok ->
+          {:ok, %{collector | attached?: true}}
+
+        {:error, reason} ->
+          close(collector)
+          {:error, reason}
+      end
     end
   end
 
-  def snapshot(%__MODULE__{table: table}) do
+  def snapshot(%__MODULE__{} = collector) do
     %{
-      send_stream_call_durations_us: duration_values(table, :stream_send_call),
-      stream_send_bytes_accepted: counter(table, {:stream_send, :bytes_accepted}),
-      stream_send_accepted: counter(table, {:stream_send, :accepted}),
-      stream_send_errors: counter(table, {:stream_send, :errors}),
-      recv_stream_call_durations_us: duration_values(table, :stream_recv_call),
-      stream_recv_bytes: counter(table, {:stream_recv, :bytes}),
-      stream_recv_ok: counter(table, {:stream_recv, :ok}),
-      stream_recv_errors: counter(table, {:stream_recv, :errors}),
-      send_datagram_call_durations_us: duration_values(table, :datagram_send_call),
-      datagram_send_bytes_accepted: counter(table, {:datagram_send, :bytes_accepted}),
-      datagram_send_accepted: counter(table, {:datagram_send, :accepted}),
-      datagram_send_errors: counter(table, {:datagram_send, :errors}),
+      send_stream_call_durations_us: duration_values(collector, :stream_send_call),
+      stream_send_bytes_accepted: counter(collector, {:stream_send, :bytes_accepted}),
+      stream_send_accepted: counter(collector, {:stream_send, :accepted}),
+      stream_send_errors: counter(collector, {:stream_send, :errors}),
+      recv_stream_call_durations_us: duration_values(collector, :stream_recv_call),
+      stream_recv_bytes: counter(collector, {:stream_recv, :bytes}),
+      stream_recv_ok: counter(collector, {:stream_recv, :ok}),
+      stream_recv_errors: counter(collector, {:stream_recv, :errors}),
+      send_datagram_call_durations_us: duration_values(collector, :datagram_send_call),
+      datagram_send_bytes_accepted: counter(collector, {:datagram_send, :bytes_accepted}),
+      datagram_send_accepted: counter(collector, {:datagram_send, :accepted}),
+      datagram_send_errors: counter(collector, {:datagram_send, :errors}),
       runtime_diagnostics: %{
-        process: process_samples(table),
-        events_drained: counter(table, {:receive_event, :events_drained}),
-        stream_data_events: counter(table, {:receive_event, :stream_data}),
-        stream_data_bytes_received: counter(table, {:receive_event, :stream_data_bytes}),
-        datagram_events: counter(table, {:receive_event, :datagram}),
-        datagram_bytes_received: counter(table, {:receive_event, :datagram_bytes}),
-        send_completed_events: counter(table, {:receive_event, {:stream_event, :send_completed}}),
-        send_cancelled_events: counter(table, {:receive_event, {:stream_event, :send_cancelled}}),
+        process: process_samples(collector.table),
+        events_drained: counter(collector, {:receive_event, :events_drained}),
+        stream_data_events: counter(collector, {:receive_event, :stream_data}),
+        stream_data_bytes_received: counter(collector, {:receive_event, :stream_data_bytes}),
+        datagram_events: counter(collector, {:receive_event, :datagram}),
+        datagram_bytes_received: counter(collector, {:receive_event, :datagram_bytes}),
+        send_completed_events:
+          counter(collector, {:receive_event, {:stream_event, :send_completed}}),
+        send_cancelled_events:
+          counter(collector, {:receive_event, {:stream_event, :send_cancelled}}),
         peer_finished_events:
-          counter(table, {:receive_event, {:stream_event, :peer_finished_sending}}),
-        stream_closed_events: counter(table, {:receive_event, {:stream_event, :closed}}),
-        ignored_events: counter(table, {:receive_event, :ignored}),
-        unknown_events: counter(table, {:receive_event, :unknown}),
-        receive_errors: counter(table, {:receive_event, :errors}),
-        timeouts: counter(table, {:receive_event, :timeouts}),
-        receive_event_call_durations_us: duration_values(table, :receive_event_call),
+          counter(collector, {:receive_event, {:stream_event, :peer_finished_sending}}),
+        stream_closed_events: counter(collector, {:receive_event, {:stream_event, :closed}}),
+        ignored_events: counter(collector, {:receive_event, :ignored}),
+        unknown_events: counter(collector, {:receive_event, :unknown}),
+        receive_errors: counter(collector, {:receive_event, :errors}),
+        timeouts: counter(collector, {:receive_event, :timeouts}),
+        receive_event_call_durations_us: duration_values(collector, :receive_event_call),
         receive_event_blocking_call_durations_us:
-          duration_values(table, :receive_event_blocking_call),
-        receive_event_drain_call_durations_us: duration_values(table, :receive_event_drain_call)
+          duration_values(collector, :receive_event_blocking_call),
+        receive_event_drain_call_durations_us:
+          duration_values(collector, :receive_event_drain_call)
       }
     }
   end
 
   def close(%__MODULE__{} = collector) do
-    :telemetry.detach(collector.handler_id)
+    if collector.attached? do
+      :telemetry.detach(collector.handler_id)
+    end
+
     stop_sampler(collector)
     :ets.delete(collector.table)
+    clear_owner_store(collector.store_key)
     :ok
   end
 
-  def handle_event(event, measurements, metadata, %{owner_pid: owner_pid, table: table}) do
+  def handle_event(event, measurements, metadata, %{owner_pid: owner_pid, store_key: store_key}) do
     if self() == owner_pid do
-      do_handle_event(event, measurements, metadata, table)
+      do_handle_event(event, measurements, metadata, store_key)
     end
   end
 
-  defp do_handle_event([:moqx, :transport, :stream, :recv, :stop], measurements, metadata, table) do
-    add_duration(table, :stream_recv_call, measurements[:duration_us])
+  defp do_handle_event(
+         [:moqx, :transport, :stream, :recv, :stop],
+         measurements,
+         metadata,
+         store_key
+       ) do
+    add_duration(store_key, :stream_recv_call, measurements[:duration_us])
 
     case metadata[:result] do
       :ok ->
-        increment(table, {:stream_recv, :ok})
-        increment(table, {:stream_recv, :bytes}, measurements[:byte_size] || 0)
+        increment(store_key, {:stream_recv, :ok})
+        increment(store_key, {:stream_recv, :bytes}, measurements[:byte_size] || 0)
 
       :error ->
-        increment(table, {:stream_recv, :errors})
+        increment(store_key, {:stream_recv, :errors})
 
       _other ->
         :ok
@@ -136,33 +205,38 @@ defmodule MOQX.TransportBench.TransportTelemetryCollector do
          [:moqx, :transport, :datagram, :send, :stop],
          measurements,
          metadata,
-         table
+         store_key
        ) do
-    add_duration(table, :datagram_send_call, measurements[:duration_us])
+    add_duration(store_key, :datagram_send_call, measurements[:duration_us])
 
     case metadata[:result] do
       :ok ->
-        increment(table, {:datagram_send, :accepted})
-        increment(table, {:datagram_send, :bytes_accepted}, measurements[:byte_size] || 0)
+        increment(store_key, {:datagram_send, :accepted})
+        increment(store_key, {:datagram_send, :bytes_accepted}, measurements[:byte_size] || 0)
 
       :error ->
-        increment(table, {:datagram_send, :errors})
+        increment(store_key, {:datagram_send, :errors})
 
       _other ->
         :ok
     end
   end
 
-  defp do_handle_event([:moqx, :transport, :stream, :send, :stop], measurements, metadata, table) do
-    add_duration(table, :stream_send_call, measurements[:duration_us])
+  defp do_handle_event(
+         [:moqx, :transport, :stream, :send, :stop],
+         measurements,
+         metadata,
+         store_key
+       ) do
+    add_duration(store_key, :stream_send_call, measurements[:duration_us])
 
     case metadata[:result] do
       :ok ->
-        increment(table, {:stream_send, :accepted})
-        increment(table, {:stream_send, :bytes_accepted}, measurements[:byte_size] || 0)
+        increment(store_key, {:stream_send, :accepted})
+        increment(store_key, {:stream_send, :bytes_accepted}, measurements[:byte_size] || 0)
 
       :error ->
-        increment(table, {:stream_send, :errors})
+        increment(store_key, {:stream_send, :errors})
 
       _other ->
         :ok
@@ -173,89 +247,108 @@ defmodule MOQX.TransportBench.TransportTelemetryCollector do
          [:moqx, :transport, :event, :receive, :stop],
          measurements,
          metadata,
-         table
+         store_key
        ) do
-    add_duration(table, :receive_event_call, measurements[:duration_us])
+    add_duration(store_key, :receive_event_call, measurements[:duration_us])
 
     if measurements[:timeout_ms] == 0 do
-      add_duration(table, :receive_event_drain_call, measurements[:duration_us])
+      add_duration(store_key, :receive_event_drain_call, measurements[:duration_us])
     else
-      add_duration(table, :receive_event_blocking_call, measurements[:duration_us])
+      add_duration(store_key, :receive_event_blocking_call, measurements[:duration_us])
     end
 
-    record_receive_result(table, measurements, metadata)
+    record_receive_result(store_key, measurements, metadata)
   end
 
   defp record_receive_result(
-         table,
+         store_key,
          measurements,
          %{result: :ok, event_kind: event_kind} = metadata
        ) do
-    increment(table, {:receive_event, :events_drained})
+    increment(store_key, {:receive_event, :events_drained})
 
     case {event_kind, metadata[:event_name]} do
       {:stream_data, _event_name} ->
-        increment(table, {:receive_event, :stream_data})
-        increment(table, {:receive_event, :stream_data_bytes}, measurements[:byte_size] || 0)
+        increment(store_key, {:receive_event, :stream_data})
+        increment(store_key, {:receive_event, :stream_data_bytes}, measurements[:byte_size] || 0)
 
       {:datagram, _event_name} ->
-        increment(table, {:receive_event, :datagram})
-        increment(table, {:receive_event, :datagram_bytes}, measurements[:byte_size] || 0)
+        increment(store_key, {:receive_event, :datagram})
+        increment(store_key, {:receive_event, :datagram_bytes}, measurements[:byte_size] || 0)
 
       {:stream_event, event_name}
       when event_name in [:send_completed, :send_cancelled, :peer_finished_sending, :closed] ->
-        increment(table, {:receive_event, {:stream_event, event_name}})
+        increment(store_key, {:receive_event, {:stream_event, event_name}})
 
       _other ->
-        increment(table, {:receive_event, :ignored})
+        increment(store_key, {:receive_event, :ignored})
     end
   end
 
-  defp record_receive_result(table, _measurements, %{result: :timeout}) do
-    increment(table, {:receive_event, :timeouts})
+  defp record_receive_result(store_key, _measurements, %{result: :timeout}) do
+    increment(store_key, {:receive_event, :timeouts})
   end
 
-  defp record_receive_result(table, _measurements, %{result: :unknown}) do
-    increment(table, {:receive_event, :unknown})
+  defp record_receive_result(store_key, _measurements, %{result: :unknown}) do
+    increment(store_key, {:receive_event, :unknown})
   end
 
-  defp record_receive_result(table, _measurements, %{result: :error}) do
-    increment(table, {:receive_event, :errors})
+  defp record_receive_result(store_key, _measurements, %{result: :error}) do
+    increment(store_key, {:receive_event, :errors})
   end
 
-  defp record_receive_result(_table, _measurements, _metadata), do: :ok
+  defp record_receive_result(_store_key, _measurements, _metadata), do: :ok
 
-  defp add_duration(_table, _key, nil), do: :ok
+  defp add_duration(_store_key, _key, nil), do: :ok
 
-  defp add_duration(table, key, duration_us) do
-    index =
-      :ets.update_counter(table, {:duration_index, key}, {2, 1}, {{:duration_index, key}, 0})
+  defp add_duration(store_key, key, duration_us) do
+    dictionary_key = duration_key(store_key, key)
 
-    :ets.insert(table, {{:duration, key, index}, duration_us})
-  end
-
-  defp duration_values(table, key) do
-    table
-    |> :ets.tab2list()
-    |> Enum.flat_map(fn
-      {{:duration, ^key, index}, value} -> [{index, value}]
-      _entry -> []
-    end)
-    |> Enum.sort_by(fn {index, _value} -> index end)
-    |> Enum.map(fn {_index, value} -> value end)
-  end
-
-  defp increment(table, key, amount \\ 1) do
-    :ets.update_counter(table, {:counter, key}, {2, amount}, {{:counter, key}, 0})
+    Process.put(dictionary_key, [duration_us | Process.get(dictionary_key)])
     :ok
   end
 
-  defp counter(table, key) do
-    case :ets.lookup(table, {:counter, key}) do
-      [{{:counter, ^key}, value}] -> value
-      [] -> 0
-    end
+  defp duration_values(%__MODULE__{store_key: store_key}, key) do
+    store_key
+    |> duration_key(key)
+    |> Process.get()
+    |> Enum.reverse()
   end
+
+  defp increment(store_key, key, amount \\ 1) do
+    dictionary_key = counter_key(store_key, key)
+    Process.put(dictionary_key, Process.get(dictionary_key) + amount)
+    :ok
+  end
+
+  defp counter(%__MODULE__{store_key: store_key}, key) do
+    store_key
+    |> counter_key(key)
+    |> Process.get()
+  end
+
+  defp init_owner_store(store_key) do
+    Enum.each(@duration_keys, fn key ->
+      Process.put(duration_key(store_key, key), [])
+    end)
+
+    Enum.each(@counter_keys, fn key ->
+      Process.put(counter_key(store_key, key), 0)
+    end)
+  end
+
+  defp clear_owner_store(store_key) do
+    Enum.each(@duration_keys, fn key ->
+      Process.delete(duration_key(store_key, key))
+    end)
+
+    Enum.each(@counter_keys, fn key ->
+      Process.delete(counter_key(store_key, key))
+    end)
+  end
+
+  defp duration_key(store_key, key), do: {store_key, :duration, key}
+  defp counter_key(store_key, key), do: {store_key, :counter, key}
 
   defp maybe_start_sampler(_table, _owner_pid, _started_at_us, false), do: {nil, nil, nil}
 

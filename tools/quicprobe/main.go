@@ -32,10 +32,11 @@ const datagramHeaderSize = 16
 const pacedSpinThreshold = 200 * time.Microsecond
 
 type serverConfig struct {
-	addr     string
-	certFile string
-	keyFile  string
-	alpn     string
+	addr        string
+	certFile    string
+	keyFile     string
+	alpn        string
+	statsOutput string
 }
 
 type clientConfig struct {
@@ -118,6 +119,40 @@ type clientRunResult struct {
 	ControlLatencyMS                map[string]float64 `json:"control_latency_ms,omitempty"`
 }
 
+type serverDatagramSummary struct {
+	SchemaVersion          string  `json:"schema_version"`
+	RecordType             string  `json:"record_type"`
+	Tool                   string  `json:"tool"`
+	ReferenceImpl          string  `json:"reference_implementation"`
+	ReferenceVersion       string  `json:"reference_version"`
+	StartedAt              string  `json:"started_at"`
+	FinishedAt             string  `json:"finished_at"`
+	LocalAddr              string  `json:"local_addr"`
+	RemoteAddr             string  `json:"remote_addr"`
+	DurationMS             float64 `json:"duration_ms"`
+	DatagramsReceived      int     `json:"datagrams_received"`
+	DatagramsEchoAccepted  int     `json:"datagrams_echo_accepted"`
+	BytesReceived          int64   `json:"bytes_received"`
+	BytesEchoAccepted      int64   `json:"bytes_echo_accepted"`
+	ReceiveError           string  `json:"receive_error,omitempty"`
+	SendError              string  `json:"send_error,omitempty"`
+	FirstDatagramLatencyMS float64 `json:"first_datagram_latency_ms,omitempty"`
+}
+
+type datagramEchoStats struct {
+	startedAt             time.Time
+	finishedAt            time.Time
+	localAddr             string
+	remoteAddr            string
+	datagramsReceived     int
+	datagramsEchoAccepted int
+	bytesReceived         int64
+	bytesEchoAccepted     int64
+	receiveErr            error
+	sendErr               error
+	firstDatagramLatency  time.Duration
+}
+
 type datagramSendResult struct {
 	accepted          int
 	duration          time.Duration
@@ -186,6 +221,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&cfg.certFile, "cert", "", "TLS certificate PEM file")
 	flags.StringVar(&cfg.keyFile, "key", "", "TLS private key PEM file")
 	flags.StringVar(&cfg.alpn, "alpn", envOrDefault("QUICPROBE_ALPN", defaultALPN), "QUIC ALPN")
+	flags.StringVar(&cfg.statsOutput, "stats-output", "", "optional JSONL path for per-connection server DATAGRAM echo summaries")
 
 	if err := flags.Parse(args); err != nil {
 		return serverConfig{}, err
@@ -322,11 +358,11 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string) error
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
-		go handleConnection(ctx, conn)
+		go handleConnection(ctx, conn, cfg.statsOutput)
 	}
 }
 
-func handleConnection(ctx context.Context, conn quic.Connection) {
+func handleConnection(ctx context.Context, conn quic.Connection, statsOutput string) {
 	var wg sync.WaitGroup
 	wg.Add(3)
 
@@ -342,7 +378,10 @@ func handleConnection(ctx context.Context, conn quic.Connection) {
 
 	go func() {
 		defer wg.Done()
-		echoDatagrams(ctx, conn)
+		stats := echoDatagrams(ctx, conn)
+		if statsOutput != "" {
+			_ = appendServerDatagramSummary(statsOutput, stats)
+		}
 	}()
 
 	wg.Wait()
@@ -402,16 +441,69 @@ func drainUniStream(stream quic.ReceiveStream) {
 	_, _ = io.Copy(io.Discard, stream)
 }
 
-func echoDatagrams(ctx context.Context, conn quic.Connection) {
+func echoDatagrams(ctx context.Context, conn quic.Connection) (stats datagramEchoStats) {
+	stats = datagramEchoStats{
+		startedAt:  time.Now(),
+		localAddr:  conn.LocalAddr().String(),
+		remoteAddr: conn.RemoteAddr().String(),
+	}
+	defer func() {
+		stats.finishedAt = time.Now()
+	}()
+
 	for {
 		datagram, err := conn.ReceiveDatagram(ctx)
 		if err != nil {
+			stats.receiveErr = err
 			return
 		}
+		if stats.datagramsReceived == 0 {
+			stats.firstDatagramLatency = time.Since(stats.startedAt)
+		}
+		stats.datagramsReceived++
+		stats.bytesReceived += int64(len(datagram))
 		if err := conn.SendDatagram(datagram); err != nil {
+			stats.sendErr = err
 			return
 		}
+		stats.datagramsEchoAccepted++
+		stats.bytesEchoAccepted += int64(len(datagram))
 	}
+}
+
+func appendServerDatagramSummary(path string, stats datagramEchoStats) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("open server stats output: %w", err)
+	}
+	defer file.Close()
+
+	summary := serverDatagramSummary{
+		SchemaVersion:          "quicprobe-server-stats-v1",
+		RecordType:             "server_datagram_summary",
+		Tool:                   "quicprobe",
+		ReferenceImpl:          "quic-go",
+		ReferenceVersion:       moduleVersion(quicGoModulePath),
+		StartedAt:              stats.startedAt.UTC().Format(time.RFC3339Nano),
+		FinishedAt:             stats.finishedAt.UTC().Format(time.RFC3339Nano),
+		LocalAddr:              stats.localAddr,
+		RemoteAddr:             stats.remoteAddr,
+		DurationMS:             durationMillis(stats.finishedAt.Sub(stats.startedAt)),
+		DatagramsReceived:      stats.datagramsReceived,
+		DatagramsEchoAccepted:  stats.datagramsEchoAccepted,
+		BytesReceived:          stats.bytesReceived,
+		BytesEchoAccepted:      stats.bytesEchoAccepted,
+		FirstDatagramLatencyMS: durationMillis(stats.firstDatagramLatency),
+	}
+
+	if stats.receiveErr != nil {
+		summary.ReceiveError = stats.receiveErr.Error()
+	}
+	if stats.sendErr != nil {
+		summary.SendError = stats.sendErr.Error()
+	}
+
+	return json.NewEncoder(file).Encode(summary)
 }
 
 func runClient(ctx context.Context, cfg clientConfig, stdout io.Writer) error {

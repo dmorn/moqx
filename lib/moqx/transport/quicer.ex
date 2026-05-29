@@ -128,12 +128,16 @@ defmodule MOQX.Transport.Quicer do
 
   @impl true
   def send_datagram(connection, data) when is_binary(data) do
-    case :quicer.async_send_dgram(connection, data) do
+    case send_quicer_datagram(connection, data) do
       {:ok, _bytes} -> :ok
       {:error, :dgram_send_error, :invalid_state} -> {:error, :datagrams_unavailable}
       {:error, _reason} = error -> error
       {:error, reason, details} -> {:error, {reason, details}}
     end
+  end
+
+  defp send_quicer_datagram(connection, data) do
+    :quicer.async_send_dgram(connection, data, report_send_state: false)
   end
 
   @impl true
@@ -173,6 +177,17 @@ defmodule MOQX.Transport.Quicer do
       :quicer.getopt(connection, :datagram_send_enabled),
       :quicer.getopt(connection, :datagram_receive_enabled)
     )
+  end
+
+  @doc false
+  def connection_statistics(connection) do
+    case :quicer.getopt(connection, :statistics_v2) do
+      {:ok, stats} when is_list(stats) ->
+        {:ok, Map.new(stats, fn {key, value} -> {Atom.to_string(key), value} end)}
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @impl true

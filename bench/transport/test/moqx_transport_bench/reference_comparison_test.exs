@@ -490,6 +490,11 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert Contract.validate_records([record]).valid?
 
     assert record["workload"]["topology"] == "moqx-client-to-reference-server"
+    assert record["profile"]["settings"]["datagram_drain_limit"] == 0
+    assert record["profile"]["settings"]["datagram_receive_mode"] == "process"
+    assert record["profile"]["settings"]["datagram_pacing_mode"] == "coarse"
+    assert record["profile"]["settings"]["datagram_diagnostics"] == "summary"
+    assert record["profile"]["settings"]["quicer_settings"] == %{"pacing_enabled" => 0}
     assert record["workload"]["datagram_size_bytes"] == 1192
     assert record["metrics"]["payload_size_bytes"] == 1192
     assert record["metrics"]["bytes_sent"] == 2384
@@ -504,6 +509,9 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert record["diagnostics"]["process"]["message_queue_len"] == 0
     assert record["diagnostics"]["process"]["message_queue_len_peak"] >= 0
     assert record["diagnostics"]["summary"]["datagrams_accepted"] == 2
+    assert record["diagnostics"]["summary"]["datagram_drain_limit"] == 0
+    assert record["diagnostics"]["summary"]["datagram_receive_mode"] == "process"
+    assert record["diagnostics"]["summary"]["datagram_pacing_mode"] == "coarse"
     assert record["diagnostics"]["summary"]["datagrams_received"] == 2
     assert record["diagnostics"]["summary"]["datagrams_missing"] == 0
     assert record["diagnostics"]["summary"]["bytes_sent"] == 2384
@@ -537,6 +545,63 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert final_cadence["delivery_gap_to_accepted"] == 0
   end
 
+  test "passes whitelisted quicer settings to MOQX client connections and records them" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-quicer-settings.jsonl")
+    table = :ets.new(__MODULE__.CapturingDatagramEchoTransport, [:named_table, :public])
+
+    on_exit(fn ->
+      if :ets.whereis(__MODULE__.CapturingDatagramEchoTransport) != :undefined do
+        :ets.delete(table)
+      end
+    end)
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "datagram_pressure",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--datagram-size",
+        "1192",
+        "--datagram-count",
+        "2",
+        "--quicer-setting",
+        "pacing_enabled=0",
+        "--quicer-setting",
+        "max_operations_per_drain=64",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-quicer-settings-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.CapturingDatagramEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    [{:connect_opts, connect_opts}] =
+      :ets.lookup(__MODULE__.CapturingDatagramEchoTransport, :connect_opts)
+
+    assert Keyword.fetch!(connect_opts, :pacing_enabled) == 0
+    assert Keyword.fetch!(connect_opts, :max_operations_per_drain) == 64
+
+    assert record["profile"]["settings"]["quicer_settings"] == %{
+             "pacing_enabled" => 0,
+             "max_operations_per_drain" => 64
+           }
+  end
+
   test "keeps paced MOQX datagram sending on schedule when no receive events are pending" do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-paced-datagram-silent-peer.jsonl")
@@ -559,6 +624,10 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
         "64",
         "--datagram-rate",
         "3000",
+        "--datagram-drain-limit",
+        "0",
+        "--datagram-diagnostics",
+        "full",
         "--duration-seconds",
         "1",
         "--timeout-seconds",
@@ -578,6 +647,7 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert Contract.validate_records([record]).valid?
 
     assert record["profile"]["settings"]["datagram_mode"] == "paced"
+    assert record["profile"]["settings"]["datagram_drain_limit"] == 0
     assert record["workload"]["datagrams_per_second"] == 3000.0
     assert record["metrics"]["offered_rate_ratio"] >= 0.95
     assert record["metrics"]["send_rate_datagrams_per_second"] >= 2850.0
@@ -597,6 +667,7 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     refute record["limits"]["first_break_symptom"] == "tool_output_invalid"
 
     summary = record["diagnostics"]["summary"]
+    assert summary["datagram_drain_limit"] == 0
     assert summary["datagrams_accepted"] == 3000
     assert summary["datagrams_received"] == 0
     assert summary["datagram_send_errors"] == 0
@@ -606,6 +677,155 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     assert is_number(summary["send_datagram_wrapper_overhead_ms"])
     assert is_number(summary["send_loop_unmeasured_overhead_ms"])
     assert is_number(summary["send_loop_residual_overhead_ms"])
+  end
+
+  test "can use summary-only MOQX datagram diagnostics for low-overhead pressure runs" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-paced-datagram-summary-diagnostics.jsonl")
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "datagram_pressure",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--datagram-size",
+        "64",
+        "--datagram-rate",
+        "10",
+        "--duration-seconds",
+        "1",
+        "--datagram-diagnostics",
+        "summary",
+        "--timeout-seconds",
+        "1",
+        "--timeout-margin-seconds",
+        "1",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-paced-datagram-summary-diagnostics-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.DatagramSilentTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["profile"]["settings"]["datagram_diagnostics"] == "summary"
+    assert record["diagnostics"]["summary"]["datagram_diagnostics"] == "summary"
+    assert record["diagnostics"]["summary"]["datagrams_accepted"] == 10
+    assert record["diagnostics"]["summary"]["bytes_sent"] == 640
+    assert record["metrics"]["send_payload_encode_call_total_ms"] == :null
+    assert record["metrics"]["send_datagram_outer_call_total_ms"] == :null
+    assert record["metrics"]["send_datagram_call_total_ms"] == :null
+  end
+
+  test "receives paced MOQX datagrams from a dedicated receiver process by default" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-paced-datagram-process-receiver.jsonl")
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "datagram_pressure",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--datagram-size",
+        "64",
+        "--datagram-rate",
+        "20",
+        "--duration-seconds",
+        "1",
+        "--timeout-seconds",
+        "1",
+        "--timeout-margin-seconds",
+        "1",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-paced-datagram-process-receiver-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.OwnerAwareDatagramEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["profile"]["settings"]["datagram_receive_mode"] == "process"
+    assert record["profile"]["settings"]["datagram_pacing_mode"] == "coarse"
+    assert record["metrics"]["datagram_delivery_ratio"] == 1.0
+    assert record["diagnostics"]["summary"]["datagram_receive_mode"] == "process"
+    assert record["diagnostics"]["summary"]["datagram_pacing_mode"] == "coarse"
+    assert record["diagnostics"]["summary"]["datagrams_accepted"] == 20
+    assert record["diagnostics"]["summary"]["datagrams_received"] == 20
+    assert record["diagnostics"]["summary"]["datagram_receive_events"] == 20
+    assert is_map(record["diagnostics"]["receiver_process"])
+  end
+
+  test "records smooth MOQX datagram pacing mode" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-paced-datagram-smooth.jsonl")
+
+    ReferenceComparison.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "datagram_pressure",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--datagram-size",
+        "64",
+        "--datagram-rate",
+        "20",
+        "--duration-seconds",
+        "1",
+        "--datagram-pacing-mode",
+        "smooth",
+        "--timeout-seconds",
+        "1",
+        "--timeout-margin-seconds",
+        "1",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-paced-datagram-smooth-test"
+      ],
+      script: "test reference-comparison",
+      transport_backend: __MODULE__.OwnerAwareDatagramEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["profile"]["settings"]["datagram_pacing_mode"] == "smooth"
+    assert record["diagnostics"]["summary"]["datagram_pacing_mode"] == "smooth"
+    assert record["metrics"]["datagram_delivery_ratio"] == 1.0
   end
 
   test "records mixed MOQT-shaped MOQX client pressure" do
@@ -1251,6 +1471,68 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
   end
 
+  defmodule CapturingDatagramEchoTransport do
+    @behaviour MOQX.Transport
+
+    @impl true
+    def listen(_port, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept(_listener, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def handshake(connection, _timeout), do: {:ok, connection}
+
+    @impl true
+    def connect(_host, _port, opts, _timeout) do
+      :ets.insert(__MODULE__, {:connect_opts, opts})
+      {:ok, :connection}
+    end
+
+    @impl true
+    def open_stream(_connection, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def send_stream(_stream, _data, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def recv_stream(_stream, _byte_count), do: {:error, :unsupported}
+
+    @impl true
+    def send_datagram(connection, data) do
+      send(self(), {:moqx_transport, {:datagram, connection, data, %{}}})
+      :ok
+    end
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection(_connection, _error_code), do: :ok
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process(_handle, _pid), do: :ok
+
+    @impl true
+    def normalize_message({:moqx_transport, event}), do: event
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+  end
+
   defmodule DatagramSilentTransport do
     @behaviour MOQX.Transport
 
@@ -1300,6 +1582,80 @@ defmodule MOQX.TransportBench.ReferenceComparisonTest do
     def controlling_process(_handle, _pid), do: :ok
 
     @impl true
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+  end
+
+  defmodule OwnerAwareDatagramEchoTransport do
+    @behaviour MOQX.Transport
+
+    @impl true
+    def listen(_port, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept(_listener, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def handshake(connection, _timeout), do: {:ok, connection}
+
+    @impl true
+    def connect(_host, _port, _opts, _timeout) do
+      table = :ets.new(__MODULE__, [:set, :public])
+      :ets.insert(table, {:owner, self()})
+
+      {:ok, {:connection, table}}
+    end
+
+    @impl true
+    def open_stream(_connection, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def send_stream(_stream, _data, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def recv_stream(_stream, _byte_count), do: {:error, :unsupported}
+
+    @impl true
+    def send_datagram({:connection, table} = connection, data) do
+      [{:owner, owner}] = :ets.lookup(table, :owner)
+      send(owner, {:quic, data, connection, 0})
+      :ok
+    end
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection({:connection, table}, _error_code) do
+      :ets.delete(table)
+      :ok
+    end
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process({:connection, table}, pid) when is_pid(pid) do
+      :ets.insert(table, {:owner, pid})
+      :ok
+    end
+
+    @impl true
+    def normalize_message({:quic, data, connection, flags}) when is_binary(data) do
+      {:datagram, connection, data, %{flags: flags}}
+    end
+
     def normalize_message(_message), do: :unknown
 
     @impl true

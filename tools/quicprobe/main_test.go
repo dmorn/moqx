@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"os"
@@ -289,14 +290,16 @@ func TestClientServerJSONDatagramPressure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	statsOutput := filepath.Join(t.TempDir(), "server-stats.jsonl")
 	ready := make(chan string, 1)
 	errc := make(chan error, 1)
 	go func() {
 		errc <- runServer(ctx, serverConfig{
-			addr:     "127.0.0.1:0",
-			certFile: certs.serverCert,
-			keyFile:  certs.serverKey,
-			alpn:     "moqx-test",
+			addr:        "127.0.0.1:0",
+			certFile:    certs.serverCert,
+			keyFile:     certs.serverKey,
+			alpn:        "moqx-test",
+			statsOutput: statsOutput,
 		}, ready)
 	}()
 
@@ -326,6 +329,19 @@ func TestClientServerJSONDatagramPressure(t *testing.T) {
 	}
 
 	assertDatagramRunResult(t, result, 64, 4)
+	serverStats := awaitServerDatagramSummary(t, statsOutput)
+	if serverStats.DatagramsReceived != 4 {
+		t.Fatalf("server datagrams_received = %d, want 4", serverStats.DatagramsReceived)
+	}
+	if serverStats.DatagramsEchoAccepted != 4 {
+		t.Fatalf("server datagrams_echo_accepted = %d, want 4", serverStats.DatagramsEchoAccepted)
+	}
+	if serverStats.BytesReceived != 4*64 {
+		t.Fatalf("server bytes_received = %d, want %d", serverStats.BytesReceived, 4*64)
+	}
+	if serverStats.BytesEchoAccepted != 4*64 {
+		t.Fatalf("server bytes_echo_accepted = %d, want %d", serverStats.BytesEchoAccepted, 4*64)
+	}
 
 	cancel()
 	select {
@@ -604,6 +620,31 @@ func awaitServerReady(t *testing.T, ready <-chan string, errc <-chan error) stri
 	}
 
 	return ""
+}
+
+func awaitServerDatagramSummary(t *testing.T, path string) serverDatagramSummary {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(path)
+		if err == nil && len(strings.TrimSpace(string(raw))) > 0 {
+			var summary serverDatagramSummary
+			if err := json.Unmarshal(raw, &summary); err != nil {
+				t.Fatalf("server stats JSON did not decode: %v\n%s", err, string(raw))
+			}
+
+			return summary
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read server stats: %v", err)
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatalf("server stats were not written to %s", path)
+	return serverDatagramSummary{}
 }
 
 type testCerts struct {

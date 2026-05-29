@@ -37,7 +37,7 @@ defmodule MOQX.MixProject do
     [
       {:telemetry, "~> 1.4"},
       {:quicer,
-       git: "https://github.com/dmorn/quic.git", branch: "fix/macos-cmake-arch-detection"},
+       git: "https://github.com/dmorn/quic.git", branch: "fix/dgram-send-state-feedback"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end

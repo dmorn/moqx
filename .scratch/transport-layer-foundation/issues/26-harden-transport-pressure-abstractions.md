@@ -461,3 +461,17 @@ seams without `Application` env.
   are under
   `bench/transport/results/20260528T124052Z-issue-40-dgram-paced/`.
   Infrastructure was destroyed and verified clean.
+- 2026-05-29: #40 produced a clearer sender-side boundary after the second
+  live tuning loop. The useful slice is now committed as benchmark/quicer
+  observability and load-generator hardening, not as a final 32k pps fix:
+  dedicated DATAGRAM receiver process by default, summary diagnostics for the
+  hot path, suppressed quicer DATAGRAM send-state traffic, quicer connection
+  statistics in benchmark diagnostics, configurable quicer settings for
+  experiments, and a quicprobe server sidecar that proves whether the reference
+  server application received and echoed each DATAGRAM. That evidence made a
+  30k near-MTU MOQX-client DATAGRAM run valid, but 32k remained unstable and
+  repeated remote runs stopped adding signal. The next #26 direction is
+  sender-only: benchmark the cost of one DATAGRAM admission per
+  `send_datagram/3`/NIF boundary, then validate whether a BEAM-to-NIF batch
+  admission experiment is the right way to recover headroom before restarting
+  real-infra tests.

@@ -22,6 +22,32 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   @mixed_completion_drain_limit 1024
   @datagram_cadence_sample_interval_us 100_000
   @datagram_cadence_max_samples 512
+  @default_datagram_drain_limit 0
+  @default_datagram_receive_mode "process"
+  @datagram_receive_modes ~w(inline process)
+  @default_datagram_pacing_mode "coarse"
+  @datagram_pacing_modes ~w(coarse hybrid spin smooth)
+  @datagram_pacing_spin_threshold_us 200
+  @datagram_pacing_smooth_max_catchup_us 500
+  @default_datagram_diagnostics "summary"
+  @datagram_diagnostics_modes ~w(full summary)
+  @quicer_setting_keys %{
+    "congestion_control_algorithm" => :congestion_control_algorithm,
+    "initial_rtt_ms" => :initial_rtt_ms,
+    "initial_window_packets" => :initial_window_packets,
+    "max_ack_delay_ms" => :max_ack_delay_ms,
+    "max_operations_per_drain" => :max_operations_per_drain,
+    "max_worker_queue_delay_us" => :max_worker_queue_delay_us,
+    "maximum_mtu" => :maximum_mtu,
+    "minimum_mtu" => :minimum_mtu,
+    "mtu_discovery_missing_probe_count" => :mtu_discovery_missing_probe_count,
+    "mtu_discovery_search_complete_timeout_us" => :mtu_discovery_search_complete_timeout_us,
+    "pacing_enabled" => :pacing_enabled,
+    "send_buffering_enabled" => :send_buffering_enabled,
+    "tls_client_max_send_buffer" => :tls_client_max_send_buffer
+  }
+  @quicer_boolean_settings MapSet.new([:pacing_enabled, :send_buffering_enabled])
+  @quicer_uint8_settings MapSet.new([:max_operations_per_drain])
   @reference_client_topology "reference-client-to-reference-server"
   @reference_client_moqx_listener_topology "reference-client-to-moqx-listener"
   @moqx_client_topology "moqx-client-to-reference-server"
@@ -69,6 +95,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           datagram_size: :integer,
           datagram_count: :integer,
           datagram_rate: :integer,
+          datagram_drain_limit: :integer,
+          datagram_receive_mode: :string,
+          datagram_pacing_mode: :string,
+          datagram_diagnostics: :string,
           duration_seconds: :integer,
           control_payload_size: :integer,
           control_message_count: :integer,
@@ -78,6 +108,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           timeout_seconds: :integer,
           timeout_margin_seconds: :integer,
           quicprobe_command: :string,
+          quicer_setting: :keep,
           path_json: :string,
           evidence_tier: :string,
           path_id: :string,
@@ -128,6 +159,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   end
 
   defp build_config(opts, argv, script, transport_backend) do
+    explicit_quicer_settings = parse_quicer_settings(Keyword.get_values(opts, :quicer_setting))
+
     config = %{
       argv: argv,
       script: script,
@@ -151,6 +184,14 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       datagram_size: Keyword.get(opts, :datagram_size, 1200),
       datagram_count: Keyword.get(opts, :datagram_count, 1000),
       datagram_rate: opts[:datagram_rate],
+      datagram_drain_limit:
+        Keyword.get(opts, :datagram_drain_limit, @default_datagram_drain_limit),
+      datagram_receive_mode:
+        Keyword.get(opts, :datagram_receive_mode, @default_datagram_receive_mode),
+      datagram_pacing_mode:
+        Keyword.get(opts, :datagram_pacing_mode, @default_datagram_pacing_mode),
+      datagram_diagnostics:
+        Keyword.get(opts, :datagram_diagnostics, @default_datagram_diagnostics),
       duration_seconds: opts[:duration_seconds],
       control_payload_size: Keyword.get(opts, :control_payload_size, 64),
       control_message_count: Keyword.get(opts, :control_message_count, 10),
@@ -161,12 +202,15 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       timeout_seconds: Keyword.get(opts, :timeout_seconds, 5),
       timeout_margin_seconds: Keyword.get(opts, :timeout_margin_seconds, 2),
       quicprobe_command: Keyword.get(opts, :quicprobe_command, "quicprobe"),
+      quicer_settings: %{},
       path_json: opts[:path_json],
       path_overrides: path_overrides(opts),
       run_id: opts[:run_id] || default_run_id(opts[:topology], opts[:server]),
       output: opts[:output],
       notes: opts[:notes]
     }
+
+    config = %{config | quicer_settings: quicer_settings(config, explicit_quicer_settings)}
 
     with :ok <- validate_positive(config.port, "--port"),
          :ok <- validate_workload(config.workload),
@@ -179,13 +223,34 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          :ok <- validate_datagram_size(config),
          :ok <- validate_positive(config.datagram_count, "--datagram-count"),
          :ok <- validate_paced_datagrams(config),
+         :ok <- validate_non_negative(config.datagram_drain_limit, "--datagram-drain-limit"),
+         :ok <- validate_datagram_receive_mode(config.datagram_receive_mode),
+         :ok <- validate_datagram_pacing_mode(config.datagram_pacing_mode),
+         :ok <- validate_datagram_diagnostics(config.datagram_diagnostics),
          :ok <- validate_mixed_control(config),
          :ok <- validate_ratio(config.delivery_threshold, "--delivery-threshold"),
          :ok <- validate_positive_ratio(config.offered_rate_tolerance, "--offered-rate-tolerance"),
          :ok <- validate_positive(config.timeout_seconds, "--timeout-seconds"),
          :ok <- validate_positive(config.timeout_margin_seconds, "--timeout-margin-seconds"),
+         :ok <- validate_quicer_settings(config.quicer_settings),
          :ok <- validate_stream_direction(config.stream_direction) do
       {:ok, config}
+    end
+  end
+
+  defp parse_quicer_settings(values) do
+    Enum.reduce(values, %{}, fn value, settings ->
+      case String.split(value, "=", parts: 2) do
+        [key, raw_value] -> Map.put(settings, key, parse_integer(raw_value))
+        _ -> Map.put(settings, value, :invalid)
+      end
+    end)
+  end
+
+  defp parse_integer(value) do
+    case Integer.parse(value) do
+      {parsed, ""} -> parsed
+      _ -> :invalid
     end
   end
 
@@ -194,6 +259,107 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp validate_optional_positive(nil, _name), do: :ok
   defp validate_optional_positive(value, name), do: validate_positive(value, name)
+
+  defp validate_non_negative(value, _name) when is_integer(value) and value >= 0, do: :ok
+  defp validate_non_negative(_value, name), do: {:error, "#{name} must be 0 or greater."}
+
+  defp validate_datagram_receive_mode(mode) when mode in @datagram_receive_modes, do: :ok
+
+  defp validate_datagram_receive_mode(_mode) do
+    {:error, "--datagram-receive-mode must be inline or process."}
+  end
+
+  defp validate_datagram_pacing_mode(mode) when mode in @datagram_pacing_modes, do: :ok
+
+  defp validate_datagram_pacing_mode(_mode) do
+    {:error, "--datagram-pacing-mode must be coarse, hybrid, spin, or smooth."}
+  end
+
+  defp validate_datagram_diagnostics(mode) when mode in @datagram_diagnostics_modes, do: :ok
+
+  defp validate_datagram_diagnostics(_mode) do
+    {:error, "--datagram-diagnostics must be full or summary."}
+  end
+
+  defp validate_quicer_settings(settings) do
+    Enum.reduce_while(settings, :ok, fn {key, value}, :ok ->
+      case validate_quicer_setting(key, value) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_quicer_setting(key, _value) when not is_binary(key) do
+    {:error, "--quicer-setting keys must be strings."}
+  end
+
+  defp validate_quicer_setting(key, value) do
+    with {:ok, atom_key} <- quicer_setting_key(key),
+         :ok <- validate_quicer_setting_value(atom_key, value) do
+      :ok
+    else
+      {:error, :unknown_key} ->
+        {:error,
+         "--quicer-setting #{key} is not supported. Supported keys: #{supported_quicer_settings()}."}
+
+      {:error, :invalid_value} ->
+        {:error, "--quicer-setting #{key} must use an integer value, for example #{key}=1."}
+
+      {:error, :invalid_boolean} ->
+        {:error, "--quicer-setting #{key} must be 0 or 1."}
+
+      {:error, :invalid_uint8} ->
+        {:error, "--quicer-setting #{key} must be an integer from 0 to 255."}
+
+      {:error, :invalid_non_negative} ->
+        {:error, "--quicer-setting #{key} must be 0 or greater."}
+    end
+  end
+
+  defp quicer_setting_key(key) do
+    case Map.fetch(@quicer_setting_keys, key) do
+      {:ok, atom_key} -> {:ok, atom_key}
+      :error -> {:error, :unknown_key}
+    end
+  end
+
+  defp validate_quicer_setting_value(_key, :invalid), do: {:error, :invalid_value}
+
+  defp validate_quicer_setting_value(key, value) do
+    cond do
+      MapSet.member?(@quicer_boolean_settings, key) ->
+        validate_quicer_boolean_setting_value(value)
+
+      MapSet.member?(@quicer_uint8_settings, key) ->
+        validate_quicer_uint8_setting_value(value)
+
+      true ->
+        validate_quicer_non_negative_setting_value(value)
+    end
+  end
+
+  defp validate_quicer_boolean_setting_value(value) when value in [0, 1], do: :ok
+  defp validate_quicer_boolean_setting_value(_value), do: {:error, :invalid_boolean}
+
+  defp validate_quicer_uint8_setting_value(value)
+       when is_integer(value) and value >= 0 and value <= 255,
+       do: :ok
+
+  defp validate_quicer_uint8_setting_value(_value), do: {:error, :invalid_uint8}
+
+  defp validate_quicer_non_negative_setting_value(value)
+       when is_integer(value) and value >= 0,
+       do: :ok
+
+  defp validate_quicer_non_negative_setting_value(_value), do: {:error, :invalid_non_negative}
+
+  defp supported_quicer_settings do
+    @quicer_setting_keys
+    |> Map.keys()
+    |> Enum.sort()
+    |> Enum.join(", ")
+  end
 
   defp validate_workload(workload)
        when workload in [
@@ -285,6 +451,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp validate_stream_diagnostics_sampling(_mode) do
     {:error, "--stream-diagnostics-sampling must be event or final."}
   end
+
+  defp full_datagram_diagnostics?(%{datagram_diagnostics: "full"}), do: true
+  defp full_datagram_diagnostics?(_config_or_state), do: false
 
   defp path_overrides(opts) do
     %{
@@ -432,6 +601,12 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       Integer.to_string(config.payload_count),
       "--datagram-size",
       Integer.to_string(config.datagram_size),
+      "--datagram-drain-limit",
+      Integer.to_string(config.datagram_drain_limit),
+      "--datagram-receive-mode",
+      config.datagram_receive_mode,
+      "--datagram-pacing-mode",
+      config.datagram_pacing_mode,
       "--timeout",
       "#{datagram_client_timeout_seconds(config)}s"
     ]
@@ -596,8 +771,29 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       peer_unidi_stream_count: max(config.stream_count + 2, 10)
     ]
     |> Kernel.++(datagram_opts(config))
+    |> Keyword.merge(quicer_settings(config))
     |> maybe_put_server_name(config.servername)
   end
+
+  defp quicer_settings(config) do
+    Enum.map(config.quicer_settings, fn {key, value} ->
+      {:ok, atom_key} = quicer_setting_key(key)
+      {atom_key, value}
+    end)
+  end
+
+  defp quicer_settings(config, explicit_settings) do
+    Map.merge(default_quicer_settings(config), explicit_settings)
+  end
+
+  defp default_quicer_settings(%{
+         topology: @moqx_client_topology,
+         workload: @datagram_pressure_workload
+       }) do
+    %{"pacing_enabled" => 0}
+  end
+
+  defp default_quicer_settings(_config), do: %{}
 
   defp datagram_opts(%{workload: @datagram_pressure_workload}), do: [datagram_receive_enabled: 1]
   defp datagram_opts(_config), do: []
@@ -753,7 +949,11 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp merge_runtime_diagnostic(_key, _base, collected), do: collected
 
   defp measure_moqx_datagram_pressure(ctx, connection, config, handshake_latency_ms) do
-    {:ok, collector} = TransportTelemetryCollector.start(sample_process?: true)
+    {:ok, collector} =
+      TransportTelemetryCollector.start(
+        events: datagram_telemetry_events(config),
+        sample_process?: true
+      )
 
     try do
       do_measure_moqx_datagram_pressure(ctx, connection, config, handshake_latency_ms, collector)
@@ -761,6 +961,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       TransportTelemetryCollector.close(collector)
     end
   end
+
+  defp datagram_telemetry_events(%{datagram_diagnostics: "summary"}), do: []
+  defp datagram_telemetry_events(_config), do: :default
 
   defp do_measure_moqx_datagram_pressure(
          ctx,
@@ -772,10 +975,16 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     application_started_at = monotonic_us()
     offered = effective_datagram_count(config)
 
-    case send_and_receive_moqx_datagrams(ctx, connection, config, offered, application_started_at) do
+    result =
+      send_and_receive_moqx_datagrams(ctx, connection, config, offered, application_started_at)
+
+    connection_diagnostics = transport_connection_diagnostics(connection)
+
+    case result do
       {:ok, accepted, send_duration_ms, receive_state, _ctx} ->
         datagram_measurement(%{
           collector_snapshot: TransportTelemetryCollector.snapshot(collector),
+          connection_diagnostics: connection_diagnostics,
           config: config,
           handshake_latency_ms: handshake_latency_ms,
           application_started_at: application_started_at,
@@ -788,6 +997,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       {:error, failure, accepted, send_duration_ms, receive_state, _ctx} ->
         datagram_measurement(%{
           collector_snapshot: TransportTelemetryCollector.snapshot(collector),
+          connection_diagnostics: connection_diagnostics,
           config: config,
           handshake_latency_ms: handshake_latency_ms,
           application_started_at: application_started_at,
@@ -800,6 +1010,23 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     end
   end
 
+  defp transport_connection_diagnostics(%{backend: %{module: module, data: data}})
+       when is_atom(module) do
+    if function_exported?(module, :connection_statistics, 1) do
+      case module.connection_statistics(data) do
+        {:ok, statistics} ->
+          %{"backend" => inspect(module), "statistics_v2" => statistics}
+
+        {:error, reason} ->
+          %{"backend" => inspect(module), "statistics_v2_error" => inspect(reason)}
+      end
+    else
+      nil
+    end
+  end
+
+  defp transport_connection_diagnostics(_connection), do: nil
+
   defp datagram_measurement(args) do
     config = args.config
     failure = Map.get(args, :failure)
@@ -808,7 +1035,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     application_duration_ms = elapsed_ms(args.application_started_at)
 
     send_datagram_call_ms =
-      duration_summary_ms(args.collector_snapshot.send_datagram_call_durations_us)
+      duration_summary_ms_or_nil(args.collector_snapshot.send_datagram_call_durations_us)
 
     send_payload_encode_call_ms =
       duration_summary_ms_or_nil(receive_state.send_payload_encode_durations_us)
@@ -844,6 +1071,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       "datagram_size_bytes" => config.datagram_size,
       "datagram_count" => args.offered,
       "datagram_mode" => datagram_mode(config),
+      "datagram_drain_limit" => config.datagram_drain_limit,
+      "datagram_receive_mode" => config.datagram_receive_mode,
+      "datagram_pacing_mode" => config.datagram_pacing_mode,
+      "datagram_diagnostics" => config.datagram_diagnostics,
       "target_datagrams_per_second" => target_datagram_rate(config),
       "target_duration_seconds" => target_duration_seconds(config),
       "delivery_threshold" => config.delivery_threshold,
@@ -1777,90 +2008,207 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          application_duration_ms,
          collector_snapshot
        ) do
-    failure = Map.get(args, :failure)
     runtime = collector_snapshot.runtime_diagnostics
 
     %{
       "version" => "moqx-client-datagram-diagnostics-v1",
       "summary" =>
-        compact(%{
-          "datagrams_offered" => args.offered,
-          "datagrams_accepted" => args.accepted,
-          "datagrams_received" => received_count,
-          "datagrams_missing" => max(args.offered - received_count, 0),
-          "datagram_send_accepted" => collector_snapshot.datagram_send_accepted,
-          "datagram_send_bytes_accepted" => collector_snapshot.datagram_send_bytes_accepted,
-          "datagram_send_errors" => collector_snapshot.datagram_send_errors,
-          "bytes_sent" => collector_snapshot.datagram_send_bytes_accepted,
-          "bytes_received" => runtime[:datagram_bytes_received],
-          "datagram_receive_events" => runtime[:datagram_events],
-          "datagram_bytes_received" => runtime[:datagram_bytes_received],
-          "duplicate_datagrams" => receive_state.duplicate_datagrams,
-          "invalid_datagrams" => receive_state.invalid_datagrams,
-          "ignored_events" => runtime[:ignored_events],
-          "unknown_events" => runtime[:unknown_events],
-          "receive_errors" => runtime[:receive_errors],
-          "drain_events" => length(runtime[:receive_event_drain_call_durations_us] || []),
-          "send_datagram_call_ms" =>
-            duration_summary_ms(collector_snapshot.send_datagram_call_durations_us),
-          "send_payload_encode_call_ms" =>
-            duration_summary_ms_or_nil(receive_state.send_payload_encode_durations_us),
-          "send_datagram_outer_call_ms" =>
-            duration_summary_ms_or_nil(receive_state.send_datagram_outer_call_durations_us),
-          "send_datagram_wrapper_overhead_ms" =>
-            send_datagram_wrapper_overhead_ms(
-              duration_summary_ms_or_nil(receive_state.send_datagram_outer_call_durations_us),
-              duration_summary_ms(collector_snapshot.send_datagram_call_durations_us)
-            ),
-          "send_pacing_late_count" => datagram_send_pacing_late_count(config, receive_state),
-          "send_pacing_lag_ms" => datagram_send_pacing_lag_ms(config, receive_state),
-          "target_send_duration_ms" => target_datagram_send_duration_ms(config),
-          "scheduled_send_span_ms" => scheduled_datagram_send_span_ms(args.accepted, config),
-          "send_loop_overrun_ms" =>
-            send_loop_overrun_ms(
-              args.send_duration_ms,
-              scheduled_datagram_send_span_ms(args.accepted, config)
-            ),
-          "send_loop_unmeasured_overhead_ms" =>
-            send_loop_unmeasured_overhead_ms(
-              send_loop_overrun_ms(
-                args.send_duration_ms,
-                scheduled_datagram_send_span_ms(args.accepted, config)
-              ),
-              duration_summary_ms(collector_snapshot.send_datagram_call_durations_us)
-            ),
-          "send_loop_residual_overhead_ms" =>
-            send_loop_residual_overhead_ms(
-              send_loop_overrun_ms(
-                args.send_duration_ms,
-                scheduled_datagram_send_span_ms(args.accepted, config)
-              ),
-              duration_summary_ms_or_nil(receive_state.send_payload_encode_durations_us),
-              duration_summary_ms_or_nil(receive_state.send_datagram_outer_call_durations_us)
-            ),
-          "receive_event_call_ms" =>
-            duration_summary_ms(runtime[:receive_event_call_durations_us] || []),
-          "receive_event_blocking_call_ms" =>
-            duration_summary_ms(runtime[:receive_event_blocking_call_durations_us] || []),
-          "receive_event_drain_call_ms" =>
-            duration_summary_ms(runtime[:receive_event_drain_call_durations_us] || []),
-          "active_send_duration_ms" => args.send_duration_ms,
-          "active_receive_duration_ms" =>
-            duration_ms_between(
-              receive_state.receive_started_at_us,
-              receive_state.receive_finished_at_us
-            ),
-          "observation_duration_ms" => application_duration_ms,
-          "receive_loop_stop_reason" => receive_state.stop_reason,
-          "cadence_sample_interval_ms" => @datagram_cadence_sample_interval_us / 1000,
-          "cadence_sample_count" => receive_state.cadence_sample_count,
-          "application_duration_ms" => application_duration_ms,
-          "target_datagrams_per_second" => target_datagram_rate(config),
-          "send_error" => failure && failure["reason"]
-        }),
+        datagram_pressure_summary(
+          config,
+          args,
+          receive_state,
+          received_count,
+          application_duration_ms,
+          collector_snapshot,
+          runtime
+        ),
       "cadence" => receive_state.cadence_samples,
-      "process" => process_diagnostics(runtime.process)
+      "process" => process_diagnostics(runtime.process),
+      "receiver_process" => receive_state.receiver_process_diagnostics,
+      "transport" => args.connection_diagnostics
     }
+    |> compact()
+  end
+
+  defp datagram_pressure_summary(
+         config,
+         args,
+         receive_state,
+         received_count,
+         application_duration_ms,
+         collector_snapshot,
+         runtime
+       ) do
+    Map.merge(
+      datagram_pressure_count_summary(
+        config,
+        args,
+        receive_state,
+        received_count,
+        collector_snapshot,
+        runtime
+      ),
+      datagram_pressure_timing_summary(
+        config,
+        args,
+        receive_state,
+        application_duration_ms,
+        collector_snapshot,
+        runtime
+      )
+    )
+    |> compact()
+  end
+
+  defp datagram_pressure_count_summary(
+         config,
+         args,
+         receive_state,
+         received_count,
+         collector_snapshot,
+         runtime
+       ) do
+    datagram_bytes_received =
+      max(runtime[:datagram_bytes_received] || 0, received_count * config.datagram_size)
+
+    datagram_events = max(runtime[:datagram_events] || 0, received_count)
+
+    datagram_bytes_sent =
+      max(
+        collector_snapshot.datagram_send_bytes_accepted || 0,
+        args.accepted * config.datagram_size
+      )
+
+    datagram_send_accepted = max(collector_snapshot.datagram_send_accepted || 0, args.accepted)
+
+    %{
+      "datagrams_offered" => args.offered,
+      "datagrams_accepted" => args.accepted,
+      "datagrams_received" => received_count,
+      "datagrams_missing" => max(args.offered - received_count, 0),
+      "datagram_send_accepted" => datagram_send_accepted,
+      "datagram_send_bytes_accepted" => datagram_bytes_sent,
+      "datagram_send_errors" => collector_snapshot.datagram_send_errors,
+      "datagram_drain_limit" => config.datagram_drain_limit,
+      "datagram_receive_mode" => config.datagram_receive_mode,
+      "datagram_pacing_mode" => config.datagram_pacing_mode,
+      "datagram_diagnostics" => config.datagram_diagnostics,
+      "bytes_sent" => datagram_bytes_sent,
+      "bytes_received" => datagram_bytes_received,
+      "datagram_receive_events" => datagram_events,
+      "datagram_bytes_received" => datagram_bytes_received,
+      "duplicate_datagrams" => receive_state.duplicate_datagrams,
+      "invalid_datagrams" => receive_state.invalid_datagrams,
+      "ignored_events" => runtime[:ignored_events],
+      "unknown_events" => runtime[:unknown_events],
+      "receive_errors" => runtime[:receive_errors],
+      "drain_events" => length(runtime[:receive_event_drain_call_durations_us] || [])
+    }
+  end
+
+  defp datagram_pressure_timing_summary(
+         config,
+         args,
+         receive_state,
+         application_duration_ms,
+         collector_snapshot,
+         runtime
+       ) do
+    send_call_ms = duration_summary_ms_or_nil(collector_snapshot.send_datagram_call_durations_us)
+    payload_encode_ms = duration_summary_ms_or_nil(receive_state.send_payload_encode_durations_us)
+
+    outer_call_ms =
+      duration_summary_ms_or_nil(receive_state.send_datagram_outer_call_durations_us)
+
+    scheduled_span_ms = scheduled_datagram_send_span_ms(args.accepted, config)
+    send_overrun_ms = send_loop_overrun_ms(args.send_duration_ms, scheduled_span_ms)
+
+    %{
+      "send_datagram_call_ms" => send_call_ms,
+      "send_payload_encode_call_ms" => payload_encode_ms,
+      "send_datagram_outer_call_ms" => outer_call_ms,
+      "send_datagram_wrapper_overhead_ms" =>
+        send_datagram_wrapper_overhead_ms(outer_call_ms, send_call_ms),
+      "send_pacing_late_count" => datagram_send_pacing_late_count(config, receive_state),
+      "send_pacing_lag_ms" => datagram_send_pacing_lag_ms(config, receive_state),
+      "target_send_duration_ms" => target_datagram_send_duration_ms(config),
+      "scheduled_send_span_ms" => scheduled_span_ms,
+      "send_loop_overrun_ms" => send_overrun_ms,
+      "send_loop_unmeasured_overhead_ms" =>
+        send_loop_unmeasured_overhead_ms(send_overrun_ms, send_call_ms),
+      "send_loop_residual_overhead_ms" =>
+        send_loop_residual_overhead_ms(send_overrun_ms, payload_encode_ms, outer_call_ms),
+      "receive_event_call_ms" =>
+        duration_summary_ms(runtime[:receive_event_call_durations_us] || []),
+      "receive_event_blocking_call_ms" =>
+        duration_summary_ms(runtime[:receive_event_blocking_call_durations_us] || []),
+      "receive_event_drain_call_ms" =>
+        duration_summary_ms(runtime[:receive_event_drain_call_durations_us] || []),
+      "active_send_duration_ms" => args.send_duration_ms,
+      "active_receive_duration_ms" =>
+        duration_ms_between(
+          receive_state.receive_started_at_us,
+          receive_state.receive_finished_at_us
+        ),
+      "observation_duration_ms" => application_duration_ms,
+      "receive_loop_stop_reason" => receive_state.stop_reason,
+      "cadence_sample_interval_ms" => @datagram_cadence_sample_interval_us / 1000,
+      "cadence_sample_count" => receive_state.cadence_sample_count,
+      "application_duration_ms" => application_duration_ms,
+      "target_datagrams_per_second" => target_datagram_rate(config),
+      "send_error" => failure_reason(Map.get(args, :failure))
+    }
+  end
+
+  defp failure_reason(nil), do: nil
+  defp failure_reason(failure), do: failure["reason"]
+
+  defp send_and_receive_moqx_datagrams(
+         ctx,
+         connection,
+         %{datagram_rate: rate, datagram_receive_mode: "process"} = config,
+         count,
+         started_at
+       )
+       when is_integer(rate) and rate > 0 do
+    send_started_at = monotonic_us()
+    receive_state = initial_moqx_datagram_receive_state(config, started_at, count)
+    parent = self()
+
+    receiver =
+      Task.async(fn ->
+        {receive_state, receiver_ctx} =
+          receive_moqx_datagrams(ctx, connection, config, count, receive_state, started_at)
+
+        _result = Transport.controlling_process(receiver_ctx, parent)
+
+        {Map.put(receive_state, :receiver_process_diagnostics, process_diagnostics()),
+         receiver_ctx}
+      end)
+
+    case Transport.controlling_process(ctx, receiver.pid) do
+      {:ok, ctx} ->
+        case send_paced_moqx_datagrams(ctx, connection, config, count, send_started_at) do
+          {:ok, accepted, send_duration_ms, send_state, ctx} ->
+            receive_state =
+              await_moqx_datagram_receiver(receiver, config, send_state, accepted)
+
+            {:ok, accepted, send_duration_ms, receive_state, ctx}
+
+          {:error, failure, accepted, send_duration_ms, send_state, ctx} ->
+            _result = Task.shutdown(receiver, :brutal_kill)
+            receive_state = finish_moqx_datagram_receive(send_state, "send_error")
+
+            {:error, failure, accepted, send_duration_ms, receive_state, ctx}
+        end
+
+      {:error, reason, ctx} ->
+        _result = Task.shutdown(receiver, :brutal_kill)
+        failure = datagram_send_failure(config, reason, 1, count, 0)
+        receive_state = finish_moqx_datagram_receive(receive_state, "receiver_handoff_error")
+
+        {:error, failure, 0, elapsed_ms(send_started_at), receive_state, ctx}
+    end
   end
 
   defp send_and_receive_moqx_datagrams(
@@ -1873,13 +2221,21 @@ defmodule MOQX.TransportBench.ReferenceComparison do
        when is_integer(rate) and rate > 0 do
     send_started_at = monotonic_us()
     receive_state = initial_moqx_datagram_receive_state(config, started_at, count)
+    payload_padding = DatagramPayload.padding_for_size(config.datagram_size)
 
     result =
       Enum.reduce_while(
         1..count,
-        {0, ctx, receive_state},
-        fn sequence, {accepted, ctx, receive_state} ->
-          send_at = scheduled_datagram_send_at(send_started_at, sequence, rate)
+        {0, ctx, receive_state, nil},
+        fn sequence, {accepted, ctx, receive_state, schedule_state} ->
+          {send_at, schedule_state} =
+            next_datagram_send_target(
+              send_started_at,
+              sequence,
+              rate,
+              config.datagram_pacing_mode,
+              schedule_state
+            )
 
           {receive_state, ctx} =
             receive_moqx_datagrams_until(
@@ -1897,8 +2253,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
             send_moqx_datagram_with_phase_diagnostics(
               ctx,
               connection,
-              config,
               sequence,
+              payload_padding,
               receive_state
             )
 
@@ -1911,10 +2267,11 @@ defmodule MOQX.TransportBench.ReferenceComparison do
                   ctx,
                   connection,
                   receive_state,
-                  started_at
+                  started_at,
+                  config.datagram_drain_limit
                 )
 
-              {:cont, {accepted + 1, ctx, receive_state}}
+              {:cont, {accepted + 1, ctx, receive_state, schedule_state}}
 
             {:error, reason, ctx} ->
               failure = datagram_send_failure(config, reason, sequence, count, accepted)
@@ -1930,7 +2287,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       {:error, _failure, _accepted, _send_duration_ms, _receive_state, _ctx} = error ->
         error
 
-      {accepted, ctx, receive_state} ->
+      {accepted, ctx, receive_state, _schedule_state} ->
         send_duration_ms = elapsed_ms(send_started_at)
 
         {receive_state, ctx} =
@@ -1977,12 +2334,161 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     end
   end
 
+  defp send_paced_moqx_datagrams(
+         ctx,
+         connection,
+         %{datagram_rate: rate} = config,
+         count,
+         started_at
+       ) do
+    send_state = initial_moqx_datagram_receive_state(config, started_at, count)
+    payload_padding = DatagramPayload.padding_for_size(config.datagram_size)
+
+    result =
+      Enum.reduce_while(1..count, {0, ctx, send_state, nil}, fn sequence,
+                                                                {accepted, ctx, send_state,
+                                                                 schedule_state} ->
+        {send_at, schedule_state} =
+          next_datagram_send_target(
+            started_at,
+            sequence,
+            rate,
+            config.datagram_pacing_mode,
+            schedule_state
+          )
+
+        wait_until_datagram_send_target(send_at, config.datagram_pacing_mode)
+
+        send_state =
+          record_moqx_datagram_send_schedule(send_state, send_at, monotonic_us())
+
+        {send_result, send_state} =
+          send_moqx_datagram_with_phase_diagnostics(
+            ctx,
+            connection,
+            sequence,
+            payload_padding,
+            send_state
+          )
+
+        case send_result do
+          {:ok, ctx} ->
+            send_state = record_moqx_datagram_accepted(send_state, accepted + 1)
+
+            {send_state, ctx} =
+              drain_available_moqx_datagrams(
+                ctx,
+                connection,
+                send_state,
+                started_at,
+                config.datagram_drain_limit
+              )
+
+            {:cont, {accepted + 1, ctx, send_state, schedule_state}}
+
+          {:error, reason, ctx} ->
+            failure = datagram_send_failure(config, reason, sequence, count, accepted)
+            {:halt, {:error, failure, accepted, elapsed_ms(started_at), send_state, ctx}}
+        end
+      end)
+
+    case result do
+      {:error, _failure, _accepted, _send_duration_ms, _send_state, _ctx} = error ->
+        error
+
+      {accepted, ctx, send_state, _schedule_state} ->
+        {:ok, accepted, elapsed_ms(started_at), send_state, ctx}
+    end
+  end
+
+  defp wait_until_datagram_send_target(target_us, pacing_mode) do
+    case datagram_wait_until_target(target_us, pacing_mode) do
+      :due ->
+        :ok
+
+      :yield ->
+        :erlang.yield()
+        wait_until_datagram_send_target(target_us, pacing_mode)
+
+      :spin ->
+        spin_until_datagram_target(target_us)
+
+      remaining_ms ->
+        Process.sleep(remaining_ms)
+        wait_until_datagram_send_target(target_us, pacing_mode)
+    end
+  end
+
+  defp next_datagram_send_target(started_at_us, sequence, rate, "smooth", nil) do
+    next_datagram_send_target(started_at_us, sequence, rate, "smooth", %{
+      base_us: started_at_us,
+      base_sequence: 1
+    })
+  end
+
+  defp next_datagram_send_target(_started_at_us, sequence, rate, "smooth", schedule_state) do
+    target_us =
+      schedule_state.base_us +
+        div((sequence - schedule_state.base_sequence) * 1_000_000, rate)
+
+    now = monotonic_us()
+
+    if now - target_us > @datagram_pacing_smooth_max_catchup_us do
+      {now, %{base_us: now, base_sequence: sequence}}
+    else
+      {target_us, schedule_state}
+    end
+  end
+
+  defp next_datagram_send_target(started_at_us, sequence, rate, _pacing_mode, schedule_state) do
+    {scheduled_datagram_send_at(started_at_us, sequence, rate), schedule_state}
+  end
+
+  defp await_moqx_datagram_receiver(receiver, config, send_state, accepted) do
+    wait_ms = datagram_receive_timeout_ms(config) + 1_000
+
+    case Task.yield(receiver, wait_ms) || Task.shutdown(receiver, :brutal_kill) do
+      {:ok, {receive_state, _ctx}} ->
+        merge_datagram_send_receive_state(send_state, receive_state, accepted)
+
+      nil ->
+        send_state
+        |> Map.put(:accepted, accepted)
+        |> finish_moqx_datagram_receive("receiver_timeout")
+    end
+  end
+
+  defp merge_datagram_send_receive_state(send_state, receive_state, accepted) do
+    receive_state
+    |> Map.put(:accepted, accepted)
+    |> Map.put(:received, MapSet.union(receive_state.received, send_state.received))
+    |> Map.put(:latencies, receive_state.latencies ++ send_state.latencies)
+    |> Map.put(
+      :first_byte_latency_ms,
+      receive_state.first_byte_latency_ms || send_state.first_byte_latency_ms
+    )
+    |> Map.put(
+      :duplicate_datagrams,
+      receive_state.duplicate_datagrams + send_state.duplicate_datagrams
+    )
+    |> Map.put(:invalid_datagrams, receive_state.invalid_datagrams + send_state.invalid_datagrams)
+    |> Map.put(:send_pacing_late_count, send_state.send_pacing_late_count)
+    |> Map.put(:send_pacing_lags_us, send_state.send_pacing_lags_us)
+    |> Map.put(:send_payload_encode_durations_us, send_state.send_payload_encode_durations_us)
+    |> Map.put(
+      :send_datagram_outer_call_durations_us,
+      send_state.send_datagram_outer_call_durations_us
+    )
+    |> refresh_final_datagram_cadence()
+  end
+
   defp send_moqx_datagrams(ctx, connection, config, count) do
     started_at = monotonic_us()
+    payload_padding = DatagramPayload.padding_for_size(config.datagram_size)
 
     result =
       Enum.reduce_while(1..count, {0, ctx}, fn sequence, {accepted, ctx} ->
-        case send_moqx_datagram(ctx, connection, config, sequence) do
+        case send_moqx_datagram(ctx, connection, sequence, payload_padding) do
           {:ok, ctx} ->
             {:cont, {accepted + 1, ctx}}
 
@@ -2001,11 +2507,11 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     end
   end
 
-  defp send_moqx_datagram(ctx, connection, config, sequence) do
+  defp send_moqx_datagram(ctx, connection, sequence, payload_padding) do
     Transport.send_datagram(
       ctx,
       connection,
-      DatagramPayload.encode(sequence, config.datagram_size, monotonic_us())
+      DatagramPayload.encode(sequence, monotonic_us(), payload_padding)
     )
   end
 
@@ -2030,6 +2536,9 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       accepted: 0,
       offered: offered,
       target_datagrams_per_second: target_datagram_rate(config),
+      datagram_drain_limit: config.datagram_drain_limit,
+      datagram_pacing_mode: config.datagram_pacing_mode,
+      datagram_diagnostics: config.datagram_diagnostics,
       started_at_us: started_at,
       receive_started_at_us: nil,
       receive_finished_at_us: nil,
@@ -2046,7 +2555,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       send_pacing_late_count: 0,
       send_pacing_lags_us: [],
       send_payload_encode_durations_us: [],
-      send_datagram_outer_call_durations_us: []
+      send_datagram_outer_call_durations_us: [],
+      receiver_process_diagnostics: nil
     }
 
     record_datagram_cadence(state, "start", true)
@@ -2055,12 +2565,12 @@ defmodule MOQX.TransportBench.ReferenceComparison do
   defp send_moqx_datagram_with_phase_diagnostics(
          ctx,
          connection,
-         config,
          sequence,
-         receive_state
+         payload_padding,
+         %{datagram_diagnostics: "full"} = receive_state
        ) do
     payload_started_at = monotonic_us()
-    payload = DatagramPayload.encode(sequence, config.datagram_size, payload_started_at)
+    payload = DatagramPayload.encode(sequence, payload_started_at, payload_padding)
     payload_duration_us = monotonic_us() - payload_started_at
 
     send_started_at = monotonic_us()
@@ -2075,14 +2585,30 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     {result, receive_state}
   end
 
+  defp send_moqx_datagram_with_phase_diagnostics(
+         ctx,
+         connection,
+         sequence,
+         payload_padding,
+         receive_state
+       ) do
+    payload = DatagramPayload.encode(sequence, monotonic_us(), payload_padding)
+    {Transport.send_datagram(ctx, connection, payload), receive_state}
+  end
+
   defp record_moqx_datagram_send_schedule(receive_state, scheduled_at_us, actual_at_us) do
     lag_us = max(actual_at_us - scheduled_at_us, 0)
 
-    %{
+    receive_state = %{
       receive_state
-      | send_pacing_late_count: receive_state.send_pacing_late_count + late_count(lag_us),
-        send_pacing_lags_us: [lag_us | receive_state.send_pacing_lags_us]
+      | send_pacing_late_count: receive_state.send_pacing_late_count + late_count(lag_us)
     }
+
+    if full_datagram_diagnostics?(receive_state) do
+      %{receive_state | send_pacing_lags_us: [lag_us | receive_state.send_pacing_lags_us]}
+    else
+      receive_state
+    end
   end
 
   defp late_count(lag_us) when lag_us > 0, do: 1
@@ -2115,7 +2641,7 @@ defmodule MOQX.TransportBench.ReferenceComparison do
 
   defp datagram_send_pacing_lag_ms(%{datagram_rate: rate}, receive_state)
        when is_integer(rate) and rate > 0 do
-    duration_summary_ms(receive_state.send_pacing_lags_us)
+    duration_summary_ms_or_nil(receive_state.send_pacing_lags_us)
   end
 
   defp datagram_send_pacing_lag_ms(_config, _receive_state), do: nil
@@ -2139,43 +2665,75 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          target_us
        ) do
     receive_state = mark_moqx_datagram_receive_started(receive_state)
-    remaining_ms = max(ceil((target_us - monotonic_us()) / 1000), 0)
 
-    case Transport.receive_event(ctx, remaining_ms) do
-      {:ok, {:datagram, ^connection, payload, _metadata}, ctx} ->
-        receive_state = record_moqx_datagram(payload, receive_state, started_at)
-
-        receive_moqx_datagrams_until(
-          ctx,
-          connection,
-          receive_state,
-          started_at,
-          target_us
-        )
-
-      {:ok, _event, ctx} ->
-        receive_moqx_datagrams_until(
-          ctx,
-          connection,
-          receive_state,
-          started_at,
-          target_us
-        )
-
-      {:unknown, _message, ctx} ->
-        receive_moqx_datagrams_until(
-          ctx,
-          connection,
-          receive_state,
-          started_at,
-          target_us
-        )
-
-      {:error, _reason, ctx} ->
+    case datagram_wait_until_target(target_us, receive_state.datagram_pacing_mode) do
+      :due ->
         {receive_state, ctx}
 
-      {:timeout, ctx} ->
+      :yield ->
+        {receive_state, ctx} =
+          drain_available_moqx_datagrams(
+            ctx,
+            connection,
+            receive_state,
+            started_at,
+            receive_state.datagram_drain_limit
+          )
+
+        receive_moqx_datagrams_until(
+          ctx,
+          connection,
+          receive_state,
+          started_at,
+          target_us
+        )
+
+      :spin ->
+        spin_until_datagram_target(target_us)
         {receive_state, ctx}
+
+      remaining_ms ->
+        Process.sleep(remaining_ms)
+        {receive_state, ctx}
+    end
+  end
+
+  defp datagram_wait_until_target(target_us, "coarse") do
+    case target_us - monotonic_us() do
+      remaining_us when remaining_us <= 0 -> :due
+      remaining_us when remaining_us < 1_000 -> :yield
+      remaining_us -> div(remaining_us, 1_000)
+    end
+  end
+
+  defp datagram_wait_until_target(target_us, "smooth"),
+    do: datagram_wait_until_target(target_us, "coarse")
+
+  defp datagram_wait_until_target(target_us, "hybrid") do
+    case target_us - monotonic_us() do
+      remaining_us when remaining_us <= 0 ->
+        :due
+
+      remaining_us when remaining_us <= @datagram_pacing_spin_threshold_us + 1_000 ->
+        :spin
+
+      remaining_us ->
+        div(remaining_us - @datagram_pacing_spin_threshold_us, 1_000)
+    end
+  end
+
+  defp datagram_wait_until_target(target_us, "spin") do
+    case target_us - monotonic_us() do
+      remaining_us when remaining_us <= 0 -> :due
+      _remaining_us -> :spin
+    end
+  end
+
+  defp spin_until_datagram_target(target_us) do
+    if monotonic_us() < target_us do
+      spin_until_datagram_target(target_us)
+    else
+      :ok
     end
   end
 
@@ -2183,7 +2741,21 @@ defmodule MOQX.TransportBench.ReferenceComparison do
          ctx,
          connection,
          receive_state,
-         started_at
+         started_at,
+         limit
+       )
+
+  defp drain_available_moqx_datagrams(ctx, _connection, receive_state, _started_at, limit)
+       when limit <= 0 do
+    {receive_state, ctx}
+  end
+
+  defp drain_available_moqx_datagrams(
+         ctx,
+         connection,
+         receive_state,
+         started_at,
+         limit
        ) do
     receive_state = mark_moqx_datagram_receive_started(receive_state)
 
@@ -2195,7 +2767,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           ctx,
           connection,
           receive_state,
-          started_at
+          started_at,
+          limit - 1
         )
 
       {:ok, _event, ctx} ->
@@ -2203,7 +2776,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           ctx,
           connection,
           receive_state,
-          started_at
+          started_at,
+          limit - 1
         )
 
       {:unknown, _message, ctx} ->
@@ -2211,7 +2785,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
           ctx,
           connection,
           receive_state,
-          started_at
+          started_at,
+          limit - 1
         )
 
       {:error, _reason, ctx} ->
@@ -2389,6 +2964,18 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     else
       receive_state
     end
+  end
+
+  defp refresh_final_datagram_cadence(receive_state) do
+    samples = Enum.reject(receive_state.cadence_samples, &(&1["phase"] == "final"))
+    last_sample = List.last(samples) || %{}
+
+    receive_state
+    |> Map.put(:cadence_samples, samples)
+    |> Map.put(:cadence_sample_count, length(samples))
+    |> Map.put(:cadence_last_accepted, last_sample["datagrams_accepted"] || 0)
+    |> Map.put(:cadence_last_received, last_sample["datagrams_received"] || 0)
+    |> record_datagram_cadence("final", true)
   end
 
   defp append_cadence_sample(samples, sample) do
@@ -3653,12 +4240,17 @@ defmodule MOQX.TransportBench.ReferenceComparison do
         "topology" => ctx.config.topology,
         "workload" => measurement["workload"] || ctx.config.workload,
         "datagram_mode" => measurement["datagram_mode"] || profile_datagram_mode(ctx.config),
+        "datagram_drain_limit" => datagram_drain_limit(ctx.config, measurement),
+        "datagram_receive_mode" => datagram_receive_mode(ctx.config, measurement),
+        "datagram_pacing_mode" => datagram_pacing_mode(ctx.config, measurement),
+        "datagram_diagnostics" => datagram_diagnostics(ctx.config, measurement),
         "delivery_threshold" => ctx.config.delivery_threshold,
         "offered_rate_tolerance" => ctx.config.offered_rate_tolerance,
         "reference_tool" => "quicprobe",
         "measurement_schema" => measurement["schema_version"],
         "client_implementation" => measurement["client_implementation"] || "quicprobe",
         "server_implementation" => server_implementation(ctx.config),
+        "quicer_settings" => stringify_quicer_settings(ctx.config.quicer_settings),
         "stream_scheduling" => stream_scheduling(ctx.config, measurement),
         "stream_send_window" => stream_send_window(ctx.config, measurement),
         "stream_event_batch_size" => stream_event_batch_size(ctx.config, measurement),
@@ -3667,10 +4259,32 @@ defmodule MOQX.TransportBench.ReferenceComparison do
     }
   end
 
+  defp stringify_quicer_settings(settings), do: settings
+
   defp stream_send_window(%{topology: @moqx_client_topology} = config, measurement),
     do: measurement["stream_send_window"] || config.stream_send_window
 
   defp stream_send_window(_config, _measurement), do: nil
+
+  defp datagram_drain_limit(%{topology: @moqx_client_topology} = config, measurement),
+    do: measurement["datagram_drain_limit"] || config.datagram_drain_limit
+
+  defp datagram_drain_limit(_config, _measurement), do: nil
+
+  defp datagram_receive_mode(%{topology: @moqx_client_topology} = config, measurement),
+    do: measurement["datagram_receive_mode"] || config.datagram_receive_mode
+
+  defp datagram_receive_mode(_config, _measurement), do: nil
+
+  defp datagram_pacing_mode(%{topology: @moqx_client_topology} = config, measurement),
+    do: measurement["datagram_pacing_mode"] || config.datagram_pacing_mode
+
+  defp datagram_pacing_mode(_config, _measurement), do: nil
+
+  defp datagram_diagnostics(%{topology: @moqx_client_topology} = config, measurement),
+    do: measurement["datagram_diagnostics"] || config.datagram_diagnostics
+
+  defp datagram_diagnostics(_config, _measurement), do: nil
 
   defp stream_event_batch_size(%{topology: @moqx_client_topology} = config, measurement),
     do: measurement["stream_event_batch_size"] || config.stream_event_batch_size
@@ -4572,6 +5186,10 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       --datagram-size BYTES          bytes per datagram for datagram_pressure (default: 1200)
       --datagram-count N             datagrams to send for datagram_pressure (default: 1000)
       --datagram-rate N              target datagrams/sec for paced datagram_pressure
+      --datagram-drain-limit N       nonblocking receive events to drain after each paced send (default: #{@default_datagram_drain_limit})
+      --datagram-receive-mode VALUE  inline or process receive loop for paced datagrams (default: #{@default_datagram_receive_mode})
+      --datagram-pacing-mode VALUE   coarse, hybrid, spin, or smooth wait strategy for paced datagrams (default: #{@default_datagram_pacing_mode})
+      --datagram-diagnostics VALUE   full or summary hot-path diagnostics (default: #{@default_datagram_diagnostics})
       --duration-seconds N           paced datagram_pressure duration; offered = rate * duration
       --control-payload-size BYTES   bytes per control message for mixed_moqt_shaped (default: 64)
       --control-message-count N      control messages for mixed_moqt_shaped (default: 10)
@@ -4581,6 +5199,8 @@ defmodule MOQX.TransportBench.ReferenceComparison do
       --timeout-seconds N            client timeout (default: 5)
       --timeout-margin-seconds N     kill/abort step after timeout + N seconds (default: 2)
       --quicprobe-command PATH       quicprobe executable for reference-client topologies (default: quicprobe)
+      --quicer-setting KEY=VALUE     whitelisted quicer connection setting for MOQX client runs; repeatable
+                                     paced MOQX DATAGRAM runs default to pacing_enabled=0
       --path-json PATH_OR_JSON       path metadata file or inline JSON object
       --output PATH                  write JSONL to a file instead of stdout
       --run-id ID                    run identifier
