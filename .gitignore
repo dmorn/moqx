@@ -55,6 +55,8 @@ bench/probed/_build/
 bench/probed/cover/
 bench/probed/deps/
 bench/probed/doc/
+bench/probed/burrito_out/
+bench/probed/build/
 bench/probed/tmp/
 bench/probed/.tmp/
 bench/probed/*.srl

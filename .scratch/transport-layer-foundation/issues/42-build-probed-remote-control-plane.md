@@ -1,6 +1,6 @@
 # Build probed remote benchmark control plane
 
-Status: ready-for-agent
+Status: in-progress
 Type: AFK
 
 ## Parent
@@ -326,11 +326,13 @@ This phase still deploys tools through existing SSH/just recipes.
 
 Package and deploy `probed` to lab nodes:
 
-- release artifact under `/opt/moqx-bench/probed/current/bin/probed`;
+- Burrito self-contained binary artifact under
+  `/opt/moqx-bench/probed/current/bin/probed`;
 - config under `/etc/moqx-bench/probed.json`;
 - token under `/etc/moqx-bench/probed.token`;
 - work dir `/var/lib/probed`;
-- systemd unit or explicit SSH-start recipe;
+- pidfile/log under `/var/lib/probed`;
+- explicit SSH-start recipe;
 - `just` recipes to build, deploy, start, stop, and health-check `probed`.
 
 ### Phase 3: Local controller loop
@@ -417,3 +419,40 @@ Use the daemon to run the next #40 validation:
   implementation issue after deciding that the next useful remote performance
   loop is to deploy `probed` servers first, keep infrastructure up, and validate
   the new caller-side benchmark clients through the daemon.
+- 2026-06-05: Implementation progress: added the first `bench/probed` HTTP
+  daemon API, config-file/env loading, bearer auth, configured-tool validation,
+  process lifecycle/readiness handling, run artifact listing/fetch/bundling,
+  cleanup protection for active processes, local fake-tool smoke coverage,
+  Docker release packaging, and `just` recipes to build/deploy/start/stop/check
+  `probed`. Remote infrastructure smoke is intentionally not run yet per the
+  current task constraint.
+- 2026-06-05: Refined the daemon shape after checking current Bandit and Plug
+  documentation: `probed` now serves `Probed.Router` through Bandit, uses
+  `Plug.Router`/`Plug.Parsers` for the HTTP API, and keeps mutable run/process
+  state in `Probed.Runner`. Tests use `Plug.Test` for router behavior plus one
+  real Bandit smoke on an ephemeral local port.
+- 2026-06-05: Switched the intended `probed` deployment artifact from a Mix
+  release tarball to a Docker-built Burrito binary tarball, matching the
+  self-contained binary deployment model already used for `moqxprobe`.
+  The traditional Mix release remains as a fallback build sanity check; remote
+  start/stop recipes now manage the Burrito binary with an explicit pidfile and
+  verify health through the HTTP API.
+- 2026-06-05: Kept the `probed` Burrito Docker build on the native Linux
+  builder instead of forcing a target-architecture builder image. Unlike
+  `moqxprobe`, `probed` does not compile quicer or other benchmark-path NIFs,
+  so Burrito/Zig can select the Linux output target without requiring the whole
+  Elixir build to run under target-architecture emulation.
+- 2026-06-05: Chose `curl` plus a written playbook as the first controller
+  surface instead of adding an Elixir client/controller layer. Added a local
+  curl smoke script that starts two local `probed` daemons, drives iperf3,
+  reference-client, and MOQX-client runs through the HTTP API, fetches bundles,
+  and validates JSONL reports. Also tightened declared artifact handling:
+  `probed` now prepares parent directories for declared tool-owned artifacts.
+- 2026-06-05: Local curl smoke passed with run id
+  `20260605T190155Z-local-curl-smoke`. It started local client/server
+  `probed` daemons on dynamic ports, ran loopback iperf3 baseline,
+  reference-client-to-reference-server stream measurement, and
+  MOQX-client-to-reference-server stream measurement through the HTTP API,
+  fetched client/server bundles, and validated all produced JSONL with
+  `moqxprobe report`. This is loopback calibration only; it proves the
+  orchestration/control-plane loop, not real network performance.

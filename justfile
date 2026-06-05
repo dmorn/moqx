@@ -1,12 +1,15 @@
 set dotenv-load
 
 bench_dir := "bench/moqxprobe"
+probed_dir := "bench/probed"
 infra_dir := "bench/infra/hetzner"
 run_file := bench_dir + "/.run/current"
 
 release_name := "moqxprobe_runtime"
 release_cli := "moqxprobe"
 release_version := `sed -n 's/.*version: "\([^"]*\)".*/\1/p' bench/moqxprobe/mix.exs | head -1`
+probed_release_name := "probed"
+probed_release_version := `sed -n 's/.*version: "\([^"]*\)".*/\1/p' bench/probed/mix.exs | head -1`
 git_sha := `git rev-parse --short HEAD 2>/dev/null || echo unknown`
 
 target_os := env('TARGET_OS', 'linux')
@@ -21,6 +24,8 @@ artifact_name := release_cli + "-" + release_version + "-" + git_sha + "-" + tar
 artifact_rel := artifact_dir + "/" + artifact_name
 artifact := bench_dir + "/" + artifact_rel
 remote_dir := "/opt/moqx-bench/moqxprobe"
+probed_remote_dir := "/opt/moqx-bench/probed"
+probed_port := "9157"
 quicprobe_artifact_name := "quicprobe-" + git_sha + "-" + target_os + "-" + target_arch + ".tar.gz"
 quicprobe_artifact_rel := artifact_dir + "/" + quicprobe_artifact_name
 quicprobe_artifact := bench_dir + "/" + quicprobe_artifact_rel
@@ -394,6 +399,118 @@ bench-transport-build-quicprobe-docker quicprobe_target="linux_arm64":
     test -f "{{ bench_dir }}/$artifact_rel"
     printf 'Built %s\n' "{{ bench_dir }}/$artifact_rel"
 
+# Print the default deployable probed Burrito artifact path for one Linux target.
+bench-transport-probed-artifact-rel probed_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ probed_target }}" in
+      linux_arm64) artifact_target="linux-arm64" ;;
+      linux_x86_64) artifact_target="linux-x86_64" ;;
+      *)
+        printf 'Unsupported probed target: %s\n' "{{ probed_target }}" >&2
+        printf '%s\n' 'Remote probed builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    printf '%s/probed-burrito-%s-%s-%s.tar.gz\n' \
+      "{{ artifact_dir }}" \
+      "{{ probed_release_version }}" \
+      "{{ git_sha }}" \
+      "$artifact_target"
+
+# Print the fallback probed Mix release artifact path for one Linux target.
+bench-transport-probed-release-artifact-rel probed_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ probed_target }}" in
+      linux_arm64) artifact_target="linux-arm64" ;;
+      linux_x86_64) artifact_target="linux-x86_64" ;;
+      *)
+        printf 'Unsupported probed target: %s\n' "{{ probed_target }}" >&2
+        printf '%s\n' 'Remote probed builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    printf '%s/probed-%s-%s-%s.tar.gz\n' \
+      "{{ artifact_dir }}" \
+      "{{ probed_release_version }}" \
+      "{{ git_sha }}" \
+      "$artifact_target"
+
+# Build the default deployable probed Burrito artifact with Docker.
+bench-transport-build-probed probed_target="linux_arm64":
+    just bench-transport-build-probed-burrito-release "{{ probed_target }}"
+
+# Build the probed Burrito artifact inside a native Linux Docker builder.
+bench-transport-build-probed-burrito-release probed_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ probed_target }}" in
+      linux_arm64|linux_x86_64) ;;
+      *)
+        printf 'Unsupported probed target: %s\n' "{{ probed_target }}" >&2
+        printf '%s\n' 'Remote probed builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    artifact_rel="$(just --quiet bench-transport-probed-artifact-rel "{{ probed_target }}")"
+    artifact_name="$(basename "$artifact_rel")"
+
+    mkdir -p "{{ probed_dir }}/{{ artifact_dir }}"
+    docker buildx build \
+      --file "{{ probed_dir }}/docker/Dockerfile.burrito" \
+      --target artifact \
+      --output "type=local,dest={{ probed_dir }}/{{ artifact_dir }}" \
+      --build-arg "ELIXIR_IMAGE={{ elixir_image }}" \
+      --build-arg "BURRITO_TARGET={{ probed_target }}" \
+      --build-arg "BUILD_GIT_SHA={{ git_sha }}" \
+      --build-arg "ARTIFACT_NAME=$artifact_name" \
+      .
+    test -f "{{ probed_dir }}/$artifact_rel"
+    printf 'Built %s\n' "{{ probed_dir }}/$artifact_rel"
+
+# Build the fallback probed Mix release artifact with Docker.
+bench-transport-build-probed-release probed_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ probed_target }}" in
+      linux_arm64)
+        docker_platform="linux/arm64"
+        ;;
+      linux_x86_64)
+        docker_platform="linux/amd64"
+        ;;
+      *)
+        printf 'Unsupported probed target: %s\n' "{{ probed_target }}" >&2
+        printf '%s\n' 'Remote probed builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    artifact_rel="$(just --quiet bench-transport-probed-release-artifact-rel "{{ probed_target }}")"
+    artifact_name="$(basename "$artifact_rel")"
+
+    mkdir -p "{{ probed_dir }}/{{ artifact_dir }}"
+    docker buildx build \
+      --platform "$docker_platform" \
+      --file "{{ probed_dir }}/docker/Dockerfile.release" \
+      --target artifact \
+      --output "type=local,dest={{ probed_dir }}/{{ artifact_dir }}" \
+      --build-arg "ELIXIR_IMAGE={{ elixir_image }}" \
+      --build-arg "RELEASE_NAME={{ probed_release_name }}" \
+      --build-arg "BUILD_GIT_SHA={{ git_sha }}" \
+      --build-arg "ARTIFACT_NAME=$artifact_name" \
+      .
+    test -f "{{ probed_dir }}/$artifact_rel"
+    printf 'Built %s\n' "{{ probed_dir }}/$artifact_rel"
+
 # Print the release artifact path for the current defaults.
 bench-transport-artifact-path:
     @printf '%s\n' "{{ artifact }}"
@@ -406,6 +523,14 @@ bench-transport-quicprobe-artifact-path quicprobe_target="linux_arm64":
     artifact_rel="$(just --quiet bench-transport-quicprobe-artifact-rel "{{ quicprobe_target }}")"
     printf '%s/%s\n' "{{ bench_dir }}" "$artifact_rel"
 
+# Print the probed artifact path for one Linux target.
+bench-transport-probed-artifact-path probed_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    artifact_rel="$(just --quiet bench-transport-probed-artifact-rel "{{ probed_target }}")"
+    printf '%s/%s\n' "{{ probed_dir }}" "$artifact_rel"
+
 # Deploy the release artifact to both Terraform roles in parallel.
 [parallel]
 bench-transport-deploy run_id=current_run artifact=artifact_rel: (bench-transport-deploy-role run_id "client" artifact) (bench-transport-deploy-role run_id "server" artifact)
@@ -417,6 +542,10 @@ bench-transport-deploy-burrito burrito_target="linux_arm64" run_id=current_run: 
 # Deploy the quicprobe reference peer artifact to both Terraform roles in parallel.
 [parallel]
 bench-transport-deploy-quicprobe quicprobe_target="linux_arm64" run_id=current_run: (bench-transport-deploy-quicprobe-role quicprobe_target run_id "client") (bench-transport-deploy-quicprobe-role quicprobe_target run_id "server")
+
+# Deploy the probed daemon artifact to both Terraform roles in parallel.
+[parallel]
+bench-transport-deploy-probed probed_target="linux_arm64" run_id=current_run: (bench-transport-deploy-probed-role probed_target run_id "client") (bench-transport-deploy-probed-role probed_target run_id "server")
 
 # Deploy the release artifact to one Terraform role.
 bench-transport-deploy-role run_id role artifact=artifact_rel:
@@ -468,6 +597,29 @@ bench-transport-deploy-quicprobe-role quicprobe_target run_id role:
     target="$(just --quiet bench-transport-target {{ role }})"
     just bench-transport-deploy-quicprobe-target "$target" "{{ run_id }}" "$artifact"
 
+# Deploy the probed daemon artifact to one Terraform role.
+bench-transport-deploy-probed-role probed_target run_id role:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ probed_target }}" in
+      linux_arm64|linux_x86_64) ;;
+      *)
+        printf 'Unsupported deploy target for probed: %s\n' "{{ probed_target }}" >&2
+        printf '%s\n' 'Remote deploys are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    artifact="$(just --quiet bench-transport-probed-artifact-rel "{{ probed_target }}")"
+    target="$(just --quiet bench-transport-target {{ role }})"
+    just bench-transport-deploy-probed-target "$target" "{{ run_id }}" "$artifact"
+
 # Print the public SSH target for a Terraform role.
 bench-transport-target role:
     #!/usr/bin/env bash
@@ -483,6 +635,20 @@ bench-transport-target role:
 
     cd "{{ infra_dir }}"
     terraform output -json servers | jq -r --arg role "{{ role }}" '.[$role].public_ipv4 | "root@" + .'
+
+# Print the preferred probed bind address for a Terraform role.
+bench-transport-probed-bind role port=probed_port:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    cd "{{ infra_dir }}"
+    private_ip="$(terraform output -json servers | jq -r --arg role "{{ role }}" '.[$role].private_ip // empty')"
+
+    if [ -n "$private_ip" ]; then
+      printf '%s:%s\n' "$private_ip" "{{ port }}"
+    else
+      printf '127.0.0.1:%s\n' "{{ port }}"
+    fi
 
 # Deploy the release artifact to one explicit SSH target.
 bench-transport-deploy-target target run_id=current_run artifact=artifact_rel:
@@ -540,6 +706,192 @@ bench-transport-deploy-quicprobe-target target run_id=current_run artifact=quicp
         --smoke-command "bin/quicprobe 2>&1 | grep -q usage:" \
         -- "{{ target }}" 2>&1 | tee "../../$log"
 
+# Deploy the probed daemon artifact to one explicit SSH target.
+bench-transport-deploy-probed-target target run_id=current_run artifact="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    if [ -z "{{ artifact }}" ]; then
+      printf '%s\n' 'Missing probed artifact path.' >&2
+      exit 2
+    fi
+
+    key="{{ bench_dir }}/.keys/{{ run_id }}/id_ed25519"
+    test -f "$key" || {
+      printf 'Missing SSH key for run %s\n' "{{ run_id }}" >&2
+      exit 2
+    }
+
+    mkdir -p "{{ bench_dir }}/results/{{ run_id }}"
+    safe_target="$(printf '%s' "{{ target }}" | tr -c 'A-Za-z0-9_.@-' '_')"
+    log="{{ bench_dir }}/results/{{ run_id }}/deploy-probed-$safe_target.log"
+
+    SSH_OPTS="-i {{ bench_dir }}/.keys/{{ run_id }}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={{ bench_dir }}/.keys/{{ run_id }}/known_hosts" \
+      "{{ bench_dir }}/scripts/deploy_release.sh" \
+        --artifact "{{ probed_dir }}/{{ artifact }}" \
+        --remote-dir "{{ probed_remote_dir }}" \
+        --smoke-command "test -x bin/probed" \
+        -- "{{ target }}" 2>&1 | tee "$log"
+
+# Print or create the local bearer token used by probed for a run.
+bench-transport-probed-token run_id=current_run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    token_path="{{ bench_dir }}/.keys/{{ run_id }}/probed.token"
+    mkdir -p "$(dirname "$token_path")"
+
+    if [ ! -s "$token_path" ]; then
+      openssl rand -hex 32 > "$token_path"
+      chmod 0600 "$token_path"
+    fi
+
+    cat "$token_path"
+
+# Start probed for one Terraform role and verify /v1/health from the node.
+bench-transport-start-probed-role run_id role port=probed_port:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    target="$(just --quiet bench-transport-target "{{ role }}")"
+    bind="$(just --quiet bench-transport-probed-bind "{{ role }}" "{{ port }}")"
+    just bench-transport-start-probed-target "$target" "{{ run_id }}" "{{ role }}" "$bind"
+
+# Start probed on one explicit SSH target and verify /v1/health from the node.
+bench-transport-start-probed-target target run_id node_id bind:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    key="{{ bench_dir }}/.keys/{{ run_id }}/id_ed25519"
+    test -f "$key" || {
+      printf 'Missing SSH key for run %s\n' "{{ run_id }}" >&2
+      exit 2
+    }
+
+    token="$(just --quiet bench-transport-probed-token "{{ run_id }}")"
+    staging="$(mktemp -d "${TMPDIR:-/tmp}/moqx-probed-config.XXXXXX")"
+
+    cleanup() {
+      rm -rf "$staging"
+    }
+    trap cleanup EXIT
+
+    printf '%s\n' "$token" > "$staging/probed.token"
+
+    jq -n \
+      --arg node_id "{{ node_id }}" \
+      --arg bind "{{ bind }}" \
+      --arg work_dir "/var/lib/probed" \
+      --arg token_file "/etc/moqx-bench/probed.token" \
+      '{
+        node_id: $node_id,
+        bind: $bind,
+        work_dir: $work_dir,
+        token_file: $token_file,
+        tools: {
+          moqxprobe: {path: "/opt/moqx-bench/moqxprobe/current/bin/moqxprobe"},
+          quicprobe: {path: "/opt/moqx-bench/quicprobe/current/bin/quicprobe"},
+          iperf3: {path: "/usr/bin/iperf3"}
+        }
+      }' > "$staging/probed.json"
+
+    SSH_OPTS="-i {{ bench_dir }}/.keys/{{ run_id }}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={{ bench_dir }}/.keys/{{ run_id }}/known_hosts"
+
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "$staging/probed.token" "$staging/probed.json" "{{ target }}:/tmp/"
+
+    # shellcheck disable=SC2086
+    ssh $SSH_OPTS "{{ target }}" \
+      "set -e; \
+       install -d -m 0755 /etc/moqx-bench /var/lib/probed; \
+       install -m 0600 /tmp/probed.token /etc/moqx-bench/probed.token; \
+       install -m 0644 /tmp/probed.json /etc/moqx-bench/probed.json; \
+       rm -f /tmp/probed.token /tmp/probed.json; \
+       pid_file=/var/lib/probed/probed.pid; \
+       log_file=/var/lib/probed/probed.log; \
+       if [ -f \"\$pid_file\" ]; then \
+         old_pid=\"\$(cat \"\$pid_file\")\"; \
+         if [ -n \"\$old_pid\" ]; then kill \"\$old_pid\" >/dev/null 2>&1 || true; fi; \
+         rm -f \"\$pid_file\"; \
+         sleep 1; \
+       fi; \
+       PROBED_CONFIG=/etc/moqx-bench/probed.json nohup {{ probed_remote_dir }}/current/bin/probed > \"\$log_file\" 2>&1 & \
+       echo \$! > \"\$pid_file\"; \
+       sleep 1; \
+       curl -fsS -H 'Authorization: Bearer $token' 'http://{{ bind }}/v1/health'"
+
+# Stop probed for one Terraform role.
+bench-transport-stop-probed-role run_id role:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    target="$(just --quiet bench-transport-target "{{ role }}")"
+    just bench-transport-stop-probed-target "$target" "{{ run_id }}"
+
+# Stop probed on one explicit SSH target.
+bench-transport-stop-probed-target target run_id=current_run:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    key="{{ bench_dir }}/.keys/{{ run_id }}/id_ed25519"
+    test -f "$key" || {
+      printf 'Missing SSH key for run %s\n' "{{ run_id }}" >&2
+      exit 2
+    }
+
+    SSH_OPTS="-i {{ bench_dir }}/.keys/{{ run_id }}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={{ bench_dir }}/.keys/{{ run_id }}/known_hosts"
+
+    # shellcheck disable=SC2086
+    ssh $SSH_OPTS "{{ target }}" \
+      "set -e; \
+       pid_file=/var/lib/probed/probed.pid; \
+       if [ -f \"\$pid_file\" ]; then \
+         pid=\"\$(cat \"\$pid_file\")\"; \
+         if [ -n \"\$pid\" ]; then kill \"\$pid\" >/dev/null 2>&1 || true; fi; \
+         rm -f \"\$pid_file\"; \
+       fi"
+
+# Verify probed /v1/health for one Terraform role from the node itself.
+bench-transport-probed-health-role run_id role port=probed_port:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    target="$(just --quiet bench-transport-target "{{ role }}")"
+    bind="$(just --quiet bench-transport-probed-bind "{{ role }}" "{{ port }}")"
+    just bench-transport-probed-health-target "$target" "{{ run_id }}" "$bind"
+
+# Verify probed /v1/health on one explicit SSH target from the node itself.
+bench-transport-probed-health-target target run_id bind:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    key="{{ bench_dir }}/.keys/{{ run_id }}/id_ed25519"
+    test -f "$key" || {
+      printf 'Missing SSH key for run %s\n' "{{ run_id }}" >&2
+      exit 2
+    }
+
+    token="$(just --quiet bench-transport-probed-token "{{ run_id }}")"
+    SSH_OPTS="-i {{ bench_dir }}/.keys/{{ run_id }}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={{ bench_dir }}/.keys/{{ run_id }}/known_hosts"
+
+    # shellcheck disable=SC2086
+    ssh $SSH_OPTS "{{ target }}" "curl -fsS -H 'Authorization: Bearer $token' 'http://{{ bind }}/v1/health'"
+
 # Remove local transport benchmark release artifacts.
 bench-transport-clean:
-    rm -rf "{{ bench_dir }}/build"
+    rm -rf "{{ bench_dir }}/build" "{{ probed_dir }}/build"
