@@ -667,6 +667,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     refute record["limits"]["first_break_symptom"] == "tool_output_invalid"
 
     summary = record["diagnostics"]["summary"]
+    assert summary["traffic_sender"] == "datagram_sink"
     assert summary["datagram_drain_limit"] == 0
     assert summary["datagrams_accepted"] == 3000
     assert summary["datagrams_received"] == 0
@@ -775,6 +776,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     assert record["metrics"]["datagram_delivery_ratio"] == 1.0
     assert record["diagnostics"]["summary"]["datagram_receive_mode"] == "process"
     assert record["diagnostics"]["summary"]["datagram_pacing_mode"] == "coarse"
+    assert record["diagnostics"]["summary"]["traffic_sender"] == "datagram_sink"
     assert record["diagnostics"]["summary"]["datagrams_accepted"] == 20
     assert record["diagnostics"]["summary"]["datagrams_received"] == 20
     assert record["diagnostics"]["summary"]["datagram_receive_events"] == 20

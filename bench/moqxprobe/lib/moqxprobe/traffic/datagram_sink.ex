@@ -32,6 +32,7 @@ defmodule MOQXProbe.Traffic.DatagramSink do
       queue: :queue.new(),
       send_fun: Keyword.fetch!(opts, :send_fun),
       transport_state: Keyword.get(opts, :transport_state),
+      stop_on_error?: Keyword.get(opts, :stop_on_error?, false),
       now_fun: Keyword.get(opts, :now_fun, &monotonic_ms/0),
       timer_fun: Keyword.get(opts, :timer_fun, &schedule_tick/2),
       runner_from: nil,
@@ -116,11 +117,12 @@ defmodule MOQXProbe.Traffic.DatagramSink do
     {tick, pacer} = Pacer.tick(state.pacer, now_ms, :queue.len(state.queue))
     {payloads, queue} = pop_many(state.queue, tick.send_count)
 
-    {accepted, errors, error_reasons, transport_state, duration_us} =
-      send_payloads(payloads, state.send_fun, state.transport_state)
+    {accepted, errors, error_reasons, transport_state, duration_us, stopped_on_error?} =
+      send_payloads(payloads, state.send_fun, state.transport_state, state.stop_on_error?)
 
     actual_send_count = accepted + errors
-    stop_reason = stop_reason(tick, actual_send_count)
+    stop_reason = stop_reason(tick, actual_send_count, stopped_on_error?)
+    queue = restore_unsent_payloads(queue, payloads, actual_send_count)
 
     state =
       state
@@ -153,39 +155,63 @@ defmodule MOQXProbe.Traffic.DatagramSink do
     end
   end
 
-  defp send_payloads([], _send_fun, transport_state) do
-    {0, 0, %{}, transport_state, 0}
+  defp send_payloads([], _send_fun, transport_state, _stop_on_error?) do
+    {0, 0, %{}, transport_state, 0, false}
   end
 
-  defp send_payloads(payloads, send_fun, transport_state) do
+  defp send_payloads(payloads, send_fun, transport_state, stop_on_error?) do
     started_at = monotonic_us()
 
-    {accepted, errors, error_reasons, transport_state} =
-      Enum.reduce(payloads, {0, 0, %{}, transport_state}, fn payload,
-                                                             {accepted, errors, reasons,
-                                                              transport_state} ->
+    {accepted, errors, error_reasons, transport_state, stopped_on_error?} =
+      Enum.reduce_while(payloads, {0, 0, %{}, transport_state, false}, fn payload,
+                                                                          {accepted, errors,
+                                                                           reasons,
+                                                                           transport_state,
+                                                                           _stopped?} ->
         case send_fun.(payload, transport_state) do
           :ok ->
-            {accepted + 1, errors, reasons, transport_state}
+            {:cont, {accepted + 1, errors, reasons, transport_state, false}}
 
           {:ok, transport_state} ->
-            {accepted + 1, errors, reasons, transport_state}
+            {:cont, {accepted + 1, errors, reasons, transport_state, false}}
 
           {:error, reason} ->
-            {accepted, errors + 1, increment_error_reason(reasons, reason), transport_state}
+            reasons = increment_error_reason(reasons, reason)
+            maybe_stop_on_error(accepted, errors + 1, reasons, transport_state, stop_on_error?)
 
           {:error, reason, transport_state} ->
-            {accepted, errors + 1, increment_error_reason(reasons, reason), transport_state}
+            reasons = increment_error_reason(reasons, reason)
+            maybe_stop_on_error(accepted, errors + 1, reasons, transport_state, stop_on_error?)
         end
       end)
 
-    {accepted, errors, error_reasons, transport_state, monotonic_us() - started_at}
+    {accepted, errors, error_reasons, transport_state, monotonic_us() - started_at,
+     stopped_on_error?}
   end
 
-  defp stop_reason(%{tool_limited?: true}, _actual_send_count), do: :tool_limited
-  defp stop_reason(%{stop_reason: :complete}, _actual_send_count), do: :complete
-  defp stop_reason(%{send_count: expected}, actual) when actual < expected, do: :producer_limited
-  defp stop_reason(_tick, _actual_send_count), do: nil
+  defp maybe_stop_on_error(accepted, errors, reasons, transport_state, false) do
+    {:cont, {accepted, errors, reasons, transport_state, false}}
+  end
+
+  defp maybe_stop_on_error(accepted, errors, reasons, transport_state, true) do
+    {:halt, {accepted, errors, reasons, transport_state, true}}
+  end
+
+  defp stop_reason(_tick, _actual_send_count, true), do: :send_error
+  defp stop_reason(%{tool_limited?: true}, _actual_send_count, _stopped?), do: :tool_limited
+  defp stop_reason(%{stop_reason: :complete}, _actual_send_count, _stopped?), do: :complete
+
+  defp stop_reason(%{send_count: expected}, actual, _stopped?) when actual < expected,
+    do: :producer_limited
+
+  defp stop_reason(_tick, _actual_send_count, _stopped?), do: nil
+
+  defp restore_unsent_payloads(queue, payloads, actual_send_count) do
+    payloads
+    |> Enum.drop(actual_send_count)
+    |> Enum.reverse()
+    |> Enum.reduce(queue, fn payload, queue -> :queue.in_r(payload, queue) end)
+  end
 
   defp maybe_record_burst(state, 0, _duration_us), do: state
 

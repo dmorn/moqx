@@ -63,9 +63,7 @@ defmodule MOQXProbe.TransportTelemetryCollector do
 
   defp start_collector(opts) do
     owner_pid = Keyword.get(opts, :owner_pid, self())
-    handler_id = {__MODULE__, owner_pid, make_ref()}
-    store_key = {__MODULE__, handler_id}
-    init_owner_store(store_key)
+    event_owner_pid = Keyword.get(opts, :event_owner_pid, owner_pid)
 
     table =
       :ets.new(__MODULE__, [
@@ -74,6 +72,10 @@ defmodule MOQXProbe.TransportTelemetryCollector do
         read_concurrency: true,
         write_concurrency: true
       ])
+
+    handler_id = {__MODULE__, owner_pid, make_ref()}
+    store_key = {__MODULE__, handler_id}
+    init_owner_store(store_key)
 
     started_at_us = monotonic_us()
     :ets.insert(table, {:started_at_us, started_at_us})
@@ -108,8 +110,8 @@ defmodule MOQXProbe.TransportTelemetryCollector do
       {:ok, collector}
     else
       case :telemetry.attach_many(handler_id, events, &__MODULE__.handle_event/4, %{
-             owner_pid: owner_pid,
-             store_key: store_key,
+             event_owner_pid: event_owner_pid,
+             store: %{key: store_key, table: table},
              table: table
            }) do
         :ok ->
@@ -174,9 +176,19 @@ defmodule MOQXProbe.TransportTelemetryCollector do
     :ok
   end
 
-  def handle_event(event, measurements, metadata, %{owner_pid: owner_pid, store_key: store_key}) do
+  def handle_event(event, measurements, metadata, %{
+        event_owner_pid: :any,
+        store: store
+      }) do
+    do_handle_event(event, measurements, metadata, store)
+  end
+
+  def handle_event(event, measurements, metadata, %{
+        event_owner_pid: owner_pid,
+        store: store
+      }) do
     if self() == owner_pid do
-      do_handle_event(event, measurements, metadata, store_key)
+      do_handle_event(event, measurements, metadata, store)
     end
   end
 
@@ -299,32 +311,31 @@ defmodule MOQXProbe.TransportTelemetryCollector do
 
   defp record_receive_result(_store_key, _measurements, _metadata), do: :ok
 
-  defp add_duration(_store_key, _key, nil), do: :ok
+  defp add_duration(_store, _key, nil), do: :ok
 
-  defp add_duration(store_key, key, duration_us) do
-    dictionary_key = duration_key(store_key, key)
-
-    Process.put(dictionary_key, [duration_us | Process.get(dictionary_key)])
+  defp add_duration(%{table: table}, key, duration_us) do
+    :ets.insert(table, {{:duration, key, System.unique_integer([:monotonic])}, duration_us})
     :ok
   end
 
-  defp duration_values(%__MODULE__{store_key: store_key}, key) do
-    store_key
-    |> duration_key(key)
-    |> Process.get()
-    |> Enum.reverse()
+  defp duration_values(%__MODULE__{table: table}, key) do
+    table
+    |> :ets.match_object({{:duration, key, :_}, :_})
+    |> Enum.map(fn {{:duration, ^key, sequence}, duration_us} -> {sequence, duration_us} end)
+    |> Enum.sort_by(fn {sequence, _duration_us} -> sequence end)
+    |> Enum.map(fn {_sequence, duration_us} -> duration_us end)
   end
 
-  defp increment(store_key, key, amount \\ 1) do
-    dictionary_key = counter_key(store_key, key)
-    Process.put(dictionary_key, Process.get(dictionary_key) + amount)
+  defp increment(%{table: table}, key, amount \\ 1) do
+    :ets.update_counter(table, {:counter, key}, {2, amount}, {{:counter, key}, 0})
     :ok
   end
 
-  defp counter(%__MODULE__{store_key: store_key}, key) do
-    store_key
-    |> counter_key(key)
-    |> Process.get()
+  defp counter(%__MODULE__{table: table}, key) do
+    case :ets.lookup(table, {:counter, key}) do
+      [{{:counter, ^key}, value}] -> value
+      [] -> 0
+    end
   end
 
   defp init_owner_store(store_key) do

@@ -133,3 +133,12 @@ rather than presented as network capacity evidence.
   tests inject timer and clock functions. The remaining extraction step is to
   replace the old `ReferenceComparison` DATAGRAM and stream send loops with
   these Traffic components while preserving `transport-bench-v1`.
+- 2026-06-05: Wired paced MOQX-client DATAGRAM pressure in
+  `ReferenceComparison` through `Traffic.feed_payloads/3` and
+  `Traffic.DatagramSink.run/1`. Flow now produces timestamp-free descriptors
+  while the sink encodes the timestamp at the paced send point, preserving
+  latency semantics. The sink path stops on first transport send error for the
+  benchmark command, preserves existing `transport-bench-v1` metrics, and
+  records `traffic_sender=datagram_sink` in diagnostics. The telemetry
+  collector now stores event counters/durations in ETS so sink-process
+  transport telemetry is visible to the owner snapshot.

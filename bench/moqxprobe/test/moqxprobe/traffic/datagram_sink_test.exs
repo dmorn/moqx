@@ -90,6 +90,42 @@ defmodule MOQXProbe.Traffic.DatagramSinkTest do
            } = DatagramSink.snapshot(sink)
   end
 
+  test "can stop a burst on the first send error" do
+    send_fun = fn
+      "bad", state -> {:error, :blocked, state}
+      payload, state -> {:ok, [payload | state]}
+    end
+
+    {:ok, sink} =
+      DatagramSink.start_link(
+        pacer:
+          Pacer.new!(
+            count: 3,
+            rate_per_second: 3_000,
+            tick_ms: 1,
+            max_burst: 3,
+            started_at_ms: 1_000
+          ),
+        send_fun: send_fun,
+        transport_state: [],
+        stop_on_error?: true
+      )
+
+    :ok = DatagramSink.enqueue(sink, ["ok-1", "bad", "not-sent"])
+
+    tick = DatagramSink.tick(sink, 1_001)
+
+    assert tick.stop_reason == :send_error
+
+    assert %{
+             accepted: 1,
+             errors: 1,
+             error_reasons: %{":blocked" => 1},
+             queue_depth: 1,
+             stop_reason: :send_error
+           } = DatagramSink.snapshot(sink)
+  end
+
   test "stops before sending when the pacer marks the run tool limited" do
     parent = self()
 

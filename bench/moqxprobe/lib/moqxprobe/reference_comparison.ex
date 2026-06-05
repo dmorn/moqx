@@ -4,6 +4,9 @@ defmodule MOQXProbe.ReferenceComparison do
   alias MOQX.Transport
   alias MOQXProbe.BuildInfo
   alias MOQXProbe.DatagramPayload
+  alias MOQXProbe.Traffic
+  alias MOQXProbe.Traffic.DatagramSink
+  alias MOQXProbe.Traffic.Pacer
   alias MOQXProbe.TransportTelemetryCollector
   alias ProbeLedger.PathMetadata
 
@@ -952,6 +955,7 @@ defmodule MOQXProbe.ReferenceComparison do
     {:ok, collector} =
       TransportTelemetryCollector.start(
         events: datagram_telemetry_events(config),
+        event_owner_pid: :any,
         sample_process?: true
       )
 
@@ -2093,6 +2097,7 @@ defmodule MOQXProbe.ReferenceComparison do
       "datagram_receive_mode" => config.datagram_receive_mode,
       "datagram_pacing_mode" => config.datagram_pacing_mode,
       "datagram_diagnostics" => config.datagram_diagnostics,
+      "traffic_sender" => receive_state[:traffic_sender],
       "bytes_sent" => datagram_bytes_sent,
       "bytes_received" => datagram_bytes_received,
       "datagram_receive_events" => datagram_events,
@@ -2344,79 +2349,99 @@ defmodule MOQXProbe.ReferenceComparison do
     send_state = initial_moqx_datagram_receive_state(config, started_at, count)
     payload_padding = DatagramPayload.padding_for_size(config.datagram_size)
 
-    result =
-      Enum.reduce_while(1..count, {0, ctx, send_state, nil}, fn sequence,
-                                                                {accepted, ctx, send_state,
-                                                                 schedule_state} ->
-        {send_at, schedule_state} =
-          next_datagram_send_target(
-            started_at,
-            sequence,
-            rate,
-            config.datagram_pacing_mode,
-            schedule_state
-          )
+    with {:ok, sink} <-
+           DatagramSink.start_link(
+             pacer:
+               Pacer.new!(
+                 count: count,
+                 rate_per_second: rate,
+                 tick_ms: 1,
+                 max_burst: datagram_paced_burst_size(rate),
+                 started_at_ms: System.convert_time_unit(started_at, :microsecond, :millisecond)
+               ),
+             send_fun: paced_datagram_send_fun(connection, config, count, started_at),
+             transport_state: %{
+               ctx: ctx,
+               receive_state: Map.put(send_state, :traffic_sender, "datagram_sink"),
+               accepted: 0,
+               failure: nil
+             },
+             stop_on_error?: true
+           ),
+         :ok <-
+           Traffic.feed_payloads(1..count, sink,
+             mapper: fn sequence -> %{sequence: sequence, padding: payload_padding} end,
+             stages: 1,
+             min_demand: datagram_paced_min_demand(rate),
+             max_demand: datagram_paced_burst_size(rate)
+           ) do
+      snapshot = DatagramSink.run(sink, datagram_receive_timeout_ms(config) + 1_000)
+      transport_state = snapshot.transport_state
+      send_state = transport_state.receive_state
+      accepted = snapshot.accepted
+      send_duration_ms = elapsed_ms(started_at)
 
-        wait_until_datagram_send_target(send_at, config.datagram_pacing_mode)
+      case {snapshot.stop_reason, transport_state.failure} do
+        {:send_error, failure} when is_map(failure) ->
+          {:error, failure, accepted, send_duration_ms, send_state, transport_state.ctx}
 
-        send_state =
-          record_moqx_datagram_send_schedule(send_state, send_at, monotonic_us())
-
-        {send_result, send_state} =
-          send_moqx_datagram_with_phase_diagnostics(
-            ctx,
-            connection,
-            sequence,
-            payload_padding,
-            send_state
-          )
-
-        case send_result do
-          {:ok, ctx} ->
-            send_state = record_moqx_datagram_accepted(send_state, accepted + 1)
-
-            {send_state, ctx} =
-              drain_available_moqx_datagrams(
-                ctx,
-                connection,
-                send_state,
-                started_at,
-                config.datagram_drain_limit
-              )
-
-            {:cont, {accepted + 1, ctx, send_state, schedule_state}}
-
-          {:error, reason, ctx} ->
-            failure = datagram_send_failure(config, reason, sequence, count, accepted)
-            {:halt, {:error, failure, accepted, elapsed_ms(started_at), send_state, ctx}}
-        end
-      end)
-
-    case result do
-      {:error, _failure, _accepted, _send_duration_ms, _send_state, _ctx} = error ->
-        error
-
-      {accepted, ctx, send_state, _schedule_state} ->
-        {:ok, accepted, elapsed_ms(started_at), send_state, ctx}
+        _other ->
+          {:ok, accepted, send_duration_ms, send_state, transport_state.ctx}
+      end
+    else
+      {:error, reason} ->
+        failure = datagram_send_failure(config, reason, 1, count, 0)
+        {:error, failure, 0, elapsed_ms(started_at), send_state, ctx}
     end
   end
 
-  defp wait_until_datagram_send_target(target_us, pacing_mode) do
-    case datagram_wait_until_target(target_us, pacing_mode) do
-      :due ->
-        :ok
+  defp paced_datagram_send_fun(connection, config, count, started_at) do
+    fn %{sequence: sequence, padding: payload_padding}, state ->
+      send_at = scheduled_datagram_send_at(started_at, sequence, config.datagram_rate)
 
-      :yield ->
-        :erlang.yield()
-        wait_until_datagram_send_target(target_us, pacing_mode)
+      receive_state =
+        record_moqx_datagram_send_schedule(state.receive_state, send_at, monotonic_us())
 
-      :spin ->
-        spin_until_datagram_target(target_us)
+      {send_result, receive_state} =
+        send_moqx_datagram_with_phase_diagnostics(
+          state.ctx,
+          connection,
+          sequence,
+          payload_padding,
+          receive_state
+        )
 
-      remaining_ms ->
-        Process.sleep(remaining_ms)
-        wait_until_datagram_send_target(target_us, pacing_mode)
+      case send_result do
+        {:ok, ctx} ->
+          accepted = state.accepted + 1
+          receive_state = record_moqx_datagram_accepted(receive_state, accepted)
+
+          {receive_state, ctx} =
+            drain_available_moqx_datagrams(
+              ctx,
+              connection,
+              receive_state,
+              started_at,
+              config.datagram_drain_limit
+            )
+
+          {:ok, %{state | ctx: ctx, receive_state: receive_state, accepted: accepted}}
+
+        {:error, reason, ctx} ->
+          failure = datagram_send_failure(config, reason, sequence, count, state.accepted)
+          receive_state = finish_moqx_datagram_receive(receive_state, "send_error")
+
+          {:error, reason, %{state | ctx: ctx, receive_state: receive_state, failure: failure}}
+      end
     end
+  end
+
+  defp datagram_paced_burst_size(rate) when is_integer(rate) and rate > 0 do
+    max(1, div(rate + 999, 1000))
+  end
+
+  defp datagram_paced_min_demand(rate) do
+    max(datagram_paced_burst_size(rate) - 1, 0)
   end
 
   defp next_datagram_send_target(started_at_us, sequence, rate, "smooth", nil) do
@@ -2461,6 +2486,7 @@ defmodule MOQXProbe.ReferenceComparison do
   defp merge_datagram_send_receive_state(send_state, receive_state, accepted) do
     receive_state
     |> Map.put(:accepted, accepted)
+    |> Map.put(:traffic_sender, send_state[:traffic_sender])
     |> Map.put(:received, MapSet.union(receive_state.received, send_state.received))
     |> Map.put(:latencies, receive_state.latencies ++ send_state.latencies)
     |> Map.put(
