@@ -117,3 +117,11 @@ rather than presented as network capacity evidence.
   burst accounting, capped/tool-limited pacer outcomes, and producer-limited
   detection. This slice proves the Flow/GenStage split with deterministic
   tests; `ReferenceComparison` is not wired through it yet.
+- 2026-06-05: Added `MOQXProbe.Traffic.StreamSink` as the sibling stream
+  GenStage consumer. The first tests cover per-stream send-window enforcement,
+  explicit send-completion feedback, error accounting, and FIN ordering by
+  requiring the final payload to carry `finish: true` only after earlier
+  payloads for the stream have been admitted. The pacer now also accepts an
+  explicit "currently available work" cap so window-blocked streams do not
+  consume unsent offered slots. `ReferenceComparison` extraction remains the
+  next implementation step.

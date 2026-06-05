@@ -73,7 +73,7 @@ defmodule MOQXProbe.Traffic.DatagramSink do
   end
 
   defp send_tick(state, now_ms) do
-    {tick, pacer} = Pacer.tick(state.pacer, now_ms)
+    {tick, pacer} = Pacer.tick(state.pacer, now_ms, :queue.len(state.queue))
     {payloads, queue} = pop_many(state.queue, tick.send_count)
 
     {accepted, errors, error_reasons, transport_state, duration_us} =

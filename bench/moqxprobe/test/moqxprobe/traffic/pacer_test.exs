@@ -112,4 +112,30 @@ defmodule MOQXProbe.Traffic.PacerTest do
     assert tick.stop_reason == :complete
     assert Pacer.complete?(pacer)
   end
+
+  test "caps sends by currently available work without advancing unsent slots" do
+    pacer =
+      Pacer.new!(
+        count: 10,
+        rate_per_second: 10_000,
+        tick_ms: 1,
+        max_burst: 10,
+        started_at_ms: 1_000
+      )
+
+    {tick, pacer} = Pacer.tick(pacer, 1_001, 4)
+
+    assert tick.target_emitted == 10
+    assert tick.due_count == 10
+    assert tick.send_count == 4
+    refute tick.capped?
+    assert pacer.emitted_count == 4
+
+    {tick, pacer} = Pacer.tick(pacer, 1_002, 6)
+
+    assert tick.due_count == 6
+    assert tick.send_count == 6
+    assert tick.stop_reason == :complete
+    assert Pacer.complete?(pacer)
+  end
 end

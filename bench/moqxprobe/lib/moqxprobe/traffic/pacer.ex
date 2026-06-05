@@ -59,6 +59,11 @@ defmodule MOQXProbe.Traffic.Pacer do
     do: emitted_count >= count
 
   def tick(%__MODULE__{} = pacer, now_ms) when is_integer(now_ms) do
+    tick(pacer, now_ms, pacer.max_burst)
+  end
+
+  def tick(%__MODULE__{} = pacer, now_ms, available_count)
+      when is_integer(now_ms) and is_integer(available_count) and available_count >= 0 do
     scheduled_at_ms = pacer.next_deadline_ms
     lag_ms = now_ms - scheduled_at_ms
     elapsed_ms = max(now_ms - pacer.started_at_ms, 0)
@@ -66,8 +71,8 @@ defmodule MOQXProbe.Traffic.Pacer do
     due_count = max(target_emitted - pacer.emitted_count, 0)
     remaining = max(pacer.count - pacer.emitted_count, 0)
     tool_limited? = tool_limited?(pacer, lag_ms)
-    send_count = send_count(due_count, remaining, pacer.max_burst, tool_limited?)
-    capped? = !tool_limited? and due_count > send_count and remaining > send_count
+    send_count = send_count(due_count, remaining, pacer.max_burst, available_count, tool_limited?)
+    capped? = capped?(tool_limited?, due_count, remaining, pacer.max_burst, available_count)
     emitted_count = pacer.emitted_count + send_count
     stop_reason = stop_reason(tool_limited?, emitted_count, pacer.count)
 
@@ -100,12 +105,20 @@ defmodule MOQXProbe.Traffic.Pacer do
     min(pacer.count, div(elapsed_ms * pacer.rate_per_second, 1_000))
   end
 
-  defp send_count(_due_count, _remaining, _max_burst, true), do: 0
+  defp send_count(_due_count, _remaining, _max_burst, _available_count, true), do: 0
 
-  defp send_count(due_count, remaining, max_burst, false) do
+  defp send_count(due_count, remaining, max_burst, available_count, false) do
     due_count
     |> min(remaining)
     |> min(max_burst)
+    |> min(available_count)
+  end
+
+  defp capped?(true, _due_count, _remaining, _max_burst, _available_count), do: false
+
+  defp capped?(false, due_count, remaining, max_burst, available_count) do
+    burst_bound = min(max_burst, remaining)
+    due_count > burst_bound and available_count >= burst_bound
   end
 
   defp stop_reason(true, _emitted_count, _count), do: :tool_limited
