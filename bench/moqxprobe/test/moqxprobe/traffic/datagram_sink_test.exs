@@ -127,4 +127,49 @@ defmodule MOQXProbe.Traffic.DatagramSinkTest do
              stop_reason: :tool_limited
            } = DatagramSink.snapshot(sink)
   end
+
+  test "runs its own absolute-timer pacing loop until completion" do
+    parent = self()
+    {:ok, clock} = Agent.start_link(fn -> [1_001, 1_002] end)
+
+    now_fun = fn ->
+      Agent.get_and_update(clock, fn [now | rest] -> {now, rest} end)
+    end
+
+    timer_fun = fn ref, _deadline_ms ->
+      send(self(), {:traffic_datagram_sink_tick, ref})
+      :ok
+    end
+
+    send_fun = fn payload, state ->
+      send(parent, {:sent, payload})
+      {:ok, [payload | state]}
+    end
+
+    {:ok, sink} =
+      DatagramSink.start_link(
+        pacer:
+          Pacer.new!(
+            count: 4,
+            rate_per_second: 2_000,
+            tick_ms: 1,
+            max_burst: 2,
+            started_at_ms: 1_000
+          ),
+        send_fun: send_fun,
+        transport_state: [],
+        now_fun: now_fun,
+        timer_fun: timer_fun
+      )
+
+    :ok = DatagramSink.enqueue(sink, ["a", "b", "c", "d"])
+
+    assert %{accepted: 4, errors: 0, stop_reason: :complete, burst_counts: [2, 2]} =
+             DatagramSink.run(sink)
+
+    assert_receive {:sent, "a"}
+    assert_receive {:sent, "b"}
+    assert_receive {:sent, "c"}
+    assert_receive {:sent, "d"}
+  end
 end

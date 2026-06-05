@@ -125,3 +125,11 @@ rather than presented as network capacity evidence.
   explicit "currently available work" cap so window-blocked streams do not
   consume unsent offered slots. `ReferenceComparison` extraction remains the
   next implementation step.
+- 2026-06-05: Filled in the top-level `MOQXProbe.Traffic` module with a
+  `feed_payloads/3` helper that runs a bounded Flow payload pipeline into an
+  already-running GenStage sink and waits for the finite Flow coordinator to
+  finish. `DatagramSink` and `StreamSink` now also expose `run/1` self-paced
+  loops using absolute `Process.send_after(..., abs: true)` timers; deterministic
+  tests inject timer and clock functions. The remaining extraction step is to
+  replace the old `ReferenceComparison` DATAGRAM and stream send loops with
+  these Traffic components while preserving `transport-bench-v1`.

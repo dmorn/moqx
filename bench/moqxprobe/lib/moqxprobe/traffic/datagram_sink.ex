@@ -21,6 +21,10 @@ defmodule MOQXProbe.Traffic.DatagramSink do
     GenStage.call(sink, :snapshot)
   end
 
+  def run(sink, timeout \\ :infinity) do
+    GenStage.call(sink, :run, timeout)
+  end
+
   @impl GenStage
   def init(opts) do
     state = %{
@@ -28,6 +32,10 @@ defmodule MOQXProbe.Traffic.DatagramSink do
       queue: :queue.new(),
       send_fun: Keyword.fetch!(opts, :send_fun),
       transport_state: Keyword.get(opts, :transport_state),
+      now_fun: Keyword.get(opts, :now_fun, &monotonic_ms/0),
+      timer_fun: Keyword.get(opts, :timer_fun, &schedule_tick/2),
+      runner_from: nil,
+      run_ref: nil,
       accepted: 0,
       errors: 0,
       error_reasons: %{},
@@ -60,6 +68,38 @@ defmodule MOQXProbe.Traffic.DatagramSink do
 
   def handle_call(:snapshot, _from, state) do
     {:reply, snapshot_state(state), [], state}
+  end
+
+  def handle_call(:run, _from, %{stop_reason: stop_reason} = state)
+      when not is_nil(stop_reason) do
+    {:reply, snapshot_state(state), [], state}
+  end
+
+  def handle_call(:run, from, state) do
+    ref = make_ref()
+    state = %{state | runner_from: from, run_ref: ref}
+
+    :ok = state.timer_fun.(ref, Pacer.next_deadline_ms(state.pacer))
+
+    {:noreply, [], state}
+  end
+
+  @impl GenStage
+  def handle_info({:traffic_datagram_sink_tick, ref}, %{run_ref: ref} = state) do
+    now_ms = state.now_fun.()
+    {_tick, state} = send_tick(state, now_ms)
+
+    if state.stop_reason do
+      GenStage.reply(state.runner_from, snapshot_state(state))
+      {:noreply, [], %{state | runner_from: nil, run_ref: nil}}
+    else
+      :ok = state.timer_fun.(ref, Pacer.next_deadline_ms(state.pacer))
+      {:noreply, [], state}
+    end
+  end
+
+  def handle_info({:traffic_datagram_sink_tick, _ref}, state) do
+    {:noreply, [], state}
   end
 
   defp enqueue_events(state, events) do
@@ -183,4 +223,10 @@ defmodule MOQXProbe.Traffic.DatagramSink do
   end
 
   defp monotonic_us, do: System.monotonic_time(:microsecond)
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
+
+  defp schedule_tick(ref, deadline_ms) do
+    Process.send_after(self(), {:traffic_datagram_sink_tick, ref}, deadline_ms, abs: true)
+    :ok
+  end
 end
