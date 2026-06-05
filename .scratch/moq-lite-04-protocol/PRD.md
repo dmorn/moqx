@@ -41,6 +41,14 @@ The implementation should proceed in narrow slices:
 5. Add a MOQ Lite session/stream state machine that enforces stream roles,
    message ordering, graceful finish, abort sending, abort receiving, and
    connection close behavior using `MOQX.Transport`.
+6. Add a URI-first `MOQX.MOQLite04.connect/2` facade that establishes a
+   transport connection and starts a role-neutral MOQ Lite client.
+7. Add a client runner that feeds normalized transport events into Session and
+   applies returned transport actions through `MOQX.Transport`.
+8. Add subscriber-style client operations, with role implied by each operation
+   rather than by a whole-connection mode.
+9. Add publisher-style client operations and a client-level
+   subscribe/group/frame smoke flow over `MOQX.Transport.Support`.
 
 ## User Stories
 
@@ -95,6 +103,13 @@ The implementation should proceed in narrow slices:
   WebTransport remains out of scope.
 - Session APIs must receive explicit options or structs. Do not use
   `Application` env as a test seam or mutable global configuration.
+- The future `MOQX.MOQLite04.connect/2` boundary should accept a URI
+  string or `URI.t()` directly. The module name already fixes the MOQ Lite
+  draft-04 variant, so a separate `MOQX.Endpoint` wrapper would duplicate
+  protocol/profile information at this layer.
+- Transport backend selection and backend options belong in explicit client
+  options, such as `transport: {MOQX.Transport.Quicer, opts}`, not in endpoint
+  data.
 
 ## Testing Decisions
 
@@ -150,6 +165,11 @@ Delivered so far:
 - Session tests for Announce, Subscribe, Fetch, Probe, Goaway, Group,
   stream lifecycle, support transport normalized events, and the
   reference-style subscribe/group/frame smoke flow
+- Client/API follow-up issues:
+  - issue 05: URI-first `MOQX.MOQLite04.connect/2` facade;
+  - issue 06: client action and event runner;
+  - issue 07: role-neutral subscriber operations;
+  - issue 08: role-neutral publisher operations and smoke flow
 
 ## References
 

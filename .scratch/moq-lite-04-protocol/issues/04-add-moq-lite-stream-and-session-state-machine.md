@@ -172,10 +172,11 @@ Completed reducer slice:
 
 Follow-up work:
 
-- add a runner/client layer that opens transport streams from higher-level
-  application commands and applies returned transport actions;
-- decide the final public event and command vocabulary before exposing a
-  user-facing MOQ Lite client API.
+- issue 05 adds the URI-first `MOQX.MOQLite04.connect/2` facade;
+- issue 06 adds the client action and event runner;
+- issue 07 adds role-neutral subscriber operations;
+- issue 08 adds role-neutral publisher operations and the client-level
+  subscribe/group/frame smoke flow.
 
 Decision references:
 

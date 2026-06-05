@@ -15,26 +15,32 @@ The low-level `MOQX.Transport` behaviour currently exposes connection primitives
 
 ## Decision
 
-Use validated endpoint values above the raw transport boundary.
+Validate URI-shaped endpoint input above the raw transport boundary.
 
-A future endpoint module should parse and validate URI-shaped input, likely using a struct such as:
+Variant-specific clients should initially accept strings or `URI.t()` values
+directly and validate them at their public boundary. For example,
+`MOQX.MOQLite04.connect/2` already implies the MOQ Lite draft-04
+variant, so an additional endpoint struct carrying `protocol`, `profile`, or
+`variant` would duplicate information already present in the module name.
 
-```elixir
-%MOQX.Endpoint{
-  uri: %URI{},
-  scheme: :moqt,
-  protocol: :moqt_draft_14,
-  host: "relay.example.com",
-  port: 4433,
-  authority: "relay.example.com:4433",
-  path: "/live",
-  query: "track=video",
-  transport: :native_quic,
-  alpn: "moq-00"
-}
-```
+Do not introduce `MOQX.Endpoint` for the first variant-specific client runner.
+The module is deferred until a generic dispatcher such as `MOQX.connect/2`
+needs a shared value that can select between protocol variants.
 
-Public/session APIs may accept strings or `URI.t()` values and convert them into validated endpoints.
+The validated URI should remain the source of truth for URI components already
+represented by `URI.t()`, such as:
+
+- scheme;
+- authority;
+- host;
+- port;
+- path;
+- query.
+
+Derived values should be exposed through functions where needed rather than
+cached in a struct. For a variant-specific client, protocol defaults such as
+ALPN come from the variant module or `MOQX.Transport.Profile`, not from the
+URI value.
 
 The raw transport API should continue to receive transport primitives:
 
@@ -43,9 +49,15 @@ The raw transport API should continue to receive transport primitives:
 - transport options;
 - timeout.
 
+Runtime transport selection and backend initialization options belong beside
+the connect call, not in URI endpoint data. For example, a client runner may
+accept `transport: {MOQX.Transport.Quicer, opts}` or
+`transport: {MOQX.Transport.Support, opts}` while still validating the target
+URI separately.
+
 The transport layer should not own MOQT-family URI semantics such as path, query, authority SETUP parameters, reconnect URI behavior, broadcast paths, or scheme interpretation beyond what is necessary for connection setup.
 
-Initial endpoint validation should reflect ADR-0002:
+Initial URI validation should reflect ADR-0002:
 
 - accept native MOQT endpoint schemes only;
 - require a host;
@@ -64,11 +76,14 @@ Positive:
 - MOQT-family session code can retain path/query/authority information needed by draft-specific setup or reconnect logic.
 - Invalid or unsupported endpoints can fail early with clear errors.
 - Future WebTransport support can be represented as another endpoint transport mode without changing native QUIC primitives.
+- Variant-specific clients avoid a redundant wrapper around `URI.t()`.
+- Transport backend choice remains an explicit runtime dependency seam.
 
 Tradeoffs:
 
-- A dedicated endpoint validation layer is required instead of passing `%URI{}` directly everywhere.
-- Endpoint defaults and scheme rules must be documented and tested.
+- URI validation logic is initially owned by each variant-specific client rather
+  than a shared endpoint module.
+- URI scheme and default port rules must still be documented and tested.
 - Session code must explicitly pass only host/port/options/capability choices to the transport adapter while retaining the rest of the endpoint for protocol setup or reconnect handling.
 
 ## Non-goals
@@ -81,3 +96,4 @@ This ADR does not decide:
 - WebTransport endpoint behavior;
 - MOQT SETUP parameter encoding;
 - MOQ Lite reconnect or broadcast-path semantics.
+- a generic `MOQX.Endpoint` struct or `MOQX.connect/2` dispatcher.
