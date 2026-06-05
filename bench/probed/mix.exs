@@ -28,6 +28,7 @@ defmodule Probed.MixProject do
   defp deps do
     [
       {:probe_ledger, path: "../ledger"},
+      {:jason, "~> 1.4"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
