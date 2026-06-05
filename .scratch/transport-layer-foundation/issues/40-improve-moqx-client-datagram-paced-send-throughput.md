@@ -188,3 +188,17 @@ requested load on the link.
   in mind but is not a current optimization target. Preserve the public facade
   and telemetry path; revisit only if future real-path evidence shows this
   overhead has become the limiting factor.
+- 2026-06-05: Completed the benchmark-client redesign that #40 pointed toward.
+  Follow-up #41 moved MOQX-client DATAGRAM pressure onto
+  `MOQXProbe.Traffic.DatagramSender`: bounded Flow payload production, a
+  single GenStage sink that owns `MOQX.Transport.send_datagram/3`, absolute
+  monotonic pacing, capped catch-up, hot-path telemetry, and stable
+  `transport-bench-v1` adaptation. Local loopback calibration at 32k pps with
+  1180-byte DATAGRAMs was contract-valid (`offered_rate_ratio=0.9858`,
+  `datagram_delivery_ratio=0.97559375`) but remains calibration only.
+  Follow-up #43 applied the same sender architecture to pure stream pressure
+  through `MOQXProbe.Traffic.StreamSender`. The canonical command surface is
+  now `moqxprobe measure`; no `reference-comparison` compatibility path
+  remains. The next #40 step is not more local sender-admission work, but a
+  small ARM real-path bracket comparing quicprobe control versus the new
+  MOQX-client DATAGRAM sender around 30k/32k pps.

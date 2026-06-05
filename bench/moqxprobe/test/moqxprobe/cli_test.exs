@@ -10,7 +10,6 @@ defmodule MOQXProbe.CLITest do
     output = capture_io(fn -> CLI.main([]) end)
 
     assert output =~ "moqxprobe COMMAND"
-    assert output =~ "moqx-listener"
     assert output =~ "sender-admission"
   end
 
@@ -27,14 +26,6 @@ defmodule MOQXProbe.CLITest do
     assert output =~ "--target-rate"
   end
 
-  test "prints MOQX listener usage" do
-    output = capture_io(fn -> CLI.main(["help", "moqx-listener"]) end)
-
-    assert output =~ "moqxprobe moqx-listener"
-    assert output =~ "reference-client-to-MOQX-listener"
-    assert output =~ "mixed_moqt_shaped"
-  end
-
   test "documents inline or file path metadata input for iperf3 baseline" do
     assert capture_io(fn -> CLI.main(["help", "iperf3-baseline"]) end) =~
              "--path-json PATH_OR_JSON"
@@ -44,7 +35,6 @@ defmodule MOQXProbe.CLITest do
     output = capture_io(fn -> CLI.main(["help", "measure"]) end)
 
     assert output =~ "reference-client-to-reference-server"
-    assert output =~ "reference-client-to-moqx-listener"
     assert output =~ "moqx-client-to-reference-server"
     assert output =~ "mixed_moqt_shaped"
   end

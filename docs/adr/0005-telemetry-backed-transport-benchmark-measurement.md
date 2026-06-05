@@ -226,7 +226,7 @@ The benchmark collector attaches for one run or one step and detaches in
 
 As of the first migration, `MOQXProbe.TransportTelemetryCollector`
 is the shared collector for self-pair calibration, MOQX-client stream,
-DATAGRAM, and mixed pressure, plus `moqx-listener` stream/DATAGRAM diagnostics.
+DATAGRAM, and mixed pressure.
 The older stream-only collector and live phase diagnostics path are removed.
 
 Telemetry handlers run in the process that emits the event. Therefore handler
@@ -286,7 +286,7 @@ high-cardinality exported metric labels.
 The first implementation kept the staged order from this ADR but then removed
 the intermediate mixed state. The benchmark now uses a single
 `MOQXProbe.TransportTelemetryCollector` for MOQX-client stream,
-DATAGRAM, mixed pressure, and `moqx-listener` stream/DATAGRAM diagnostics.
+DATAGRAM, and mixed pressure.
 
 Root `moqx` emits transport-facade telemetry for `send_stream/4`,
 `recv_stream/3`, `send_datagram/3`, and `receive_event/2`. `bench/moqxprobe`

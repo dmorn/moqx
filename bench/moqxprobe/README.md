@@ -358,25 +358,6 @@ high pacing lag with low `SendDatagram` call time points at
 timer/scheduler/send-loop slippage, while high call time points at quic-go
 DATAGRAM queue backpressure.
 
-When `moqx-listener` serves `datagram_pressure`, it bounds the receiver loop by
-both expected count and post-first-datagram idle time. This keeps lossy steps
-from holding the UDP port while waiting for datagrams that were dropped. Pass
-`--diagnostics-output PATH` to append listener-side JSONL diagnostics with
-received/echoed counts, duplicate/invalid counts, stop reason, and receiver
-mailbox depth/peak/samples. Listener diagnostics also include bounded mailbox
-sample points across the run and echo-send timing/error counters, which are the
-first signals to inspect when a reference client cannot sustain its target
-offered rate against MOQX. If the listener fails before a workload starts, for
-example while waiting in `accept` or `handshake`, the same diagnostics file gets
-a `listener_accept_run` record with configured/bound listener address, phase,
-timeout, and error reason. Remote listener runs that involve provisioning,
-capture setup, or manual dispatch should set `--accept-timeout-seconds` higher
-than `--timeout-seconds`; the former controls how long the listener waits for a
-client connection, while the latter controls workload/read bounds after accept.
-For `stream_pressure`, the same `--diagnostics-output PATH` option appends a
-`stream_listener_run` record with listener-side receive counts, echo-send
-attempt/accept counts, send-completion counts, pending completions, per-stream
-byte counts, and listener mailbox depth/peak/sample points.
 For `moqx-client-to-reference-server` DATAGRAM runs, the canonical benchmark
 record includes
 `moqx-client-datagram-diagnostics-v1` with accepted/received/missing counts,
@@ -426,9 +407,8 @@ go run ./bench/quicprobe client --addr 127.0.0.1:4433 \
   --offered-rate-tolerance 0.95
 ```
 
-The canonical benchmark wrapper supports reference-to-reference,
-MOQX-client-to-reference-server, and reference-client-to-MOQX-listener
-topologies:
+The canonical benchmark wrapper supports two caller-side topologies:
+reference-to-reference and MOQX-client-to-reference-server.
 
 ```bash
 moqxprobe measure \
@@ -455,65 +435,10 @@ moqxprobe measure \
   --payload-count 100 \
   --output bench/moqxprobe/results/moqx-client-reference.jsonl
 
-moqxprobe moqx-listener \
-  --host 0.0.0.0 \
-  --port 4433 \
-  --certfile .tmp/integration-certs/server.pem \
-  --keyfile .tmp/integration-certs/server-key.pem \
-  --stream-count 4 \
-  --payload-size 1200 \
-  --payload-count 100
-
-moqxprobe measure \
-  --topology reference-client-to-moqx-listener \
-  --server 127.0.0.1 \
-  --port 4433 \
-  --ca .tmp/integration-certs/ca.pem \
-  --quicprobe-command /path/to/quicprobe \
-  --stream-direction bidirectional \
-  --stream-count 4 \
-  --payload-size 1200 \
-  --payload-count 100 \
-  --output bench/moqxprobe/results/reference-client-moqx-listener.jsonl
 ```
 
-Use the same topologies for datagram pressure by replacing the stream options
-with an explicit datagram workload. For example, start a MOQX listener peer:
-
-```bash
-moqxprobe moqx-listener \
-  --host 0.0.0.0 \
-  --port 4433 \
-  --certfile .tmp/integration-certs/server.pem \
-  --keyfile .tmp/integration-certs/server-key.pem \
-  --workload datagram_pressure \
-  --datagram-size 1192 \
-  --datagram-count 1000 \
-  --accept-timeout-seconds 120 \
-  --diagnostics-output bench/moqxprobe/results/moqx-listener-datagrams.jsonl
-```
-
-Then run the reference client topology against it:
-
-```bash
-moqxprobe measure \
-  --topology reference-client-to-moqx-listener \
-  --server 127.0.0.1 \
-  --port 4433 \
-  --ca .tmp/integration-certs/ca.pem \
-  --quicprobe-command /path/to/quicprobe \
-  --workload datagram_pressure \
-  --datagram-size 1192 \
-  --datagram-count 1000 \
-  --output bench/moqxprobe/results/reference-client-moqx-listener-datagrams.jsonl
-```
-
-For paced datagram steps against `moqx-listener`, pass the same
-`--datagram-rate` and `--duration-seconds` pair to the listener and the
-measure command so both sides agree on the expected datagram
-count. Keep the listener `--accept-timeout-seconds` generous enough to cover
-remote command dispatch and tcpdump/setup time; do not use the client
-measurement timeout as the listener readiness timeout.
+Use the same two topologies for datagram pressure by replacing the stream
+options with an explicit datagram workload.
 
 For mixed MOQT-shaped pressure, use `--workload mixed_moqt_shaped`. The first
 mixed workload is intentionally transport-shaped rather than a full MOQT
@@ -546,10 +471,7 @@ moqxprobe measure \
 
 The measurement command does not start the peer server. For reference server
 topologies, start `bench/quicprobe server` explicitly on the chosen endpoint
-first. For reference-client-to-MOQX-listener runs, start
-`moqxprobe moqx-listener` explicitly on the server endpoint; it
-serves one connection by default and then exits. Then run
-`measure` from the client side. The wrapper emits
+first. Then run `measure` from the client side. The wrapper emits
 `transport-bench-v1` JSONL. The MOQX-client topology opens all requested
 streams, schedules payload rounds across those streams, and records
 `stream_scheduling=concurrent` for pure stream pressure and
@@ -560,12 +482,6 @@ proof. Mixed-pressure diagnostics include object send-completion counts,
 pending completion counts, drained event counts, current sender mailbox depth,
 peak observed sender mailbox depth, and zero-wait completion-drain events
 observed after the workload success condition has been met.
-
-`moqxprobe moqx-listener` is a correctness and interop peer, not yet
-a high-rate performance peer. Its stream-pressure path currently accepts the
-expected streams up front, then serves them in stream-id order. That is useful
-for contract smokes, but heavier listener-side performance claims need a
-dedicated concurrent serving path.
 
 ### Pressure Patterns
 
@@ -715,9 +631,8 @@ transport and benchmark measurements may be collected through `:telemetry`,
 `telemetry_metrics` declarations, and benchmark-owned collectors.
 The shared JSONL/path metadata validation code lives in `bench/ledger`; this
 CLI owns producing and reporting the measurements, not the reusable specs.
-Self-pair calibration, MOQX-client stream, DATAGRAM, mixed pressure, and
-`moqx-listener` stream/DATAGRAM diagnostics all use the same
-`MOQXProbe.TransportTelemetryCollector` path for transport timings,
+Self-pair calibration and MOQX-client stream, DATAGRAM, and mixed pressure use
+the same `MOQXProbe.TransportTelemetryCollector` path for transport timings,
 event counts, and bounded mailbox samples.
 
 ### Record Types

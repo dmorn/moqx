@@ -15,16 +15,15 @@ before moving on to higher-level MOQT protocol work.
 The transport is semantically ready for protocol implementation, but the
 current real-path evidence shows that MOQX is still far enough from the
 reference peer that protocol work would risk hiding transport bottlenecks under
-session logic. This issue should make pressure, backpressure, mailbox growth,
-send-completion cadence, and listener/client limits visible enough to close the
-gap deliberately.
+session logic. This issue should make caller-side pressure, backpressure,
+mailbox growth, send-completion cadence, and client limits visible enough to
+close the gap deliberately.
 
 ## Observations
 
-- `moqx-transport-bench moqx-listener` is a correctness peer, not yet a
-  serious performance peer. It accepts all expected streams, then serves them
-  sequentially by stream id, which can create benchmark artifacts under heavier
-  bidirectional stream pressure.
+- Listener/relay benchmarking is future relay scope. The v1 benchmark harness
+  targets caller-side processes that connect out to a relay or reference peer
+  and publish, subscribe, send, or receive over that outbound QUIC connection.
 - `MOQX.Transport` currently normalizes all backend events through the caller
   mailbox. For high-rate datagrams, mailbox growth and drain speed can become
   the benchmark result unless it is measured or separated deliberately.
@@ -47,14 +46,12 @@ gap deliberately.
 
 ## Acceptance criteria
 
-- [x] Benchmark docs distinguish correctness peers from performance peers and
-      call out known listener serialization limits.
+- [x] Benchmark docs scope listener/relay benchmarking out of v1 and keep the
+      active benchmark surface caller-side.
 - [x] Datagram benchmark records distinguish offered datagrams, locally
       accepted sends, and peer-delivered datagrams.
-- [x] High-rate datagram runs can record or bound receiver mailbox pressure in
-      all MOQX receiver topologies.
-- [x] `moqx-listener` DATAGRAM runs record receiver mailbox pressure and bound
-      lossy-step idle waits.
+- [x] High-rate caller-side datagram runs can record or bound receiver mailbox
+      pressure in the MOQX-client topology.
 - [x] Mixed MOQX-client pressure drains object-stream send completions instead
       of leaving completion events in the caller mailbox.
 - [x] Mixed pressure records sender mailbox depth, peak mailbox depth,
@@ -84,8 +81,8 @@ child issues in evidence order:
    MOQX-client transition.
 4. #35 reruns mixed MOQT-shaped pressure on real ARM nodes after the event-pump
    fix to confirm the mailbox artifact is gone off loopback.
-5. #36 is a human design decision: keep `moqx-listener` as a correctness peer
-   or build a dedicated performance-serving model.
+5. #36 is closed: listener/relay benchmarking is dropped from the v1 harness
+   and deferred until relay work has an explicit serving model.
 6. #37 attacks the first stream-pressure bottleneck identified by #33: the
    MOQX-client caller/event pump and per-payload async completion cadence.
 7. #38 designs the next measurement layer so transport and benchmark
@@ -475,3 +472,20 @@ seams without `Application` env.
   `send_datagram/3`/NIF boundary, then validate whether a BEAM-to-NIF batch
   admission experiment is the right way to recover headroom before restarting
   real-infra tests.
+- 2026-06-05: #41 and #43 completed the caller-side sender extraction under
+  the canonical `moqxprobe measure` surface. MOQX-client DATAGRAM pressure now
+  runs through `MOQXProbe.Traffic.DatagramSender`, and pure stream pressure
+  runs through `MOQXProbe.Traffic.StreamSender`; both use bounded Flow
+  production, a single final GenStage sink that owns transport send calls, and
+  benchmark-owned telemetry harvested by the ETS-backed collector while
+  preserving `transport-bench-v1`. The old `reference-comparison` command,
+  module, Mix task, workload family, stop reasons, and measurement schema name
+  were removed instead of kept as compatibility aliases. The next useful #26
+  evidence step is a tight real-path validation bracket of the new sender
+  architecture before opening any lower-level NIF batching work.
+- 2026-06-05: #36 was closed by dropping the benchmark listener branch from
+  the v1 harness. `moqxprobe moqx-listener`, its Mix wrapper, tests, README
+  examples, and the `reference-client-to-moqx-listener` measurement topology
+  were removed. This keeps the transport benchmark focused on the product's
+  first caller-side use cases. Listener/relay performance should return as a
+  new relay-scoped issue only when relays become a target.

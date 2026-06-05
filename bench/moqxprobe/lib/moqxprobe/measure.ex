@@ -45,11 +45,9 @@ defmodule MOQXProbe.Measure do
   @quicer_boolean_settings MapSet.new([:pacing_enabled, :send_buffering_enabled])
   @quicer_uint8_settings MapSet.new([:max_operations_per_drain])
   @reference_client_topology "reference-client-to-reference-server"
-  @reference_client_moqx_listener_topology "reference-client-to-moqx-listener"
   @moqx_client_topology "moqx-client-to-reference-server"
   @supported_topologies [
     @reference_client_topology,
-    @reference_client_moqx_listener_topology,
     @moqx_client_topology
   ]
 
@@ -476,9 +474,6 @@ defmodule MOQXProbe.Measure do
   end
 
   defp run_topology(%{topology: @reference_client_topology} = config), do: run_quicprobe(config)
-
-  defp run_topology(%{topology: @reference_client_moqx_listener_topology} = config),
-    do: run_quicprobe(config)
 
   defp run_topology(%{topology: @moqx_client_topology} = config), do: run_moqx_client(config)
 
@@ -4296,12 +4291,8 @@ defmodule MOQXProbe.Measure do
 
   defp default_stream_scheduling(%{topology: @reference_client_topology}), do: "concurrent"
 
-  defp default_stream_scheduling(%{topology: @reference_client_moqx_listener_topology}),
-    do: "concurrent"
-
   defp default_stream_scheduling(%{topology: @moqx_client_topology}), do: "concurrent"
 
-  defp server_implementation(%{topology: @reference_client_moqx_listener_topology}), do: "moqx"
   defp server_implementation(_config), do: "quicprobe"
 
   defp workload_metadata(ctx) do
@@ -4701,12 +4692,6 @@ defmodule MOQXProbe.Measure do
 
   defp valid_measurement?(
          %{topology: @reference_client_topology} = config,
-         %{"schema_version" => "quicprobe-v1", "record_type" => "client_run"} = measurement
-       ),
-       do: valid_offered_rate?(config, measurement)
-
-  defp valid_measurement?(
-         %{topology: @reference_client_moqx_listener_topology} = config,
          %{"schema_version" => "quicprobe-v1", "record_type" => "client_run"} = measurement
        ),
        do: valid_offered_rate?(config, measurement)
@@ -5155,7 +5140,6 @@ defmodule MOQXProbe.Measure do
     Required:
       --topology VALUE               one of:
                                       reference-client-to-reference-server
-                                      reference-client-to-moqx-listener
                                       moqx-client-to-reference-server
       --server HOST                  peer server host or IP
       --ca PATH                      CA certificate for the peer server
@@ -5232,20 +5216,6 @@ defmodule MOQXProbe.Measure do
         --quicprobe-command /path/to/quicprobe \\
         --datagram-size 1200 --datagram-rate 1000 --duration-seconds 10
 
-    Reference client to MOQX listener:
-      server$ moqxprobe moqx-listener \\
-        --host 0.0.0.0 --port 4433 \\
-        --certfile /opt/moqx-bench/certs/server.pem \\
-        --keyfile /opt/moqx-bench/certs/server-key.pem \\
-        --stream-count 2
-
-      client$ #{script} \\
-        --topology reference-client-to-moqx-listener \\
-        --workload datagram_pressure \\
-        --server SERVER_PRIVATE_IP --port 4433 \\
-        --ca /opt/moqx-bench/certs/ca.pem \\
-        --quicprobe-command /opt/moqx-bench/quicprobe/current/bin/quicprobe \\
-        --datagram-size 1200 --datagram-count 1000
     """
   end
 end

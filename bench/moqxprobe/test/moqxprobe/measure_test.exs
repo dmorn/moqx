@@ -68,64 +68,6 @@ defmodule MOQXProbe.MeasureTest do
     assert args =~ "--payload-count 4"
   end
 
-  test "emits a valid reference client to MOQX listener record from quicprobe JSON" do
-    dir = tmp_dir()
-    output_path = Path.join(dir, "reference-client-moqx-listener.jsonl")
-    args_path = Path.join(dir, "quicprobe-listener.args")
-    fake_quicprobe = fake_quicprobe_command(dir, args_path)
-
-    Measure.main(
-      [
-        "--topology",
-        "reference-client-to-moqx-listener",
-        "--server",
-        "127.0.0.1",
-        "--port",
-        "4433",
-        "--ca",
-        "/tmp/ca.pem",
-        "--servername",
-        "localhost",
-        "--stream-count",
-        "2",
-        "--payload-size",
-        "256",
-        "--payload-count",
-        "4",
-        "--quicprobe-command",
-        fake_quicprobe,
-        "--output",
-        output_path,
-        "--run-id",
-        "reference-client-listener-test"
-      ],
-      script: "test measure"
-    )
-
-    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
-    assert Contract.validate_records([record]).valid?
-
-    assert record["workload"]["family"] == "measurement"
-    assert record["workload"]["tool"] == "quicprobe"
-    assert record["workload"]["topology"] == "reference-client-to-moqx-listener"
-    assert record["profile"]["settings"]["topology"] == "reference-client-to-moqx-listener"
-    assert record["profile"]["settings"]["workload"] == "stream_pressure"
-    assert record["profile"]["settings"]["client_implementation"] == "quicprobe"
-    assert record["profile"]["settings"]["server_implementation"] == "moqx"
-    assert record["profile"]["settings"]["stream_scheduling"] == "concurrent"
-    assert record["metrics"]["bytes_sent"] == 2048
-    assert record["metrics"]["bytes_received"] == 2048
-
-    args = File.read!(args_path)
-    assert args =~ "client"
-    assert args =~ "--json"
-    assert args =~ "--addr 127.0.0.1:4433"
-    assert args =~ "--workload stream_pressure"
-    assert args =~ "--stream-count 2"
-    assert args =~ "--payload-size 256"
-    assert args =~ "--payload-count 4"
-  end
-
   test "emits a valid datagram pressure record from quicprobe JSON" do
     dir = tmp_dir()
     output_path = Path.join(dir, "reference-datagram.jsonl")
