@@ -121,9 +121,12 @@ Delivered so far:
 - `MOQX.Codec`
 - `MOQX.Codec.Encoder`
 - `MOQX.Codec.Decoder`
+- `MOQX.Codec` varint, string, and byte payload helpers
 - `MOQX.MOQLite04` stream type lookup helpers
+- `MOQX.MOQLite04` subscribe response discriminator lookup helpers
 - `MOQX.MOQLite04` message structs for Announce, Subscribe, Fetch, Probe,
   Goaway, Group, and Frame messages
+- `MOQX.MOQLite04` payload encoders and decoders for all message structs
 
 ## References
 

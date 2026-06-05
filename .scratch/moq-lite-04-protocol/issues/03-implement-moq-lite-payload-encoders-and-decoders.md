@@ -2,7 +2,7 @@
 
 # Implement MOQ Lite 04 payload encoders and decoders
 
-Status: ready-for-agent
+Status: closed
 Type: enhancement
 
 ## Parent
@@ -21,22 +21,43 @@ later stream codec slice.
 
 ## Acceptance criteria
 
-- [ ] `MOQX.Codec.Encoder` implementations exist for all MOQ Lite draft-04
+- [x] `MOQX.Codec.Encoder` implementations exist for all MOQ Lite draft-04
       message structs.
-- [ ] Concrete decoders exist for all MOQ Lite draft-04 message payload shapes.
-- [ ] Round-trip tests cover AnnounceInterest, Announce, Subscribe,
+- [x] Concrete decoders exist for all MOQ Lite draft-04 message payload shapes.
+- [x] Round-trip tests cover AnnounceInterest, Announce, Subscribe,
       SubscribeUpdate, SubscribeOk, SubscribeDrop, Fetch, Probe, Goaway, Group,
       and Frame.
-- [ ] Invalid status/order/discriminator values return explicit errors.
-- [ ] Decoders reject trailing bytes when the caller expects a complete payload.
-- [ ] Message length remains outside the message structs and outside payload
+- [x] Invalid status/order/discriminator values return explicit errors.
+- [x] Decoders reject trailing bytes when the caller expects a complete payload.
+- [x] Message length remains outside the message structs and outside payload
       encoder implementations unless the stream codec explicitly adds it.
-- [ ] Subscribe response type discriminators are handled without adding a
+- [x] Subscribe response type discriminators are handled without adding a
       synthetic `type` field to `SubscribeOk` or `SubscribeDrop` structs.
-- [ ] Tests do not depend on `Application` env or live QUIC sockets.
+- [x] Tests do not depend on `Application` env or live QUIC sockets.
 
 ## Notes
 
 Use `MOQX.Codec` helpers for primitive parsing. Keep decoder selection
 contextual: the stream codec or state machine should decide which decoder is
 valid next.
+
+## Progress
+
+Implemented in the current working tree:
+
+- `MOQX.Codec.Encoder` implementations for every `MOQX.MOQLite04` message
+  struct.
+- `MOQX.Codec.Decoder` implementations through each message module's
+  `decode/2` callback.
+- Subscribe response discriminator lookup helpers on `MOQX.MOQLite04`.
+
+Validation:
+
+- `mix test test/moqx/moq_lite_04/payload_codec_test.exs`
+- `mix test test/moqx/codec/binary_test.exs test/moqx/moq_lite_04_test.exs test/moqx/moq_lite_04/payload_codec_test.exs test/moqx/codec/encoder_decoder_test.exs`
+
+## Comments
+
+- 2026-06-05: Closed after adding payload-only encoders/decoders. Stream type
+  prefixes, message length fields, buffering, and stream-state dispatch remain
+  for issue 04.

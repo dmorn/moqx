@@ -2,7 +2,7 @@
 
 # Add shared binary codec helpers
 
-Status: ready-for-agent
+Status: closed
 Type: enhancement
 
 ## Parent
@@ -19,20 +19,41 @@ dispatcher.
 
 ## Acceptance criteria
 
-- [ ] Variable-length integer encode/decode helpers exist and return explicit
+- [x] Variable-length integer encode/decode helpers exist and return explicit
       `{:ok, value, rest}` or `{:error, reason}` results for decode.
-- [ ] Boundary tests cover every encoded integer size class required by the
+- [x] Boundary tests cover every encoded integer size class required by the
       referenced MOQT-family drafts.
-- [ ] Incomplete integer inputs return a distinguishable incomplete-data error.
-- [ ] Length-prefixed UTF-8 string helpers exist for MOQ Lite `(s)` fields.
-- [ ] Length-prefixed byte payload helpers exist for MOQ Lite `(b)` fields.
-- [ ] Helpers reject malformed lengths instead of reading past available data.
-- [ ] The module remains protocol-neutral: no MOQ Lite message atoms, stream
+- [x] Incomplete integer inputs return a distinguishable incomplete-data error.
+- [x] Length-prefixed UTF-8 string helpers exist for MOQ Lite `(s)` fields.
+- [x] Length-prefixed byte payload helpers exist for MOQ Lite `(b)` fields.
+- [x] Helpers reject malformed lengths instead of reading past available data.
+- [x] The module remains protocol-neutral: no MOQ Lite message atoms, stream
       roles, or session state in `MOQX.Codec`.
-- [ ] Tests are pure unit tests and do not require live QUIC transport.
+- [x] Tests are pure unit tests and do not require live QUIC transport.
 
 ## Notes
 
 Consult MOQ Lite draft-04 encoding sections before implementing the exact
 integer, string, and byte helper semantics. Keep helper names generic enough to
 serve future MOQT draft-14 codec work.
+
+## Progress
+
+Implemented in the current working tree:
+
+- `MOQX.Codec.encode_varint/1`
+- `MOQX.Codec.decode_varint/1`
+- `MOQX.Codec.encode_string/1`
+- `MOQX.Codec.decode_string/1`
+- `MOQX.Codec.encode_bytes/1`
+- `MOQX.Codec.decode_bytes/1`
+
+Validation:
+
+- `mix test test/moqx/codec/binary_test.exs`
+- `mix test test/moqx/codec/binary_test.exs test/moqx/moq_lite_04_test.exs test/moqx/moq_lite_04/payload_codec_test.exs test/moqx/codec/encoder_decoder_test.exs`
+
+## Comments
+
+- 2026-06-05: Closed after adding generic QUIC varint and length-prefixed
+  string/bytes helpers under `MOQX.Codec`.

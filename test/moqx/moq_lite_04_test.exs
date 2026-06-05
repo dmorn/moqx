@@ -28,6 +28,45 @@ defmodule MOQX.MOQLite04Test do
     end
   end
 
+  describe "subscribe response types" do
+    test "maps subscribe response variants to draft-04 discriminator IDs" do
+      assert MOQLite04.subscribe_response_type_id(:ok) == {:ok, 0x0}
+      assert MOQLite04.subscribe_response_type_id(:drop) == {:ok, 0x1}
+    end
+
+    test "maps draft-04 discriminator IDs to subscribe response variants" do
+      assert MOQLite04.subscribe_response_type(0x0) == {:ok, :ok}
+      assert MOQLite04.subscribe_response_type(0x1) == {:ok, :drop}
+    end
+
+    test "rejects unknown subscribe response discriminator IDs" do
+      assert MOQLite04.subscribe_response_type_id(:unknown) ==
+               {:error, :unknown_subscribe_response_type}
+
+      assert MOQLite04.subscribe_response_type(0x2) ==
+               {:error, :unknown_subscribe_response_type}
+    end
+
+    test "keeps discriminator outside SubscribeOk and SubscribeDrop structs" do
+      subscribe_ok = %MOQLite04.SubscribeOk{
+        publisher_priority: 1,
+        publisher_ordered: :descending,
+        publisher_max_latency: 0,
+        start_group: 0,
+        end_group: 0
+      }
+
+      subscribe_drop = %MOQLite04.SubscribeDrop{
+        start_group: 0,
+        end_group: 0,
+        error_code: 0
+      }
+
+      refute Map.has_key?(subscribe_ok, :type)
+      refute Map.has_key?(subscribe_drop, :type)
+    end
+  end
+
   describe "message structs" do
     test "defines announcement messages" do
       assert %MOQLite04.AnnounceInterest{
