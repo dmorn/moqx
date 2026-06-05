@@ -1,6 +1,6 @@
 # Build paced DATAGRAM benchmark client
 
-Status: needs-triage
+Status: in-progress
 Type: AFK
 
 ## Parent
@@ -101,3 +101,12 @@ Unbounded catch-up is a measurement bug. If the sink wakes late, it may send a
 bounded catch-up burst and should record the capped tick. Past a configured
 threshold, the run should be marked as tool-limited or offered-rate invalid
 rather than presented as network capacity evidence.
+
+## Progress
+
+- 2026-06-05: Started implementation by extracting the dependency-free
+  `MOQXProbe.Traffic` namespace and pure `MOQXProbe.Traffic.Pacer`. The pacer
+  covers absolute elapsed-time target accounting, absolute deadline increments
+  from the previous scheduled tick, bounded catch-up bursts, tool-limited lag
+  detection, and final count clamping. This is the shared timing core for both
+  the upcoming DATAGRAM sink and stream sink.
