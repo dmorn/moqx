@@ -279,22 +279,44 @@ These knobs are not protocol semantics. Use them to distinguish benchmark
 event-pump overhead, event granularity, and transport/NIF behavior while
 preserving send admission and completion accounting.
 
-Paced MOQX-client DATAGRAM pressure uses benchmark defaults tuned for stable
-high-rate load generation rather than protocol semantics:
+Paced MOQX-client DATAGRAM pressure uses `MOQXProbe.Traffic.DatagramSender`.
+The sender composes a bounded Flow payload producer with a single GenStage
+paced sink:
 
-- `--datagram-receive-mode process` moves DATAGRAM receive ownership to a
-  dedicated process.
-- `--datagram-pacing-mode coarse` uses coarse absolute-deadline sleeps for the
-  application pacing loop. `--datagram-pacing-mode smooth` keeps the same
-  absolute target rate but caps catch-up bursts after scheduler delays; use it
-  when server-side evidence shows inbound loss from bursty application pacing.
-- `--datagram-diagnostics summary` avoids per-send timing collectors on the hot
-  path. Use `--datagram-diagnostics full` only when diagnosing a lower-rate
-  reproduction or when the observer effect is acceptable.
-- `--quicer-setting pacing_enabled=0` disables MsQuic pacing for this paced
-  load-generator path so the benchmark's own offered-rate scheduler controls
-  timing. Pass `--quicer-setting KEY=VALUE` to override or add whitelisted
-  quicer connection settings for an experiment.
+```text
+payload descriptors -> bounded DATAGRAM sink -> MOQX.Transport.send_datagram/3
+```
+
+The sink is the only process that calls `MOQX.Transport.send_datagram/3` for
+the connection. It uses 1 ms absolute monotonic deadlines, sends small bounded
+bursts, and records scheduler lag or capped catch-up ticks instead of hiding
+tool slippage behind unbounded bursts. Payload production is demand-bound by
+the sink queue. Sequence/timestamp payloads encode the timestamp at the paced
+send point; fixed payloads and prefilled payload rings are prepared before the
+timed send loop, so the hot path does not allocate or read random bytes.
+
+Benchmark-owned telemetry is emitted under
+`[:moqx, :transport_bench, :datagram_sender, ...]`:
+
+- `[:run, :start]` and `[:run, :stop]` for sender lifecycle.
+- `[:demand, :ask]` and `[:backlog, :change]` for producer demand and queue
+  depth.
+- `[:tick, :stop]` for lag, due count, sent count, capped ticks, tool-limited
+  ticks, burst duration, send errors, and queue depth.
+- `[:send, :error]` for burst send-error summaries.
+
+Use `--datagram-diagnostics summary` for the normal low-overhead pressure path.
+Use `--datagram-diagnostics full` only when diagnosing a lower-rate
+reproduction or when the observer effect is acceptable. `--quicer-setting
+pacing_enabled=0` disables MsQuic pacing for this paced load-generator path so
+the benchmark's own offered-rate scheduler controls timing. Pass
+`--quicer-setting KEY=VALUE` to override or add whitelisted quicer connection
+settings for an experiment.
+
+Use `sender-admission` only for lower-level BEAM-to-NIF admission calibration.
+It answers whether local DATAGRAM admission can keep up when pacing is already
+solved; `reference-comparison --workload datagram_pressure --datagram-rate ...`
+is the benchmark path for peer-facing QUIC DATAGRAM pressure evidence.
 
 For datagram pressure, use `--workload datagram_pressure`. By default the
 workload sends a burst of `--datagram-count` fixed-size QUIC DATAGRAM frames.

@@ -64,6 +64,54 @@ defmodule MOQXProbe.TransportTelemetryCollectorTest do
         %{result: :timeout, event_kind: :timeout, event_name: nil}
       )
 
+      :telemetry.execute(
+        [:moqx, :transport_bench, :datagram_sender, :run, :start],
+        %{count: 4, rate_per_second: 2_000, max_burst: 2, max_queue_depth: 2},
+        %{sender: :datagram}
+      )
+
+      :telemetry.execute(
+        [:moqx, :transport_bench, :datagram_sender, :demand, :ask],
+        %{demand_count: 2, outstanding_demand: 2, queue_depth: 0, max_queue_depth: 2},
+        %{sender: :datagram, sink: :datagram_sink}
+      )
+
+      :telemetry.execute(
+        [:moqx, :transport_bench, :datagram_sender, :backlog, :change],
+        %{enqueued_count: 2, outstanding_demand: 0, queue_depth: 2, max_queue_depth: 2},
+        %{sender: :datagram, sink: :datagram_sink}
+      )
+
+      :telemetry.execute(
+        [:moqx, :transport_bench, :datagram_sender, :tick, :stop],
+        %{
+          lag_ms: 1,
+          due_count: 4,
+          target_emitted: 4,
+          send_count: 2,
+          accepted_count: 1,
+          error_count: 1,
+          capped_tick_count: 1,
+          tool_limited_tick_count: 0,
+          burst_duration_us: 9,
+          queue_depth: 0,
+          outstanding_demand: 0
+        },
+        %{sender: :datagram, sink: :datagram_sink, result: :error, stop_reason: :complete}
+      )
+
+      :telemetry.execute(
+        [:moqx, :transport_bench, :datagram_sender, :send, :error],
+        %{error_count: 1},
+        %{sender: :datagram, sink: :datagram_sink, error_reasons: [":blocked"]}
+      )
+
+      :telemetry.execute(
+        [:moqx, :transport_bench, :datagram_sender, :run, :stop],
+        %{accepted_count: 1, error_count: 1, queue_depth: 0, max_queue_depth: 2},
+        %{sender: :datagram, result: :ok, stop_reason: :complete}
+      )
+
       snapshot = TransportTelemetryCollector.snapshot(collector)
 
       assert snapshot.stream_send_accepted == 1
@@ -91,6 +139,23 @@ defmodule MOQXProbe.TransportTelemetryCollectorTest do
       assert runtime.receive_event_blocking_call_durations_us == [20]
       assert runtime.receive_event_drain_call_durations_us == [5, 7, 1]
       assert runtime.process["message_queue_len_samples"] >= 1
+
+      assert runtime.datagram_sender == %{
+               runs_started: 1,
+               runs_stopped: 1,
+               runs_failed: 0,
+               demand_asked: 2,
+               payloads_enqueued: 2,
+               ticks: 1,
+               due: 4,
+               sent: 2,
+               accepted: 1,
+               errors: 1,
+               send_error_events: 1,
+               capped_ticks: 1,
+               tool_limited_ticks: 0,
+               burst_durations_us: [9]
+             }
     after
       TransportTelemetryCollector.close(collector)
     end

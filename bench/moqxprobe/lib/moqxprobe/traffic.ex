@@ -9,6 +9,12 @@ defmodule MOQXProbe.Traffic do
   def feed_payloads(enumerable, sink, opts \\ []) do
     timeout = Keyword.get(opts, :timeout, 5_000)
 
+    with {:ok, coordinator} <- start_payloads(enumerable, sink, opts) do
+      await_payloads(coordinator, timeout)
+    end
+  end
+
+  def start_payloads(enumerable, sink, opts \\ []) do
     flow =
       PayloadFlow.from_enumerable(
         enumerable,
@@ -17,16 +23,15 @@ defmodule MOQXProbe.Traffic do
 
     subscription_opts = Keyword.take(opts, [:min_demand, :max_demand])
 
-    with {:ok, coordinator} <- Flow.into_stages(flow, [{sink, subscription_opts}]) do
-      await_flow(coordinator, timeout)
-    end
+    Flow.into_stages(flow, [{sink, subscription_opts}])
   end
 
-  defp await_flow(coordinator, timeout) do
+  def await_payloads(coordinator, timeout) when is_pid(coordinator) do
     ref = Process.monitor(coordinator)
 
     receive do
-      {:DOWN, ^ref, :process, ^coordinator, reason} when reason in [:normal, :shutdown] ->
+      {:DOWN, ^ref, :process, ^coordinator, reason}
+      when reason in [:normal, :shutdown, :noproc] ->
         :ok
 
       {:DOWN, ^ref, :process, ^coordinator, reason} ->
@@ -35,6 +40,21 @@ defmodule MOQXProbe.Traffic do
       timeout ->
         Process.demonitor(ref, [:flush])
         {:error, :flow_timeout}
+    end
+  end
+
+  def stop_payloads(coordinator, timeout \\ 1_000) when is_pid(coordinator) do
+    ref = Process.monitor(coordinator)
+    Process.exit(coordinator, :shutdown)
+
+    receive do
+      {:DOWN, ^ref, :process, ^coordinator, _reason} ->
+        :ok
+    after
+      timeout ->
+        Process.demonitor(ref, [:flush])
+        Process.exit(coordinator, :kill)
+        :ok
     end
   end
 end

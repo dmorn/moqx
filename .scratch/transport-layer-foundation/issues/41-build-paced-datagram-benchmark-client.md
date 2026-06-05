@@ -1,6 +1,6 @@
 # Build paced DATAGRAM benchmark client
 
-Status: in-progress
+Status: done
 Type: AFK
 
 ## Parent
@@ -52,30 +52,30 @@ catch-up bursts.
 
 ## Acceptance criteria
 
-- [ ] The DATAGRAM pressure sender is encapsulated behind a benchmark client
+- [x] The DATAGRAM pressure sender is encapsulated behind a benchmark client
       module with explicit options and no mutable `Application` environment
       seam.
-- [ ] Pure scheduler math is covered by tests: absolute deadlines, due count,
+- [x] Pure scheduler math is covered by tests: absolute deadlines, due count,
       burst cap, capped catch-up, no drift from "work time plus sleep time",
       and target-rate accounting.
-- [ ] The paced sink is covered with a fake send function and can prove
+- [x] The paced sink is covered with a fake send function and can prove
       accepted count, send errors, tick lag, capped ticks, and final stop
       reason without opening a QUIC connection.
-- [ ] Payload production is bounded by demand/backlog settings and does not
+- [x] Payload production is bounded by demand/backlog settings and does not
       allocate or read random bytes in the hot send loop.
-- [ ] The final sink is the only process that calls
+- [x] The final sink is the only process that calls
       `MOQX.Transport.send_datagram/3` for a connection.
-- [ ] Benchmark telemetry events are emitted with low-cardinality metadata and
+- [x] Benchmark telemetry events are emitted with low-cardinality metadata and
       can be collected by the existing benchmark collector or a small dedicated
       collector without synchronous GenServer/Agent calls on the hot path.
-- [ ] `reference-comparison` DATAGRAM pressure uses the new client path while
+- [x] `reference-comparison` DATAGRAM pressure uses the new client path while
       preserving `transport-bench-v1` fields for accepted sends, offered rate,
       offered-rate validity, delivery, drops, send timing, pacing lag, and
       diagnostics.
-- [ ] Local loopback calibration demonstrates that the new client can sustain
+- [x] Local loopback calibration demonstrates that the new client can sustain
       the 32k pps offered-rate contract with a valid negotiated DATAGRAM size,
       while clearly marking the result as loopback calibration only.
-- [ ] Documentation explains the client architecture, payload modes, pacing
+- [x] Documentation explains the client architecture, payload modes, pacing
       rules, telemetry events, and when to use it instead of the lower-level
       `sender-admission` microbenchmark.
 
@@ -139,6 +139,26 @@ rather than presented as network capacity evidence.
   while the sink encodes the timestamp at the paced send point, preserving
   latency semantics. The sink path stops on first transport send error for the
   benchmark command, preserves existing `transport-bench-v1` metrics, and
-  records `traffic_sender=datagram_sink` in diagnostics. The telemetry
+  records `traffic_sender=datagram_sender` in diagnostics. The telemetry
   collector now stores event counters/durations in ETS so sink-process
   transport telemetry is visible to the owner snapshot.
+- 2026-06-05: Completed the clean DATAGRAM sender extraction. Added
+  `MOQXProbe.Traffic.DatagramSender` as the benchmark-client boundary around
+  bounded Flow payload production plus the single final `DatagramSink`. Removed
+  the retired DATAGRAM receive/pacing mode options and fields from
+  `ReferenceComparison`, tests, and docs. The sink now uses manual GenStage
+  demand so queued descriptors and outstanding demand stay bounded by explicit
+  queue settings, and emits benchmark-owned telemetry under
+  `[:moqx, :transport_bench, :datagram_sender, ...]`. The existing ETS-backed
+  collector now harvests sender lifecycle, demand, backlog, tick, burst, and
+  send-error counters without GenServer/Agent calls on the hot path.
+- 2026-06-05: Local loopback calibration artifact:
+  `/private/tmp/moqx-issue41-loopback-32k-final.jsonl`. Command used
+  `moqx-client-to-reference-server`, `--datagram-size 1180`,
+  `--datagram-rate 32000`, `--duration-seconds 1`,
+  `--delivery-threshold 0.95`, and a local `quicprobe` server on UDP `55433`.
+  Result: evidence tier `loopback_calibration`, `datagrams_accepted=32000`,
+  `send_rate_datagrams_per_second=31545.6169`, `offered_rate_ratio=0.9858`,
+  `offered_rate_valid=true`, `datagram_delivery_ratio=0.97559375`, no first
+  break symptom, and `traffic_sender=datagram_sender`. This is calibration
+  evidence only, not real network capacity evidence.

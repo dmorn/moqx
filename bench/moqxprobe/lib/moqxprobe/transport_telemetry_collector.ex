@@ -5,7 +5,13 @@ defmodule MOQXProbe.TransportTelemetryCollector do
     [:moqx, :transport, :stream, :send, :stop],
     [:moqx, :transport, :stream, :recv, :stop],
     [:moqx, :transport, :datagram, :send, :stop],
-    [:moqx, :transport, :event, :receive, :stop]
+    [:moqx, :transport, :event, :receive, :stop],
+    [:moqx, :transport_bench, :datagram_sender, :run, :start],
+    [:moqx, :transport_bench, :datagram_sender, :run, :stop],
+    [:moqx, :transport_bench, :datagram_sender, :demand, :ask],
+    [:moqx, :transport_bench, :datagram_sender, :backlog, :change],
+    [:moqx, :transport_bench, :datagram_sender, :tick, :stop],
+    [:moqx, :transport_bench, :datagram_sender, :send, :error]
   ]
 
   @message_queue_sample_prefix_count 16
@@ -17,7 +23,8 @@ defmodule MOQXProbe.TransportTelemetryCollector do
     :datagram_send_call,
     :receive_event_call,
     :receive_event_blocking_call,
-    :receive_event_drain_call
+    :receive_event_drain_call,
+    :datagram_sender_burst
   ]
   @counter_keys [
     {:stream_send, :bytes_accepted},
@@ -41,7 +48,20 @@ defmodule MOQXProbe.TransportTelemetryCollector do
     {:receive_event, :ignored},
     {:receive_event, :unknown},
     {:receive_event, :errors},
-    {:receive_event, :timeouts}
+    {:receive_event, :timeouts},
+    {:datagram_sender, :runs_started},
+    {:datagram_sender, :runs_stopped},
+    {:datagram_sender, :runs_failed},
+    {:datagram_sender, :demand_asked},
+    {:datagram_sender, :payloads_enqueued},
+    {:datagram_sender, :ticks},
+    {:datagram_sender, :due},
+    {:datagram_sender, :sent},
+    {:datagram_sender, :accepted},
+    {:datagram_sender, :errors},
+    {:datagram_sender, :send_error_events},
+    {:datagram_sender, :capped_ticks},
+    {:datagram_sender, :tool_limited_ticks}
   ]
 
   defstruct [
@@ -160,7 +180,8 @@ defmodule MOQXProbe.TransportTelemetryCollector do
         receive_event_blocking_call_durations_us:
           duration_values(collector, :receive_event_blocking_call),
         receive_event_drain_call_durations_us:
-          duration_values(collector, :receive_event_drain_call)
+          duration_values(collector, :receive_event_drain_call),
+        datagram_sender: datagram_sender_snapshot(collector)
       }
     }
   end
@@ -272,6 +293,83 @@ defmodule MOQXProbe.TransportTelemetryCollector do
     record_receive_result(store_key, measurements, metadata)
   end
 
+  defp do_handle_event(
+         [:moqx, :transport_bench, :datagram_sender, :run, :start],
+         _measurements,
+         _metadata,
+         store_key
+       ) do
+    increment(store_key, {:datagram_sender, :runs_started})
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport_bench, :datagram_sender, :run, :stop],
+         _measurements,
+         metadata,
+         store_key
+       ) do
+    increment(store_key, {:datagram_sender, :runs_stopped})
+
+    if metadata[:result] == :error do
+      increment(store_key, {:datagram_sender, :runs_failed})
+    end
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport_bench, :datagram_sender, :demand, :ask],
+         measurements,
+         _metadata,
+         store_key
+       ) do
+    increment(store_key, {:datagram_sender, :demand_asked}, measurements[:demand_count] || 0)
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport_bench, :datagram_sender, :backlog, :change],
+         measurements,
+         _metadata,
+         store_key
+       ) do
+    increment(
+      store_key,
+      {:datagram_sender, :payloads_enqueued},
+      measurements[:enqueued_count] || 0
+    )
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport_bench, :datagram_sender, :tick, :stop],
+         measurements,
+         _metadata,
+         store_key
+       ) do
+    increment(store_key, {:datagram_sender, :ticks})
+    increment(store_key, {:datagram_sender, :due}, measurements[:due_count] || 0)
+    increment(store_key, {:datagram_sender, :sent}, measurements[:send_count] || 0)
+    increment(store_key, {:datagram_sender, :accepted}, measurements[:accepted_count] || 0)
+    increment(store_key, {:datagram_sender, :errors}, measurements[:error_count] || 0)
+    increment(store_key, {:datagram_sender, :capped_ticks}, measurements[:capped_tick_count] || 0)
+
+    increment(
+      store_key,
+      {:datagram_sender, :tool_limited_ticks},
+      measurements[:tool_limited_tick_count] || 0
+    )
+
+    add_duration(store_key, :datagram_sender_burst, measurements[:burst_duration_us])
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport_bench, :datagram_sender, :send, :error],
+         measurements,
+         _metadata,
+         store_key
+       ) do
+    increment(store_key, {:datagram_sender, :send_error_events}, measurements[:error_count] || 0)
+  end
+
+  defp do_handle_event(_event, _measurements, _metadata, _store_key), do: :ok
+
   defp record_receive_result(
          store_key,
          measurements,
@@ -310,6 +408,25 @@ defmodule MOQXProbe.TransportTelemetryCollector do
   end
 
   defp record_receive_result(_store_key, _measurements, _metadata), do: :ok
+
+  defp datagram_sender_snapshot(collector) do
+    %{
+      runs_started: counter(collector, {:datagram_sender, :runs_started}),
+      runs_stopped: counter(collector, {:datagram_sender, :runs_stopped}),
+      runs_failed: counter(collector, {:datagram_sender, :runs_failed}),
+      demand_asked: counter(collector, {:datagram_sender, :demand_asked}),
+      payloads_enqueued: counter(collector, {:datagram_sender, :payloads_enqueued}),
+      ticks: counter(collector, {:datagram_sender, :ticks}),
+      due: counter(collector, {:datagram_sender, :due}),
+      sent: counter(collector, {:datagram_sender, :sent}),
+      accepted: counter(collector, {:datagram_sender, :accepted}),
+      errors: counter(collector, {:datagram_sender, :errors}),
+      send_error_events: counter(collector, {:datagram_sender, :send_error_events}),
+      capped_ticks: counter(collector, {:datagram_sender, :capped_ticks}),
+      tool_limited_ticks: counter(collector, {:datagram_sender, :tool_limited_ticks}),
+      burst_durations_us: duration_values(collector, :datagram_sender_burst)
+    }
+  end
 
   defp add_duration(_store, _key, nil), do: :ok
 

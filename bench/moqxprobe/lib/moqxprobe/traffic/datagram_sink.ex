@@ -5,6 +5,8 @@ defmodule MOQXProbe.Traffic.DatagramSink do
 
   alias MOQXProbe.Traffic.Pacer
 
+  @telemetry_prefix [:moqx, :transport_bench, :datagram_sender]
+
   def start_link(opts) when is_list(opts) do
     GenStage.start_link(__MODULE__, opts)
   end
@@ -30,6 +32,8 @@ defmodule MOQXProbe.Traffic.DatagramSink do
     state = %{
       pacer: Keyword.fetch!(opts, :pacer),
       queue: :queue.new(),
+      max_queue_depth: Keyword.get(opts, :max_queue_depth, :infinity),
+      subscriptions: %{},
       send_fun: Keyword.fetch!(opts, :send_fun),
       transport_state: Keyword.get(opts, :transport_state),
       stop_on_error?: Keyword.get(opts, :stop_on_error?, false),
@@ -52,8 +56,29 @@ defmodule MOQXProbe.Traffic.DatagramSink do
   end
 
   @impl GenStage
-  def handle_events(events, _from, state) do
-    {:noreply, [], enqueue_events(state, events)}
+  def handle_subscribe(:producer, opts, from, state) do
+    state =
+      state
+      |> put_subscription(from, opts)
+      |> ask_for_demand()
+
+    {:manual, state}
+  end
+
+  @impl GenStage
+  def handle_cancel(_reason, from, state) do
+    {:noreply, [], %{state | subscriptions: Map.delete(state.subscriptions, from)}}
+  end
+
+  @impl GenStage
+  def handle_events(events, from, state) do
+    state =
+      state
+      |> receive_demanded_events(from, length(events))
+      |> enqueue_events(events)
+      |> ask_for_demand()
+
+    {:noreply, [], state}
   end
 
   @impl GenStage
@@ -106,7 +131,9 @@ defmodule MOQXProbe.Traffic.DatagramSink do
   defp enqueue_events(state, events) do
     queue = Enum.reduce(events, state.queue, fn event, queue -> :queue.in(event, queue) end)
 
-    %{state | queue: queue}
+    state = %{state | queue: queue}
+    emit_backlog(state, length(events))
+    state
   end
 
   defp send_tick(%{stop_reason: stop_reason} = state, _now_ms) when not is_nil(stop_reason) do
@@ -138,7 +165,120 @@ defmodule MOQXProbe.Traffic.DatagramSink do
       |> maybe_record_burst(actual_send_count, duration_us)
       |> Map.put(:stop_reason, stop_reason)
 
-    {%{tick | send_count: actual_send_count, stop_reason: stop_reason}, state}
+    tick = %{tick | send_count: actual_send_count, stop_reason: stop_reason}
+
+    emit_tick(state, tick, actual_send_count, accepted, errors, duration_us)
+    emit_send_errors(error_reasons, errors)
+
+    state =
+      if stop_reason do
+        state
+      else
+        ask_for_demand(state)
+      end
+
+    {tick, state}
+  end
+
+  defp put_subscription(state, from, opts) do
+    max_demand = positive_subscription_integer(opts, :max_demand, default_max_demand(state))
+    min_demand = non_negative_subscription_integer(opts, :min_demand, max(max_demand - 1, 0))
+
+    subscription = %{
+      outstanding: 0,
+      max_demand: max_demand,
+      min_demand: min(min_demand, max_demand - 1)
+    }
+
+    %{state | subscriptions: Map.put(state.subscriptions, from, subscription)}
+  end
+
+  defp default_max_demand(%{max_queue_depth: :infinity}), do: 1_000
+  defp default_max_demand(%{max_queue_depth: max_queue_depth}), do: max(max_queue_depth, 1)
+
+  defp positive_subscription_integer(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value > 0 -> value
+      _invalid -> default
+    end
+  end
+
+  defp non_negative_subscription_integer(opts, key, default) do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value >= 0 -> value
+      _invalid -> default
+    end
+  end
+
+  defp receive_demanded_events(state, from, count) do
+    update_subscription(state, from, fn subscription ->
+      %{subscription | outstanding: max(subscription.outstanding - count, 0)}
+    end)
+  end
+
+  defp ask_for_demand(%{subscriptions: subscriptions} = state)
+       when map_size(subscriptions) == 0 do
+    state
+  end
+
+  defp ask_for_demand(%{stop_reason: stop_reason} = state) when not is_nil(stop_reason), do: state
+
+  defp ask_for_demand(state) do
+    {subscriptions, _capacity} =
+      Enum.reduce(state.subscriptions, {%{}, queue_capacity(state)}, fn {from, subscription},
+                                                                        {subscriptions, capacity} ->
+        demand = demand_to_ask(subscription, capacity)
+
+        if demand > 0 do
+          :ok = GenStage.ask(from, demand)
+
+          subscription = %{
+            subscription
+            | outstanding: subscription.outstanding + demand
+          }
+
+          emit_demand(state, subscription, demand)
+          {Map.put(subscriptions, from, subscription), subtract_capacity(capacity, demand)}
+        else
+          {Map.put(subscriptions, from, subscription), capacity}
+        end
+      end)
+
+    %{state | subscriptions: subscriptions}
+  end
+
+  defp queue_capacity(%{max_queue_depth: :infinity}), do: :infinity
+
+  defp queue_capacity(state) do
+    max(state.max_queue_depth - :queue.len(state.queue) - outstanding_demand(state), 0)
+  end
+
+  defp outstanding_demand(state) do
+    state.subscriptions
+    |> Map.values()
+    |> Enum.map(& &1.outstanding)
+    |> Enum.sum()
+  end
+
+  defp demand_to_ask(%{outstanding: outstanding, min_demand: min_demand}, _capacity)
+       when outstanding > min_demand,
+       do: 0
+
+  defp demand_to_ask(subscription, :infinity), do: subscription.max_demand
+
+  defp demand_to_ask(subscription, capacity), do: min(subscription.max_demand, capacity)
+
+  defp subtract_capacity(:infinity, _demand), do: :infinity
+  defp subtract_capacity(capacity, demand), do: max(capacity - demand, 0)
+
+  defp update_subscription(state, from, fun) do
+    case Map.fetch(state.subscriptions, from) do
+      {:ok, subscription} ->
+        %{state | subscriptions: Map.put(state.subscriptions, from, fun.(subscription))}
+
+      :error ->
+        state
+    end
   end
 
   defp pop_many(queue, count), do: pop_many(queue, count, [])
@@ -237,6 +377,8 @@ defmodule MOQXProbe.Traffic.DatagramSink do
       errors: state.errors,
       error_reasons: state.error_reasons,
       queue_depth: :queue.len(state.queue),
+      outstanding_demand: outstanding_demand(state),
+      max_queue_depth: state.max_queue_depth,
       stop_reason: state.stop_reason,
       transport_state: state.transport_state,
       pacer: state.pacer,
@@ -247,6 +389,78 @@ defmodule MOQXProbe.Traffic.DatagramSink do
       tick_send_counts: Enum.reverse(state.tick_send_counts)
     }
   end
+
+  defp emit_backlog(state, enqueued_count) do
+    :telemetry.execute(
+      @telemetry_prefix ++ [:backlog, :change],
+      %{
+        enqueued_count: enqueued_count,
+        queue_depth: :queue.len(state.queue),
+        outstanding_demand: outstanding_demand(state),
+        max_queue_depth: telemetry_queue_depth(state.max_queue_depth)
+      },
+      %{sender: :datagram, sink: :datagram_sink}
+    )
+  end
+
+  defp emit_demand(state, subscription, demand) do
+    :telemetry.execute(
+      @telemetry_prefix ++ [:demand, :ask],
+      %{
+        demand_count: demand,
+        outstanding_demand: subscription.outstanding,
+        queue_depth: :queue.len(state.queue),
+        max_queue_depth: telemetry_queue_depth(state.max_queue_depth)
+      },
+      %{sender: :datagram, sink: :datagram_sink}
+    )
+  end
+
+  defp emit_tick(state, tick, actual_send_count, accepted, errors, duration_us) do
+    :telemetry.execute(
+      @telemetry_prefix ++ [:tick, :stop],
+      %{
+        lag_ms: tick.lag_ms,
+        due_count: tick.due_count,
+        target_emitted: tick.target_emitted,
+        send_count: actual_send_count,
+        accepted_count: accepted,
+        error_count: errors,
+        capped_tick_count: flag(tick.capped?),
+        tool_limited_tick_count: flag(tick.tool_limited?),
+        burst_duration_us: duration_us,
+        queue_depth: :queue.len(state.queue),
+        outstanding_demand: outstanding_demand(state)
+      },
+      %{
+        sender: :datagram,
+        sink: :datagram_sink,
+        result: tick_result(tick, errors),
+        stop_reason: tick.stop_reason
+      }
+    )
+  end
+
+  defp emit_send_errors(_error_reasons, 0), do: :ok
+
+  defp emit_send_errors(error_reasons, errors) do
+    :telemetry.execute(
+      @telemetry_prefix ++ [:send, :error],
+      %{error_count: errors},
+      %{sender: :datagram, sink: :datagram_sink, error_reasons: Map.keys(error_reasons)}
+    )
+  end
+
+  defp telemetry_queue_depth(:infinity), do: -1
+  defp telemetry_queue_depth(max_queue_depth), do: max_queue_depth
+
+  defp flag(true), do: 1
+  defp flag(false), do: 0
+
+  defp tick_result(_tick, errors) when errors > 0, do: :error
+  defp tick_result(%{stop_reason: :tool_limited}, _errors), do: :tool_limited
+  defp tick_result(%{stop_reason: :complete}, _errors), do: :complete
+  defp tick_result(_tick, _errors), do: :ok
 
   defp monotonic_us, do: System.monotonic_time(:microsecond)
   defp monotonic_ms, do: System.monotonic_time(:millisecond)

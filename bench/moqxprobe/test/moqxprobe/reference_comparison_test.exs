@@ -491,8 +491,6 @@ defmodule MOQXProbe.ReferenceComparisonTest do
 
     assert record["workload"]["topology"] == "moqx-client-to-reference-server"
     assert record["profile"]["settings"]["datagram_drain_limit"] == 0
-    assert record["profile"]["settings"]["datagram_receive_mode"] == "process"
-    assert record["profile"]["settings"]["datagram_pacing_mode"] == "coarse"
     assert record["profile"]["settings"]["datagram_diagnostics"] == "summary"
     assert record["profile"]["settings"]["quicer_settings"] == %{"pacing_enabled" => 0}
     assert record["workload"]["datagram_size_bytes"] == 1192
@@ -510,8 +508,6 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     assert record["diagnostics"]["process"]["message_queue_len_peak"] >= 0
     assert record["diagnostics"]["summary"]["datagrams_accepted"] == 2
     assert record["diagnostics"]["summary"]["datagram_drain_limit"] == 0
-    assert record["diagnostics"]["summary"]["datagram_receive_mode"] == "process"
-    assert record["diagnostics"]["summary"]["datagram_pacing_mode"] == "coarse"
     assert record["diagnostics"]["summary"]["datagrams_received"] == 2
     assert record["diagnostics"]["summary"]["datagrams_missing"] == 0
     assert record["diagnostics"]["summary"]["bytes_sent"] == 2384
@@ -650,6 +646,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     assert record["profile"]["settings"]["datagram_drain_limit"] == 0
     assert record["workload"]["datagrams_per_second"] == 3000.0
     assert record["metrics"]["offered_rate_ratio"] >= 0.95
+    assert record["metrics"]["offered_rate_valid"] == true
     assert record["metrics"]["send_rate_datagrams_per_second"] >= 2850.0
     assert record["metrics"]["target_send_duration_ms"] == 1000.0
     assert_in_delta record["metrics"]["scheduled_send_span_ms"], 999.666, 0.1
@@ -667,7 +664,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     refute record["limits"]["first_break_symptom"] == "tool_output_invalid"
 
     summary = record["diagnostics"]["summary"]
-    assert summary["traffic_sender"] == "datagram_sink"
+    assert summary["traffic_sender"] == "datagram_sender"
     assert summary["datagram_drain_limit"] == 0
     assert summary["datagrams_accepted"] == 3000
     assert summary["datagrams_received"] == 0
@@ -771,63 +768,13 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
     assert Contract.validate_records([record]).valid?
 
-    assert record["profile"]["settings"]["datagram_receive_mode"] == "process"
-    assert record["profile"]["settings"]["datagram_pacing_mode"] == "coarse"
+    assert record["profile"]["settings"]["traffic_sender"] == "datagram_sender"
     assert record["metrics"]["datagram_delivery_ratio"] == 1.0
-    assert record["diagnostics"]["summary"]["datagram_receive_mode"] == "process"
-    assert record["diagnostics"]["summary"]["datagram_pacing_mode"] == "coarse"
-    assert record["diagnostics"]["summary"]["traffic_sender"] == "datagram_sink"
+    assert record["diagnostics"]["summary"]["traffic_sender"] == "datagram_sender"
     assert record["diagnostics"]["summary"]["datagrams_accepted"] == 20
     assert record["diagnostics"]["summary"]["datagrams_received"] == 20
     assert record["diagnostics"]["summary"]["datagram_receive_events"] == 20
     assert is_map(record["diagnostics"]["receiver_process"])
-  end
-
-  test "records smooth MOQX datagram pacing mode" do
-    dir = tmp_dir()
-    output_path = Path.join(dir, "moqx-paced-datagram-smooth.jsonl")
-
-    ReferenceComparison.main(
-      [
-        "--topology",
-        "moqx-client-to-reference-server",
-        "--workload",
-        "datagram_pressure",
-        "--server",
-        "127.0.0.1",
-        "--port",
-        "4433",
-        "--ca",
-        "/tmp/ca.pem",
-        "--servername",
-        "localhost",
-        "--datagram-size",
-        "64",
-        "--datagram-rate",
-        "20",
-        "--duration-seconds",
-        "1",
-        "--datagram-pacing-mode",
-        "smooth",
-        "--timeout-seconds",
-        "1",
-        "--timeout-margin-seconds",
-        "1",
-        "--output",
-        output_path,
-        "--run-id",
-        "moqx-paced-datagram-smooth-test"
-      ],
-      script: "test reference-comparison",
-      transport_backend: __MODULE__.OwnerAwareDatagramEchoTransport
-    )
-
-    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
-    assert Contract.validate_records([record]).valid?
-
-    assert record["profile"]["settings"]["datagram_pacing_mode"] == "smooth"
-    assert record["diagnostics"]["summary"]["datagram_pacing_mode"] == "smooth"
-    assert record["metrics"]["datagram_delivery_ratio"] == 1.0
   end
 
   test "records mixed MOQT-shaped MOQX client pressure" do
