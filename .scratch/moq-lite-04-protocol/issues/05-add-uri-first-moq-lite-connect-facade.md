@@ -2,7 +2,7 @@
 
 # Add URI-first MOQ Lite 04 connect facade
 
-Status: ready-for-agent
+Status: done
 Type: enhancement
 
 ## Parent
@@ -34,25 +34,24 @@ stream roles.
 
 ## Acceptance criteria
 
-- [ ] `MOQX.MOQLite04.connect/2` exists as the public facade.
-- [ ] `connect/2` accepts a URI string or `URI.t()`.
-- [ ] URI validation rejects unsupported schemes, missing hosts, missing ports
+- [x] `MOQX.MOQLite04.connect/2` exists as the public facade.
+- [x] `connect/2` accepts a URI string or `URI.t()`.
+- [x] URI validation rejects unsupported schemes, missing hosts, missing ports
       for the initial native-QUIC slice, userinfo, and fragments with explicit
       errors.
-- [ ] The client stores the parsed `URI.t()` without wrapping it in
+- [x] The client stores the parsed `URI.t()` without wrapping it in
       `MOQX.Endpoint`.
-- [ ] Transport selection is passed explicitly as
+- [x] Transport selection is passed explicitly as
       `transport: {module, opts}`; no `Application` env or mutable global
       configuration is introduced.
-- [ ] The selected transport connects and handshakes using ALPN `moq-lite-04`.
-- [ ] A successful connect returns a client value containing the transport
+- [x] The selected transport connects and handshakes using ALPN `moq-lite-04`.
+- [x] A successful connect returns a client value containing the transport
       context, connection, parsed URI, and active `MOQX.MOQLite04.Session`.
-- [ ] Connect does not open MOQ Lite transaction or group streams.
-- [ ] Connect does not accept a publisher/subscriber mode.
-- [ ] Tests cover the happy path with `MOQX.Transport.Support` and validation
+- [x] Connect does not open MOQ Lite transaction or group streams.
+- [x] Connect does not accept a publisher/subscriber mode.
+- [x] Tests cover the happy path with `MOQX.Transport.Support` and validation
       failures without live QUIC.
 
 ## Blocked by
 
 - `.scratch/moq-lite-04-protocol/issues/04-add-moq-lite-stream-and-session-state-machine.md`
-

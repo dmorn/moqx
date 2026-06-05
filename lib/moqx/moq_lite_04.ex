@@ -1,11 +1,13 @@
 defmodule MOQX.MOQLite04 do
   @moduledoc """
-  Data model for MOQ Lite draft-04 messages.
+  MOQ Lite draft-04 protocol variant facade and message data model.
 
-  This module records protocol constants and message structs only. Payload
-  codecs use the generic `MOQX.Codec` contracts; stream framing and session
-  behavior are intentionally separate concerns.
+  Payload codecs use the generic `MOQX.Codec` contracts. Stream framing,
+  session behavior, and client connection setup are variant-specific concerns
+  layered under this module.
   """
+
+  alias MOQX.MOQLite04.Client
 
   @typedoc "MOQ Lite draft-04 stream type."
   @type stream_type :: :group | :announce | :subscribe | :fetch | :probe | :goaway
@@ -46,6 +48,12 @@ defmodule MOQX.MOQLite04 do
   @id_to_subscribe_response_type Map.new(@subscribe_response_type_to_id, fn {type, id} ->
                                    {id, type}
                                  end)
+
+  @doc """
+  Connects to a native QUIC MOQ Lite draft-04 endpoint.
+  """
+  @spec connect(String.t() | URI.t(), keyword()) :: {:ok, Client.t()} | {:error, term()}
+  def connect(uri, opts \\ []), do: Client.connect(uri, opts)
 
   @doc """
   Returns the draft-04 numeric stream type ID for a known stream type.

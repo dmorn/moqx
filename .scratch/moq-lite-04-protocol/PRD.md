@@ -162,11 +162,13 @@ Delivered so far:
 - `MOQX.MOQLite04.Session` pure reducer for normalized transport input,
   local protocol commands, per-stream codec state, protocol events, and
   transport action output
+- `MOQX.MOQLite04.connect/2` URI-first client facade over explicit transport
+  options, native QUIC ALPN `moq-lite-04`, and a role-neutral
+  `MOQX.MOQLite04.Client` value
 - Session tests for Announce, Subscribe, Fetch, Probe, Goaway, Group,
   stream lifecycle, support transport normalized events, and the
   reference-style subscribe/group/frame smoke flow
 - Client/API follow-up issues:
-  - issue 05: URI-first `MOQX.MOQLite04.connect/2` facade;
   - issue 06: client action and event runner;
   - issue 07: role-neutral subscriber operations;
   - issue 08: role-neutral publisher operations and smoke flow
