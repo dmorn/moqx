@@ -2,7 +2,7 @@
 
 # Add MOQ Lite 04 stream and session state machine
 
-Status: ready-for-agent
+Status: in-progress
 Type: enhancement
 
 ## Parent
@@ -22,7 +22,7 @@ emits typed protocol events or errors.
 
 - [ ] Session state starts after successful transport connection/handshake with
       ALPN `moq-lite-04`; there is no setup-message phase.
-- [ ] Accepted streams are classified by the initial stream type prefix.
+- [x] Accepted streams are classified by the initial stream type prefix.
 - [ ] Unknown stream types are reset for extension probing and do not close the
       whole connection.
 - [ ] Announce streams require an initial AnnounceInterest from the subscriber
@@ -49,3 +49,28 @@ emits typed protocol events or errors.
 Prefer a pure reducer/state struct for the first implementation boundary, then
 wrap it in a process only when stream ownership or mailbox behavior requires
 one.
+
+## Progress
+
+Started with a pure stream-codec slice:
+
+- `MOQX.MOQLite04.StreamCodec` classifies opener-side streams from the
+  `STREAM_TYPE` prefix.
+- The codec encodes and incrementally receives opener-side message streams.
+- Responder-side codecs can be initialized with an already-known stream type.
+- Group streams decode `GROUP` followed by `FRAME` messages.
+- Subscribe responder streams encode/decode SUBSCRIBE_OK and SUBSCRIBE_DROP
+  discriminators.
+- Unknown stream types return `:unknown_stream_type` at the codec boundary;
+  the later transport/session reducer should translate that into stream reset.
+
+Remaining work:
+
+- pure session/stream reducer for protocol state transitions;
+- transport-event reducer integration;
+- Finish Sending, Abort Sending, Abort Receiving, and Connection Close actions;
+- support-transport tests proving normalized `MOQX.Transport` event handling.
+
+Validation:
+
+- `mix test test/moqx/moq_lite_04/stream_codec_test.exs`
