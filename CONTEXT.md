@@ -29,6 +29,36 @@ A named fixture that records protocol-selected ALPN, transport capabilities, and
 Current profiles are `:draft_14` and `:moq_lite_04`.
 _Avoid_: protocol implementation, session implementation
 
+**Protocol Variant**:
+A concrete MOQT-family protocol version with its own message model and session
+rules, such as MOQ Lite draft-04 or MOQT draft-14.
+_Avoid_: generic protocol behaviour, transport profile
+
+**Codec**:
+Shared protocol-neutral binary helpers and encoder/decoder contracts under
+`MOQX.Codec`.
+_Avoid_: session codec, transport adapter
+
+**Payload Codec**:
+Encoding or decoding for one typed protocol payload after stream framing has
+identified the payload shape and removed length fields.
+_Avoid_: stream parser, state machine
+
+**Stream Codec**:
+Protocol-specific framing logic that reads stream type prefixes, message
+lengths, and ordered byte buffers before dispatching complete payloads.
+_Avoid_: payload codec, transport receive
+
+**Transaction Stream**:
+A MOQ Lite bidirectional stream whose first byte identifies an Announce,
+Subscribe, Fetch, Probe, or Goaway transaction.
+_Avoid_: control stream, data stream
+
+**Group Stream**:
+A MOQ Lite publisher-created unidirectional stream that starts with a GROUP
+message and then carries FRAME messages for that group.
+_Avoid_: object stream, subgroup stream
+
 **Stream Side**:
 One directional half of a stream, either local sending or local receiving.
 _Avoid_: half-connection, close direction
@@ -45,6 +75,12 @@ _Avoid_: half-connection, close direction
 - A **Transport Profile** can describe protocol-specific stream expectations,
   but the raw transport boundary still exposes generic QUIC streams and does
   not enforce those protocol rules.
+- A **Protocol Variant** consumes **Transport** events and enforces its own
+  stream/session rules above the raw transport boundary.
+- A **Stream Codec** owns framing and buffering before invoking a
+  **Payload Codec** for complete typed payloads.
+- MOQ Lite **Transaction Streams** and **Group Streams** are protocol rules,
+  not transport-layer stream types.
 
 ## Example dialogue
 

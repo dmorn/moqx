@@ -124,7 +124,8 @@ Initial test coverage should include:
 ## Out of Scope
 
 - Full MOQT draft-14 session establishment
-- Full MOQ Lite implementation
+- Full MOQ Lite implementation, now tracked separately in
+  `.scratch/moq-lite-04-protocol/PRD.md`
 - WebTransport-over-HTTP/3 support
 - Final benchmark thresholds or pass/fail criteria
 - Selecting a permanent reference QUIC implementation
