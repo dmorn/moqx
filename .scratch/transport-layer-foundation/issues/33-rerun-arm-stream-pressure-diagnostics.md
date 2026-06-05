@@ -71,7 +71,7 @@ the diagnostic fields before spending remote nodes.
   target.
 - 2026-05-27: Artifacts are under
   `bench/transport/results/20260527T131746Z-issue-33-streamdiag/`, especially
-  `iperf3-private.jsonl`, `reference-comparison-stream-private.jsonl`,
+  `iperf3-private.jsonl`, `measure-stream-private.jsonl`,
   `path_metadata_private.json`, and the rendered report files. Terraform
   destroy completed and `just bench-transport-verify-clean` confirmed no state
   entries or labelled Hetzner resources remain. Follow-up #37 opened for the

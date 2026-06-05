@@ -1,17 +1,17 @@
-defmodule MOQXProbe.ReferenceComparisonTest do
+defmodule MOQXProbe.MeasureTest do
   use ExUnit.Case, async: true
 
-  alias MOQXProbe.ReferenceComparison
+  alias MOQXProbe.Measure
   alias ProbeLedger.Contract
   alias ProbeLedger.JSONL
 
-  test "emits a valid reference comparison record from quicprobe JSON" do
+  test "emits a valid measurement record from quicprobe JSON" do
     dir = tmp_dir()
     output_path = Path.join(dir, "reference.jsonl")
     args_path = Path.join(dir, "quicprobe.args")
     fake_quicprobe = fake_quicprobe_command(dir, args_path)
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "reference-client-to-reference-server",
@@ -38,13 +38,13 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "reference-test"
       ],
-      script: "test reference-comparison"
+      script: "test measure"
     )
 
     assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
     assert Contract.validate_records([record]).valid?
 
-    assert record["workload"]["family"] == "reference_comparison"
+    assert record["workload"]["family"] == "measurement"
     assert record["workload"]["stream_direction"] == "bidirectional"
     assert record["workload"]["stream_count"] == 2
     assert record["workload"]["payload_size_bytes"] == 256
@@ -74,7 +74,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     args_path = Path.join(dir, "quicprobe-listener.args")
     fake_quicprobe = fake_quicprobe_command(dir, args_path)
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "reference-client-to-moqx-listener",
@@ -99,13 +99,13 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "reference-client-listener-test"
       ],
-      script: "test reference-comparison"
+      script: "test measure"
     )
 
     assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
     assert Contract.validate_records([record]).valid?
 
-    assert record["workload"]["family"] == "reference_comparison"
+    assert record["workload"]["family"] == "measurement"
     assert record["workload"]["tool"] == "quicprobe"
     assert record["workload"]["topology"] == "reference-client-to-moqx-listener"
     assert record["profile"]["settings"]["topology"] == "reference-client-to-moqx-listener"
@@ -132,7 +132,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     args_path = Path.join(dir, "quicprobe-datagram.args")
     fake_quicprobe = fake_quicprobe_command(dir, args_path, datagram_quicprobe_json())
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "reference-client-to-reference-server",
@@ -155,7 +155,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "reference-datagram-test"
       ],
-      script: "test reference-comparison"
+      script: "test measure"
     )
 
     assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
@@ -191,7 +191,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     args_path = Path.join(dir, "quicprobe-paced-datagram.args")
     fake_quicprobe = fake_quicprobe_command(dir, args_path, paced_datagram_quicprobe_json())
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "reference-client-to-reference-server",
@@ -220,7 +220,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "reference-paced-datagram-test"
       ],
-      script: "test reference-comparison"
+      script: "test measure"
     )
 
     assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
@@ -263,13 +263,13 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     assert args =~ "--timeout 7s"
   end
 
-  test "emits a mixed MOQT-shaped reference comparison record" do
+  test "emits a mixed MOQT-shaped measurement record" do
     dir = tmp_dir()
     output_path = Path.join(dir, "reference-mixed.jsonl")
     args_path = Path.join(dir, "quicprobe-mixed.args")
     fake_quicprobe = fake_quicprobe_command(dir, args_path, mixed_quicprobe_json())
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "reference-client-to-reference-server",
@@ -300,7 +300,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "reference-mixed-test"
       ],
-      script: "test reference-comparison"
+      script: "test measure"
     )
 
     assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
@@ -343,7 +343,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         paced_datagram_quicprobe_json(offered_rate_ratio: 0.8, offered_rate_valid: false)
       )
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "reference-client-to-reference-server",
@@ -372,13 +372,13 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "reference-paced-invalid-test"
       ],
-      script: "test reference-comparison"
+      script: "test measure"
     )
 
     assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
     assert Contract.validate_records([record]).valid?
     assert record["limits"]["first_break_symptom"] == "tool_output_invalid"
-    assert record["limits"]["stopped_by"] == "reference_comparison_invalid_measurement"
+    assert record["limits"]["stopped_by"] == "measure_invalid_measurement"
     assert record["limits"]["protocol_error"] == true
     assert record["errors"]["message"] =~ "offered rate below tolerance"
     assert record["errors"]["message"] =~ "0.8 < 0.95"
@@ -388,7 +388,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-datagram-send-error.jsonl")
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "moqx-client-to-reference-server",
@@ -413,7 +413,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "moqx-datagram-send-error-test"
       ],
-      script: "test reference-comparison",
+      script: "test measure",
       transport_backend: __MODULE__.DatagramSendErrorTransport
     )
 
@@ -459,7 +459,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-near-limit-datagram.jsonl")
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "moqx-client-to-reference-server",
@@ -482,7 +482,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "moqx-near-limit-datagram-test"
       ],
-      script: "test reference-comparison",
+      script: "test measure",
       transport_backend: __MODULE__.DatagramEchoTransport
     )
 
@@ -552,7 +552,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
       end
     end)
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "moqx-client-to-reference-server",
@@ -579,7 +579,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "moqx-quicer-settings-test"
       ],
-      script: "test reference-comparison",
+      script: "test measure",
       transport_backend: __MODULE__.CapturingDatagramEchoTransport
     )
 
@@ -602,7 +602,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-paced-datagram-silent-peer.jsonl")
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "moqx-client-to-reference-server",
@@ -635,7 +635,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "moqx-paced-datagram-silent-peer-test"
       ],
-      script: "test reference-comparison",
+      script: "test measure",
       transport_backend: __MODULE__.DatagramSilentTransport
     )
 
@@ -681,7 +681,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-paced-datagram-summary-diagnostics.jsonl")
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "moqx-client-to-reference-server",
@@ -712,7 +712,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "moqx-paced-datagram-summary-diagnostics-test"
       ],
-      script: "test reference-comparison",
+      script: "test measure",
       transport_backend: __MODULE__.DatagramSilentTransport
     )
 
@@ -732,7 +732,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-paced-datagram-process-receiver.jsonl")
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "moqx-client-to-reference-server",
@@ -761,7 +761,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "moqx-paced-datagram-process-receiver-test"
       ],
-      script: "test reference-comparison",
+      script: "test measure",
       transport_backend: __MODULE__.OwnerAwareDatagramEchoTransport
     )
 
@@ -781,7 +781,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-mixed.jsonl")
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "moqx-client-to-reference-server",
@@ -812,7 +812,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "moqx-mixed-test"
       ],
-      script: "test reference-comparison",
+      script: "test measure",
       transport_backend: __MODULE__.MixedEchoTransport
     )
 
@@ -856,7 +856,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-peer-shutdown.jsonl")
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "moqx-client-to-reference-server",
@@ -881,7 +881,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "moqx-peer-shutdown-test"
       ],
-      script: "test reference-comparison",
+      script: "test measure",
       transport_backend: __MODULE__.PeerShutdownTransport
     )
 
@@ -913,7 +913,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-stream-diagnostics.jsonl")
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "moqx-client-to-reference-server",
@@ -938,7 +938,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "moqx-stream-diagnostics-test"
       ],
-      script: "test reference-comparison",
+      script: "test measure",
       transport_backend: __MODULE__.MixedEchoTransport
     )
 
@@ -975,7 +975,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-stream-pump-tuning.jsonl")
 
-    ReferenceComparison.main(
+    Measure.main(
       [
         "--topology",
         "moqx-client-to-reference-server",
@@ -1006,7 +1006,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
         "--run-id",
         "moqx-stream-pump-tuning-test"
       ],
-      script: "test reference-comparison",
+      script: "test measure",
       transport_backend: __MODULE__.MixedEchoTransport
     )
 
@@ -1238,7 +1238,7 @@ defmodule MOQXProbe.ReferenceComparisonTest do
     dir =
       Path.join(
         System.tmp_dir!(),
-        "moqx-reference-comparison-#{System.unique_integer([:positive])}"
+        "moqx-measure-#{System.unique_integer([:positive])}"
       )
 
     File.mkdir_p!(dir)

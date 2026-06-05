@@ -1,4 +1,4 @@
-defmodule MOQXProbe.ReferenceComparison do
+defmodule MOQXProbe.Measure do
   @moduledoc false
 
   alias MOQX.Transport
@@ -9,11 +9,11 @@ defmodule MOQXProbe.ReferenceComparison do
   alias MOQXProbe.TransportTelemetryCollector
   alias ProbeLedger.PathMetadata
 
-  @default_script "moqxprobe reference-comparison"
+  @default_script "moqxprobe measure"
   @script_version "v1"
   @schema_version "transport-bench-v1"
   @timeout_exit_status 124
-  @timeout_stop_condition "reference_comparison_step_timeout"
+  @timeout_stop_condition "measure_step_timeout"
   @datagram_header_size DatagramPayload.header_size()
   @stream_pressure_workload "stream_pressure"
   @datagram_pressure_workload "datagram_pressure"
@@ -669,7 +669,7 @@ defmodule MOQXProbe.ReferenceComparison do
     summary = Map.get(diagnostics, "summary", %{})
 
     %{
-      "schema_version" => "moqx-reference-measurement-v1",
+      "schema_version" => "moqx-measurement-v1",
       "record_type" => "client_run",
       "tool" => "moqxprobe",
       "client_implementation" => "moqx",
@@ -864,7 +864,7 @@ defmodule MOQXProbe.ReferenceComparison do
         else: result.bytes_received
 
     %{
-      "schema_version" => "moqx-reference-measurement-v1",
+      "schema_version" => "moqx-measurement-v1",
       "record_type" => "client_run",
       "tool" => "moqxprobe",
       "client_implementation" => "moqx",
@@ -1041,7 +1041,7 @@ defmodule MOQXProbe.ReferenceComparison do
     offered_rate_ratio = target_rate_ratio(send_rate, config)
 
     %{
-      "schema_version" => "moqx-reference-measurement-v1",
+      "schema_version" => "moqx-measurement-v1",
       "record_type" => "client_run",
       "tool" => "moqxprobe",
       "client_implementation" => "moqx",
@@ -1157,7 +1157,7 @@ defmodule MOQXProbe.ReferenceComparison do
     collector_snapshot = TransportTelemetryCollector.snapshot(collector)
 
     %{
-      "schema_version" => "moqx-reference-measurement-v1",
+      "schema_version" => "moqx-measurement-v1",
       "record_type" => "client_run",
       "tool" => "moqxprobe",
       "client_implementation" => "moqx",
@@ -4335,7 +4335,7 @@ defmodule MOQXProbe.ReferenceComparison do
   defp workload_tool(_config), do: "quicprobe"
 
   defp workload_family(%{workload: @mixed_moqt_shaped_workload}), do: @mixed_moqt_shaped_workload
-  defp workload_family(_config), do: "reference_comparison"
+  defp workload_family(_config), do: "measurement"
 
   defp workload_stream_count(%{workload: @datagram_pressure_workload}, _measurement), do: nil
 
@@ -4395,7 +4395,7 @@ defmodule MOQXProbe.ReferenceComparison do
       "step_count" => 1,
       "repetition_index" => 1,
       "repetition_count" => 1,
-      "stop_conditions" => ["reference_comparison_nonzero_exit", @timeout_stop_condition]
+      "stop_conditions" => ["measure_nonzero_exit", @timeout_stop_condition]
     }
   end
 
@@ -4475,7 +4475,7 @@ defmodule MOQXProbe.ReferenceComparison do
       "control_latency_p99_ms" => control_latency_p99_ms(measurement),
       "bytes_sent" => number(measurement["bytes_sent"]),
       "bytes_received" => number(measurement["bytes_received"]),
-      "reference_comparison_exit_status" => ctx.exit_status
+      "measure_exit_status" => ctx.exit_status
     }
   end
 
@@ -4609,7 +4609,7 @@ defmodule MOQXProbe.ReferenceComparison do
   end
 
   defp timed_out_message(%{timed_out?: true} = ctx),
-    do: "reference comparison step timed out after #{seconds(ctx.timeout_ms)}s"
+    do: "measure step timed out after #{seconds(ctx.timeout_ms)}s"
 
   defp timed_out_message(_ctx), do: nil
 
@@ -4617,18 +4617,18 @@ defmodule MOQXProbe.ReferenceComparison do
 
   defp exit_status_message(ctx) do
     failure_output(ctx.step_output) ||
-      "reference comparison step exited with status #{ctx.exit_status}"
+      "measure step exited with status #{ctx.exit_status}"
   end
 
   defp offered_rate_invalid_message(ctx) do
     if offered_rate_invalid?(ctx.config, ctx.measurement) do
-      "reference comparison offered rate below tolerance: actual/target #{number(measurement(ctx)["offered_rate_ratio"])} < #{ctx.config.offered_rate_tolerance}"
+      "measure offered rate below tolerance: actual/target #{number(measurement(ctx)["offered_rate_ratio"])} < #{ctx.config.offered_rate_tolerance}"
     end
   end
 
   defp invalid_measurement_message(ctx) do
     unless valid_measurement?(ctx.config, ctx.measurement) do
-      "reference comparison step did not produce a valid client_run measurement"
+      "measure step did not produce a valid client_run measurement"
     end
   end
 
@@ -4682,9 +4682,9 @@ defmodule MOQXProbe.ReferenceComparison do
        ) do
     cond do
       timed_out? -> @timeout_stop_condition
-      failed? -> "reference_comparison_nonzero_exit"
+      failed? -> "measure_nonzero_exit"
       datagram_send_failure? -> "datagram_send_error"
-      invalid_measurement? -> "reference_comparison_invalid_measurement"
+      invalid_measurement? -> "measure_invalid_measurement"
       datagram_loss? -> "datagram_delivery_loss"
       stream_failure? -> "stream_closed_before_expected_bytes"
       true -> nil
@@ -4713,7 +4713,7 @@ defmodule MOQXProbe.ReferenceComparison do
 
   defp valid_measurement?(
          %{topology: @moqx_client_topology} = config,
-         %{"schema_version" => "moqx-reference-measurement-v1", "record_type" => "client_run"} =
+         %{"schema_version" => "moqx-measurement-v1", "record_type" => "client_run"} =
            measurement
        ),
        do: valid_offered_rate?(config, measurement)

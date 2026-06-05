@@ -56,8 +56,8 @@ step summaries, key metrics, limits, errors, and current diagnostics must stay
 semantically equivalent unless a later issue explicitly changes the contract.
 
 The collector should first return the existing
-`moqx-reference-measurement-v1`-style measurement maps used internally by
-`reference-comparison`. The existing record builder can continue converting
+`moqx-measurement-v1`-style measurement maps used internally by
+`measure`. The existing record builder can continue converting
 those maps into `transport-bench-v1` JSONL.
 
 Additional sidecar artifacts, remote collectors, or dashboards are optional

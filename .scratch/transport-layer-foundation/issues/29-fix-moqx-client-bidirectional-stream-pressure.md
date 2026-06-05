@@ -9,7 +9,7 @@ Type: Bug
 
 ## Problem
 
-The `moqx-client-to-reference-server` reference-comparison topology does not
+The `moqx-client-to-reference-server` measure topology does not
 survive real-path concurrent bidirectional echo pressure. It is correct at one
 and two streams, but stalls at four and eight streams and crashes at higher
 stream counts when the echo receive path observes a closed stream.
@@ -31,9 +31,9 @@ link can carry much more traffic than the MOQX bidirectional client result.
 - MOQX-client-to-reference-server bidirectional echo reached only 24.48 Mbps
   with one stream and 25.00 Mbps with two streams.
 - The same topology timed out at four and eight bidirectional streams with
-  `reference comparison step timed out after 150s`.
+  `measure step timed out after 150s`.
 - The same topology crashed at 16 and 64 bidirectional streams with
-  `reference_comparison_nonzero_exit`; the error begins with
+  `measure_nonzero_exit`; the error begins with
   `** (MatchError) no match of right hand side value:` and the failing receive
   branch saw a closed stream.
 - MOQX-client-to-reference-server with 64 unidirectional streams reached 851.82
@@ -50,7 +50,7 @@ Artifacts are under
 ## Acceptance criteria
 
 - [x] The failure is reproducible with a focused local or controlled-path test
-      for `reference-comparison --topology moqx-client-to-reference-server`
+      for `measure --topology moqx-client-to-reference-server`
       using at least four bidirectional streams.
 - [x] Closed stream events in the echo receive path are handled explicitly and
       never crash the benchmark with a `MatchError`.
@@ -68,13 +68,13 @@ Artifacts are under
 - Preserve the async stream-send model. The benchmark needs application-level
   echo feedback for delivery evidence, but it must not turn that feedback into
   serial send admission.
-- Keep this in the benchmark/reference-comparison layer unless the root cause
+- Keep this in the benchmark/measure layer unless the root cause
   proves to be a `MOQX.Transport` contract bug.
 
 ## Comments
 
 - 2026-05-22: Local diagnosis reproduced the original crash shape with
-  `reference-comparison --topology moqx-client-to-reference-server` and four
+  `measure --topology moqx-client-to-reference-server` and four
   bidirectional streams: the benchmark matched on `{:ok, data, ctx}` from
   `Transport.recv_stream/3`, but quicer can return peer close signals such as
   `{:error, :peer_send_shutdown, ctx}` or `{:error, :closed, ctx}`. The first
@@ -136,5 +136,5 @@ Artifacts are under
   Canonical artifacts are under
   `bench/transport/results/20260526T075945Z-issue-29-bidi/`, especially
   `iperf3-baseline-private.jsonl` and
-  `reference-comparison-stream-private.jsonl`. Infrastructure was still
+  `measure-stream-private.jsonl`. Infrastructure was still
   intentionally running at the time this note was written.

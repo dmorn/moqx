@@ -68,7 +68,7 @@ None.
 - 2026-05-27: Added the first observability slice. `tools/quicprobe` now emits
   active `send_duration_ms`, target/scheduled send timing, pacing late counts,
   and pacing-lag percentiles for paced DATAGRAM runs. Canonical
-  `reference-comparison` records carry those values in methodology/metrics.
+  `measure` records carry those values in methodology/metrics.
   `moqx-listener` DATAGRAM diagnostics now include first/last receive and echo
   timings, echo-send duration summaries, and bounded mailbox sample points
   across the workload. Focused quicprobe and benchmark tests pass. The next
@@ -115,7 +115,7 @@ None.
   block once that queue is full, so `tools/quicprobe` now records synchronous
   `SendDatagram` call duration percentiles, slow-call count, and the slow-call
   threshold separately from absolute-schedule pacing lag. Canonical
-  `reference-comparison` metrics now carry those values. The next remote run
+  `measure` metrics now carry those values. The next remote run
   can distinguish high lag from quic-go send-queue backpressure versus high lag
   with low send-call time from scheduler/timer/send-loop slippage.
 - 2026-05-27: Ran the send-call split on ARM as
@@ -145,7 +145,7 @@ None.
   and total time before declaring #31 closed.
 - 2026-05-27: Added the remaining send-call diagnostics for the next run.
   `tools/quicprobe` now emits `send_datagram_call_total_ms` plus `p999` and
-  `max` in `send_datagram_call_ms`; canonical `reference-comparison` metrics
+  `max` in `send_datagram_call_ms`; canonical `measure` metrics
   carry those through as `send_datagram_call_total_ms`,
   `send_datagram_call_p999_ms`, and `send_datagram_call_max_ms`. This should
   expose rare stalls and total time spent inside quic-go `SendDatagram`, which

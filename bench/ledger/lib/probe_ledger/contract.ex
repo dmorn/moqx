@@ -9,7 +9,7 @@ defmodule ProbeLedger.Contract do
     stream_pressure
     datagram_pressure
     mixed_moqt_shaped
-    reference_comparison
+    measurement
     public_relay_interop
   )
 

@@ -82,7 +82,7 @@ process state inside every telemetry handler.
   `mix test` (45 tests, 0 failures), bench `mix credo --strict`. Local
   loopback calibration against `tools/quicprobe` produced a strict-valid
   `moqx-client-to-reference-server` stream-pressure record at
-  `/tmp/moqx-telemetry-reference-comparison.jsonl`: 1 stream, 20 payloads,
+  `/tmp/moqx-telemetry-measure.jsonl`: 1 stream, 20 payloads,
   256-byte payloads, 5120 sent bytes, 5120 received bytes, 20 accepted sends,
   0 stream send errors, 46.02 Mbps, no break symptom. This remains loopback
   calibration only, not real network evidence.

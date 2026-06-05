@@ -47,12 +47,12 @@ defmodule MOQXProbe.ReportTest do
     assert report =~ "100.00%"
   end
 
-  test "renders profile workload when a reference comparison record has no step" do
+  test "renders profile workload when a measurement record has no step" do
     record =
       record()
       |> put_in(["profile", "name"], "reference_quic")
       |> put_in(["profile", "settings"], %{"workload" => "datagram_pressure"})
-      |> put_in(["workload", "family"], "reference_comparison")
+      |> put_in(["workload", "family"], "measurement")
       |> update_in(["workload"], &Map.delete(&1, "step"))
 
     report = Report.render([record])

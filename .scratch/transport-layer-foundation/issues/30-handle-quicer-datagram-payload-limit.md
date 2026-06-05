@@ -51,18 +51,18 @@ can report the transport limit directly.
 Artifacts are under
 `bench/transport/results/20260526T075945Z-issue-29-bidi/`:
 
-- `reference-comparison-datagram-client-private.jsonl`
-- `reference-comparison-datagram-listener-private-isolated.jsonl`
-- `reference-comparison-datagram-size-probe-private.jsonl`
-- `reference-comparison-datagram-size-probe-boundary-private.jsonl`
-- `reference-comparison-datagram-1192-client-private.jsonl`
-- `reference-comparison-datagram-1192-listener-private.jsonl`
+- `measure-datagram-client-private.jsonl`
+- `measure-datagram-listener-private-isolated.jsonl`
+- `measure-datagram-size-probe-private.jsonl`
+- `measure-datagram-size-probe-boundary-private.jsonl`
+- `measure-datagram-1192-client-private.jsonl`
+- `measure-datagram-1192-listener-private.jsonl`
 - `moqx-listener-isolated-dgram-s1200-r*.log`
 
 ## Acceptance criteria
 
 - [x] MOQX DATAGRAM send errors are handled explicitly in
-      `moqx-transport-bench reference-comparison`; no `MatchError` is emitted
+      `moqx-transport-bench measure`; no `MatchError` is emitted
       for `{:dgram_send_error, reason}`.
 - [x] Failure records preserve the caller-requested datagram size, target rate,
       duration, offered load, and topology even when the first send fails.
@@ -85,7 +85,7 @@ Artifacts are under
 ## Comments
 
 - 2026-05-26: Fixed in the benchmark layer with a TDD slice against
-  `MOQX.TransportBench.ReferenceComparison.main/2` and explicit transport
+  `MOQX.TransportBench.Measure.main/2` and explicit transport
   backend seams. MOQX-client DATAGRAM send errors now produce a structured
   `datagram_failure` measurement, `limits.first_break_symptom` and
   `limits.stopped_by` are `datagram_send_error`, and `errors.message` is a

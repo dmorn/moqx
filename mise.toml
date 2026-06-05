@@ -93,5 +93,6 @@ case "$(uname -s)" in
 esac
 
 export BURRITO_TARGET="${usage_target:?}"
+mix clean
 mix release moqxprobe_burrito --overwrite
 '''

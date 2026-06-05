@@ -141,8 +141,8 @@ Collector contract:
   `Process.info/2` calls;
 - aggregate with cheap counters, histograms, summaries, ETS, `:counters`, or
   equivalent process-local batching;
-- return the same `moqx-reference-measurement-v1`-style measurement map that
-  existing `reference-comparison` code already converts into
+- return the same `moqx-measurement-v1`-style measurement map that
+  existing `measure` code already converts into
   `transport-bench-v1`.
 
 First implementation slice:

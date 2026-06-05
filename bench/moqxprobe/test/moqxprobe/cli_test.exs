@@ -40,8 +40,8 @@ defmodule MOQXProbe.CLITest do
              "--path-json PATH_OR_JSON"
   end
 
-  test "prints reference comparison usage" do
-    output = capture_io(fn -> CLI.main(["help", "reference-comparison"]) end)
+  test "prints measure usage" do
+    output = capture_io(fn -> CLI.main(["help", "measure"]) end)
 
     assert output =~ "reference-client-to-reference-server"
     assert output =~ "reference-client-to-moqx-listener"

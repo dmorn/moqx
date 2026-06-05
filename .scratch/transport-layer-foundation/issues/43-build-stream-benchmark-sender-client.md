@@ -10,7 +10,7 @@ Type: AFK
 ## What to build
 
 Extract the MOQX-client stream-pressure sender out of the monolithic
-`reference-comparison` loop into a caller-side benchmark client with bounded
+`measure` loop into a caller-side benchmark client with bounded
 payload production, a single final stream sink, and benchmark-owned telemetry.
 
 The desired shape mirrors the DATAGRAM sender while preserving stream-specific
@@ -41,7 +41,7 @@ send-completion feedback into the sink.
       limitation, send errors, queue depth, and in-flight sends.
 - [x] The existing benchmark telemetry collector can harvest stream-sender
       events without synchronous GenServer/Agent calls on the hot path.
-- [x] `reference-comparison --workload stream_pressure` uses the new sender for
+- [x] `measure --workload stream_pressure` uses the new sender for
       MOQX-client stream pressure while preserving current metrics,
       diagnostics, stream summaries, send-completion counts, send-call timing,
       and event-pump fields.
@@ -51,7 +51,7 @@ send-completion feedback into the sink.
 - [x] Unidirectional stream pressure continues to produce send-only records
       without requiring peer echo.
 - [x] Tests cover the sender boundary, bounded producer behavior, telemetry,
-      and reference-comparison report compatibility.
+      and measure report compatibility.
 
 ## Notes
 
@@ -64,10 +64,10 @@ the stream sender is proven on the simpler workload.
 - 2026-06-05: Started after #41 completed the DATAGRAM sender extraction.
   Current state before edits: `StreamSink` exists with unit tests for send
   windows, send errors, send completions, and FIN ordering, but
-  `ReferenceComparison` still calls `MOQX.Transport.send_stream/4` directly in
+  `Measure` still calls `MOQX.Transport.send_stream/4` directly in
   its stream-pressure scheduling loop.
 - 2026-06-05: Implemented `MOQXProbe.Traffic.StreamSender` and migrated pure
-  `reference-comparison --workload stream_pressure` onto it. The sender uses a
+  `measure --workload stream_pressure` onto it. The sender uses a
   bounded Flow producer and a single stream sink, carries the transport context
   and per-stream diagnostics state, reopens windows from send-completion
   feedback, and preserves the existing stream-pressure diagnostic/report
@@ -76,4 +76,4 @@ the stream sender is proven on the simpler workload.
   `mix test test/moqxprobe/traffic/stream_sender_test.exs
   test/moqxprobe/traffic/stream_sink_test.exs
   test/moqxprobe/transport_telemetry_collector_test.exs` and
-  `mix test test/moqxprobe/reference_comparison_test.exs`.
+  `mix test test/moqxprobe/measure_test.exs`.

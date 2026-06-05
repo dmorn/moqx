@@ -1166,7 +1166,7 @@ defmodule MOQXProbe.MoqxListener do
         --keyfile /opt/moqx-bench/certs/server-key.pem \\
         --stream-count 4 --payload-size 1200 --payload-count 100
 
-      client$ moqxprobe reference-comparison \\
+      client$ moqxprobe measure \\
         --topology reference-client-to-moqx-listener \\
         --server SERVER_PRIVATE_IP --port 4433 \\
         --ca /opt/moqx-bench/certs/ca.pem \\

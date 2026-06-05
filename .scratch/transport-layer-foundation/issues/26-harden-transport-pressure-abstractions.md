@@ -31,7 +31,7 @@ gap deliberately.
 - Stream sends now expose accepted-send tokens and completion events, but
   datagram sends only expose local admission. Datagram pressure must keep
   offered, locally accepted, and peer-delivered counts distinct.
-- `reference-comparison` now has explicit stream, DATAGRAM, and mixed workload
+- `measure` now has explicit stream, DATAGRAM, and mixed workload
   modes. The next risk is not workload shape; it is whether those workloads
   expose enough runtime pressure signals to guide optimization.
 - The self-pair datagram pressure step is burst-only: it sends all datagrams as
@@ -60,9 +60,9 @@ gap deliberately.
 - [x] Mixed pressure records sender mailbox depth, peak mailbox depth,
       send-completion counts, pending send-completion counts, and event-drain
       counts.
-- [x] Reference-comparison datagram support is modeled as an explicit workload
+- [x] Measure datagram support is modeled as an explicit workload
       mode, not hidden inside stream-pressure fields.
-- [x] Self-pair and reference-comparison datagram workloads support both burst
+- [x] Self-pair and measure datagram workloads support both burst
       and rate-stepped modes, or document why one mode is intentionally absent.
 - [ ] Any transport API refactor preserves explicit dependency seams and does
       not introduce `Application` environment as mutable configuration.
@@ -113,7 +113,7 @@ seams without `Application` env.
   explicit.
 - 2026-05-21: The #12 datagram-pressure slice addressed the explicit
   workload-mode and offered/accepted/delivered-count boundaries for
-  reference-comparison, and the README now calls out the current listener as a
+  measure, and the README now calls out the current listener as a
   correctness peer. Remaining work is about high-rate observability,
   rate-stepped datagram pressure, and any transport API refactor suggested by
   real benchmark evidence.
@@ -190,7 +190,7 @@ seams without `Application` env.
   `message_queue_len_peak=22`; this is loopback calibration only, but confirms
   receiver mailbox pressure is now visible for the next ARM ramp.
 - 2026-05-26: Added MOQX-client DATAGRAM receive diagnostics to
-  `reference-comparison --topology moqx-client-to-reference-server
+  `measure --topology moqx-client-to-reference-server
   --workload datagram_pressure`. Canonical records now include
   `moqx-client-datagram-diagnostics-v1` with accepted/received/missing counts,
   receive-loop event counters, duplicate/invalid counts, receive errors, and
@@ -293,11 +293,11 @@ seams without `Application` env.
   caused by quic-go `SendDatagram` call cost in the reference client consuming
   the pacing budget, not by MOQX listener receive loss or mailbox growth.
 - 2026-05-27: Refined #26 into a focused roadmap and split the next work into
-  child issues #32-#36. Reference-comparison DATAGRAM pressure already supports
+  child issues #32-#36. Measure DATAGRAM pressure already supports
   burst and paced modes. Self-pair remains intentionally burst-only
   calibration for now: local loopback paced DATAGRAMs would mostly measure host
   scheduler/timer behavior, while real-link paced evidence belongs in
-  reference-comparison after an iperf3 path baseline.
+  measure after an iperf3 path baseline.
 - 2026-05-27: Closed #32. The stream-pressure harness now records the
   MOQX-client send admission/completion gap, echo receive cadence,
   event-drain counters, per-stream completion status, and bounded process
@@ -374,7 +374,7 @@ seams without `Application` env.
   received bytes, send/receive timing, event counts, and bounded process
   samples while still emitting the existing `transport-bench-v1`
   step-summary/report diagnostics. Local loopback calibration against
-  `tools/quicprobe` (`/tmp/moqx-telemetry-reference-comparison.jsonl`) reached
+  `tools/quicprobe` (`/tmp/moqx-telemetry-measure.jsonl`) reached
   46.02 Mbps for a tiny 1-stream/20x256-byte smoke with 5120 sent/received
   bytes, 20 accepted sends, 0 send errors, strict-valid JSONL, and no break
   symptom. The next #26 slice can now migrate DATAGRAM/mixed pressure onto the

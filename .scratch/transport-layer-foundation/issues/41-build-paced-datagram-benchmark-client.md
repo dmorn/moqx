@@ -10,7 +10,7 @@ Type: AFK
 ## What to build
 
 Extract the MOQX-client DATAGRAM pressure sender out of the monolithic
-`reference-comparison` loop into a caller-side benchmark client with an explicit
+`measure` loop into a caller-side benchmark client with an explicit
 payload pipeline and a paced send sink.
 
 The client should model the first production use of `moqx`: a caller publishing
@@ -68,7 +68,7 @@ catch-up bursts.
 - [x] Benchmark telemetry events are emitted with low-cardinality metadata and
       can be collected by the existing benchmark collector or a small dedicated
       collector without synchronous GenServer/Agent calls on the hot path.
-- [x] `reference-comparison` DATAGRAM pressure uses the new client path while
+- [x] `measure` DATAGRAM pressure uses the new client path while
       preserving `transport-bench-v1` fields for accepted sends, offered rate,
       offered-rate validity, delivery, drops, send timing, pacing lag, and
       diagnostics.
@@ -116,14 +116,14 @@ rather than presented as network capacity evidence.
   owns queued DATAGRAM admission, fake-send test seams, accepted/error counts,
   burst accounting, capped/tool-limited pacer outcomes, and producer-limited
   detection. This slice proves the Flow/GenStage split with deterministic
-  tests; `ReferenceComparison` is not wired through it yet.
+  tests; `Measure` is not wired through it yet.
 - 2026-06-05: Added `MOQXProbe.Traffic.StreamSink` as the sibling stream
   GenStage consumer. The first tests cover per-stream send-window enforcement,
   explicit send-completion feedback, error accounting, and FIN ordering by
   requiring the final payload to carry `finish: true` only after earlier
   payloads for the stream have been admitted. The pacer now also accepts an
   explicit "currently available work" cap so window-blocked streams do not
-  consume unsent offered slots. `ReferenceComparison` extraction remains the
+  consume unsent offered slots. `Measure` extraction remains the
   next implementation step.
 - 2026-06-05: Filled in the top-level `MOQXProbe.Traffic` module with a
   `feed_payloads/3` helper that runs a bounded Flow payload pipeline into an
@@ -131,10 +131,10 @@ rather than presented as network capacity evidence.
   finish. `DatagramSink` and `StreamSink` now also expose `run/1` self-paced
   loops using absolute `Process.send_after(..., abs: true)` timers; deterministic
   tests inject timer and clock functions. The remaining extraction step is to
-  replace the old `ReferenceComparison` DATAGRAM and stream send loops with
+  replace the old `Measure` DATAGRAM and stream send loops with
   these Traffic components while preserving `transport-bench-v1`.
 - 2026-06-05: Wired paced MOQX-client DATAGRAM pressure in
-  `ReferenceComparison` through `Traffic.feed_payloads/3` and
+  `Measure` through `Traffic.feed_payloads/3` and
   `Traffic.DatagramSink.run/1`. Flow now produces timestamp-free descriptors
   while the sink encodes the timestamp at the paced send point, preserving
   latency semantics. The sink path stops on first transport send error for the
@@ -146,7 +146,7 @@ rather than presented as network capacity evidence.
   `MOQXProbe.Traffic.DatagramSender` as the benchmark-client boundary around
   bounded Flow payload production plus the single final `DatagramSink`. Removed
   the retired DATAGRAM receive/pacing mode options and fields from
-  `ReferenceComparison`, tests, and docs. The sink now uses manual GenStage
+  `Measure`, tests, and docs. The sink now uses manual GenStage
   demand so queued descriptors and outstanding demand stay bounded by explicit
   queue settings, and emits benchmark-owned telemetry under
   `[:moqx, :transport_bench, :datagram_sender, ...]`. The existing ETS-backed

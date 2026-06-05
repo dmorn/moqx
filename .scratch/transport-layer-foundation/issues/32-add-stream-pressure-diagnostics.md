@@ -51,7 +51,7 @@ remote stream-pressure run explain where time and queued work accumulate.
 ## Comments
 
 - 2026-05-27: Implemented additive stream-pressure diagnostics for
-  `reference-comparison --topology moqx-client-to-reference-server` without
+  `measure --topology moqx-client-to-reference-server` without
   changing the `transport-bench-v1` record envelope. Bidirectional
   stream-pressure records now include accepted/completed/cancelled/pending send
   counts, per-stream completion status, active send and echo-receive durations,

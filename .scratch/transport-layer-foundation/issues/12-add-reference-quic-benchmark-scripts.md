@@ -52,10 +52,10 @@ Current status:
 - Output must remain `transport-bench-v1` JSONL and comparable with
   `self-pair` and `iperf3-baseline`.
 - The next useful dependency is packaging and deploying `tools/quicprobe`
-  alongside the runtime benchmark CLI so reference-comparison smokes can run on
+  alongside the runtime benchmark CLI so measure smokes can run on
   controlled Hetzner paths without rebuilding or cloning the repo on targets.
 
-Reference-comparison command contract, first pass:
+Measure command contract, first pass:
 
 - Extend `tools/quicprobe` from an echo probe into a reference pressure peer.
   It should keep `server` and `client` modes, but add structured JSON output
@@ -65,7 +65,7 @@ Reference-comparison command contract, first pass:
   may emit reference-run JSON, but `moqx-transport-bench` is responsible for
   converting measured runs into `transport-bench-v1` records.
 - Add one runtime command family under `moqx-transport-bench`, tentatively
-  `reference-comparison`, with an explicit `--topology`:
+  `measure`, with an explicit `--topology`:
   - `moqx-client-to-reference-server`;
   - `reference-client-to-moqx-listener`;
   - `reference-client-to-reference-server`.
@@ -83,7 +83,7 @@ Reference-comparison command contract, first pass:
   Mixed control-plus-object pressure should build on the same measurement
   primitives after the simple stream path is comparable.
 
-Move this issue out of `needs-triage` once the `reference-comparison` CLI
+Move this issue out of `needs-triage` once the `measure` CLI
 shape is committed with the first local loopback reference-to-reference record.
 
 ## Comments
@@ -95,7 +95,7 @@ shape is committed with the first local loopback reference-to-reference record.
   provider label query all succeeded. Before implementing this issue, address
   or consciously scope around follow-ups 24 and 25: failed path attempts should
   not hang indefinitely, and private-network readiness needs a deterministic
-  answer if reference comparisons are expected to use private paths.
+  answer if measurement runs are expected to use private paths.
 - 2026-05-21: Hetzner ARM smoke `20260521T070013Z-smoke` re-proved the
   operator path after replacing Make with `just`: fresh run key, Terraform
   plan/apply, cloud-init readiness, Docker release build, parallel role deploy,
@@ -107,13 +107,13 @@ shape is committed with the first local loopback reference-to-reference record.
   embed the Docker build git SHA.
 - 2026-05-21: Follow-up #24 is closed: bad `iperf3-baseline` paths now produce
   bounded timeout JSONL instead of hanging indefinitely. The remaining
-  infrastructure decision before reference-comparison runs is #25: either make
+  infrastructure decision before measure runs is #25: either make
   Hetzner private-network readiness deterministic or scope #12 explicitly to
   public IPv4 paths for the first implementation.
 - 2026-05-21: Follow-up #25 is closed: Hetzner private-network readiness is now
   an explicit operator step with static guest netplan config and
   `just bench-transport-private-check`, validated by smoke
-  `20260521T093427Z-private-smoke`. #12 can now design reference-comparison
+  `20260521T093427Z-private-smoke`. #12 can now design measure
   runtime command contracts against both public IPv4 and private-network paths.
 - 2026-05-21: Design/experiment pass:
   `tools/quicprobe` is currently a minimal quic-go bidi echo peer, not a
@@ -141,18 +141,18 @@ shape is committed with the first local loopback reference-to-reference record.
   streams, 256-byte payloads, four writes per stream, and 2048 bytes sent and
   received.
 - 2026-05-21: First canonical wrapper slice:
-  `moqx-transport-bench reference-comparison` and Mix wrapper
-  `mix moqx.transport.reference_comparison` now support the
+  `moqx-transport-bench measure` and Mix wrapper
+  `mix moqx.transport.measure` now support the
   `reference-client-to-reference-server` topology. The command requires an
   explicit `--quicprobe-command`, caller-provided `--server` and `--ca`, and
   does not start the reference server implicitly. It converts `quicprobe-v1`
   client output into one `transport-bench-v1` JSONL `step_summary`. Local
   smoke `reference-smoke` used a temporary quicprobe binary against
   `127.0.0.1:4434`, produced 2048 bytes sent/received, and passed
-  `mix moqx.transport.report /private/tmp/moqx-reference-comparison-smoke.jsonl
+  `mix moqx.transport.report /private/tmp/moqx-measure-smoke.jsonl
   --strict` with only the expected loopback-calibration warning.
 - 2026-05-21: Added the `moqx-client-to-reference-server` topology to
-  `moqx-transport-bench reference-comparison`. It uses
+  `moqx-transport-bench measure`. It uses
   `MOQX.Transport.Quicer` against an explicit `tools/quicprobe server`, emits
   canonical `transport-bench-v1` JSONL, records `quicer_version`, byte counts,
   handshake latency, first-byte latency, goodput, payload send rate, stream
@@ -187,7 +187,7 @@ shape is committed with the first local loopback reference-to-reference record.
   Linux/ARM64 artifacts for git `ae52d74` deployed and smoke-checked on both
   nodes. A tiny canonical `iperf3-baseline` record on the private path reported
   5.18 Gbps TCP goodput and a 10 Mbps UDP step with 100% delivery. Two tiny
-  reference-comparison records passed report validation: quicprobe client to
+  measure records passed report validation: quicprobe client to
   quicprobe server reported 17.849 ms handshake latency, 4.419 ms first byte,
   and 4.32 Mbps goodput; MOQX client to quicprobe server reported 41.265 ms
   handshake latency, 7.417 ms first byte, and 2.59 Mbps goodput. Result
@@ -196,7 +196,7 @@ shape is committed with the first local loopback reference-to-reference record.
   destroyed and `just bench-transport-verify-clean` confirmed no Terraform
   state entries or labelled Hetzner resources remain. These are smoke records,
   not capacity claims.
-- 2026-05-21: Redesigned the MOQX-client reference-comparison stream pressure
+- 2026-05-21: Redesigned the MOQX-client measure stream pressure
   loop to open all requested streams first, schedule payload rounds across all
   streams, and attach FIN to each final payload with `send_stream(..., finish:
   true)`. The topology now records `stream_scheduling=concurrent`. This keeps
@@ -208,7 +208,7 @@ shape is committed with the first local loopback reference-to-reference record.
 - 2026-05-21: Added the `reference-client-to-moqx-listener` topology and the
   explicit `moqx-transport-bench moqx-listener` peer command. Operators start
   the MOQX listener on the server endpoint, then run
-  `reference-comparison --topology reference-client-to-moqx-listener` from the
+  `measure --topology reference-client-to-moqx-listener` from the
   client side with caller-provided endpoint, CA, SNI, and path metadata. The
   listener receives stream payloads through `MOQX.Transport.recv_stream/3`,
   echoes with async `MOQX.Transport.send_stream/4`, waits for local send
@@ -218,8 +218,8 @@ shape is committed with the first local loopback reference-to-reference record.
   `server_implementation=moqx`, `stream_scheduling=concurrent`, and no break
   symptom. This remains loopback calibration only, not real network evidence.
 - 2026-05-21: Added the burst-mode `datagram_pressure` workload to #12
-  reference-comparison tooling. `tools/quicprobe` now enables QUIC DATAGRAM and
-  echoes datagrams from the reference server; `reference-comparison
+  measure tooling. `tools/quicprobe` now enables QUIC DATAGRAM and
+  echoes datagrams from the reference server; `measure
   --workload datagram_pressure` emits canonical `transport-bench-v1` records
   for `reference-client-to-reference-server`,
   `moqx-client-to-reference-server`, and `reference-client-to-moqx-listener`.
@@ -240,7 +240,7 @@ shape is committed with the first local loopback reference-to-reference record.
   Linux/ARM64 artifacts for git `17c4774` deployed and smoke-checked on both
   nodes. A tiny canonical `iperf3-baseline` record on the private path reported
   5.27 Gbps TCP goodput and a 10 Mbps UDP step with 100% delivery. Three
-  burst-mode `datagram_pressure` reference-comparison records passed strict
+  burst-mode `datagram_pressure` measure records passed strict
   report validation with 100 datagrams of 64 bytes, 6,400 bytes sent and
   received, 100% delivery, zero drops, and no break symptom:
   reference-client-to-reference-server, MOQX-client-to-reference-server, and
@@ -250,8 +250,8 @@ shape is committed with the first local loopback reference-to-reference record.
   state entries or labelled Hetzner resources remain. These are smoke records,
   not capacity claims.
 - 2026-05-22: Follow-up from inspecting the datagram-smoke reports: the human
-  report table now displays `datagram_pressure` for reference-comparison
-  datagram records instead of only `reference_comparison`, and MOQX-originated
+  report table now displays `datagram_pressure` for measure
+  datagram records instead of only `measurement`, and MOQX-originated
   datagram probe timestamps now encode signed monotonic timestamps correctly.
   The old `20260521T155945Z-datagram-smoke` MOQX-client-to-reference-server
   artifact has invalid negative datagram latency percentiles, but its
@@ -260,7 +260,7 @@ shape is committed with the first local loopback reference-to-reference record.
   fix produced positive latency percentiles and a strict report with
   `step=datagram_pressure`.
 - 2026-05-22: Added the first fixed-rate datagram pressure primitive. The
-  reference-comparison CLI now accepts `--datagram-rate`,
+  measure CLI now accepts `--datagram-rate`,
   `--duration-seconds`, and `--delivery-threshold`; paced mode offers
   `rate * duration` datagrams and records target offered rate separately from
   actual send and delivered rates. The reference client and MOQX-client paths
@@ -403,7 +403,7 @@ shape is committed with the first local loopback reference-to-reference record.
   same path. Artifacts are under
   `bench/transport/results/20260526T075945Z-issue-29-bidi/`:
   `path_metadata_private.json`, `iperf3-baseline-private.jsonl`, and
-  `reference-comparison-stream-private.jsonl`. The preserved server still
+  `measure-stream-private.jsonl`. The preserved server still
   reported a cloud-init status error from Hetzner network-config schema
   handling, so this round used manual toolchain and private-route readiness
   checks. Infrastructure was still intentionally running at the time this note
@@ -445,23 +445,23 @@ shape is committed with the first local loopback reference-to-reference record.
   DATAGRAM JSONL artifacts.
 - 2026-05-26: DATAGRAM artifacts for this round are under
   `bench/transport/results/20260526T075945Z-issue-29-bidi/`:
-  `reference-comparison-datagram-client-private.jsonl`,
-  `reference-comparison-datagram-listener-private.jsonl`,
-  `reference-comparison-datagram-listener-private-isolated.jsonl`,
-  `reference-comparison-datagram-size-probe-private.jsonl`,
-  `reference-comparison-datagram-size-probe-boundary-private.jsonl`,
-  `reference-comparison-datagram-1192-client-private.jsonl`, and
-  `reference-comparison-datagram-1192-listener-private.jsonl`, plus listener
+  `measure-datagram-client-private.jsonl`,
+  `measure-datagram-listener-private.jsonl`,
+  `measure-datagram-listener-private-isolated.jsonl`,
+  `measure-datagram-size-probe-private.jsonl`,
+  `measure-datagram-size-probe-boundary-private.jsonl`,
+  `measure-datagram-1192-client-private.jsonl`, and
+  `measure-datagram-1192-listener-private.jsonl`, plus listener
   logs for the failed/isolated runs.
 - 2026-05-26: After artifact capture and issue updates, the disposable Hetzner
   infrastructure for `20260526T075945Z-issue-29-bidi` was destroyed.
   `just bench-transport-verify-clean` reported no Terraform state entries or
   labelled Hetzner resources remaining.
-- 2026-05-26: Follow-up #30 is closed. `reference-comparison` now records
+- 2026-05-26: Follow-up #30 is closed. `measure` now records
   MOQX DATAGRAM send failures explicitly as `datagram_send_error` instead of
   emitting a `MatchError`, and the README documents 1192 bytes as the current
   near-limit MOQX/quicer DATAGRAM payload until capability metadata exists.
-- 2026-05-26: Added the first `mixed_moqt_shaped` reference-comparison
+- 2026-05-26: Added the first `mixed_moqt_shaped` measure
   workload. The workload is transport-shaped, not full MOQT session semantics:
   one low-rate bidirectional control stream plus object-like unidirectional
   streams. It is supported by `tools/quicprobe`,
@@ -524,7 +524,7 @@ Closure notes:
 
 - 2026-05-27: Closed #12 as the reference QUIC benchmark script/tooling
   contract. The selected reference implementation is `tools/quicprobe`; the
-  canonical operator surface is `moqx-transport-bench reference-comparison`
+  canonical operator surface is `moqx-transport-bench measure`
   plus the explicit `moqx-transport-bench moqx-listener` peer command. The
   implemented topologies are reference-client-to-reference-server,
   MOQX-client-to-reference-server, and reference-client-to-MOQX-listener.

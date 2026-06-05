@@ -38,7 +38,7 @@ None.
 ## Context
 
 This is not a throughput feature. It is operator safety for bad-path smoke
-tests and future reference-comparison experiments.
+tests and future measure experiments.
 
 The first implementation should stay local to the benchmark subproject. Do not
 add retry orchestration, Terraform coupling, or global configuration.

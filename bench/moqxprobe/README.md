@@ -215,7 +215,7 @@ DATAGRAM admission calls the future paced sink would need to pay in one tick;
 1 ms at 32k pps. Use `--schedule burst` to measure raw admission capacity and
 `--schedule paced --tick-ms 1` to measure the absolute-timer burst pacer shape.
 
-### Reference Comparison
+### Measure
 
 Run the selected reference QUIC implementation on controlled server paths:
 
@@ -331,7 +331,7 @@ settings for an experiment.
 
 Use `sender-admission` only for lower-level BEAM-to-NIF admission calibration.
 It answers whether local DATAGRAM admission can keep up when pacing is already
-solved; `reference-comparison --workload datagram_pressure --datagram-rate ...`
+solved; `measure --workload datagram_pressure --datagram-rate ...`
 is the benchmark path for peer-facing QUIC DATAGRAM pressure evidence.
 
 For datagram pressure, use `--workload datagram_pressure`. By default the
@@ -431,7 +431,7 @@ MOQX-client-to-reference-server, and reference-client-to-MOQX-listener
 topologies:
 
 ```bash
-moqxprobe reference-comparison \
+moqxprobe measure \
   --topology reference-client-to-reference-server \
   --server 127.0.0.1 \
   --port 4433 \
@@ -441,9 +441,9 @@ moqxprobe reference-comparison \
   --stream-count 4 \
   --payload-size 1200 \
   --payload-count 100 \
-  --output bench/moqxprobe/results/reference-comparison.jsonl
+  --output bench/moqxprobe/results/measure.jsonl
 
-moqxprobe reference-comparison \
+moqxprobe measure \
   --topology moqx-client-to-reference-server \
   --server 127.0.0.1 \
   --port 4433 \
@@ -464,7 +464,7 @@ moqxprobe moqx-listener \
   --payload-size 1200 \
   --payload-count 100
 
-moqxprobe reference-comparison \
+moqxprobe measure \
   --topology reference-client-to-moqx-listener \
   --server 127.0.0.1 \
   --port 4433 \
@@ -496,7 +496,7 @@ moqxprobe moqx-listener \
 Then run the reference client topology against it:
 
 ```bash
-moqxprobe reference-comparison \
+moqxprobe measure \
   --topology reference-client-to-moqx-listener \
   --server 127.0.0.1 \
   --port 4433 \
@@ -510,7 +510,7 @@ moqxprobe reference-comparison \
 
 For paced datagram steps against `moqx-listener`, pass the same
 `--datagram-rate` and `--duration-seconds` pair to the listener and the
-reference-comparison command so both sides agree on the expected datagram
+measure command so both sides agree on the expected datagram
 count. Keep the listener `--accept-timeout-seconds` generous enough to cover
 remote command dispatch and tcpdump/setup time; do not use the client
 measurement timeout as the listener readiness timeout.
@@ -528,7 +528,7 @@ send-completion events while the control stream is active, so object pressure
 does not silently accumulate in the caller mailbox.
 
 ```bash
-moqxprobe reference-comparison \
+moqxprobe measure \
   --topology moqx-client-to-reference-server \
   --workload mixed_moqt_shaped \
   --server 127.0.0.1 \
@@ -549,7 +549,7 @@ topologies, start `bench/quicprobe server` explicitly on the chosen endpoint
 first. For reference-client-to-MOQX-listener runs, start
 `moqxprobe moqx-listener` explicitly on the server endpoint; it
 serves one connection by default and then exits. Then run
-`reference-comparison` from the client side. The wrapper emits
+`measure` from the client side. The wrapper emits
 `transport-bench-v1` JSONL. The MOQX-client topology opens all requested
 streams, schedules payload rounds across those streams, and records
 `stream_scheduling=concurrent` for pure stream pressure and
@@ -839,7 +839,7 @@ Allowed `workload.family` values:
 - `stream_pressure`
 - `datagram_pressure`
 - `mixed_moqt_shaped`
-- `reference_comparison`
+- `measurement`
 - `public_relay_interop`
 
 ### Methodology Metadata
@@ -970,6 +970,7 @@ machine:
 
 ```bash
 cd bench/moqxprobe
+MIX_ENV=prod mix clean
 MIX_ENV=prod mix release --overwrite
 _build/prod/rel/moqxprobe_runtime/bin/moqxprobe help
 ```
