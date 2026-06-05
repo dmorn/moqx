@@ -31,6 +31,8 @@ defmodule MOQXProbe.MixProject do
       {:probe_ledger, path: "../ledger"},
       {:moqx, path: "../.."},
       {:burrito, "~> 1.5"},
+      {:flow, "~> 1.2"},
+      {:gen_stage, "~> 1.3"},
       {:telemetry_metrics, "~> 1.1"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]

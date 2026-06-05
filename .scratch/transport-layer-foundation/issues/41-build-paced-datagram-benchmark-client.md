@@ -110,3 +110,10 @@ rather than presented as network capacity evidence.
   from the previous scheduled tick, bounded catch-up bursts, tool-limited lag
   detection, and final count clamping. This is the shared timing core for both
   the upcoming DATAGRAM sink and stream sink.
+- 2026-06-05: Added the first DATAGRAM client components under
+  `MOQXProbe.Traffic`: `PayloadFlow` builds bounded Flow payload pipelines
+  with explicit demand options, and `DatagramSink` is a GenStage consumer that
+  owns queued DATAGRAM admission, fake-send test seams, accepted/error counts,
+  burst accounting, capped/tool-limited pacer outcomes, and producer-limited
+  detection. This slice proves the Flow/GenStage split with deterministic
+  tests; `ReferenceComparison` is not wired through it yet.
