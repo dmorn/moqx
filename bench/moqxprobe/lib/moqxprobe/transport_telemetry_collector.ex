@@ -11,7 +11,13 @@ defmodule MOQXProbe.TransportTelemetryCollector do
     [:moqx, :transport_bench, :datagram_sender, :demand, :ask],
     [:moqx, :transport_bench, :datagram_sender, :backlog, :change],
     [:moqx, :transport_bench, :datagram_sender, :tick, :stop],
-    [:moqx, :transport_bench, :datagram_sender, :send, :error]
+    [:moqx, :transport_bench, :datagram_sender, :send, :error],
+    [:moqx, :transport_bench, :stream_sender, :run, :start],
+    [:moqx, :transport_bench, :stream_sender, :run, :stop],
+    [:moqx, :transport_bench, :stream_sender, :demand, :ask],
+    [:moqx, :transport_bench, :stream_sender, :backlog, :change],
+    [:moqx, :transport_bench, :stream_sender, :tick, :stop],
+    [:moqx, :transport_bench, :stream_sender, :send, :error]
   ]
 
   @message_queue_sample_prefix_count 16
@@ -24,7 +30,8 @@ defmodule MOQXProbe.TransportTelemetryCollector do
     :receive_event_call,
     :receive_event_blocking_call,
     :receive_event_drain_call,
-    :datagram_sender_burst
+    :datagram_sender_burst,
+    :stream_sender_burst
   ]
   @counter_keys [
     {:stream_send, :bytes_accepted},
@@ -61,7 +68,22 @@ defmodule MOQXProbe.TransportTelemetryCollector do
     {:datagram_sender, :errors},
     {:datagram_sender, :send_error_events},
     {:datagram_sender, :capped_ticks},
-    {:datagram_sender, :tool_limited_ticks}
+    {:datagram_sender, :tool_limited_ticks},
+    {:stream_sender, :runs_started},
+    {:stream_sender, :runs_stopped},
+    {:stream_sender, :runs_failed},
+    {:stream_sender, :demand_asked},
+    {:stream_sender, :payloads_enqueued},
+    {:stream_sender, :ticks},
+    {:stream_sender, :due},
+    {:stream_sender, :sent},
+    {:stream_sender, :accepted},
+    {:stream_sender, :completed},
+    {:stream_sender, :errors},
+    {:stream_sender, :send_error_events},
+    {:stream_sender, :capped_ticks},
+    {:stream_sender, :tool_limited_ticks},
+    {:stream_sender, :stream_window_limited_ticks}
   ]
 
   defstruct [
@@ -181,7 +203,8 @@ defmodule MOQXProbe.TransportTelemetryCollector do
           duration_values(collector, :receive_event_blocking_call),
         receive_event_drain_call_durations_us:
           duration_values(collector, :receive_event_drain_call),
-        datagram_sender: datagram_sender_snapshot(collector)
+        datagram_sender: datagram_sender_snapshot(collector),
+        stream_sender: stream_sender_snapshot(collector)
       }
     }
   end
@@ -368,6 +391,88 @@ defmodule MOQXProbe.TransportTelemetryCollector do
     increment(store_key, {:datagram_sender, :send_error_events}, measurements[:error_count] || 0)
   end
 
+  defp do_handle_event(
+         [:moqx, :transport_bench, :stream_sender, :run, :start],
+         _measurements,
+         _metadata,
+         store_key
+       ) do
+    increment(store_key, {:stream_sender, :runs_started})
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport_bench, :stream_sender, :run, :stop],
+         measurements,
+         metadata,
+         store_key
+       ) do
+    increment(store_key, {:stream_sender, :runs_stopped})
+    increment(store_key, {:stream_sender, :completed}, measurements[:completed_count] || 0)
+
+    if metadata[:result] == :error do
+      increment(store_key, {:stream_sender, :runs_failed})
+    end
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport_bench, :stream_sender, :demand, :ask],
+         measurements,
+         _metadata,
+         store_key
+       ) do
+    increment(store_key, {:stream_sender, :demand_asked}, measurements[:demand_count] || 0)
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport_bench, :stream_sender, :backlog, :change],
+         measurements,
+         _metadata,
+         store_key
+       ) do
+    increment(
+      store_key,
+      {:stream_sender, :payloads_enqueued},
+      measurements[:enqueued_count] || 0
+    )
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport_bench, :stream_sender, :tick, :stop],
+         measurements,
+         _metadata,
+         store_key
+       ) do
+    increment(store_key, {:stream_sender, :ticks})
+    increment(store_key, {:stream_sender, :due}, measurements[:due_count] || 0)
+    increment(store_key, {:stream_sender, :sent}, measurements[:send_count] || 0)
+    increment(store_key, {:stream_sender, :accepted}, measurements[:accepted_count] || 0)
+    increment(store_key, {:stream_sender, :errors}, measurements[:error_count] || 0)
+    increment(store_key, {:stream_sender, :capped_ticks}, measurements[:capped_tick_count] || 0)
+
+    increment(
+      store_key,
+      {:stream_sender, :tool_limited_ticks},
+      measurements[:tool_limited_tick_count] || 0
+    )
+
+    increment(
+      store_key,
+      {:stream_sender, :stream_window_limited_ticks},
+      measurements[:stream_window_limited_tick_count] || 0
+    )
+
+    add_duration(store_key, :stream_sender_burst, measurements[:burst_duration_us])
+  end
+
+  defp do_handle_event(
+         [:moqx, :transport_bench, :stream_sender, :send, :error],
+         measurements,
+         _metadata,
+         store_key
+       ) do
+    increment(store_key, {:stream_sender, :send_error_events}, measurements[:error_count] || 0)
+  end
+
   defp do_handle_event(_event, _measurements, _metadata, _store_key), do: :ok
 
   defp record_receive_result(
@@ -425,6 +530,28 @@ defmodule MOQXProbe.TransportTelemetryCollector do
       capped_ticks: counter(collector, {:datagram_sender, :capped_ticks}),
       tool_limited_ticks: counter(collector, {:datagram_sender, :tool_limited_ticks}),
       burst_durations_us: duration_values(collector, :datagram_sender_burst)
+    }
+  end
+
+  defp stream_sender_snapshot(collector) do
+    %{
+      runs_started: counter(collector, {:stream_sender, :runs_started}),
+      runs_stopped: counter(collector, {:stream_sender, :runs_stopped}),
+      runs_failed: counter(collector, {:stream_sender, :runs_failed}),
+      demand_asked: counter(collector, {:stream_sender, :demand_asked}),
+      payloads_enqueued: counter(collector, {:stream_sender, :payloads_enqueued}),
+      ticks: counter(collector, {:stream_sender, :ticks}),
+      due: counter(collector, {:stream_sender, :due}),
+      sent: counter(collector, {:stream_sender, :sent}),
+      accepted: counter(collector, {:stream_sender, :accepted}),
+      completed: counter(collector, {:stream_sender, :completed}),
+      errors: counter(collector, {:stream_sender, :errors}),
+      send_error_events: counter(collector, {:stream_sender, :send_error_events}),
+      capped_ticks: counter(collector, {:stream_sender, :capped_ticks}),
+      tool_limited_ticks: counter(collector, {:stream_sender, :tool_limited_ticks}),
+      stream_window_limited_ticks:
+        counter(collector, {:stream_sender, :stream_window_limited_ticks}),
+      burst_durations_us: duration_values(collector, :stream_sender_burst)
     }
   end
 

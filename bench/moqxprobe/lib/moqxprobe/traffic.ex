@@ -44,6 +44,7 @@ defmodule MOQXProbe.Traffic do
   end
 
   def stop_payloads(coordinator, timeout \\ 1_000) when is_pid(coordinator) do
+    Process.unlink(coordinator)
     ref = Process.monitor(coordinator)
     Process.exit(coordinator, :shutdown)
 

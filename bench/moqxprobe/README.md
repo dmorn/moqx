@@ -279,6 +279,22 @@ These knobs are not protocol semantics. Use them to distinguish benchmark
 event-pump overhead, event granularity, and transport/NIF behavior while
 preserving send admission and completion accounting.
 
+MOQX-client stream pressure uses `MOQXProbe.Traffic.StreamSender`. The sender
+composes a bounded Flow payload producer with a single GenStage stream sink:
+
+```text
+payload descriptors -> bounded stream sink -> MOQX.Transport.send_stream/4
+                                      ^ send-completion feedback
+```
+
+The sink is the only process that calls `MOQX.Transport.send_stream/4` for pure
+stream pressure. It owns per-stream admission windows, FIN placement on the
+final payload for each stream, bounded producer demand, and stream-sender
+telemetry under `[:moqx, :transport_bench, :stream_sender, ...]`.
+Bidirectional pressure keeps echo validation, timeout/failure classification,
+and report assembly in the existing receive-event loop; send-completion events
+feed back into the sink to reopen per-stream windows.
+
 Paced MOQX-client DATAGRAM pressure uses `MOQXProbe.Traffic.DatagramSender`.
 The sender composes a bounded Flow payload producer with a single GenStage
 paced sink:

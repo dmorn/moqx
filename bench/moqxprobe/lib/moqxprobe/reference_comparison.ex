@@ -5,6 +5,7 @@ defmodule MOQXProbe.ReferenceComparison do
   alias MOQXProbe.BuildInfo
   alias MOQXProbe.DatagramPayload
   alias MOQXProbe.Traffic.DatagramSender
+  alias MOQXProbe.Traffic.StreamSender
   alias MOQXProbe.TransportTelemetryCollector
   alias ProbeLedger.PathMetadata
 
@@ -814,6 +815,7 @@ defmodule MOQXProbe.ReferenceComparison do
   defp measure_moqx_stream_pressure(ctx, connection, config, handshake_latency_ms) do
     {:ok, collector} =
       TransportTelemetryCollector.start(
+        event_owner_pid: :any,
         sample_process?: stream_pressure_process_sampling?(config)
       )
 
@@ -834,7 +836,15 @@ defmodule MOQXProbe.ReferenceComparison do
       if config.stream_direction == "bidirectional" do
         collect_pressure_streams(ctx, streams, payload, config, application_started_at)
       else
-        {streams, ctx} = schedule_pressure_payloads(ctx, streams, payload, config)
+        {streams, ctx} =
+          send_unidirectional_pressure_payloads(
+            ctx,
+            streams,
+            payload,
+            config,
+            application_started_at
+          )
+
         collect_pressure_streams(ctx, streams, payload, config, application_started_at)
       end
 
@@ -2867,31 +2877,6 @@ defmodule MOQXProbe.ReferenceComparison do
 
   defp open_stream_opts(config), do: [direction: stream_direction(config)]
 
-  defp schedule_pressure_payloads(ctx, streams, payload, config) do
-    Enum.reduce(1..config.payload_count, {streams, ctx}, fn payload_index, {streams, ctx} ->
-      schedule_payload_round(streams, ctx, payload, payload_index == config.payload_count)
-    end)
-  end
-
-  defp schedule_payload_round(streams, ctx, payload, finish?) do
-    Enum.map_reduce(streams, ctx, fn stream_state, ctx ->
-      schedule_stream_payload(stream_state, ctx, payload, finish?)
-    end)
-  end
-
-  defp schedule_stream_payload(stream_state, ctx, payload, finish?) do
-    opts = if finish?, do: [finish: true], else: []
-    {:ok, _send, ctx} = Transport.send_stream(ctx, stream_state.stream, payload, opts)
-
-    stream_state = %{
-      stream_state
-      | bytes_sent: stream_state.bytes_sent + byte_size(payload),
-        payloads_accepted: stream_state.payloads_accepted + 1
-    }
-
-    {stream_state, ctx}
-  end
-
   defp collect_pressure_streams(
          ctx,
          streams,
@@ -2918,36 +2903,28 @@ defmodule MOQXProbe.ReferenceComparison do
   end
 
   defp collect_active_echo_streams(ctx, streams, payload, config, first_byte_origin) do
-    states =
-      Map.new(streams, fn stream_state ->
-        {stream_state.stream,
-         %{
-           stream_state: stream_state,
-           bytes_received: 0,
-           first_byte_latency_ms: nil,
-           completed_at: nil,
-           first_send_accepted_at: nil,
-           last_send_accepted_at: nil,
-           first_echo_received_at: nil,
-           last_echo_received_at: nil,
-           payloads_scheduled: 0,
-           payloads_completed: 0,
-           send_inflight: 0,
-           send_completed: 0,
-           send_cancelled: 0,
-           send_call_durations_us: [],
-           peer_finished?: false,
-           failure: nil
-         }}
-      end)
-
+    states = initial_stream_pressure_states(streams)
     diagnostics = initial_stream_pressure_runtime(first_byte_origin)
-    {states, ctx} = prime_active_echo_sends(ctx, states, payload, config)
+
+    {:ok, sender} =
+      start_stream_pressure_sender(
+        ctx,
+        streams,
+        states,
+        payload,
+        config,
+        first_byte_origin,
+        config.stream_send_window
+      )
+
+    {:ok, snapshot} = StreamSender.drain(sender)
+    {ctx, states} = stream_sender_context_and_states(snapshot)
     diagnostics = sample_stream_pressure_runtime(diagnostics, config)
     deadline_us = monotonic_us() + client_timeout_ms(config) * 1000
 
     collect_active_echo_events(
       ctx,
+      sender,
       states,
       diagnostics,
       payload,
@@ -2955,6 +2932,221 @@ defmodule MOQXProbe.ReferenceComparison do
       first_byte_origin,
       deadline_us
     )
+  end
+
+  defp send_unidirectional_pressure_payloads(ctx, streams, payload, config, started_at) do
+    states = initial_stream_pressure_states(streams)
+    stream_send_window = max(config.payload_count, 1)
+
+    with {:ok, sender} <-
+           start_stream_pressure_sender(
+             ctx,
+             streams,
+             states,
+             payload,
+             config,
+             started_at,
+             stream_send_window
+           ),
+         {:ok, snapshot} <- StreamSender.run(sender) do
+      {ctx, states} = stream_sender_context_and_states(snapshot)
+      {stream_pressure_state_streams(states), ctx}
+    else
+      {:error, _reason, snapshot} when is_map(snapshot) ->
+        {ctx, states} = stream_sender_context_and_states(snapshot)
+        {stream_pressure_state_streams(states), ctx}
+    end
+  end
+
+  defp initial_stream_pressure_states(streams) do
+    Map.new(streams, fn stream_state ->
+      {stream_state.stream,
+       %{
+         stream_state: stream_state,
+         bytes_received: 0,
+         first_byte_latency_ms: nil,
+         completed_at: nil,
+         first_send_accepted_at: nil,
+         last_send_accepted_at: nil,
+         first_echo_received_at: nil,
+         last_echo_received_at: nil,
+         payloads_scheduled: 0,
+         payloads_completed: 0,
+         send_inflight: 0,
+         send_completed: 0,
+         send_cancelled: 0,
+         send_call_durations_us: [],
+         peer_finished?: false,
+         failure: nil
+       }}
+    end)
+  end
+
+  defp start_stream_pressure_sender(
+         ctx,
+         streams,
+         states,
+         payload,
+         config,
+         started_at,
+         stream_send_window
+       ) do
+    count = length(streams) * config.payload_count
+    max_burst = StreamSender.default_max_burst(count)
+
+    StreamSender.start(
+      count: count,
+      started_at_us: started_at,
+      streams: streams,
+      payload: payload,
+      payload_count: config.payload_count,
+      stream_send_window: stream_send_window,
+      max_burst: max_burst,
+      min_demand: StreamSender.default_min_demand(max_burst),
+      max_demand: max_burst,
+      max_queue_depth: StreamSender.default_max_queue_depth(max_burst),
+      idle_retries: 1_000,
+      send_fun: stream_pressure_sender_send_fun(config),
+      complete_fun: stream_pressure_sender_complete_fun(config),
+      transport_state: %{ctx: ctx, states: states},
+      event_forward_pid: self()
+    )
+  end
+
+  defp stream_pressure_sender_send_fun(config) do
+    fn event, %{ctx: ctx, states: states} = transport_state ->
+      opts = if event.finish?, do: [finish: true], else: []
+      send_started_at = monotonic_us()
+      send_result = Transport.send_stream(ctx, event.stream, event.payload, opts)
+      accepted_at = monotonic_us()
+      send_call_duration_us = accepted_at - send_started_at
+
+      case send_result do
+        {:ok, send, ctx} ->
+          states =
+            record_stream_pressure_send_accepted(
+              states,
+              event,
+              accepted_at,
+              send_call_duration_us
+            )
+
+          {:ok, send, %{transport_state | ctx: ctx, states: states}}
+
+        {:error, reason, ctx} ->
+          states =
+            record_stream_pressure_send_error(
+              states,
+              event,
+              config,
+              reason,
+              send_call_duration_us
+            )
+
+          {:error, reason, %{transport_state | ctx: ctx, states: states}}
+      end
+    end
+  end
+
+  defp record_stream_pressure_send_accepted(states, event, accepted_at, send_call_duration_us) do
+    Map.update!(states, event.stream, fn state ->
+      record_stream_pressure_send_accepted(
+        state,
+        event,
+        byte_size(event.payload),
+        accepted_at,
+        send_call_duration_us
+      )
+    end)
+  end
+
+  defp record_stream_pressure_send_accepted(state, event, byte_size, accepted_at, duration_us) do
+    payload_index = Map.get(event, :payload_index, state.payloads_scheduled + 1)
+
+    stream_state = %{
+      state.stream_state
+      | bytes_sent: state.stream_state.bytes_sent + byte_size,
+        payloads_accepted: state.stream_state.payloads_accepted + 1
+    }
+
+    %{
+      state
+      | stream_state: stream_state,
+        payloads_scheduled: payload_index,
+        send_inflight: state.send_inflight + 1,
+        first_send_accepted_at: state.first_send_accepted_at || accepted_at,
+        last_send_accepted_at: accepted_at,
+        send_call_durations_us: [duration_us | state.send_call_durations_us]
+    }
+  end
+
+  defp record_stream_pressure_send_error(states, event, config, reason, duration_us) do
+    Map.update!(states, event.stream, fn state ->
+      state = %{
+        state
+        | send_call_durations_us: [duration_us | state.send_call_durations_us]
+      }
+
+      fail_active_stream(state, config, reason_name(reason))
+    end)
+  end
+
+  defp stream_pressure_sender_complete_fun(_config) do
+    fn stream, count, %{states: states} = transport_state ->
+      states =
+        Map.update!(states, stream, fn state ->
+          %{
+            state
+            | send_completed: state.send_completed + count,
+              payloads_completed: state.payloads_completed + count,
+              send_inflight: max(state.send_inflight - count, 0)
+          }
+        end)
+
+      %{transport_state | states: states}
+    end
+  end
+
+  defp put_stream_sender_context(sender, ctx) do
+    StreamSender.update_transport_state(sender, fn
+      %{states: _states} = transport_state -> %{transport_state | ctx: ctx}
+      transport_state -> transport_state
+    end)
+  end
+
+  defp put_stream_sender_context_and_states(sender, ctx, states) do
+    StreamSender.update_transport_state(sender, fn
+      %{states: _states} = transport_state -> %{transport_state | ctx: ctx, states: states}
+      transport_state -> transport_state
+    end)
+  end
+
+  defp stream_sender_context_and_states(%{transport_state: %{ctx: ctx, states: states}}) do
+    {ctx, states}
+  end
+
+  defp stream_pressure_state_streams(states) do
+    states
+    |> Map.values()
+    |> Enum.map(& &1.stream_state)
+    |> Enum.sort_by(& &1.index)
+  end
+
+  defp stop_stream_pressure_sender(sender, ctx, states) do
+    sender = put_stream_sender_context_and_states(sender, ctx, states)
+
+    case StreamSender.stop(sender) do
+      {:ok, snapshot} -> stream_sender_context_and_states(snapshot)
+    end
+  end
+
+  defp finish_stream_pressure_sender(sender, ctx, states) do
+    sender = put_stream_sender_context_and_states(sender, ctx, states)
+
+    case StreamSender.finish(sender) do
+      {:ok, snapshot} -> stream_sender_context_and_states(snapshot)
+      {:error, _reason, snapshot} -> stream_sender_context_and_states(snapshot)
+    end
   end
 
   defp initial_stream_pressure_runtime(started_at) do
@@ -2968,6 +3160,7 @@ defmodule MOQXProbe.ReferenceComparison do
 
   defp collect_active_echo_events(
          ctx,
+         sender,
          states,
          diagnostics,
          payload,
@@ -2977,18 +3170,22 @@ defmodule MOQXProbe.ReferenceComparison do
        ) do
     cond do
       all_streams_complete?(states) ->
+        {ctx, states} = finish_stream_pressure_sender(sender, ctx, states)
         active_echo_result(ctx, states, config, nil, diagnostics)
 
       failure = first_stream_failure(states) ->
+        {ctx, states} = stop_stream_pressure_sender(sender, ctx, states)
         active_echo_result(ctx, states, config, failure, diagnostics)
 
       monotonic_us() >= deadline_us ->
         failure = timeout_stream_failure(states, config)
         diagnostics = timeout_stream_pressure_runtime(diagnostics, config, "echo_receive")
+        states = mark_timeout_failure(states, failure)
+        {ctx, states} = stop_stream_pressure_sender(sender, ctx, states)
 
         active_echo_result(
           ctx,
-          mark_timeout_failure(states, failure),
+          states,
           config,
           failure,
           diagnostics
@@ -3001,9 +3198,10 @@ defmodule MOQXProbe.ReferenceComparison do
 
         case receive_result do
           {:ok, event, ctx} ->
-            {ctx, states, diagnostics} =
+            {ctx, sender, states, diagnostics} =
               handle_active_echo_received_event(
                 ctx,
+                sender,
                 states,
                 diagnostics,
                 event,
@@ -3012,9 +3210,10 @@ defmodule MOQXProbe.ReferenceComparison do
                 first_byte_origin
               )
 
-            {ctx, states, diagnostics} =
+            {ctx, sender, states, diagnostics} =
               drain_ready_active_echo_events(
                 ctx,
+                sender,
                 states,
                 diagnostics,
                 payload,
@@ -3026,6 +3225,7 @@ defmodule MOQXProbe.ReferenceComparison do
 
             collect_active_echo_events(
               ctx,
+              sender,
               states,
               diagnostics,
               payload,
@@ -3037,6 +3237,7 @@ defmodule MOQXProbe.ReferenceComparison do
           {:unknown, _message, ctx} ->
             collect_active_echo_events(
               ctx,
+              sender,
               states,
               diagnostics,
               payload,
@@ -3047,10 +3248,12 @@ defmodule MOQXProbe.ReferenceComparison do
 
           {:error, reason, ctx} ->
             failure = receive_event_failure(states, config, reason)
+            states = mark_timeout_failure(states, failure)
+            {ctx, states} = stop_stream_pressure_sender(sender, ctx, states)
 
             active_echo_result(
               ctx,
-              mark_timeout_failure(states, failure),
+              states,
               config,
               failure,
               diagnostics
@@ -3060,10 +3263,12 @@ defmodule MOQXProbe.ReferenceComparison do
             failure = timeout_stream_failure(states, config)
 
             diagnostics = timeout_stream_pressure_runtime(diagnostics, config, "echo_receive")
+            states = mark_timeout_failure(states, failure)
+            {ctx, states} = stop_stream_pressure_sender(sender, ctx, states)
 
             active_echo_result(
               ctx,
-              mark_timeout_failure(states, failure),
+              states,
               config,
               failure,
               diagnostics
@@ -3074,6 +3279,7 @@ defmodule MOQXProbe.ReferenceComparison do
 
   defp handle_active_echo_received_event(
          ctx,
+         sender,
          states,
          diagnostics,
          event,
@@ -3081,14 +3287,17 @@ defmodule MOQXProbe.ReferenceComparison do
          config,
          first_byte_origin
        ) do
-    {states, ctx} =
-      handle_active_echo_event(ctx, states, event, payload, config, first_byte_origin)
+    sender = put_stream_sender_context_and_states(sender, ctx, states)
 
-    {ctx, states, diagnostics}
+    {states, ctx, sender} =
+      handle_active_echo_event(ctx, sender, states, event, payload, config, first_byte_origin)
+
+    {ctx, sender, states, diagnostics}
   end
 
   defp drain_ready_active_echo_events(
          ctx,
+         sender,
          states,
          diagnostics,
          payload,
@@ -3097,6 +3306,7 @@ defmodule MOQXProbe.ReferenceComparison do
        ) do
     drain_ready_active_echo_events(
       ctx,
+      sender,
       states,
       diagnostics,
       payload,
@@ -3108,6 +3318,7 @@ defmodule MOQXProbe.ReferenceComparison do
 
   defp drain_ready_active_echo_events(
          ctx,
+         sender,
          states,
          diagnostics,
          _payload,
@@ -3116,11 +3327,12 @@ defmodule MOQXProbe.ReferenceComparison do
          remaining
        )
        when remaining <= 0 do
-    {ctx, states, diagnostics}
+    {ctx, sender, states, diagnostics}
   end
 
   defp drain_ready_active_echo_events(
          ctx,
+         sender,
          states,
          diagnostics,
          payload,
@@ -3129,10 +3341,11 @@ defmodule MOQXProbe.ReferenceComparison do
          remaining
        ) do
     if all_streams_complete?(states) or first_stream_failure(states) do
-      {ctx, states, diagnostics}
+      {ctx, sender, states, diagnostics}
     else
       drain_ready_active_echo_event(
         ctx,
+        sender,
         states,
         diagnostics,
         payload,
@@ -3145,6 +3358,7 @@ defmodule MOQXProbe.ReferenceComparison do
 
   defp drain_ready_active_echo_event(
          ctx,
+         sender,
          states,
          diagnostics,
          payload,
@@ -3156,9 +3370,10 @@ defmodule MOQXProbe.ReferenceComparison do
 
     case receive_result do
       {:ok, event, ctx} ->
-        {ctx, states, diagnostics} =
+        {ctx, sender, states, diagnostics} =
           handle_active_echo_received_event(
             ctx,
+            sender,
             states,
             diagnostics,
             event,
@@ -3169,6 +3384,7 @@ defmodule MOQXProbe.ReferenceComparison do
 
         drain_ready_active_echo_events(
           ctx,
+          sender,
           states,
           diagnostics,
           payload,
@@ -3180,6 +3396,7 @@ defmodule MOQXProbe.ReferenceComparison do
       {:unknown, _message, ctx} ->
         drain_ready_active_echo_events(
           ctx,
+          sender,
           states,
           diagnostics,
           payload,
@@ -3189,11 +3406,11 @@ defmodule MOQXProbe.ReferenceComparison do
         )
 
       {:timeout, ctx} ->
-        {ctx, states, diagnostics}
+        {ctx, sender, states, diagnostics}
 
       {:error, reason, ctx} ->
         failure = receive_event_failure(states, config, reason)
-        {ctx, mark_timeout_failure(states, failure), diagnostics}
+        {ctx, sender, mark_timeout_failure(states, failure), diagnostics}
     end
   end
 
@@ -3203,70 +3420,9 @@ defmodule MOQXProbe.ReferenceComparison do
     |> sample_stream_pressure_runtime(config)
   end
 
-  defp prime_active_echo_sends(ctx, states, payload, config) do
-    Enum.reduce(states, {%{}, ctx}, fn {stream, state}, {states, ctx} ->
-      {state, ctx} = schedule_active_stream_sends(ctx, state, payload, config)
-      {Map.put(states, stream, state), ctx}
-    end)
-  end
-
-  defp schedule_active_stream_sends(ctx, state, payload, config) do
-    cond do
-      state.failure ->
-        {state, ctx}
-
-      state.payloads_scheduled >= config.payload_count ->
-        {state, ctx}
-
-      state.send_inflight >= config.stream_send_window ->
-        {state, ctx}
-
-      true ->
-        payload_index = state.payloads_scheduled + 1
-        finish? = payload_index == config.payload_count
-        opts = if finish?, do: [finish: true], else: []
-        send_started_at = monotonic_us()
-        send_result = Transport.send_stream(ctx, state.stream_state.stream, payload, opts)
-        accepted_at = monotonic_us()
-        send_call_duration_us = accepted_at - send_started_at
-
-        case send_result do
-          {:ok, _send, ctx} ->
-            stream_state = %{
-              state.stream_state
-              | bytes_sent: state.stream_state.bytes_sent + byte_size(payload),
-                payloads_accepted: state.stream_state.payloads_accepted + 1
-            }
-
-            state = %{
-              state
-              | stream_state: stream_state,
-                payloads_scheduled: payload_index,
-                send_inflight: state.send_inflight + 1,
-                first_send_accepted_at: state.first_send_accepted_at || accepted_at,
-                last_send_accepted_at: accepted_at,
-                send_call_durations_us: [
-                  send_call_duration_us | state.send_call_durations_us
-                ]
-            }
-
-            schedule_active_stream_sends(ctx, state, payload, config)
-
-          {:error, reason, ctx} ->
-            state = %{
-              state
-              | send_call_durations_us: [
-                  send_call_duration_us | state.send_call_durations_us
-                ]
-            }
-
-            {fail_active_stream(state, config, reason_name(reason)), ctx}
-        end
-    end
-  end
-
   defp handle_active_echo_event(
          ctx,
+         sender,
          states,
          {:stream_data, stream, data, _metadata},
          payload,
@@ -3278,30 +3434,28 @@ defmodule MOQXProbe.ReferenceComparison do
         handle_active_stream_data(state, data, payload, config, first_byte_origin)
       end)
 
-    {states, ctx}
+    {states, ctx, sender}
   end
 
   defp handle_active_echo_event(
          ctx,
-         states,
+         sender,
+         _states,
          {:stream_event, stream, :send_completed, _metadata},
-         payload,
-         config,
+         _payload,
+         _config,
          _first_byte_origin
        ) do
-    state =
-      states
-      |> Map.fetch!(stream)
-      |> Map.update!(:send_completed, &(&1 + 1))
-      |> Map.update!(:payloads_completed, &(&1 + 1))
-      |> Map.update!(:send_inflight, &max(&1 - 1, 0))
+    sender = put_stream_sender_context(sender, ctx)
+    {:ok, snapshot} = StreamSender.complete(sender, stream, 1)
+    {ctx, states} = stream_sender_context_and_states(snapshot)
 
-    {state, ctx} = schedule_active_stream_sends(ctx, state, payload, config)
-    {Map.put(states, stream, state), ctx}
+    {states, ctx, sender}
   end
 
   defp handle_active_echo_event(
          ctx,
+         sender,
          states,
          {:stream_event, stream, :send_cancelled, _metadata},
          _payload,
@@ -3314,11 +3468,12 @@ defmodule MOQXProbe.ReferenceComparison do
         fail_active_stream(state, config, "send_cancelled")
       end)
 
-    {states, ctx}
+    {states, ctx, sender}
   end
 
   defp handle_active_echo_event(
          ctx,
+         sender,
          states,
          {:stream_event, stream, :peer_finished_sending, _metadata},
          _payload,
@@ -3336,11 +3491,12 @@ defmodule MOQXProbe.ReferenceComparison do
         end
       end)
 
-    {states, ctx}
+    {states, ctx, sender}
   end
 
   defp handle_active_echo_event(
          ctx,
+         sender,
          states,
          {:stream_event, stream, :closed, _metadata},
          _payload,
@@ -3356,11 +3512,19 @@ defmodule MOQXProbe.ReferenceComparison do
         end
       end)
 
-    {states, ctx}
+    {states, ctx, sender}
   end
 
-  defp handle_active_echo_event(ctx, states, _event, _payload, _config, _first_byte_origin),
-    do: {states, ctx}
+  defp handle_active_echo_event(
+         ctx,
+         sender,
+         states,
+         _event,
+         _payload,
+         _config,
+         _first_byte_origin
+       ),
+       do: {states, ctx, sender}
 
   defp handle_active_stream_data(state, data, payload, config, first_byte_origin) do
     received = state.bytes_received
