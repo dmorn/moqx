@@ -73,6 +73,19 @@ The implementation should proceed in narrow slices:
   atom tables, or session state.
 - `MOQX.MOQLite04` owns MOQ Lite draft-04 message structs, stream type lookup,
   stream codec, and session state.
+- The upper protocol state machine is called a Session. Connection remains
+  transport vocabulary for `MOQX.Transport.Connection`.
+- Session APIs are pure reducers. `handle_transport/2` consumes normalized
+  `MOQX.Transport` events and `handle_command/2` consumes local application
+  intent.
+- Session reducers return protocol events and transport actions as data. They
+  do not call `MOQX.Transport`, `quicer`, or process APIs directly.
+- Transport stream identity is preserved. Stream-derived protocol events remain
+  tagged with a stream identity or ref, and each transport stream keeps its own
+  `MOQX.MOQLite04.StreamCodec` state.
+- `MOQX.MOQLite04.Error` is the protocol error boundary. Session code should
+  use structured errors and convert to integer transport application error
+  codes only when producing transport actions.
 - `StreamType` remains a typespec plus lookup helpers, not a struct.
 - Message structs contain semantic payload fields only. Message length is a
   stream/message framing concern.
@@ -127,6 +140,16 @@ Delivered so far:
 - `MOQX.MOQLite04` message structs for Announce, Subscribe, Fetch, Probe,
   Goaway, Group, and Frame messages
 - `MOQX.MOQLite04` payload encoders and decoders for all message structs
+- `MOQX.MOQLite04.Error` structured protocol errors and transport application
+  code mapping
+- `MOQX.MOQLite04.StreamCodec` incremental receive and send framing for
+  opener and responder stream sides
+- `MOQX.MOQLite04.Session` pure reducer for normalized transport input,
+  local protocol commands, per-stream codec state, protocol events, and
+  transport action output
+- Session tests for Announce, Subscribe, Fetch, Probe, Goaway, Group,
+  stream lifecycle, support transport normalized events, and the
+  reference-style subscribe/group/frame smoke flow
 
 ## References
 
@@ -136,3 +159,4 @@ Delivered so far:
 - `docs/adr/0002-native-quic-first-webtransport-out-of-scope.md`
 - `docs/adr/0003-validated-endpoints-above-raw-transport.md`
 - `docs/adr/0006-protocol-variants-own-session-state-codec-stays-generic.md`
+- `docs/adr/0007-protocol-sessions-are-pure-reducers.md`

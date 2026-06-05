@@ -2,7 +2,7 @@
 
 # Add MOQ Lite 04 stream and session state machine
 
-Status: in-progress
+Status: done
 Type: enhancement
 
 ## Parent
@@ -18,37 +18,125 @@ transport events, classifies streams by MOQ Lite stream type, buffers stream
 bytes until complete messages are available, dispatches payload decoders, and
 emits typed protocol events or errors.
 
+The upper protocol state machine is `MOQX.MOQLite04.Session`; the transport
+handle remains `MOQX.Transport.Connection`.
+
 ## Acceptance criteria
 
-- [ ] Session state starts after successful transport connection/handshake with
+- [x] Session state starts after successful transport connection/handshake with
       ALPN `moq-lite-04`; there is no setup-message phase.
 - [x] Accepted streams are classified by the initial stream type prefix.
-- [ ] Unknown stream types are reset for extension probing and do not close the
+- [x] Unknown stream types are reset for extension probing and do not close the
       whole connection.
-- [ ] Announce streams require an initial AnnounceInterest from the subscriber
+- [x] Announce streams require an initial AnnounceInterest from the subscriber
       and support publisher Announce messages with valid status alternation.
-- [ ] Subscribe streams require an initial Subscribe from the subscriber,
+- [x] Subscribe streams require an initial Subscribe from the subscriber,
       support SubscribeUpdate messages from the subscriber, and require the
       publisher's first response to be SubscribeOk before any SubscribeDrop.
-- [ ] Fetch streams accept one Fetch request and then publisher Frame messages
+- [x] Fetch streams accept one Fetch request and then publisher Frame messages
       on the same bidirectional stream without a Group header.
-- [ ] Probe streams support repeated Probe messages from the subscriber and
+- [x] Probe streams support repeated Probe messages from the subscriber and
       publisher responses on the same stream.
-- [ ] Goaway streams and messages stop new protocol work according to the
+- [x] Goaway streams and messages stop new protocol work according to the
       draft-04 graceful shutdown model.
-- [ ] Group streams are publisher-created unidirectional streams that start
+- [x] Group streams are publisher-created unidirectional streams that start
       with Group and then carry Frame messages.
-- [ ] Finish Sending, Abort Sending, Abort Receiving, and Connection Close are
+- [x] Finish Sending, Abort Sending, Abort Receiving, and Connection Close are
       represented using `MOQX.Transport` operations and events.
-- [ ] Unit tests cover pure state transitions without live QUIC.
-- [ ] Support-transport tests show the state machine handles normalized
+- [x] Unit tests cover pure state transitions without live QUIC.
+- [x] Support-transport tests show the state machine handles normalized
       transport events and never matches raw `quicer` messages.
+- [x] Stream-derived protocol events preserve stream identity or a stable stream
+      ref; raw bytes from different transport streams are never decoded through
+      one shared stream codec.
+- [x] Session reducers return transport actions as data rather than calling
+      `MOQX.Transport` directly.
+- [x] Protocol failures use `MOQX.MOQLite04.Error` structs internally and carry
+      integer transport application error codes only at the action boundary.
 
 ## Notes
 
 Prefer a pure reducer/state struct for the first implementation boundary, then
 wrap it in a process only when stream ownership or mailbox behavior requires
 one.
+
+Use `handle_transport/2` for normalized transport input and `handle_command/2`
+for local application intent. Do not introduce a shared session behaviour yet;
+wait until MOQ Lite and draft-14 both prove the common callback boundary.
+
+## Scenario inventory
+
+Research pass sources:
+
+- MOQ Lite draft-04:
+  <https://datatracker.ietf.org/doc/html/draft-lcurley-moq-lite-04>
+- `moq-dev/moq` reference snapshot:
+  `f809b8fbf5a0984bf56c2f3003965186db53d211`
+- Primary reference files:
+  `rs/moq-net/src/lite/session.rs`,
+  `rs/moq-net/src/lite/publisher.rs`,
+  `rs/moq-net/src/lite/subscriber.rs`,
+  `rs/moq-net/src/lite/message.rs`,
+  `rs/moq-native/tests/broadcast.rs`,
+  `js/net/src/integration.test.ts`.
+
+Candidate TDD scenarios for `MOQX.MOQLite04.Session`:
+
+1. Session start: after transport handshake with ALPN `moq-lite-04`, the
+   protocol session is active immediately and emits no setup-stream action.
+2. Unknown stream type: incoming stream data with an unknown stream type emits
+   a stream abort action using `MOQX.MOQLite04.Error` and does not close the
+   whole session.
+3. Announce happy path: subscriber opens Announce with `AnnounceInterest`;
+   publisher receives an announce-interest event; publisher sends active and
+   ended `Announce` messages; subscriber emits announce events tagged with the
+   announce stream ref.
+4. Announce protocol violation: duplicate active or duplicate ended status for
+   the same suffix on one announce stream emits a protocol error plus stream
+   abort action.
+5. Subscribe happy path: subscriber opens Subscribe; publisher receives a
+   subscribe-requested event; publisher's first response is `SubscribeOk`;
+   later subscriber `SubscribeUpdate` messages update the same stream.
+6. Subscribe response ordering: `SubscribeDrop` before the first `SubscribeOk`
+   is a stream-level protocol violation.
+7. Group delivery: after an active subscription, publisher-created
+   unidirectional Group stream starts with `Group`, carries zero or more
+   `Frame` messages, and FIN maps to group completion.
+8. Group correlation: a Group stream with an unknown `subscribe_id` emits a
+   stream abort action, not a connection close.
+9. Fetch happy path: subscriber opens Fetch; publisher responds with `Frame`
+   messages on the same bidirectional stream without a Group header; FIN maps
+   to fetch completion.
+10. Probe happy path: subscriber opens Probe and may send repeated `Probe`
+    targets; publisher replies with bitrate/RTT `Probe` messages on the same
+    stream.
+11. Probe unsupported: publisher can reset the Probe stream without making the
+    session fail.
+12. Goaway: either endpoint opens Goaway; receiver records draining state,
+    emits redirect/no-redirect event, and rejects new local commands that would
+    open streams while allowing existing streams to finish.
+13. Stream termination: FIN maps to graceful transaction/group completion;
+    reset/abort maps to cancellation for that stream only unless the draft
+    requires a connection close.
+14. Broadcast smoke flow: publish one broadcast and track, announce it,
+    subscribe, serve one group with one frame, and verify the subscriber
+    receives the original payload. This mirrors the reference Rust and
+    TypeScript integration tests.
+
+Reference caveats:
+
+- The reference implementation is process/task oriented; use it for scenarios
+  and ordering, not for our reducer shape.
+- The reference Rust Lite04 stack encodes `Fetch` and `Goaway`, but the current
+  publisher loop does not serve Fetch and only logs Goaway. For these two
+  flows, prefer the draft as the source of truth.
+- The draft requires stream resets and connection closes in several places, but
+  does not define a complete application error-code registry. Use
+  `MOQX.MOQLite04.Error` as the local boundary and treat the `moq-dev/moq`
+  mapping as practical interop evidence.
+- The reference smoke tests mainly prove publish/announce/subscribe/group/frame
+  flow across protocol versions; they do not fully cover all draft-04 error
+  cases.
 
 ## Progress
 
@@ -64,13 +152,36 @@ Started with a pure stream-codec slice:
 - Unknown stream types return `:unknown_stream_type` at the codec boundary;
   the later transport/session reducer should translate that into stream reset.
 
-Remaining work:
+Completed reducer slice:
 
-- pure session/stream reducer for protocol state transitions;
-- transport-event reducer integration;
-- Finish Sending, Abort Sending, Abort Receiving, and Connection Close actions;
-- support-transport tests proving normalized `MOQX.Transport` event handling.
+- `MOQX.MOQLite04.Session` is a pure state reducer with `new/1`,
+  `handle_transport/2`, and `handle_command/2`.
+- Each transport stream keeps its own `MOQX.MOQLite04.StreamCodec` state and
+  receives a stable stream ref for protocol events.
+- `handle_transport/2` consumes normalized `:stream_data` and `:stream_event`
+  tuples, not raw `quicer` messages.
+- `handle_command/2` returns transport action tuples for stream sends, Finish
+  Sending, Abort Sending, Abort Receiving, and Connection Close.
+- Unknown stream types and protocol violations return
+  `MOQX.MOQLite04.Error` structs and stream abort actions with integer
+  application codes only at the action boundary.
+- Announce, Subscribe, Fetch, Probe, Goaway, Group, stream lifecycle, and the
+  reference-style subscribe/group/frame smoke flow are covered by pure tests.
+- A support-transport test sends bytes through `MOQX.Transport.Support` and
+  feeds the normalized `:stream_data` event into the session reducer.
+
+Follow-up work:
+
+- add a runner/client layer that opens transport streams from higher-level
+  application commands and applies returned transport actions;
+- decide the final public event and command vocabulary before exposing a
+  user-facing MOQ Lite client API.
+
+Decision references:
+
+- `docs/adr/0007-protocol-sessions-are-pure-reducers.md`
 
 Validation:
 
-- `mix test test/moqx/moq_lite_04/stream_codec_test.exs`
+- `mix test test/moqx/moq_lite_04/session_test.exs`
+- `mix test test/moqx/moq_lite_04 test/moqx/moq_lite_04_test.exs`

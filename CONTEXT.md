@@ -34,6 +34,28 @@ A concrete MOQT-family protocol version with its own message model and session
 rules, such as MOQ Lite draft-04 or MOQT draft-14.
 _Avoid_: generic protocol behaviour, transport profile
 
+**Protocol Session**:
+A variant-owned state machine for one negotiated MOQT-family relationship over
+one transport connection. A protocol session owns stream state, role-specific
+rules, protocol events, and transport actions.
+_Avoid_: connection, socket, transport handle
+
+**Protocol Command**:
+Local application intent submitted to a **Protocol Session**, such as subscribe,
+fetch, publish a frame, or goaway.
+_Avoid_: encode data, send raw bytes
+
+**Protocol Event**:
+Typed output emitted by a **Protocol Session** for application code. Events that
+come from streams remain tagged with a stream identity.
+_Avoid_: raw transport message, decoded bytes
+
+**Transport Action**:
+A side effect requested by a **Protocol Session** and later applied by a runner
+through `MOQX.Transport`, such as opening a stream, sending bytes, finishing a
+send side, aborting a stream side, or closing a connection.
+_Avoid_: direct quicer call, protocol callback side effect
+
 **Codec**:
 Shared protocol-neutral binary helpers and encoder/decoder contracts under
 `MOQX.Codec`.
@@ -77,8 +99,19 @@ _Avoid_: half-connection, close direction
   not enforce those protocol rules.
 - A **Protocol Variant** consumes **Transport** events and enforces its own
   stream/session rules above the raw transport boundary.
+- A **Protocol Session** runs above one `MOQX.Transport.Connection`; the raw
+  connection handle remains transport vocabulary, while session names belong to
+  protocol vocabulary.
+- A **Protocol Session** consumes transport input through `handle_transport/2`
+  and local application input through `handle_command/2`.
+- A **Protocol Session** returns **Transport Actions** as data. A runner applies
+  those actions through `MOQX.Transport`.
+- A **Protocol Session** may merge decoded outputs into one logical event
+  stream, but stream-derived **Protocol Events** must preserve stream identity.
 - A **Stream Codec** owns framing and buffering before invoking a
   **Payload Codec** for complete typed payloads.
+- A **Stream Codec** is kept per transport stream. Raw bytes from different
+  transport streams are never muxed together before decoding.
 - MOQ Lite **Transaction Streams** and **Group Streams** are protocol rules,
   not transport-layer stream types.
 

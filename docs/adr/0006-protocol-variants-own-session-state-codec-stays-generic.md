@@ -34,6 +34,8 @@ state machine:
   rules, and session behavior.
 - A future draft-14 namespace will own draft-14 setup, control-stream,
   request-ID, datagram, and object-delivery behavior.
+- Session reducer shape, naming, and transport-action boundaries are recorded
+  separately in ADR-0007.
 
 `MOQX.Codec` remains protocol-neutral. It hosts generic binary helpers and
 contracts shared by protocol variants:
@@ -84,3 +86,7 @@ This ADR does not decide:
 - exact binary helper names inside `MOQX.Codec`;
 - draft-14 message structs or setup encoding;
 - WebTransport support.
+
+## References
+
+- `docs/adr/0007-protocol-sessions-are-pure-reducers.md`

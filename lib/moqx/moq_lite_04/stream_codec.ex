@@ -47,15 +47,42 @@ defmodule MOQX.MOQLite04.StreamCodec do
   def encode(stream_type, messages, opts \\ []) when is_list(messages) do
     side = Keyword.get(opts, :side, :opener)
 
-    with {:ok, stream_type_id} <- MOQLite04.stream_type_id(stream_type),
-         {:ok, payloads} <- encode_messages(stream_type, side, messages, 0) do
+    codec = new(side: side, stream_type: stream_type)
+
+    case encode_next(codec, messages) do
+      {:ok, _codec, bytes} -> {:ok, bytes}
+      {:error, reason, _codec} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Encodes the next messages for an existing stream codec.
+
+  Opener-side codecs emit the stream type prefix only before the first message.
+  The returned codec must be retained by the caller for later sends on the same
+  stream.
+  """
+  @spec encode_next(t(), [MOQLite04.message()]) ::
+          {:ok, t(), binary()} | {:error, term(), t()}
+  def encode_next(%__MODULE__{stream_type: nil} = codec, _messages),
+    do: {:error, :missing_stream_type, codec}
+
+  def encode_next(%__MODULE__{} = codec, messages) when is_list(messages) do
+    with {:ok, stream_type_id} <- MOQLite04.stream_type_id(codec.stream_type),
+         {:ok, payloads} <-
+           encode_messages(codec.stream_type, codec.side, messages, codec.message_count) do
       prefix =
-        case side do
-          :opener -> Codec.encode_varint(stream_type_id)
-          :responder -> <<>>
+        if codec.side == :opener and codec.message_count == 0 do
+          Codec.encode_varint(stream_type_id)
+        else
+          <<>>
         end
 
-      {:ok, IO.iodata_to_binary([prefix, payloads])}
+      codec = %{codec | message_count: codec.message_count + length(messages)}
+
+      {:ok, codec, IO.iodata_to_binary([prefix, payloads])}
+    else
+      {:error, reason} -> {:error, reason, codec}
     end
   end
 

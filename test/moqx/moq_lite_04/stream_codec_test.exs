@@ -105,6 +105,41 @@ defmodule MOQX.MOQLite04.StreamCodecTest do
     end
   end
 
+  describe "incremental encode" do
+    test "encodes later opener-side messages using the current stream position" do
+      messages = [
+        %MOQLite04.Subscribe{
+          subscribe_id: 9,
+          broadcast_path: "/live",
+          track_name: "video",
+          subscriber_priority: 128,
+          subscriber_ordered: :ascending,
+          subscriber_max_latency: 500,
+          start_group: 11,
+          end_group: 0
+        },
+        %MOQLite04.SubscribeUpdate{
+          subscriber_priority: 64,
+          subscriber_ordered: :descending,
+          subscriber_max_latency: 1_000,
+          start_group: 12,
+          end_group: 0
+        }
+      ]
+
+      codec = StreamCodec.new(side: :opener, stream_type: :subscribe)
+
+      assert {:ok, codec, first_bytes} = StreamCodec.encode_next(codec, [hd(messages)])
+      assert {:ok, _codec, second_bytes} = StreamCodec.encode_next(codec, tl(messages))
+
+      assert {:ok, codec, decoded} =
+               StreamCodec.recv(StreamCodec.new(), first_bytes <> second_bytes)
+
+      assert codec.stream_type == :subscribe
+      assert decoded == messages
+    end
+  end
+
   describe "responder stream round trip" do
     test "encodes and receives subscribe responses with response discriminators" do
       messages = [
