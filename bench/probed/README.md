@@ -242,6 +242,22 @@ DURATION_SECONDS=1 \
 just bench-transport-probed-suite <run-id>
 ```
 
+For the current #40 validation loop, prefer the bracket wrapper once the lab is
+already provisioned, private-path checked, and tools are deployed:
+
+```bash
+just bench-transport-probed-datagram-bracket <run-id> 30000,32000
+```
+
+It runs `iperf3,reference_stream,moqx_stream` once, then runs
+`reference_datagram,moqx_datagram` once per requested DATAGRAM rate. Defaults
+are tuned for the ARM near-limit check: 1180-byte DATAGRAMs, 3-second paced
+steps, delivery threshold 0.95, and offered-rate tolerance 0.95. It writes an
+aggregate manifest under
+`bench/moqxprobe/results/<run-id>/probed-datagram-bracket/<bracket-id>/` while
+leaving each underlying `remote_curl_suite.sh` run under the existing
+`probed-suite/<api-run-id>/` layout.
+
 When iterating on `moqxprobe`, prefer the update-and-run loop:
 
 ```bash

@@ -1084,6 +1084,15 @@ bench-transport-probed-suite run_id=current_run tests="iperf3,reference_stream,m
       --quic-port "{{ quic_port }}" \
       --iperf3-port "{{ iperf3_port }}"
 
+# Run the #40 DATAGRAM bracket through probed: baseline once, then one DATAGRAM suite per rate.
+bench-transport-probed-datagram-bracket run_id=current_run rates="30000,32000" port=probed_port quic_port="55433" iperf3_port="55201":
+    bench/probed/scripts/remote_datagram_bracket.sh \
+      --run-id "{{ run_id }}" \
+      --rates "{{ rates }}" \
+      --probed-port "{{ port }}" \
+      --quic-port "{{ quic_port }}" \
+      --iperf3-port "{{ iperf3_port }}"
+
 # Build/deploy the current moqxprobe worktree, then run selected tests through probed.
 bench-transport-iterate-moqxprobe run_id=current_run moqxprobe_target="linux_x86_64" tests="iperf3,reference_stream,moqx_stream" builder_role="client" port=probed_port quic_port="55433" iperf3_port="55201":
     #!/usr/bin/env bash

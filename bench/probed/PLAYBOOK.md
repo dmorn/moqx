@@ -228,6 +228,23 @@ DURATION_SECONDS=1 \
 just bench-transport-probed-suite <run-id>
 ```
 
+For the #40 ARM DATAGRAM validation, use the bracket wrapper after the lab is
+up, private-path checked, and tools are deployed:
+
+```bash
+just bench-transport-probed-datagram-bracket <run-id> 30000,32000
+```
+
+The wrapper runs one baseline/stream-smoke suite
+(`iperf3,reference_stream,moqx_stream`) and then one DATAGRAM suite
+(`reference_datagram,moqx_datagram`) per requested rate. The default bracket
+uses 1180-byte DATAGRAMs, 3-second paced steps, delivery threshold 0.95, and
+offered-rate tolerance 0.95. It writes an aggregate manifest under:
+
+```text
+bench/moqxprobe/results/<infra-run-id>/probed-datagram-bracket/<bracket-id>/
+```
+
 Useful suite knobs:
 
 ```text
