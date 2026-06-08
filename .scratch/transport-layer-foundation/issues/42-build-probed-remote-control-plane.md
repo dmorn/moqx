@@ -326,8 +326,7 @@ This phase still deploys tools through existing SSH/just recipes.
 
 Package and deploy `probed` to lab nodes:
 
-- Burrito self-contained binary artifact under
-  `/opt/moqx-bench/probed/current/bin/probed`;
+- Mix release artifact under `/opt/moqx-bench/probed/current/`;
 - config under `/etc/moqx-bench/probed.json`;
 - token under `/etc/moqx-bench/probed.token`;
 - work dir `/var/lib/probed`;
@@ -511,3 +510,8 @@ Use the daemon to run the next #40 validation:
   recipe for x86 nodes so the AMD64 artifact can be built on the benchmark host
   without cloning the repo or relying on Docker/OTP cross-architecture
   emulation.
+- 2026-06-08: Replaced the remaining Burrito-based packaging path with standard
+  Mix releases for both `moqxprobe` and `probed`. Burrito dependencies,
+  release definitions, Dockerfiles, `just` recipes, and local smoke hooks were
+  removed. `probed` now ships as a target-specific release tarball with ERTS
+  included, matching the `moqxprobe` deployment model.

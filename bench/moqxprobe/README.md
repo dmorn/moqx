@@ -899,47 +899,9 @@ bin/moqxprobe
 It delegates to the release management script internally and boots the full
 release once per command with a short-lived release node name, so operators do
 not need to call release internals manually. Release artifacts are
-target-specific because the project includes the `quicer` NIF; build the release on the same
-OS/architecture/ABI as the remote benchmark node or in a matching container.
-
-### Burrito Packaging Spike
-
-`moqxprobe` also has an experimental Burrito release target. Burrito packages
-the BEAM release plus ERTS into a single self-extracting binary and reads CLI
-arguments through `Burrito.Util.Args.argv/0`.
-
-Build one target explicitly:
-
-```bash
-just bench-transport-build-burrito darwin_arm64
-```
-
-The `just` recipe delegates to the root mise task:
-
-```bash
-mise run bench:moqxprobe:burrito --target darwin_arm64
-```
-
-On macOS, Burrito still requires Zig 0.15.2, but the official Zig tarball used
-by mise's normal Zig backend does not link correctly on macOS 26/Xcode 26. The
-mise task therefore checks for Homebrew's patched `zig@0.15` formula and puts
-that binary first in `PATH` only for the Burrito build. Install or verify it
-with:
-
-```bash
-mise run tools:zig:install-patched
-mise run tools:zig:doctor
-```
-
-The current target aliases are:
-
-- `darwin_arm64`
-- `linux_arm64`
-- `linux_x86_64`
-
-The host-local Burrito task is useful for smoke-testing wrapper behavior on the
-current machine. It is not sufficient for Linux deployment from macOS because
-the release payload would still contain the locally compiled `quicer` NIF.
+target-specific because the project includes the `quicer` NIF; build the
+release on the same OS/architecture/ABI as the remote benchmark node or in a
+matching container.
 
 For Hetzner ARM nodes, build the Linux/ARM64 artifact with Docker:
 
@@ -986,26 +948,6 @@ artifact under the same local `build/artifacts/` naming convention:
 bench/moqxprobe/build/artifacts/moqxprobe-<version>-<git>-linux-x86_64.tar.gz
 ```
 
-For Burrito packaging experiments, build inside the target Linux Docker image so
-native dependencies are compiled for the same OS/architecture as the remote
-node:
-
-```bash
-just bench-transport-build-burrito-release linux_arm64
-```
-
-The artifact is still a deploy-compatible tarball containing
-`bin/moqxprobe`, but that executable is the Burrito self-extracting binary:
-
-```text
-bench/moqxprobe/build/artifacts/moqxprobe-burrito-<version>-<git>-linux-arm64.tar.gz
-```
-
-Keep Burrito as experimental for Linux `moqxprobe` while the project depends on
-the `quicer` NIF. The canonical remote deployment path is the Mix release above;
-the Burrito runtime can use a different libc ABI than the native quicer build,
-which can make the extracted NIF fail at runtime even when compilation succeeds.
-
 The Dockerfile stages dependency resolution and `mix deps.compile quicer`
 before copying application source, so the expensive `libquicer_nif.so` layer is
 reused unless the target, OTP image, lockfiles, or native dependency inputs
@@ -1038,13 +980,6 @@ parallel:
 
 ```bash
 just bench-transport-deploy-release linux_arm64
-```
-
-Deploy a built Burrito artifact to the same roles only when intentionally
-validating the experimental Burrito path:
-
-```bash
-just bench-transport-deploy-burrito linux_arm64
 ```
 
 Deploy the built `quicprobe` artifact to the same roles:

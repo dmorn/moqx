@@ -46,10 +46,4 @@ defmodule MOQXProbe.CLITest do
 
     assert ReleaseCLI.decode_argv(encoded) == ["report", "/tmp/run.jsonl", "--strict"]
   end
-
-  test "dispatches Burrito wrapper arguments" do
-    output = capture_io(fn -> ReleaseCLI.main_from_burrito(fn -> ["help"] end) end)
-
-    assert output =~ "moqxprobe COMMAND"
-  end
 end

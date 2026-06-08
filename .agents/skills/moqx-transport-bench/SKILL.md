@@ -39,10 +39,9 @@ Source of truth:
   on an already-provisioned x86 node when Docker/OTP cross-architecture
   emulation is unreliable, then deploy with
   `just bench-transport-deploy-release linux_x86_64 <run-id>`.
-- Keep Burrito for Linux `moqxprobe` experimental while the project depends on
-  `quicer`; the canonical remote deployment path is the glibc-compatible Mix
-  release. Do not deploy host-local Burrito output for Linux when native
-  dependencies such as `quicer` are present.
+- Build Linux `probed` Mix release artifacts with
+  `just bench-transport-build-probed <target>` and deploy them with
+  `just bench-transport-deploy-probed <target> <run-id>`.
 - Build `quicprobe` with native Go cross-compilation through mise via
   `just bench-transport-build-quicprobe <target>`, where target is one of
   `linux_arm64`, `linux_x86_64`, `darwin_arm64`, or `darwin_x86_64`. Deploys

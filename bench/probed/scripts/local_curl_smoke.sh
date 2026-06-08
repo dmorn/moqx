@@ -85,10 +85,6 @@ mkdir -p "$bin_dir" "$bundle_dir" "$cert_dir" "$logs_dir" "$client_work" "$serve
 
 if [ -n "$requested_moqxprobe_bin" ]; then
   moqxprobe_bin="$requested_moqxprobe_bin"
-elif [ "${PROBED_BUILD_MOQXPROBE:-0}" = "1" ] ||
-  [ "${PROBED_USE_MOQXPROBE_BURRITO:-0}" = "1" ]; then
-  moqxprobe_bin="$repo_root/bench/moqxprobe/burrito_out/moqxprobe_burrito_darwin_arm64"
-  (cd "$repo_root" && just bench-transport-build-burrito darwin_arm64)
 else
   moqxprobe_bin="$bin_dir/moqxprobe"
 

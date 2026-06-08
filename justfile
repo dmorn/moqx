@@ -12,22 +12,17 @@ probed_release_name := "probed"
 probed_release_version := `sed -n 's/.*version: "\([^"]*\)".*/\1/p' bench/probed/mix.exs | head -1`
 git_sha := `git rev-parse --short HEAD 2>/dev/null || echo unknown`
 
-target_os := env('TARGET_OS', 'linux')
-target_arch := env('TARGET_ARCH', 'arm64')
-docker_platform := target_os + "/" + target_arch
 elixir_image := env('ELIXIR_IMAGE', 'elixir:1.19.5-otp-28')
 go_image := env('GO_IMAGE', 'golang:1.23-bookworm')
 quicprobe_go_version := env('QUICPROBE_GO_VERSION', '1.25.6')
 
 artifact_dir := "build/artifacts"
-artifact_name := release_cli + "-" + release_version + "-" + git_sha + "-" + target_os + "-" + target_arch + ".tar.gz"
-artifact_rel := artifact_dir + "/" + artifact_name
+artifact_rel := artifact_dir + "/" + release_cli + "-" + release_version + "-" + git_sha + "-linux-arm64.tar.gz"
 artifact := bench_dir + "/" + artifact_rel
 remote_dir := "/opt/moqx-bench/moqxprobe"
 probed_remote_dir := "/opt/moqx-bench/probed"
 probed_port := "9157"
-quicprobe_artifact_name := "quicprobe-" + git_sha + "-" + target_os + "-" + target_arch + ".tar.gz"
-quicprobe_artifact_rel := artifact_dir + "/" + quicprobe_artifact_name
+quicprobe_artifact_rel := artifact_dir + "/quicprobe-" + git_sha + "-linux-arm64.tar.gz"
 quicprobe_artifact := bench_dir + "/" + quicprobe_artifact_rel
 quicprobe_remote_dir := "/opt/moqx-bench/quicprobe"
 quicprobe_go_cache := bench_dir + "/tmp/go-build-cache"
@@ -377,66 +372,6 @@ bench-transport-build-release-remote-target target run_id moqxprobe_target="linu
     scp $SSH_OPTS "{{ target }}:$remote_artifact" "$artifact_path"
     printf 'Built %s on %s and fetched %s\n' "{{ moqxprobe_target }}" "{{ target }}" "$artifact_path"
 
-# Build an experimental Burrito-wrapped moqxprobe binary for one target.
-bench-transport-build-burrito target="darwin_arm64":
-    mise run bench:moqxprobe:burrito --target "{{ target }}"
-
-# Print the deployable Burrito artifact path for one Linux target.
-bench-transport-burrito-artifact-rel burrito_target="linux_arm64":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    case "{{ burrito_target }}" in
-      linux_arm64) artifact_target="linux-arm64" ;;
-      linux_x86_64) artifact_target="linux-x86_64" ;;
-      *)
-        printf 'Unsupported Burrito target: %s\n' "{{ burrito_target }}" >&2
-        exit 2
-        ;;
-    esac
-
-    printf '%s/moqxprobe-burrito-%s-%s-%s.tar.gz\n' \
-      "{{ artifact_dir }}" \
-      "{{ release_version }}" \
-      "{{ git_sha }}" \
-      "$artifact_target"
-
-# Build a deployable Burrito-wrapped moqxprobe artifact inside a target Linux Docker image.
-bench-transport-build-burrito-release burrito_target="linux_arm64":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    case "{{ burrito_target }}" in
-      linux_arm64)
-        docker_platform="linux/arm64"
-        ;;
-      linux_x86_64)
-        docker_platform="linux/amd64"
-        ;;
-      *)
-        printf 'Unsupported Burrito target: %s\n' "{{ burrito_target }}" >&2
-        exit 2
-        ;;
-    esac
-
-    artifact_rel="$(just --quiet bench-transport-burrito-artifact-rel "{{ burrito_target }}")"
-    artifact_name="$(basename "$artifact_rel")"
-
-    mkdir -p "{{ bench_dir }}/{{ artifact_dir }}"
-    cd "{{ bench_dir }}"
-    docker buildx build \
-      --platform "$docker_platform" \
-      --file docker/Dockerfile.burrito \
-      --target artifact \
-      --output "type=local,dest={{ artifact_dir }}" \
-      --build-arg "ELIXIR_IMAGE={{ elixir_image }}" \
-      --build-arg "BURRITO_TARGET={{ burrito_target }}" \
-      --build-arg "BUILD_GIT_SHA={{ git_sha }}" \
-      --build-arg "ARTIFACT_NAME=$artifact_name" \
-      ../..
-    test -f "$artifact_rel"
-    printf 'Built %s\n' "{{ bench_dir }}/$artifact_rel"
-
 # Print the quicprobe artifact path for one target.
 bench-transport-quicprobe-artifact-rel quicprobe_target="linux_arm64":
     #!/usr/bin/env bash
@@ -543,29 +478,8 @@ bench-transport-build-quicprobe-docker quicprobe_target="linux_arm64":
     test -f "{{ bench_dir }}/$artifact_rel"
     printf 'Built %s\n' "{{ bench_dir }}/$artifact_rel"
 
-# Print the default deployable probed Burrito artifact path for one Linux target.
+# Print the deployable probed Mix release artifact path for one Linux target.
 bench-transport-probed-artifact-rel probed_target="linux_arm64":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    case "{{ probed_target }}" in
-      linux_arm64) artifact_target="linux-arm64" ;;
-      linux_x86_64) artifact_target="linux-x86_64" ;;
-      *)
-        printf 'Unsupported probed target: %s\n' "{{ probed_target }}" >&2
-        printf '%s\n' 'Remote probed builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
-        exit 2
-        ;;
-    esac
-
-    printf '%s/probed-burrito-%s-%s-%s.tar.gz\n' \
-      "{{ artifact_dir }}" \
-      "{{ probed_release_version }}" \
-      "{{ git_sha }}" \
-      "$artifact_target"
-
-# Print the fallback probed Mix release artifact path for one Linux target.
-bench-transport-probed-release-artifact-rel probed_target="linux_arm64":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -585,42 +499,8 @@ bench-transport-probed-release-artifact-rel probed_target="linux_arm64":
       "{{ git_sha }}" \
       "$artifact_target"
 
-# Build the default deployable probed Burrito artifact with Docker.
+# Build the probed Mix release artifact with Docker for one Linux target.
 bench-transport-build-probed probed_target="linux_arm64":
-    just bench-transport-build-probed-burrito-release "{{ probed_target }}"
-
-# Build the probed Burrito artifact inside a native Linux Docker builder.
-bench-transport-build-probed-burrito-release probed_target="linux_arm64":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    case "{{ probed_target }}" in
-      linux_arm64|linux_x86_64) ;;
-      *)
-        printf 'Unsupported probed target: %s\n' "{{ probed_target }}" >&2
-        printf '%s\n' 'Remote probed builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
-        exit 2
-        ;;
-    esac
-
-    artifact_rel="$(just --quiet bench-transport-probed-artifact-rel "{{ probed_target }}")"
-    artifact_name="$(basename "$artifact_rel")"
-
-    mkdir -p "{{ probed_dir }}/{{ artifact_dir }}"
-    docker buildx build \
-      --file "{{ probed_dir }}/docker/Dockerfile.burrito" \
-      --target artifact \
-      --output "type=local,dest={{ probed_dir }}/{{ artifact_dir }}" \
-      --build-arg "ELIXIR_IMAGE={{ elixir_image }}" \
-      --build-arg "BURRITO_TARGET={{ probed_target }}" \
-      --build-arg "BUILD_GIT_SHA={{ git_sha }}" \
-      --build-arg "ARTIFACT_NAME=$artifact_name" \
-      .
-    test -f "{{ probed_dir }}/$artifact_rel"
-    printf 'Built %s\n' "{{ probed_dir }}/$artifact_rel"
-
-# Build the fallback probed Mix release artifact with Docker.
-bench-transport-build-probed-release probed_target="linux_arm64":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -638,7 +518,7 @@ bench-transport-build-probed-release probed_target="linux_arm64":
         ;;
     esac
 
-    artifact_rel="$(just --quiet bench-transport-probed-release-artifact-rel "{{ probed_target }}")"
+    artifact_rel="$(just --quiet bench-transport-probed-artifact-rel "{{ probed_target }}")"
     artifact_name="$(basename "$artifact_rel")"
 
     mkdir -p "{{ probed_dir }}/{{ artifact_dir }}"
@@ -687,10 +567,6 @@ bench-transport-deploy run_id=current_run artifact=artifact_rel: (bench-transpor
 [parallel]
 bench-transport-deploy-release moqxprobe_target="linux_arm64" run_id=current_run: (bench-transport-deploy-release-role moqxprobe_target run_id "client") (bench-transport-deploy-release-role moqxprobe_target run_id "server")
 
-# Deploy the Burrito release artifact to both Terraform roles in parallel.
-[parallel]
-bench-transport-deploy-burrito burrito_target="linux_arm64" run_id=current_run: (bench-transport-deploy-burrito-role burrito_target run_id "client") (bench-transport-deploy-burrito-role burrito_target run_id "server")
-
 # Deploy the quicprobe reference peer artifact to both Terraform roles in parallel.
 [parallel]
 bench-transport-deploy-quicprobe quicprobe_target="linux_arm64" run_id=current_run: (bench-transport-deploy-quicprobe-role quicprobe_target run_id "client") (bench-transport-deploy-quicprobe-role quicprobe_target run_id "server")
@@ -732,20 +608,6 @@ bench-transport-deploy-release-role moqxprobe_target run_id role:
     fi
 
     artifact="$(just --quiet bench-transport-release-artifact-rel "{{ moqxprobe_target }}")"
-    target="$(just --quiet bench-transport-target {{ role }})"
-    just bench-transport-deploy-target "$target" "{{ run_id }}" "$artifact"
-
-# Deploy the Burrito release artifact to one Terraform role.
-bench-transport-deploy-burrito-role burrito_target run_id role:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    if [ -z "{{ run_id }}" ]; then
-      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
-      exit 2
-    fi
-
-    artifact="$(just --quiet bench-transport-burrito-artifact-rel "{{ burrito_target }}")"
     target="$(just --quiet bench-transport-target {{ role }})"
     just bench-transport-deploy-target "$target" "{{ run_id }}" "$artifact"
 
@@ -1005,7 +867,7 @@ bench-transport-start-probed-target target run_id node_id bind:
          rm -f \"\$pid_file\"; \
          sleep 1; \
        fi; \
-       PROBED_CONFIG=/etc/moqx-bench/probed.json nohup {{ probed_remote_dir }}/current/bin/probed > \"\$log_file\" 2>&1 & \
+       PROBED_CONFIG=/etc/moqx-bench/probed.json nohup {{ probed_remote_dir }}/current/bin/probed start > \"\$log_file\" 2>&1 & \
        echo \$! > \"\$pid_file\"; \
        sleep 1; \
        curl -fsS -H 'Authorization: Bearer $token' 'http://{{ bind }}/v1/health'"

@@ -17,18 +17,12 @@ bench/probed/scripts/local_curl_smoke.sh
 
 By default the local smoke uses a generated wrapper that runs `moqxprobe` from
 the current source tree with `mix`. This keeps the local orchestration loop
-independent from the host Burrito/Zig toolchain.
+independent from release packaging.
 
 To force a specific `moqxprobe` executable:
 
 ```bash
 MOQXPROBE_BIN=/path/to/moqxprobe bench/probed/scripts/local_curl_smoke.sh
-```
-
-To rebuild and use the local `moqxprobe` Burrito binary first:
-
-```bash
-PROBED_BUILD_MOQXPROBE=1 bench/probed/scripts/local_curl_smoke.sh
 ```
 
 The script starts two local `probed` daemons on high random local ports unless

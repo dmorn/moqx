@@ -30,7 +30,6 @@ defmodule Probed.MixProject do
     [
       {:probe_ledger, path: "../ledger"},
       {:bandit, "~> 1.11"},
-      {:burrito, "~> 1.5"},
       {:jason, "~> 1.4"},
       {:plug, "~> 1.19"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
@@ -40,18 +39,9 @@ defmodule Probed.MixProject do
   defp releases do
     [
       probed: [
+        include_erts: true,
+        include_executables_for: [:unix],
         applications: [probed: :permanent]
-      ],
-      probed_burrito: [
-        steps: [:assemble, &Burrito.wrap/1],
-        applications: [probed: :permanent],
-        burrito: [
-          targets: [
-            darwin_arm64: [os: :darwin, cpu: :aarch64],
-            linux_arm64: [os: :linux, cpu: :aarch64],
-            linux_x86_64: [os: :linux, cpu: :x86_64]
-          ]
-        ]
       ]
     ]
   end

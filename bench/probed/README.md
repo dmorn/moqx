@@ -165,7 +165,7 @@ file itself.
 
 ## Packaging
 
-Build the default Linux Burrito artifact:
+Build the Linux Mix release artifact:
 
 ```bash
 just bench-transport-build-probed linux_arm64
@@ -177,15 +177,10 @@ Deploy it to the disposable Terraform roles:
 just bench-transport-deploy-probed linux_arm64
 ```
 
-This artifact is a tarball containing one self-contained binary at
-`bin/probed`. Because `probed` has no target-native QUIC/NIF dependency, the
-Docker recipe uses the native Linux builder and lets Burrito/Zig select the
-requested Linux output target. The traditional Mix release tarball remains
-available only as a fallback build sanity check:
-
-```bash
-just bench-transport-build-probed-release linux_arm64
-```
+This artifact is a standard Elixir release tarball containing `bin/probed` and
+an included ERTS. It is target-specific, matching the `moqxprobe` release
+model, so the remote node does not need to provide a compatible runtime to run
+the deployed daemon.
 
 Start the daemon and verify `/v1/health` from each node:
 
