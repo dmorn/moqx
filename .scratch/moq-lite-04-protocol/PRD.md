@@ -182,6 +182,11 @@ Delivered so far:
   stream lifecycle, support transport normalized events, and the
   reference-style subscribe/group/frame smoke flow
 
+Follow-up integration work:
+
+- issue 09: real QUIC MOQ Lite 04 integration tests over
+  `MOQX.Transport.Quicer`
+
 ## References
 
 - <https://datatracker.ietf.org/doc/html/draft-lcurley-moq-lite-04>
