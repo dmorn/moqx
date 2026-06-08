@@ -215,3 +215,17 @@ requested load on the link.
   entries or labelled Hetzner resources remaining. No performance evidence was
   produced, and no x86 substitute was run because it would not satisfy the
   pending ARM #40 validation.
+- 2026-06-08: Retried the ARM real-path bracket with the new `probed`
+  DATAGRAM bracket wrapper using run id
+  `20260608T160101Z-issue40-arm-bracket`. Hetzner ARM placement was still
+  unavailable. The attempted profiles were `arm-hel1-tiny` (`cax11`,
+  `hel1 -> hel1`), `arm-nbg1-tiny` (`cax11`, `nbg1 -> nbg1`),
+  `arm-default` (`cax31`, `fsn1 -> hel1`), `arm-nbg1-hel1-stress`
+  (`cax41`, `nbg1 -> hel1`), and `arm-smoke` (`cax21`, `fsn1 -> nbg1`).
+  Every apply failed during server placement with `resource_unavailable` for
+  both client and server roles. Each partial network/firewall/SSH-key apply was
+  destroyed immediately, and `just bench-transport-verify-clean` reported no
+  Terraform state entries or labelled Hetzner resources remaining. No bracket
+  artifacts or performance measurements were produced. This keeps the next
+  #40 action unchanged: run the `probed` DATAGRAM bracket on ARM once Hetzner
+  can place a pair, not on x86 as a substitute.

@@ -213,6 +213,15 @@ seams without `Application` env.
   collapse is not explained by an unbounded final mailbox backlog, so inspect
   receive/drain cadence, quicer DATAGRAM admission/completion signals, and
   scheduler/NIF pressure around the 20k-30k pps transition.
+- 2026-06-08: The current DATAGRAM hardening loop now has a `probed`-driven
+  ARM bracket wrapper for quickly comparing `quicprobe` control versus
+  MOQX-client DATAGRAM pressure around 30k/32k pps. Two Hetzner ARM attempts on
+  this date failed before measurement because ARM placement was unavailable
+  across CAX11, CAX21, CAX31, and CAX41 profiles in `hel1`, `nbg1`, and
+  `fsn1` combinations. The lab was verified clean after each partial apply.
+  The next useful #26/#40 action is to rerun the bracket when an ARM pair can
+  be provisioned; x86 can smoke tooling, but it is not a substitute for the
+  pending ARM evidence.
 - 2026-05-26: The same ARM run could not produce valid
   reference-client-to-MOQX-listener DATAGRAM capacity numbers. quicprobe clients
   timed out while dialing the MOQX listener at every rate, and the listener
