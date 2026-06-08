@@ -379,9 +379,9 @@ Use the daemon to run the next #40 validation:
 - [x] Path traversal outside the work directory is rejected.
 - [x] A local fake-tool smoke test proves create-run, start-process,
       observe-status, fetch-artifact, fetch-bundle, and cleanup.
-- [ ] Packaging/deploy recipes can put `probed` on a lab node and verify
+- [x] Packaging/deploy recipes can put `probed` on a lab node and verify
       `/v1/health`.
-- [ ] The first remote smoke starts quicprobe server through `probed`, runs a
+- [x] The first remote smoke starts quicprobe server through `probed`, runs a
       `moqxprobe measure` client through `probed`, fetches JSONL/log artifacts,
       and validates the JSONL with `moqxprobe report`.
 - [x] Documentation records that `probed` does not own benchmark semantics and
@@ -515,3 +515,29 @@ Use the daemon to run the next #40 validation:
   release definitions, Dockerfiles, `just` recipes, and local smoke hooks were
   removed. `probed` now ships as a target-specific release tarball with ERTS
   included, matching the `moqxprobe` deployment model.
+- 2026-06-08: Full remote `probed` smoke passed on run id
+  `20260608T103912Z-mixrel-smoke` using x86-control nodes after ARM placement
+  was temporarily unavailable in both `hel1` and `nbg1`. The lab used a `ccx23`
+  client in `fsn1` (`10.88.0.11`) and a `ccx23` server in `hel1`
+  (`10.88.0.12`). `just bench-transport-private-check
+  20260608T103912Z-mixrel-smoke` proved the private path before the QUIC smoke.
+  `probed-0.1.0-c4fcdde-linux-x86_64.tar.gz`,
+  `moqxprobe-0.1.0-c4fcdde-linux-x86_64.tar.gz`, and
+  `quicprobe-c4fcdde-linux-x86_64.tar.gz` were deployed to both nodes.
+- 2026-06-08: The first full remote API smoke used curl over SSH as the
+  controller and API run id
+  `20260608T103912Z-mixrel-smoke-probed-smoke-110020`. It staged a temporary
+  CA/server certificate, started `quicprobe server` through server `probed` on
+  `10.88.0.12:55433`, ran `moqxprobe measure --topology
+  reference-client-to-reference-server` and `moqxprobe measure --topology
+  moqx-client-to-reference-server` through client `probed`, fetched client and
+  server bundles, and validated both client JSONL artifacts with
+  `moqxprobe report`. Artifacts are under
+  `bench/moqxprobe/results/20260608T103912Z-mixrel-smoke/probed-remote-smoke/`.
+- 2026-06-08: The final smoke also caught and fixed one real release-wrapper
+  defect before passing: `moqxprobe` launched under `probed` inherited
+  `RELEASE_NODE=probed@...`, so the CLI release tried to start with the same
+  distributed node name as the daemon and exited with an `inet_tcp` name-in-use
+  error. The `moqxprobe` wrapper now forces `RELEASE_DISTRIBUTION=none` and
+  uses a unique `MOQXPROBE_RELEASE_NODE` fallback. A regression test covers the
+  wrapper environment.

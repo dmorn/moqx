@@ -82,3 +82,8 @@ Implemented private-network readiness as a first-class Hetzner operator step:
   against that peer after netplan apply. The subnet gateway remains only the
   route next hop. Also tightened the generated netplan file permissions to
   `0600`.
+- 2026-06-08: Confirmed the peer-route readiness fix during remote x86-control
+  run `20260608T103912Z-mixrel-smoke`. The disposable client and server
+  provisioned without the previous gateway probe failure, and
+  `just bench-transport-private-check 20260608T103912Z-mixrel-smoke` passed
+  before the full remote `probed` smoke.

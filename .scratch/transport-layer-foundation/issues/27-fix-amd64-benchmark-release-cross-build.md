@@ -1,6 +1,6 @@
 # Fix AMD64 benchmark release cross-build
 
-Status: in-progress
+Status: closed
 Type: AFK
 
 ## Parent
@@ -60,3 +60,13 @@ operator path for producing that artifact before x86 benchmark runs.
   `just bench-transport-build-release linux_arm64`, which built
   `bench/moqxprobe/build/artifacts/moqxprobe-0.1.0-7b85779-linux-arm64.tar.gz`
   and compiled the quicer/msquic native dependency path successfully.
+- 2026-06-08: Closed after remote x86-control smoke
+  `20260608T103912Z-mixrel-smoke`. The one-command native AMD64 fallback
+  `just bench-transport-build-release-remote-role 20260608T103912Z-mixrel-smoke
+  client linux_x86_64` built and fetched
+  `bench/moqxprobe/build/artifacts/moqxprobe-0.1.0-c4fcdde-linux-x86_64.tar.gz`.
+  `just bench-transport-deploy-release linux_x86_64
+  20260608T103912Z-mixrel-smoke` deployed the artifact to both lab nodes, and
+  the remote `probed` smoke ran `moqxprobe measure` through the deployed release
+  for both reference-client and MOQX-client topologies. Both JSONL outputs
+  validated with `moqxprobe report`.
