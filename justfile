@@ -163,30 +163,20 @@ bench-transport-private-check run_id=current_run port="55209":
       exit 2
     fi
 
-    ssh_opts=(
-      -i "$key"
-      -o IdentitiesOnly=yes
-      -o StrictHostKeyChecking=accept-new
-      -o UserKnownHostsFile="{{ bench_dir }}/.keys/{{ run_id }}/known_hosts"
-    )
-
     client="root@$client_public"
     server="root@$server_public"
-    remote_log="/tmp/moqx-private-iperf3-{{ port }}.log"
+    results_dir="{{ bench_dir }}/results/{{ run_id }}/private-check"
 
-    cleanup() {
-      ssh "${ssh_opts[@]}" "$server" "pkill -f 'iperf3 .*--port {{ port }}' >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
-    }
-    trap cleanup EXIT
-
-    ssh "${ssh_opts[@]}" "$client" "cloud-init status --wait >/dev/null && ip -4 address show && ip route get '$server_private'"
-    ssh "${ssh_opts[@]}" "$server" "cloud-init status --wait >/dev/null && ip -4 address show && ip route get '$client_private'"
-    ssh "${ssh_opts[@]}" "$server" "nohup iperf3 --server --bind '$server_private' --port '{{ port }}' --one-off > '$remote_log' 2>&1 &"
-    sleep 1
-    ssh "${ssh_opts[@]}" "$client" "ping -c 3 -W 2 '$server_private'"
-    ssh "${ssh_opts[@]}" "$client" "iperf3 --client '$server_private' --port '{{ port }}' --time 1 --json >/tmp/moqx-private-check.json"
-
-    printf 'Private network ready: %s -> %s over ICMP and TCP port %s\n' "$client_private" "$server_private" "{{ port }}"
+    "{{ infra_dir }}/scripts/private_check.sh" \
+      --run-id "{{ run_id }}" \
+      --key "$key" \
+      --known-hosts "{{ bench_dir }}/.keys/{{ run_id }}/known_hosts" \
+      --client "$client" \
+      --server "$server" \
+      --client-private "$client_private" \
+      --server-private "$server_private" \
+      --results-dir "$results_dir" \
+      --port "{{ port }}"
 
 # Verify Terraform state and Hetzner labelled resources are clean after destroy.
 bench-transport-verify-clean:

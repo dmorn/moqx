@@ -39,7 +39,8 @@ The `just` recipes load `.env` automatically when present. Cloud-mutating
 recipes still require `HCLOUD_TOKEN` to be available from `.env` or the
 environment.
 
-Check cloud-init and the installed tools before running benchmarks:
+Terraform still emits read-only commands for inspecting cloud-init and the
+installed tools:
 
 ```bash
 terraform output -json toolchain_check_commands
@@ -52,10 +53,25 @@ private IPs for benchmarks:
 just bench-transport-private-check
 ```
 
-The check waits for cloud-init on both nodes, verifies that each node has a
-route to its peer private IP, pings the server private IP from the client, and
-runs a one-second `iperf3` TCP probe bound to the server private IP. Do not use
-`path_metadata_private` for benchmark results until this check passes.
+The check records cloud-init status as diagnostics under:
+
+```text
+bench/moqxprobe/results/<run-id>/private-check/
+```
+
+Cloud-init can report a non-clean diagnostic status even when the benchmark
+preconditions are already true. Therefore the readiness pass/fail decision is
+made from concrete checks instead:
+
+- SSH reachability to both nodes;
+- Go, Elixir, and `iperf3` availability on both nodes;
+- a route from each node to its peer private IP;
+- ICMP from the client to the server private IP;
+- a one-second TCP `iperf3` probe bound to the server private IP.
+
+Do not use `path_metadata_private` for benchmark results until this check
+passes. A cloud-init warning in the private-check output is evidence to keep
+with the run, but it is not by itself a private-network failure.
 
 Destroy the pair when the run is finished:
 
@@ -119,9 +135,9 @@ node's private IP after netplan has been applied. The subnet gateway is used
 only as the route next hop; it is not treated as a routable readiness endpoint.
 
 The benchmark repo is not cloned automatically, and no benchmark process is
-started automatically. Deploy a `moqxprobe` release artifact or use
-the installed Elixir/Mix toolchain for development-only checks after cloud-init
-finishes.
+started automatically. Deploy a `moqxprobe` release artifact or use the
+installed Elixir/Mix toolchain for development-only checks after the concrete
+toolchain/private-path readiness checks pass.
 
 ## Deploy Benchmark CLI
 
@@ -131,7 +147,7 @@ Build the Linux/ARM64 `moqxprobe` Mix release artifact locally with Docker:
 just bench-transport-build-release linux_arm64
 ```
 
-After Terraform apply and cloud-init readiness checks, deploy the release to
+After Terraform apply and private-path readiness checks, deploy the release to
 the Terraform `client` and `server` roles:
 
 ```bash

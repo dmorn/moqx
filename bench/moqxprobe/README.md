@@ -1095,10 +1095,13 @@ Before using private-network path metadata, run:
 just bench-transport-private-check
 ```
 
-The check proves that both nodes have their configured private IPs ready and
-that the client can reach the server private IP over ICMP and TCP. Treat private
-path benchmark results as invalid if this readiness check has not passed for
-the same Terraform run.
+The check captures cloud-init status as diagnostics, then proves the benchmark
+preconditions directly: SSH to both nodes, Go/Elixir/`iperf3` availability,
+peer-private routes in both directions, ICMP from client to server, and a short
+TCP `iperf3` probe over the private path. Treat private-path benchmark results
+as invalid if this readiness check has not passed for the same Terraform run.
+A non-clean cloud-init diagnostic is not by itself a private-network failure
+when the concrete readiness checks pass.
 
 ## Implementation Order
 

@@ -2,7 +2,7 @@
 
 # Fix cloud-init false-negative in private-network readiness
 
-Status: ready-for-agent
+Status: closed
 Type: AFK
 Category: bug
 
@@ -80,20 +80,20 @@ not to block the benchmark preconditions.
 
 ## Acceptance criteria
 
-- [ ] Reproduce the cloud-init false-negative on a disposable Hetzner run, or
+- [x] Reproduce the cloud-init false-negative on a disposable Hetzner run, or
       document why it no longer reproduces.
-- [ ] Capture the relevant cloud-init diagnostics in the run results when
+- [x] Capture the relevant cloud-init diagnostics in the run results when
       cloud-init reports `error`.
-- [ ] `bench-transport-private-check` verifies private peer routes and proves
+- [x] `bench-transport-private-check` verifies private peer routes and proves
       client-to-server ICMP and TCP connectivity over the private IPs even when
       cloud-init status is non-clean.
-- [ ] The readiness output clearly reports cloud-init status as diagnostic
+- [x] The readiness output clearly reports cloud-init status as diagnostic
       evidence instead of conflating it with private-network failure.
-- [ ] The check still fails if SSH is unavailable, required tools are missing,
+- [x] The check still fails if SSH is unavailable, required tools are missing,
       peer routes are absent, ICMP fails, or private TCP fails.
-- [ ] `bench/infra/hetzner/README.md` documents the distinction between
+- [x] `bench/infra/hetzner/README.md` documents the distinction between
       cloud-init diagnostics and benchmark readiness.
-- [ ] Existing private-network readiness tests or shell checks are updated so
+- [x] Existing private-network readiness tests or shell checks are updated so
       this does not regress silently.
 
 ## Non-goals
@@ -110,3 +110,48 @@ cloud-init status for evidence, then validate the actual path and toolchain
 directly. If the root cause is in our generated network config, fix it; if it
 is a Hetzner/cloud-init interaction that leaves the path usable, document and
 tolerate it as a warning.
+
+## Resolution
+
+Implemented the readiness check as a separate script:
+
+```text
+bench/infra/hetzner/scripts/private_check.sh
+```
+
+`just bench-transport-private-check` now resolves Terraform outputs and calls
+that script. The script records cloud-init status under
+`bench/moqxprobe/results/<run-id>/private-check/`, reports non-clean
+cloud-init as a warning, and decides benchmark readiness from concrete checks:
+SSH reachability, Go/Elixir/`iperf3` availability on both nodes, peer-private
+routes in both directions, client-to-server private ICMP, and client-to-server
+private TCP `iperf3`.
+
+Added a fake-SSH shell regression:
+
+```text
+bench/infra/hetzner/scripts/private_check_test.sh
+```
+
+The regression simulates `cloud-init status: error` while concrete readiness
+checks pass, and also proves the script still fails when the required toolchain
+is missing.
+
+## Comments
+
+- 2026-06-08: Fixed in local scripts/docs and validated with disposable
+  x86-control run `20260608T143237Z-issue44`. The first private-check attempt
+  failed while server SSH was not yet reachable, proving SSH unavailability
+  remains a hard failure. After the server finished booting, the private check
+  passed even though server cloud-init reported `status: error` with
+  `DataSourceHetzner` and repeated `network-config-v1 failed schema
+  validation` warnings.
+- 2026-06-08: The passing live check recorded diagnostics under
+  `bench/moqxprobe/results/20260608T143237Z-issue44/private-check/`. It
+  reported `Cloud-init client: ok` and `Cloud-init server: warning`, then
+  proved toolchain readiness on both nodes, private routes both ways, ICMP
+  client-to-server with 3/3 packets delivered and about 27.0 ms average RTT,
+  and private TCP `iperf3` at about 989 Mbps with zero retransmits.
+- 2026-06-08: The disposable run was destroyed afterward, and
+  `just bench-transport-verify-clean` reported no Terraform state entries or
+  labelled Hetzner resources remaining.
