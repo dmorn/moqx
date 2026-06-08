@@ -456,3 +456,51 @@ Use the daemon to run the next #40 validation:
   fetched client/server bundles, and validated all produced JSONL with
   `moqxprobe report`. This is loopback calibration only; it proves the
   orchestration/control-plane loop, not real network performance.
+- 2026-06-08: Remote smoke attempt used run id
+  `20260605T190822Z-psmoke`. Hetzner ARM placement was unavailable for the
+  attempted tiny/smoke ARM profiles (`arm-hel1-tiny`, `arm-nbg1-tiny`, and
+  `arm-smoke`), so the smoke fell back to the existing `x86-control` profile:
+  `ccx23` client in `fsn1`, `ccx23` server in `hel1`, private path
+  `10.88.0.11 -> 10.88.0.12`. Client cloud-init failed before package install
+  at the private-network route check with `RTNETLINK answers: Network is
+  unreachable`; the node still had the private address/route, so the smoke
+  manually installed the minimal runtime tools (`curl`, `jq`, `tar`, `iperf3`)
+  on that disposable client. Manual private readiness then passed with 0% ICMP
+  loss, about 26.6 ms average RTT, and about 835 Mbps for a one-second TCP
+  iperf check.
+- 2026-06-08: `quicprobe` and `probed` x86_64 artifacts built and deployed.
+  The normal local Docker x86_64 `moqxprobe` Burrito build is not usable on
+  this Apple ARM host because the emulated amd64 `elixir:1.19.5-otp-28` image
+  crashes in OTP `user_drv` before project compilation. A native x86 build was
+  then produced on the disposable Hetzner server from `git archive HEAD`, and
+  it compiled a correct x86_64 `libquicer_nif.so`, but deployment/start failed
+  because Burrito's Linux runtime is musl-based while the quicer NIF expected
+  the glibc symbol `malloc_stats`. This blocks the full remote
+  `moqxprobe measure` smoke until `moqxprobe` packaging is redesigned for the
+  quicer NIF, for example by using a glibc-compatible release artifact or by
+  making the native dependency linkage compatible with Burrito's musl runtime.
+- 2026-06-08: Remote `probed` Burrito itself is viable: both nodes started the
+  daemon bound to their private IPs and authenticated health returned
+  `{"status":"ok"}` for node ids `client` and `server`. The `just`
+  `bench-transport-start-probed-role` health check currently reports a false
+  failure because it curls `/v1/health` without the bearer token; the daemon was
+  listening and correctly returned `401` unauthenticated.
+- 2026-06-08: Because `moqxprobe` packaging blocked the full smoke, ran a
+  minimal curl-driven remote `probed` API smoke with only `iperf3`:
+  `20260605T190822Z-psmoke-minimal-iperf`. The controller created matching runs
+  on both private probed endpoints, started an `iperf3 --server` process on the
+  server through `probed`, started an `iperf3 --client` process on the client
+  through `probed`, and fetched both bundles. Both processes exited with status
+  0; the client JSON reported about 777 Mbps over 1.027 seconds. Bundles are
+  stored under
+  `bench/moqxprobe/results/20260605T190822Z-psmoke/probed-minimal-iperf/`.
+  The disposable infrastructure was destroyed afterwards, and
+  `just bench-transport-verify-clean` reported no Terraform state entries or
+  labelled Hetzner resources remaining.
+- 2026-06-08: Follow-up fix for the cloud-init blocker: private-route
+  readiness now checks each node's peer private IP after netplan apply instead
+  of probing the subnet gateway as if it were a routable endpoint. This is
+  validated by Terraform fmt/validate and a plan render for
+  `20260605T190822Z-psmoke` with the `x86-control` profile; the next disposable
+  apply should confirm cloud-init reaches `done` on both nodes without manual
+  package installation.

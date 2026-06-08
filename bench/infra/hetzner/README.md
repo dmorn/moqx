@@ -114,6 +114,10 @@ route to the private network CIDR via the network gateway. The Terraform
 variable `private_network_interface` exists so a future profile can override
 the guest interface name if needed.
 
+Cloud-init validates private-path routing by checking the route to the peer
+node's private IP after netplan has been applied. The subnet gateway is used
+only as the route next hop; it is not treated as a routable readiness endpoint.
+
 The benchmark repo is not cloned automatically, and no benchmark process is
 started automatically. Deploy a `moqxprobe` release artifact or use
 the installed Elixir/Mix toolchain for development-only checks after cloud-init

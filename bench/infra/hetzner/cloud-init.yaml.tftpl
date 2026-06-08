@@ -20,7 +20,7 @@ write_files:
       ready to run a benchmark.
 %{ if private_network_enabled }
   - path: /etc/netplan/60-moqx-bench-private-network.yaml
-    permissions: "0644"
+    permissions: "0600"
     content: |
       network:
         version: 2
@@ -44,6 +44,7 @@ runcmd:
       export DEBIAN_FRONTEND=noninteractive
 %{ if private_network_enabled }
       private_iface="${private_network_interface}"
+      private_peer_ip="${private_peer_ip}"
 
       for _ in $(seq 1 30); do
         if ip link show dev "$private_iface" >/dev/null 2>&1; then
@@ -59,7 +60,13 @@ runcmd:
       netplan generate
       netplan apply
       ip -4 address show dev "$private_iface"
-      ip route get "${private_gateway_ip}"
+      for _ in $(seq 1 10); do
+        if ip route get "$private_peer_ip"; then
+          break
+        fi
+        sleep 1
+      done
+      ip route get "$private_peer_ip"
 %{ endif }
       apt-get update
       apt-get install -y \

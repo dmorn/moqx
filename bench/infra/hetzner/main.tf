@@ -14,12 +14,14 @@ locals {
 
   nodes = {
     client = {
-      location   = var.client_location
-      private_ip = var.client_private_ip
+      location        = var.client_location
+      private_ip      = var.client_private_ip
+      peer_private_ip = var.server_private_ip
     }
     server = {
-      location   = var.server_location
-      private_ip = var.server_private_ip
+      location        = var.server_location
+      private_ip      = var.server_private_ip
+      peer_private_ip = var.client_private_ip
     }
   }
 }
@@ -145,6 +147,7 @@ resource "hcloud_server" "node" {
     private_network_cidr      = var.private_network_cidr
     private_gateway_ip        = cidrhost(var.private_subnet_cidr, 1)
     private_ip                = each.value.private_ip
+    private_peer_ip           = each.value.peer_private_ip
   })
 
   firewall_ids = [hcloud_firewall.operator.id]

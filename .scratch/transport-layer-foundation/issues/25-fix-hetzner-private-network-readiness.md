@@ -74,3 +74,11 @@ Implemented private-network readiness as a first-class Hetzner operator step:
   `iperf3 --client 10.88.0.12 --port 55209 --time 1`. The Terraform pair was
   destroyed afterward, and `just bench-transport-verify-clean` confirmed no
   Terraform state entries or labelled Hetzner resources remained.
+- 2026-06-08: Revisited after remote probed smoke
+  `20260605T190822Z-psmoke` exposed a narrower cloud-init failure. The client
+  failed before package installation at `ip route get 10.88.0.1`, even though
+  the private path to the server later worked manually. Fixed cloud-init to
+  pass each node's peer private IP into the template and retry `ip route get`
+  against that peer after netplan apply. The subnet gateway remains only the
+  route next hop. Also tightened the generated netplan file permissions to
+  `0600`.
