@@ -168,11 +168,13 @@ Delivered so far:
 - `MOQX.MOQLite04.command/2` and `MOQX.MOQLite04.recv/2` client runner APIs
   that thread the connected client value, keep `Session` pure, and apply
   returned transport actions through `MOQX.Transport`
+- Role-neutral subscriber operations on `MOQX.MOQLite04` for
+  AnnounceInterest, Subscribe, SubscribeUpdate, Fetch, Probe, repeated Probe,
+  and Goaway transaction streams
 - Session tests for Announce, Subscribe, Fetch, Probe, Goaway, Group,
   stream lifecycle, support transport normalized events, and the
   reference-style subscribe/group/frame smoke flow
 - Client/API follow-up issues:
-  - issue 07: role-neutral subscriber operations;
   - issue 08: role-neutral publisher operations and smoke flow
 
 ## References

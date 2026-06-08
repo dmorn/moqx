@@ -3,14 +3,17 @@ defmodule MOQX.MOQLite04.Client do
   URI-first MOQ Lite draft-04 client connection value.
 
   This module establishes the transport connection and starts the pure
-  `MOQX.MOQLite04.Session`. Protocol operations and event running are layered on
-  top in later slices.
+  `MOQX.MOQLite04.Session`. The public runner API keeps `command/2` and
+  `recv/2` available for lower-level protocol use, while convenience operations
+  open the required transport streams and delegate message encoding through
+  `command/2`.
   """
 
+  alias MOQX.MOQLite04
   alias MOQX.MOQLite04.Error, as: ProtocolError
   alias MOQX.MOQLite04.Session
   alias MOQX.Transport
-  alias MOQX.Transport.{Capabilities, Connection, Context}
+  alias MOQX.Transport.{Capabilities, Connection, Context, Stream}
 
   @alpn "moq-lite-04"
 
@@ -50,6 +53,9 @@ defmodule MOQX.MOQLite04.Client do
           connection: Connection.t(),
           session: Session.t()
         }
+
+  @type operation_result ::
+          {:ok, t(), Stream.t(), [term()]} | {:error, t(), term(), [term()]}
 
   @doc """
   Connects to a native QUIC MOQ Lite draft-04 endpoint.
@@ -130,6 +136,66 @@ defmodule MOQX.MOQLite04.Client do
     end
   end
 
+  @doc """
+  Opens an Announce transaction stream and sends `ANNOUNCE_INTEREST`.
+  """
+  @spec announce_interest(t(), MOQLite04.AnnounceInterest.t()) :: operation_result()
+  def announce_interest(%__MODULE__{} = client, %MOQLite04.AnnounceInterest{} = message) do
+    open_transaction(client, :announce, message)
+  end
+
+  @doc """
+  Opens a Subscribe transaction stream and sends `SUBSCRIBE`.
+  """
+  @spec subscribe(t(), MOQLite04.Subscribe.t()) :: operation_result()
+  def subscribe(%__MODULE__{} = client, %MOQLite04.Subscribe{} = message) do
+    open_transaction(client, :subscribe, message)
+  end
+
+  @doc """
+  Sends `SUBSCRIBE_UPDATE` on an existing Subscribe transaction stream.
+  """
+  @spec subscribe_update(t(), Stream.t(), MOQLite04.SubscribeUpdate.t()) :: operation_result()
+  def subscribe_update(
+        %__MODULE__{} = client,
+        %Stream{} = stream,
+        %MOQLite04.SubscribeUpdate{} = message
+      ) do
+    send_on_transaction(client, stream, :subscribe, message)
+  end
+
+  @doc """
+  Opens a Fetch transaction stream and sends `FETCH`.
+  """
+  @spec fetch(t(), MOQLite04.Fetch.t()) :: operation_result()
+  def fetch(%__MODULE__{} = client, %MOQLite04.Fetch{} = message) do
+    open_transaction(client, :fetch, message)
+  end
+
+  @doc """
+  Opens a Probe transaction stream and sends `PROBE`.
+  """
+  @spec probe(t(), MOQLite04.Probe.t()) :: operation_result()
+  def probe(%__MODULE__{} = client, %MOQLite04.Probe{} = message) do
+    open_transaction(client, :probe, message)
+  end
+
+  @doc """
+  Sends `PROBE` on an existing Probe transaction stream.
+  """
+  @spec probe(t(), Stream.t(), MOQLite04.Probe.t()) :: operation_result()
+  def probe(%__MODULE__{} = client, %Stream{} = stream, %MOQLite04.Probe{} = message) do
+    send_on_transaction(client, stream, :probe, message)
+  end
+
+  @doc """
+  Opens a Goaway transaction stream and sends `GOAWAY`.
+  """
+  @spec goaway(t(), MOQLite04.Goaway.t()) :: operation_result()
+  def goaway(%__MODULE__{} = client, %MOQLite04.Goaway{} = message) do
+    open_transaction(client, :goaway, message)
+  end
+
   defp reject_mode(opts) do
     if Keyword.has_key?(opts, :mode) do
       {:error, {:unsupported_option, :mode}}
@@ -193,6 +259,32 @@ defmodule MOQX.MOQLite04.Client do
   defp put_context(%__MODULE__{} = client, context), do: %{client | context: context}
 
   defp put_session(%__MODULE__{} = client, session), do: %{client | session: session}
+
+  defp open_transaction(%__MODULE__{} = client, stream_type, message) do
+    with {:ok, stream, context} <-
+           Transport.open_stream(client.context, client.connection, direction: :bidirectional),
+         {:ok, context} <- Transport.set_active(context, stream, true) do
+      client
+      |> put_context(context)
+      |> send_on_transaction(stream, stream_type, message)
+    else
+      {:error, reason, context} ->
+        error =
+          Error.new(:transport_action_failed,
+            action: {:open_transaction, stream_type},
+            details: %{transport_reason: reason}
+          )
+
+        {:error, put_context(client, context), error, []}
+    end
+  end
+
+  defp send_on_transaction(%__MODULE__{} = client, %Stream{} = stream, stream_type, message) do
+    case command(client, {:send, stream, stream_type, [message]}) do
+      {:ok, client, events} -> {:ok, client, stream, events}
+      {:error, client, reason, events} -> {:error, client, reason, events}
+    end
+  end
 
   defp handle_transport_event(%__MODULE__{} = client, event) do
     case Session.handle_transport(client.session, event) do

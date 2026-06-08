@@ -2,7 +2,7 @@
 
 # Add role-neutral MOQ Lite 04 subscriber operations
 
-Status: ready-for-agent
+Status: done
 Type: enhancement
 
 ## Parent
@@ -25,25 +25,24 @@ client-initiated transaction streams.
 
 ## Acceptance criteria
 
-- [ ] Subscriber-style public functions exist on `MOQX.MOQLite04` for opening
+- [x] Subscriber-style public functions exist on `MOQX.MOQLite04` for opening
       Announce, Subscribe, Fetch, Probe, and Goaway transaction streams.
-- [ ] The public functions accept typed MOQ Lite message structs or clearly
+- [x] The public functions accept typed MOQ Lite message structs or clearly
       documented option maps that are converted into typed structs.
-- [ ] Each operation opens the correct transport stream direction through the
+- [x] Each operation opens the correct transport stream direction through the
       runner before calling `Session.handle_command/2`.
-- [ ] SubscribeUpdate and repeated Probe messages reuse the existing transaction
+- [x] SubscribeUpdate and repeated Probe messages reuse the existing transaction
       stream and incremental stream encoder state.
-- [ ] Peer responses are received through the runner and surfaced as protocol
+- [x] Peer responses are received through the runner and surfaced as protocol
       events tagged with stream refs.
-- [ ] `connect/2` remains role-neutral; no publisher/subscriber connect mode is
+- [x] `connect/2` remains role-neutral; no publisher/subscriber connect mode is
       added.
-- [ ] Tests prove a subscriber can send Subscribe and receive SubscribeOk using
+- [x] Tests prove a subscriber can send Subscribe and receive SubscribeOk using
       `MOQX.Transport.Support`.
-- [ ] Tests prove Fetch response Frames arrive on the same bidirectional stream
+- [x] Tests prove Fetch response Frames arrive on the same bidirectional stream
       without a Group header.
-- [ ] Tests prove repeated Probe messages can be sent on one stream.
+- [x] Tests prove repeated Probe messages can be sent on one stream.
 
 ## Blocked by
 
 - `.scratch/moq-lite-04-protocol/issues/06-add-moq-lite-client-action-and-event-runner.md`
-

@@ -75,6 +75,63 @@ defmodule MOQX.MOQLite04 do
   def recv(client, timeout \\ :infinity), do: Client.recv(client, timeout)
 
   @doc """
+  Opens an Announce transaction stream and sends `ANNOUNCE_INTEREST`.
+  """
+  @spec announce_interest(Client.t(), AnnounceInterest.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          | {:error, Client.t(), term(), [term()]}
+  def announce_interest(client, message), do: Client.announce_interest(client, message)
+
+  @doc """
+  Opens a Subscribe transaction stream and sends `SUBSCRIBE`.
+  """
+  @spec subscribe(Client.t(), Subscribe.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          | {:error, Client.t(), term(), [term()]}
+  def subscribe(client, message), do: Client.subscribe(client, message)
+
+  @doc """
+  Sends `SUBSCRIBE_UPDATE` on an existing Subscribe transaction stream.
+  """
+  @spec subscribe_update(Client.t(), MOQX.Transport.Stream.t(), SubscribeUpdate.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          | {:error, Client.t(), term(), [term()]}
+  def subscribe_update(client, stream, message),
+    do: Client.subscribe_update(client, stream, message)
+
+  @doc """
+  Opens a Fetch transaction stream and sends `FETCH`.
+  """
+  @spec fetch(Client.t(), Fetch.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          | {:error, Client.t(), term(), [term()]}
+  def fetch(client, message), do: Client.fetch(client, message)
+
+  @doc """
+  Opens a Probe transaction stream and sends `PROBE`.
+  """
+  @spec probe(Client.t(), Probe.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          | {:error, Client.t(), term(), [term()]}
+  def probe(client, message), do: Client.probe(client, message)
+
+  @doc """
+  Sends `PROBE` on an existing Probe transaction stream.
+  """
+  @spec probe(Client.t(), MOQX.Transport.Stream.t(), Probe.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          | {:error, Client.t(), term(), [term()]}
+  def probe(client, stream, message), do: Client.probe(client, stream, message)
+
+  @doc """
+  Opens a Goaway transaction stream and sends `GOAWAY`.
+  """
+  @spec goaway(Client.t(), Goaway.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          | {:error, Client.t(), term(), [term()]}
+  def goaway(client, message), do: Client.goaway(client, message)
+
+  @doc """
   Returns the draft-04 numeric stream type ID for a known stream type.
   """
   @spec stream_type_id(stream_type()) :: {:ok, non_neg_integer()} | {:error, :unknown_stream_type}
