@@ -413,9 +413,10 @@ bench-transport-build-release-remote-target target run_id moqxprobe_target="linu
          mix local.rebar --force; \
          mix deps.get --only prod; \
          mix release '{{ release_name }}' --overwrite; \
-         test -x '_build/prod/rel/{{ release_name }}/bin/moqxprobe'; \
-         cp '$remote_metadata' '_build/prod/rel/{{ release_name }}/.moqx-bench-artifact.json'; \
-         tar -C '_build/prod/rel/{{ release_name }}' -czf '$remote_artifact' .; \
+         release_dir='$remote_cache/build/prod/rel/{{ release_name }}'; \
+         test -x \"\$release_dir/bin/moqxprobe\"; \
+         cp '$remote_metadata' \"\$release_dir/.moqx-bench-artifact.json\"; \
+         tar -C \"\$release_dir\" -czf '$remote_artifact' .; \
        fi; \
        rm -f '$remote_source' '$remote_metadata'; \
        test -f '$remote_artifact'"

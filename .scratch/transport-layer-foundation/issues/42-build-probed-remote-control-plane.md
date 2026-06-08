@@ -384,10 +384,10 @@ Use the daemon to run the next #40 validation:
 - [x] The first remote smoke starts quicprobe server through `probed`, runs a
       `moqxprobe measure` client through `probed`, fetches JSONL/log artifacts,
       and validates the JSONL with `moqxprobe report`.
-- [ ] A repo-owned remote suite driver can run multiple tests through `probed`
+- [x] A repo-owned remote suite driver can run multiple tests through `probed`
       in one API run, fetch bundles, validate JSONL reports, and write a local
       manifest without relying on a temporary script.
-- [ ] The moqxprobe iteration loop can build from a dirty source snapshot,
+- [x] The moqxprobe iteration loop can build from a dirty source snapshot,
       deploy the new artifact to both lab nodes, run the selected `probed`
       suite, and record the exact deployed artifact identity in the local
       manifest.
@@ -588,3 +588,33 @@ Use the daemon to run the next #40 validation:
   expanded the update/iterate recipes, invalid suite selection failed before
   Terraform access, and the full root/bench format-test-credo gate passed.
   Remote proof of the full iteration loop is still pending.
+- 2026-06-08: Remote proof of the repo-owned suite driver and dirty-source
+  iteration loop passed on run id `20260608T131235Z-iter-remote`, API run id
+  `20260608T131235Z-iter-remote-probed-suite-133214`. The lab used the
+  `x86-control` profile with a `ccx23` client in `fsn1`
+  (`168.119.96.235`, private `10.88.0.11`) and a `ccx23` server in `hel1`
+  (`77.42.64.162`, private `10.88.0.12`). `bench-transport-private-check`
+  still failed because the client reported `cloud-init status: error`, but the
+  concrete private path was manually proven before benchmark traffic:
+  peer routes existed both ways, ICMP delivered 3/3 packets with about
+  25.5 ms average RTT, and a one-second private TCP `iperf3` probe reached
+  about 890 Mbps with zero retransmits. The cloud-init false-negative is now
+  tracked separately in #44.
+- 2026-06-08: The first iteration attempt exposed a real remote packaging bug:
+  the recipe set `MIX_BUILD_ROOT` to the remote cache but still tried to package
+  the release from `_build/prod/rel/...`. Mix correctly created the release at
+  `/var/tmp/moqxprobe-native-build/cache/linux_x86_64/build/prod/rel/moqxprobe_runtime`.
+  The recipe now packages from that cached release directory. The rerun reused
+  the expensive remote MsQuic/quicer cache, built
+  `moqxprobe-0.1.0-bdd98d2-dirty-b4dbfe3d40a0-linux-x86_64.tar.gz`, deployed it
+  to both roles, confirmed both `probed` health endpoints, and ran
+  `iperf3,reference_stream,moqx_stream` through the suite driver.
+- 2026-06-08: Suite artifacts are stored under
+  `bench/moqxprobe/results/20260608T131235Z-iter-remote/probed-suite/20260608T131235Z-iter-remote-probed-suite-133214/`.
+  The manifest status is `passed`, records resolved `current` symlinks for
+  `moqxprobe`, `quicprobe`, and `probed` on both roles, and embeds the exact
+  `moqxprobe` artifact metadata. The source snapshot was intentionally dirty
+  because it included the justfile packaging fix plus the new #44 issue file.
+  Validated JSONL artifacts include the iperf3 baseline, reference stream
+  measurement, and MOQX stream measurement. Reports validated successfully;
+  the stream steps were smoke-sized and are not throughput claims.
