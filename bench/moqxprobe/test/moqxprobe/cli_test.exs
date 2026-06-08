@@ -46,4 +46,41 @@ defmodule MOQXProbe.CLITest do
 
     assert ReleaseCLI.decode_argv(encoded) == ["report", "/tmp/run.jsonl", "--strict"]
   end
+
+  test "release wrapper does not inherit a parent release node name" do
+    source_wrapper = Path.expand("../../rel/overlays/bin/moqxprobe", __DIR__)
+
+    tmp_dir =
+      Path.join(System.tmp_dir!(), "moqxprobe-wrapper-#{System.unique_integer([:positive])}")
+
+    bin_dir = Path.join(tmp_dir, "bin")
+    wrapper = Path.join(bin_dir, "moqxprobe")
+    runtime = Path.join(bin_dir, "moqxprobe_runtime")
+
+    File.mkdir_p!(bin_dir)
+    File.cp!(source_wrapper, wrapper)
+    File.chmod!(wrapper, 0o755)
+
+    File.write!(runtime, """
+    #!/usr/bin/env sh
+    printf 'distribution=%s\\n' "$RELEASE_DISTRIBUTION"
+    printf 'node=%s\\n' "$RELEASE_NODE"
+    printf 'argv=%s\\n' "$MOQXPROBE_ARGV_B64"
+    """)
+
+    File.chmod!(runtime, 0o755)
+
+    on_exit(fn -> File.rm_rf!(tmp_dir) end)
+
+    {output, 0} =
+      System.cmd(wrapper, ["report", "/tmp/run.jsonl"],
+        env: [{"RELEASE_NODE", "probed@host"}, {"RELEASE_DISTRIBUTION", "name"}]
+      )
+
+    assert output =~ "distribution=none"
+    assert output =~ "node=moqxprobe_cli_"
+    refute output =~ "node=probed@host"
+    assert output =~ Base.encode64("report")
+    assert output =~ Base.encode64("/tmp/run.jsonl")
+  end
 end

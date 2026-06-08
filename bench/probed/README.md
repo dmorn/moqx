@@ -171,6 +171,14 @@ Build the Linux Mix release artifact:
 just bench-transport-build-probed linux_arm64
 ```
 
+When a target architecture cannot be built reliably through local Docker
+emulation, build the release natively on an already-provisioned lab role and
+fetch the artifact:
+
+```bash
+just bench-transport-build-probed-remote-role <run-id> client linux_x86_64
+```
+
 Deploy it to the disposable Terraform roles:
 
 ```bash

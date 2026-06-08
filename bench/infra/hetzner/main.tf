@@ -1,6 +1,8 @@
 locals {
-  safe_profile_name = substr(replace(lower(var.profile_name), "/[^a-z0-9-]/", "-"), 0, 32)
-  safe_run_id       = substr(replace(lower(var.run_id), "/[^a-z0-9-]/", "-"), 0, 24)
+  raw_profile_name  = replace(lower(var.profile_name), "/[^a-z0-9-]/", "-")
+  raw_run_id        = replace(lower(var.run_id), "/[^a-z0-9-]/", "-")
+  safe_profile_name = trim(substr(local.raw_profile_name, 0, 32), "-")
+  safe_run_id       = trim(substr(local.raw_run_id, 0, 24), "-")
   name_prefix       = substr("${var.project_name}-${local.safe_profile_name}-${local.safe_run_id}", 0, 54)
 
   evidence_tier = var.client_location == var.server_location ? "same_region_pair" : "cross_region_pair"

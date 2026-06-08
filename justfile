@@ -535,6 +535,98 @@ bench-transport-build-probed probed_target="linux_arm64":
     test -f "{{ probed_dir }}/$artifact_rel"
     printf 'Built %s\n' "{{ probed_dir }}/$artifact_rel"
 
+# Build the probed Mix release natively on one Terraform role and fetch it locally.
+bench-transport-build-probed-remote-role run_id role probed_target="linux_x86_64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    target="$(just --quiet bench-transport-target "{{ role }}")"
+    just bench-transport-build-probed-remote-target "$target" "{{ run_id }}" "{{ probed_target }}"
+
+# Build the probed Mix release natively on one explicit SSH target and fetch it locally.
+bench-transport-build-probed-remote-target target run_id probed_target="linux_x86_64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    key="{{ bench_dir }}/.keys/{{ run_id }}/id_ed25519"
+    test -f "$key" || {
+      printf 'Missing SSH key for run %s\n' "{{ run_id }}" >&2
+      exit 2
+    }
+
+    case "{{ probed_target }}" in
+      linux_arm64)
+        expected_uname="aarch64"
+        ;;
+      linux_x86_64)
+        expected_uname="x86_64"
+        ;;
+      *)
+        printf 'Unsupported probed target: %s\n' "{{ probed_target }}" >&2
+        printf '%s\n' 'Remote probed builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    artifact_rel="$(just --quiet bench-transport-probed-artifact-rel "{{ probed_target }}")"
+    artifact_name="$(basename "$artifact_rel")"
+    artifact_path="{{ probed_dir }}/$artifact_rel"
+    local_stage="$(mktemp -d "${TMPDIR:-/tmp}/probed-source.XXXXXX")"
+    remote_root="/var/tmp/probed-native-build"
+    remote_source="/tmp/probed-source-{{ git_sha }}.tar.gz"
+    remote_work="$remote_root/{{ git_sha }}"
+    remote_artifact="$remote_root/artifacts/$artifact_name"
+
+    cleanup() {
+      rm -rf "$local_stage"
+    }
+    trap cleanup EXIT
+
+    mkdir -p "$(dirname "$artifact_path")"
+    git archive --format=tar.gz --output "$local_stage/source.tar.gz" HEAD
+
+    SSH_OPTS="-i {{ bench_dir }}/.keys/{{ run_id }}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={{ bench_dir }}/.keys/{{ run_id }}/known_hosts"
+
+    # shellcheck disable=SC2086
+    remote_uname="$(ssh $SSH_OPTS "{{ target }}" "uname -m")"
+    if [ "$remote_uname" != "$expected_uname" ]; then
+      printf 'Target architecture mismatch for %s: got %s, expected %s\n' \
+        "{{ probed_target }}" "$remote_uname" "$expected_uname" >&2
+      exit 1
+    fi
+
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "$local_stage/source.tar.gz" "{{ target }}:$remote_source"
+
+    # shellcheck disable=SC2086
+    ssh $SSH_OPTS "{{ target }}" \
+      "set -e; \
+       export MIX_ENV=prod LANG=C.UTF-8; \
+       mkdir -p '$remote_root/artifacts'; \
+       if [ ! -f '$remote_artifact' ]; then \
+         rm -rf '$remote_work'; \
+         mkdir -p '$remote_work'; \
+         tar -xzf '$remote_source' -C '$remote_work'; \
+         cd '$remote_work/bench/probed'; \
+         mix local.hex --force; \
+         mix local.rebar --force; \
+         mix deps.get --only prod; \
+         mix release '{{ probed_release_name }}' --overwrite; \
+         test -x '_build/prod/rel/{{ probed_release_name }}/bin/probed'; \
+         tar -C '_build/prod/rel/{{ probed_release_name }}' -czf '$remote_artifact' .; \
+       fi; \
+       rm -f '$remote_source'; \
+       test -f '$remote_artifact'"
+
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "{{ target }}:$remote_artifact" "$artifact_path"
+    printf 'Built %s on %s and fetched %s\n' "{{ probed_target }}" "{{ target }}" "$artifact_path"
+
 # Print the moqxprobe Mix release artifact path for one Linux target.
 bench-transport-artifact-path moqxprobe_target="linux_arm64":
     #!/usr/bin/env bash

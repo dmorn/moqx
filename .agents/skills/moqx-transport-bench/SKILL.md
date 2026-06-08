@@ -42,6 +42,10 @@ Source of truth:
 - Build Linux `probed` Mix release artifacts with
   `just bench-transport-build-probed <target>` and deploy them with
   `just bench-transport-deploy-probed <target> <run-id>`.
+- For Linux/x86_64 `probed`, use
+  `just bench-transport-build-probed-remote-role <run-id> client linux_x86_64`
+  on an already-provisioned x86 node when Docker/OTP cross-architecture
+  emulation is unreliable.
 - Build `quicprobe` with native Go cross-compilation through mise via
   `just bench-transport-build-quicprobe <target>`, where target is one of
   `linux_arm64`, `linux_x86_64`, `darwin_arm64`, or `darwin_x86_64`. Deploys

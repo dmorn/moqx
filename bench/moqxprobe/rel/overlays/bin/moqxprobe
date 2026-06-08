@@ -12,6 +12,6 @@ done
 
 export MOQXPROBE_ARGV_B64="$argv_b64"
 export MOQXPROBE_RELEASE_CLI=1
-export RELEASE_DISTRIBUTION="${RELEASE_DISTRIBUTION:-none}"
-export RELEASE_NODE="${RELEASE_NODE:-moqxprobe_cli_$$}"
+export RELEASE_DISTRIBUTION=none
+export RELEASE_NODE="${MOQXPROBE_RELEASE_NODE:-moqxprobe_cli_$$}"
 exec "$bin_dir/moqxprobe_runtime" start
