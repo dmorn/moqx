@@ -29,15 +29,20 @@ Source of truth:
 - Prefer the runtime `moqxprobe` CLI on remote nodes. Local Mix
   tasks under `mix moqx.transport.*` are development wrappers over the same
   runtime command modules.
-- Build Linux/ARM64 remote release artifacts with Docker via
-  `just bench-transport-build-release`; deploy them to Terraform `client` and
-  `server` roles with `just bench-transport-deploy`, or to one explicit target
+- Build Linux/ARM64 `moqxprobe` Mix release artifacts with Docker via
+  `just bench-transport-build-release linux_arm64`; deploy them to Terraform
+  `client` and `server` roles with
+  `just bench-transport-deploy-release linux_arm64`, or to one explicit target
   with `just bench-transport-deploy-target`.
-- Build Burrito-wrapped Linux artifacts inside the target Linux Docker image
-  with `just bench-transport-build-burrito-release linux_arm64`; deploy them
-  with `just bench-transport-deploy-burrito linux_arm64`. Do not use
-  host-local Burrito output for Linux deployment when native dependencies such
-  as `quicer` are present.
+- For Linux/x86_64 `moqxprobe`, prefer
+  `just bench-transport-build-release-remote-role <run-id> client linux_x86_64`
+  on an already-provisioned x86 node when Docker/OTP cross-architecture
+  emulation is unreliable, then deploy with
+  `just bench-transport-deploy-release linux_x86_64 <run-id>`.
+- Keep Burrito for Linux `moqxprobe` experimental while the project depends on
+  `quicer`; the canonical remote deployment path is the glibc-compatible Mix
+  release. Do not deploy host-local Burrito output for Linux when native
+  dependencies such as `quicer` are present.
 - Build `quicprobe` with native Go cross-compilation through mise via
   `just bench-transport-build-quicprobe <target>`, where target is one of
   `linux_arm64`, `linux_x86_64`, `darwin_arm64`, or `darwin_x86_64`. Deploys
@@ -80,8 +85,8 @@ Source of truth:
 
    ```bash
    just bench-transport-apply-plan
-   just bench-transport-build-release
-   just bench-transport-deploy
+   just bench-transport-build-release linux_arm64
+   just bench-transport-deploy-release linux_arm64
    ```
 
 7. Run the path baseline:

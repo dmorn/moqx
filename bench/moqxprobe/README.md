@@ -944,10 +944,10 @@ the release payload would still contain the locally compiled `quicer` NIF.
 For Hetzner ARM nodes, build the Linux/ARM64 artifact with Docker:
 
 ```bash
-just bench-transport-build-release
+just bench-transport-build-release linux_arm64
 ```
 
-The default artifact path is:
+The artifact path is:
 
 ```text
 bench/moqxprobe/build/artifacts/moqxprobe-<version>-<git>-linux-arm64.tar.gz
@@ -959,12 +959,36 @@ emitted by the remote CLI can be tied back to the artifact that produced them.
 The Docker build uses `elixir:1.19.5-otp-28` by default and can be overridden:
 
 ```bash
-ELIXIR_IMAGE=elixir:1.19.5-otp-28 TARGET_ARCH=arm64 \
-  just bench-transport-build-release
+ELIXIR_IMAGE=elixir:1.19.5-otp-28 just bench-transport-build-release linux_arm64
 ```
 
-For Burrito deployment, build inside the target Linux Docker image so native
-dependencies are compiled for the same OS/architecture as the remote node:
+Use the same target names as the other transport-bench artifacts:
+
+```bash
+just bench-transport-release-artifact-rel linux_arm64
+just bench-transport-release-artifact-rel linux_x86_64
+```
+
+If the target architecture cannot be built reliably from the workstation, build
+the Mix release natively on an already-provisioned benchmark node and fetch the
+artifact back locally:
+
+```bash
+just bench-transport-build-release-remote-role <run-id> client linux_x86_64
+```
+
+The native remote build uploads a `git archive HEAD` source snapshot over SSH,
+checks that the remote machine architecture matches the requested target, builds
+the normal glibc-compatible Mix release on that host, and stores the fetched
+artifact under the same local `build/artifacts/` naming convention:
+
+```text
+bench/moqxprobe/build/artifacts/moqxprobe-<version>-<git>-linux-x86_64.tar.gz
+```
+
+For Burrito packaging experiments, build inside the target Linux Docker image so
+native dependencies are compiled for the same OS/architecture as the remote
+node:
 
 ```bash
 just bench-transport-build-burrito-release linux_arm64
@@ -976,6 +1000,11 @@ The artifact is still a deploy-compatible tarball containing
 ```text
 bench/moqxprobe/build/artifacts/moqxprobe-burrito-<version>-<git>-linux-arm64.tar.gz
 ```
+
+Keep Burrito as experimental for Linux `moqxprobe` while the project depends on
+the `quicer` NIF. The canonical remote deployment path is the Mix release above;
+the Burrito runtime can use a different libc ABI than the native quicer build,
+which can make the extracted NIF fail at runtime even when compilation succeeds.
 
 The Dockerfile stages dependency resolution and `mix deps.compile quicer`
 before copying application source, so the expensive `libquicer_nif.so` layer is
@@ -1008,10 +1037,11 @@ Deploy a built artifact to the Terraform `client` and `server` roles in
 parallel:
 
 ```bash
-just bench-transport-deploy
+just bench-transport-deploy-release linux_arm64
 ```
 
-Deploy a built Burrito artifact to the same roles:
+Deploy a built Burrito artifact to the same roles only when intentionally
+validating the experimental Burrito path:
 
 ```bash
 just bench-transport-deploy-burrito linux_arm64

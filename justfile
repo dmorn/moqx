@@ -217,21 +217,165 @@ bench-transport-verify-clean:
 
     printf '%s\n' 'No Terraform state entries or labelled Hetzner resources remain.'
 
-# Build the Linux/ARM64 benchmark release artifact with Docker.
-bench-transport-build-release:
-    mkdir -p "{{ bench_dir }}/{{ artifact_dir }}"
-    cd "{{ bench_dir }}" && docker buildx build \
-      --platform "{{ docker_platform }}" \
+# Print the deployable moqxprobe Mix release artifact path for one Linux target.
+bench-transport-release-artifact-rel moqxprobe_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ moqxprobe_target }}" in
+      linux_arm64) artifact_target="linux-arm64" ;;
+      linux_x86_64) artifact_target="linux-x86_64" ;;
+      *)
+        printf 'Unsupported moqxprobe target: %s\n' "{{ moqxprobe_target }}" >&2
+        printf '%s\n' 'Remote moqxprobe builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    printf '%s/%s-%s-%s-%s.tar.gz\n' \
+      "{{ artifact_dir }}" \
+      "{{ release_cli }}" \
+      "{{ release_version }}" \
+      "{{ git_sha }}" \
+      "$artifact_target"
+
+# Print the deployable moqxprobe Mix release artifact path for one Linux target.
+bench-transport-release-artifact-path moqxprobe_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    artifact_rel="$(just --quiet bench-transport-release-artifact-rel "{{ moqxprobe_target }}")"
+    printf '%s/%s\n' "{{ bench_dir }}" "$artifact_rel"
+
+# Build the moqxprobe Mix release artifact with Docker for one Linux target.
+bench-transport-build-release moqxprobe_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ moqxprobe_target }}" in
+      linux_arm64)
+        docker_platform="linux/arm64"
+        ;;
+      linux_x86_64)
+        docker_platform="linux/amd64"
+        ;;
+      *)
+        printf 'Unsupported moqxprobe target: %s\n' "{{ moqxprobe_target }}" >&2
+        printf '%s\n' 'Docker moqxprobe builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    artifact_rel="$(just --quiet bench-transport-release-artifact-rel "{{ moqxprobe_target }}")"
+    artifact_name="$(basename "$artifact_rel")"
+    artifact_path="{{ bench_dir }}/$artifact_rel"
+
+    mkdir -p "$(dirname "$artifact_path")"
+    cd "{{ bench_dir }}"
+    docker buildx build \
+      --platform "$docker_platform" \
       --file docker/Dockerfile.release \
       --target artifact \
       --output "type=local,dest={{ artifact_dir }}" \
       --build-arg "ELIXIR_IMAGE={{ elixir_image }}" \
       --build-arg "RELEASE_NAME={{ release_name }}" \
       --build-arg "BUILD_GIT_SHA={{ git_sha }}" \
-      --build-arg "ARTIFACT_NAME={{ artifact_name }}" \
+      --build-arg "ARTIFACT_NAME=$artifact_name" \
       ../..
-    @test -f "{{ artifact }}"
-    @printf 'Built %s\n' "{{ artifact }}"
+    test -f "$artifact_rel"
+    printf 'Built %s\n' "$artifact_path"
+
+# Build the moqxprobe Mix release natively on one Terraform role and fetch it locally.
+bench-transport-build-release-remote-role run_id role moqxprobe_target="linux_x86_64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    target="$(just --quiet bench-transport-target "{{ role }}")"
+    just bench-transport-build-release-remote-target "$target" "{{ run_id }}" "{{ moqxprobe_target }}"
+
+# Build the moqxprobe Mix release natively on one explicit SSH target and fetch it locally.
+bench-transport-build-release-remote-target target run_id moqxprobe_target="linux_x86_64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    key="{{ bench_dir }}/.keys/{{ run_id }}/id_ed25519"
+    test -f "$key" || {
+      printf 'Missing SSH key for run %s\n' "{{ run_id }}" >&2
+      exit 2
+    }
+
+    case "{{ moqxprobe_target }}" in
+      linux_arm64)
+        expected_uname="aarch64"
+        ;;
+      linux_x86_64)
+        expected_uname="x86_64"
+        ;;
+      *)
+        printf 'Unsupported moqxprobe target: %s\n' "{{ moqxprobe_target }}" >&2
+        printf '%s\n' 'Remote moqxprobe builds are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    artifact_rel="$(just --quiet bench-transport-release-artifact-rel "{{ moqxprobe_target }}")"
+    artifact_name="$(basename "$artifact_rel")"
+    artifact_path="{{ bench_dir }}/$artifact_rel"
+    local_stage="$(mktemp -d "${TMPDIR:-/tmp}/moqxprobe-source.XXXXXX")"
+    remote_root="/var/tmp/moqxprobe-native-build"
+    remote_source="/tmp/moqxprobe-source-{{ git_sha }}.tar.gz"
+    remote_work="$remote_root/{{ git_sha }}"
+    remote_artifact="$remote_root/artifacts/$artifact_name"
+
+    cleanup() {
+      rm -rf "$local_stage"
+    }
+    trap cleanup EXIT
+
+    mkdir -p "$(dirname "$artifact_path")"
+    git archive --format=tar.gz --output "$local_stage/source.tar.gz" HEAD
+
+    SSH_OPTS="-i {{ bench_dir }}/.keys/{{ run_id }}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={{ bench_dir }}/.keys/{{ run_id }}/known_hosts"
+
+    # shellcheck disable=SC2086
+    remote_uname="$(ssh $SSH_OPTS "{{ target }}" "uname -m")"
+    if [ "$remote_uname" != "$expected_uname" ]; then
+      printf 'Target architecture mismatch for %s: got %s, expected %s\n' \
+        "{{ moqxprobe_target }}" "$remote_uname" "$expected_uname" >&2
+      exit 1
+    fi
+
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "$local_stage/source.tar.gz" "{{ target }}:$remote_source"
+
+    # shellcheck disable=SC2086
+    ssh $SSH_OPTS "{{ target }}" \
+      "set -e; \
+       export MIX_ENV=prod LANG=C.UTF-8 MOQXPROBE_BUILD_GIT_SHA={{ git_sha }}; \
+       mkdir -p '$remote_root/artifacts'; \
+       if [ ! -f '$remote_artifact' ]; then \
+         rm -rf '$remote_work'; \
+         mkdir -p '$remote_work'; \
+         tar -xzf '$remote_source' -C '$remote_work'; \
+         cd '$remote_work/bench/moqxprobe'; \
+         mix local.hex --force; \
+         mix local.rebar --force; \
+         mix deps.get --only prod; \
+         mix release '{{ release_name }}' --overwrite; \
+         test -x '_build/prod/rel/{{ release_name }}/bin/moqxprobe'; \
+         tar -C '_build/prod/rel/{{ release_name }}' -czf '$remote_artifact' .; \
+       fi; \
+       rm -f '$remote_source'; \
+       test -f '$remote_artifact'"
+
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "{{ target }}:$remote_artifact" "$artifact_path"
+    printf 'Built %s on %s and fetched %s\n' "{{ moqxprobe_target }}" "{{ target }}" "$artifact_path"
 
 # Build an experimental Burrito-wrapped moqxprobe binary for one target.
 bench-transport-build-burrito target="darwin_arm64":
@@ -511,9 +655,13 @@ bench-transport-build-probed-release probed_target="linux_arm64":
     test -f "{{ probed_dir }}/$artifact_rel"
     printf 'Built %s\n' "{{ probed_dir }}/$artifact_rel"
 
-# Print the release artifact path for the current defaults.
-bench-transport-artifact-path:
-    @printf '%s\n' "{{ artifact }}"
+# Print the moqxprobe Mix release artifact path for one Linux target.
+bench-transport-artifact-path moqxprobe_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    artifact_rel="$(just --quiet bench-transport-release-artifact-rel "{{ moqxprobe_target }}")"
+    printf '%s/%s\n' "{{ bench_dir }}" "$artifact_rel"
 
 # Print the quicprobe artifact path for one target.
 bench-transport-quicprobe-artifact-path quicprobe_target="linux_arm64":
@@ -534,6 +682,10 @@ bench-transport-probed-artifact-path probed_target="linux_arm64":
 # Deploy the release artifact to both Terraform roles in parallel.
 [parallel]
 bench-transport-deploy run_id=current_run artifact=artifact_rel: (bench-transport-deploy-role run_id "client" artifact) (bench-transport-deploy-role run_id "server" artifact)
+
+# Deploy the moqxprobe Mix release artifact for one Linux target to both Terraform roles.
+[parallel]
+bench-transport-deploy-release moqxprobe_target="linux_arm64" run_id=current_run: (bench-transport-deploy-release-role moqxprobe_target run_id "client") (bench-transport-deploy-release-role moqxprobe_target run_id "server")
 
 # Deploy the Burrito release artifact to both Terraform roles in parallel.
 [parallel]
@@ -559,6 +711,29 @@ bench-transport-deploy-role run_id role artifact=artifact_rel:
 
     target="$(just --quiet bench-transport-target {{ role }})"
     just bench-transport-deploy-target "$target" "{{ run_id }}" "{{ artifact }}"
+
+# Deploy the moqxprobe Mix release artifact for one Linux target to one Terraform role.
+bench-transport-deploy-release-role moqxprobe_target run_id role:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    case "{{ moqxprobe_target }}" in
+      linux_arm64|linux_x86_64) ;;
+      *)
+        printf 'Unsupported deploy target for moqxprobe: %s\n' "{{ moqxprobe_target }}" >&2
+        printf '%s\n' 'Remote deploys are Linux-only; use linux_arm64 or linux_x86_64.' >&2
+        exit 2
+        ;;
+    esac
+
+    if [ -z "{{ run_id }}" ]; then
+      printf '%s\n' 'Missing run_id. Run `just bench-transport-new-run` first or pass run_id explicitly.' >&2
+      exit 2
+    fi
+
+    artifact="$(just --quiet bench-transport-release-artifact-rel "{{ moqxprobe_target }}")"
+    target="$(just --quiet bench-transport-target {{ role }})"
+    just bench-transport-deploy-target "$target" "{{ run_id }}" "$artifact"
 
 # Deploy the Burrito release artifact to one Terraform role.
 bench-transport-deploy-burrito-role burrito_target run_id role:

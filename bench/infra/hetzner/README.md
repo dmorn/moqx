@@ -125,17 +125,25 @@ finishes.
 
 ## Deploy Benchmark CLI
 
-Build the Linux/ARM64 release artifact locally with Docker:
+Build the Linux/ARM64 `moqxprobe` Mix release artifact locally with Docker:
 
 ```bash
-just bench-transport-build-release
+just bench-transport-build-release linux_arm64
 ```
 
 After Terraform apply and cloud-init readiness checks, deploy the release to
 the Terraform `client` and `server` roles:
 
 ```bash
-just bench-transport-deploy
+just bench-transport-deploy-release linux_arm64
+```
+
+For x86 benchmark nodes, prefer a native remote build on one already-provisioned
+node when Docker/OTP cross-architecture emulation is unreliable:
+
+```bash
+just bench-transport-build-release-remote-role <run-id> client linux_x86_64
+just bench-transport-deploy-release linux_x86_64 <run-id>
 ```
 
 Reference-comparison runs also need the repo-owned `bench/quicprobe` binary on

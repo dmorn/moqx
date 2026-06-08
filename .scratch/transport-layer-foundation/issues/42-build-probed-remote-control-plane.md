@@ -369,23 +369,23 @@ Use the daemon to run the next #40 validation:
 
 ## Acceptance criteria
 
-- [ ] `bench/probed` exposes the Phase 1 HTTP API with bearer-token auth.
-- [ ] `probed` loads config from file/env and reports node/tool status.
-- [ ] Only configured absolute tool paths can be executed.
-- [ ] Processes are started with argv arrays, not shell strings.
-- [ ] Process stdout/stderr, command metadata, exit data, and declared
+- [x] `bench/probed` exposes the Phase 1 HTTP API with bearer-token auth.
+- [x] `probed` loads config from file/env and reports node/tool status.
+- [x] Only configured absolute tool paths can be executed.
+- [x] Processes are started with argv arrays, not shell strings.
+- [x] Process stdout/stderr, command metadata, exit data, and declared
       artifacts are stored under the run directory.
-- [ ] Run/process states follow the documented state model.
-- [ ] Artifacts can be listed, fetched individually, and fetched as a bundle.
-- [ ] Path traversal outside the work directory is rejected.
-- [ ] A local fake-tool smoke test proves create-run, start-process,
+- [x] Run/process states follow the documented state model.
+- [x] Artifacts can be listed, fetched individually, and fetched as a bundle.
+- [x] Path traversal outside the work directory is rejected.
+- [x] A local fake-tool smoke test proves create-run, start-process,
       observe-status, fetch-artifact, fetch-bundle, and cleanup.
 - [ ] Packaging/deploy recipes can put `probed` on a lab node and verify
       `/v1/health`.
 - [ ] The first remote smoke starts quicprobe server through `probed`, runs a
       `moqxprobe measure` client through `probed`, fetches JSONL/log artifacts,
       and validates the JSONL with `moqxprobe report`.
-- [ ] Documentation records that `probed` does not own benchmark semantics and
+- [x] Documentation records that `probed` does not own benchmark semantics and
       does not manage cloud lifecycle.
 
 ## Out of scope
@@ -482,9 +482,9 @@ Use the daemon to run the next #40 validation:
 - 2026-06-08: Remote `probed` Burrito itself is viable: both nodes started the
   daemon bound to their private IPs and authenticated health returned
   `{"status":"ok"}` for node ids `client` and `server`. The `just`
-  `bench-transport-start-probed-role` health check currently reports a false
-  failure because it curls `/v1/health` without the bearer token; the daemon was
-  listening and correctly returned `401` unauthenticated.
+  `bench-transport-start-probed-role` and `bench-transport-probed-health-role`
+  recipes now pass the bearer token to `/v1/health`, so the earlier
+  unauthenticated `401` is tracked as resolved in the operator recipes.
 - 2026-06-08: Because `moqxprobe` packaging blocked the full smoke, ran a
   minimal curl-driven remote `probed` API smoke with only `iperf3`:
   `20260605T190822Z-psmoke-minimal-iperf`. The controller created matching runs
@@ -504,3 +504,10 @@ Use the daemon to run the next #40 validation:
   `20260605T190822Z-psmoke` with the `x86-control` profile; the next disposable
   apply should confirm cloud-init reaches `done` on both nodes without manual
   package installation.
+- 2026-06-08: Follow-up fix for the `moqxprobe` packaging blocker: keep Burrito
+  experimental for Linux `moqxprobe` while quicer is present, and restore the
+  canonical remote path to the glibc-compatible Mix release. Added
+  target-explicit release artifact/deploy recipes and a native remote build
+  recipe for x86 nodes so the AMD64 artifact can be built on the benchmark host
+  without cloning the repo or relying on Docker/OTP cross-architecture
+  emulation.
