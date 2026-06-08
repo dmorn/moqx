@@ -202,3 +202,16 @@ requested load on the link.
   remains. The next #40 step is not more local sender-admission work, but a
   small ARM real-path bracket comparing quicprobe control versus the new
   MOQX-client DATAGRAM sender around 30k/32k pps.
+- 2026-06-08: Attempted to start the next ARM real-path bracket with run id
+  `20260608T151903Z-issue40-arm-dgram`, after closing #42 and pushing a clean
+  `main` so the remote build would have stable artifact identity. Hetzner ARM
+  placement was unavailable for every attempted profile: `arm-hel1-tiny`
+  (`cax11`, `hel1 -> hel1`), `arm-nbg1-tiny` (`cax11`, `nbg1 -> nbg1`),
+  `arm-default` (`cax31`, `fsn1 -> hel1`), and `arm-nbg1-hel1-stress`
+  (`cax41`, `nbg1 -> hel1`) all failed during server placement with
+  `resource_unavailable` for both client and server. Each partial network,
+  firewall, and SSH-key state was destroyed immediately after the failed
+  apply. `just bench-transport-verify-clean` reported no Terraform state
+  entries or labelled Hetzner resources remaining. No performance evidence was
+  produced, and no x86 substitute was run because it would not satisfy the
+  pending ARM #40 validation.
