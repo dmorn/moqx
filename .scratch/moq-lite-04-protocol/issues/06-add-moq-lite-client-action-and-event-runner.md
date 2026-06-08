@@ -2,7 +2,7 @@
 
 # Add MOQ Lite 04 client action and event runner
 
-Status: ready-for-agent
+Status: done
 Type: enhancement
 
 ## Parent
@@ -25,26 +25,28 @@ without changing the pure Session reducer.
 
 ## Acceptance criteria
 
-- [ ] A public receive/poll function exists on `MOQX.MOQLite04` for one
+- [x] A public receive/poll function exists on `MOQX.MOQLite04` for one
       connected client, such as `recv/2`, and it returns the updated client
       plus protocol events.
-- [ ] The runner consumes normalized `MOQX.Transport` events only.
-- [ ] `:unknown` transport messages are ignored or surfaced with documented
+- [x] A public `MOQX.MOQLite04.command/2` function exists for local
+      application intent and returns the updated client plus protocol events.
+- [x] The runner consumes normalized `MOQX.Transport` events only.
+- [x] `:unknown` transport messages are ignored or surfaced with documented
       behavior without crashing the client.
-- [ ] Transport actions returned by `Session.handle_transport/2` are applied
+- [x] Transport actions returned by `Session.handle_transport/2` are applied
       through `MOQX.Transport`.
-- [ ] Transport actions returned by `Session.handle_command/2` can be applied
-      through a private or public runner helper without direct `quicer` calls.
-- [ ] Stream send, Finish Sending, Abort Sending, Abort Receiving, and
+- [x] Transport actions returned by `Session.handle_command/2` can be applied
+      through the public `command/2` runner helper without direct `quicer`
+      calls.
+- [x] Stream send, Finish Sending, Abort Sending, Abort Receiving, and
       Connection Close actions are all handled.
-- [ ] Errors from action application return structured client errors and retain
+- [x] Errors from action application return structured client errors and retain
       the updated session state where applicable.
-- [ ] Tests use `MOQX.Transport.Support` to prove normalized stream data and
+- [x] Tests use `MOQX.Transport.Support` to prove normalized stream data and
       stream lifecycle events flow through the runner.
-- [ ] No `MOQX.Endpoint`, publisher/subscriber connect mode, process registry,
+- [x] No `MOQX.Endpoint`, publisher/subscriber connect mode, process registry,
       or `Application` env seam is introduced.
 
 ## Blocked by
 
 - `.scratch/moq-lite-04-protocol/issues/05-add-uri-first-moq-lite-connect-facade.md`
-

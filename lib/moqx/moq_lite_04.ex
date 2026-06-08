@@ -56,6 +56,25 @@ defmodule MOQX.MOQLite04 do
   def connect(uri, opts \\ []), do: Client.connect(uri, opts)
 
   @doc """
+  Applies one local MOQ Lite draft-04 command to a connected client.
+  """
+  @spec command(Client.t(), term()) ::
+          {:ok, Client.t(), [term()]} | {:error, Client.t(), term(), [term()]}
+  def command(client, command), do: Client.command(client, command)
+
+  @doc """
+  Receives and handles one transport mailbox event for a connected client.
+
+  Unknown mailbox messages are ignored and return `{:ok, client, []}`. A timeout
+  returns `{:timeout, client}`.
+  """
+  @spec recv(Client.t(), timeout()) ::
+          {:ok, Client.t(), [term()]}
+          | {:error, Client.t(), term(), [term()]}
+          | {:timeout, Client.t()}
+  def recv(client, timeout \\ :infinity), do: Client.recv(client, timeout)
+
+  @doc """
   Returns the draft-04 numeric stream type ID for a known stream type.
   """
   @spec stream_type_id(stream_type()) :: {:ok, non_neg_integer()} | {:error, :unknown_stream_type}

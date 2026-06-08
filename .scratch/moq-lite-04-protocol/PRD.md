@@ -165,11 +165,13 @@ Delivered so far:
 - `MOQX.MOQLite04.connect/2` URI-first client facade over explicit transport
   options, native QUIC ALPN `moq-lite-04`, and a role-neutral
   `MOQX.MOQLite04.Client` value
+- `MOQX.MOQLite04.command/2` and `MOQX.MOQLite04.recv/2` client runner APIs
+  that thread the connected client value, keep `Session` pure, and apply
+  returned transport actions through `MOQX.Transport`
 - Session tests for Announce, Subscribe, Fetch, Probe, Goaway, Group,
   stream lifecycle, support transport normalized events, and the
   reference-style subscribe/group/frame smoke flow
 - Client/API follow-up issues:
-  - issue 06: client action and event runner;
   - issue 07: role-neutral subscriber operations;
   - issue 08: role-neutral publisher operations and smoke flow
 

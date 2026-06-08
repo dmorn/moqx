@@ -7,7 +7,7 @@ defmodule MOQX.MOQLite04.Client do
   top in later slices.
   """
 
-  alias MOQX.MOQLite04.Error
+  alias MOQX.MOQLite04.Error, as: ProtocolError
   alias MOQX.MOQLite04.Session
   alias MOQX.Transport
   alias MOQX.Transport.{Capabilities, Connection, Context}
@@ -16,6 +16,33 @@ defmodule MOQX.MOQLite04.Client do
 
   @enforce_keys [:uri, :context, :connection, :session]
   defstruct [:uri, :context, :connection, :session]
+
+  defmodule Error do
+    @moduledoc """
+    Structured client runner error.
+    """
+
+    @enforce_keys [:reason]
+    defstruct [:reason, :action, details: %{}]
+
+    @type reason :: :transport_action_failed | :transport_receive_failed
+
+    @type t :: %__MODULE__{
+            reason: reason(),
+            action: term() | nil,
+            details: map()
+          }
+
+    @doc false
+    @spec new(reason(), keyword()) :: t()
+    def new(reason, opts \\ []) do
+      %__MODULE__{
+        reason: reason,
+        action: Keyword.get(opts, :action),
+        details: Keyword.get(opts, :details, %{})
+      }
+    end
+  end
 
   @type t :: %__MODULE__{
           uri: URI.t(),
@@ -48,6 +75,58 @@ defmodule MOQX.MOQLite04.Client do
     else
       {:error, reason, _context} -> {:error, reason}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Applies one local protocol command and its resulting transport actions.
+
+  This is the low-level local application intent boundary. Higher-level
+  subscribe, publish, and fetch APIs build on top of it.
+  """
+  @spec command(t(), term()) :: {:ok, t(), [term()]} | {:error, t(), term(), [term()]}
+  def command(%__MODULE__{} = client, command) do
+    case Session.handle_command(client.session, command) do
+      {:ok, session, events, actions} ->
+        client
+        |> put_session(session)
+        |> apply_actions(actions, events, nil)
+
+      {:error, session, reason, events, actions} ->
+        client
+        |> put_session(session)
+        |> apply_actions(actions, events, reason)
+    end
+  end
+
+  @doc """
+  Receives and handles one normalized transport event from the caller mailbox.
+
+  Unknown mailbox messages are ignored and return `{:ok, client, []}`. A timeout
+  returns `{:timeout, client}`.
+  """
+  @spec recv(t(), timeout()) ::
+          {:ok, t(), [term()]} | {:error, t(), term(), [term()]} | {:timeout, t()}
+  def recv(%__MODULE__{} = client, timeout \\ :infinity) do
+    case Transport.receive_event(client.context, timeout) do
+      {:ok, event, context} ->
+        client
+        |> put_context(context)
+        |> handle_transport_event(event)
+
+      {:unknown, _message, context} ->
+        {:ok, put_context(client, context), []}
+
+      {:timeout, context} ->
+        {:timeout, put_context(client, context)}
+
+      {:error, reason, context} ->
+        error =
+          Error.new(:transport_receive_failed,
+            details: %{transport_reason: reason}
+          )
+
+        {:error, put_context(client, context), error, []}
     end
   end
 
@@ -102,12 +181,91 @@ defmodule MOQX.MOQLite04.Client do
 
       %Capabilities{alpn: actual} ->
         {:error,
-         Error.new(:unknown_alpn,
+         ProtocolError.new(:unknown_alpn,
            details: %{expected_alpn: @alpn, actual_alpn: actual}
          )}
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp put_context(%__MODULE__{} = client, context), do: %{client | context: context}
+
+  defp put_session(%__MODULE__{} = client, session), do: %{client | session: session}
+
+  defp handle_transport_event(%__MODULE__{} = client, event) do
+    case Session.handle_transport(client.session, event) do
+      :unknown ->
+        {:ok, client, []}
+
+      {:ok, session, events, actions} ->
+        client
+        |> put_session(session)
+        |> apply_actions(actions, events, nil)
+
+      {:error, session, reason, events, actions} ->
+        client
+        |> put_session(session)
+        |> apply_actions(actions, events, reason)
+    end
+  end
+
+  defp apply_actions(client, actions, events, session_error) do
+    case Enum.reduce_while(actions, {:ok, client}, &apply_action/2) do
+      {:ok, client} when is_nil(session_error) ->
+        {:ok, client, events}
+
+      {:ok, client} ->
+        {:error, client, session_error, events}
+
+      {:error, client, action, reason} ->
+        error =
+          Error.new(:transport_action_failed,
+            action: action,
+            details: %{transport_reason: reason}
+          )
+
+        {:error, client, error, events}
+    end
+  end
+
+  defp apply_action({:send_stream, stream, bytes, opts} = action, {:ok, client}) do
+    case Transport.send_stream(client.context, stream, bytes, opts) do
+      {:ok, _send, context} -> {:cont, {:ok, %{client | context: context}}}
+      {:error, reason, context} -> {:halt, {:error, %{client | context: context}, action, reason}}
+    end
+  end
+
+  defp apply_action({:finish_sending, stream} = action, {:ok, client}) do
+    case Transport.finish_sending(client.context, stream) do
+      {:ok, context} -> {:cont, {:ok, %{client | context: context}}}
+      {:error, reason, context} -> {:halt, {:error, %{client | context: context}, action, reason}}
+    end
+  end
+
+  defp apply_action({:abort_sending, stream, error_code} = action, {:ok, client}) do
+    case Transport.abort_sending(client.context, stream, error_code) do
+      {:ok, context} -> {:cont, {:ok, %{client | context: context}}}
+      {:error, reason, context} -> {:halt, {:error, %{client | context: context}, action, reason}}
+    end
+  end
+
+  defp apply_action({:abort_receiving, stream, error_code} = action, {:ok, client}) do
+    case Transport.abort_receiving(client.context, stream, error_code) do
+      {:ok, context} -> {:cont, {:ok, %{client | context: context}}}
+      {:error, reason, context} -> {:halt, {:error, %{client | context: context}, action, reason}}
+    end
+  end
+
+  defp apply_action({:close_connection, connection, error_code} = action, {:ok, client}) do
+    case Transport.close_connection(client.context, connection, error_code) do
+      {:ok, context} -> {:cont, {:ok, %{client | context: context}}}
+      {:error, reason, context} -> {:halt, {:error, %{client | context: context}, action, reason}}
+    end
+  end
+
+  defp apply_action(action, {:ok, client}) do
+    {:halt, {:error, client, action, {:unsupported_transport_action, action}}}
   end
 end
