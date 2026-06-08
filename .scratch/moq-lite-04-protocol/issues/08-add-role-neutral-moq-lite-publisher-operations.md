@@ -2,7 +2,7 @@
 
 # Add role-neutral MOQ Lite 04 publisher operations
 
-Status: ready-for-agent
+Status: done
 Type: enhancement
 
 ## Parent
@@ -25,26 +25,25 @@ flow that mirrors the reducer smoke flow from issue 04, but now passes through
 
 ## Acceptance criteria
 
-- [ ] Public functions exist on `MOQX.MOQLite04` for sending Announce messages
+- [x] Public functions exist on `MOQX.MOQLite04` for sending Announce messages
       on an Announce transaction stream.
-- [ ] Public functions exist for sending SubscribeOk and SubscribeDrop on a
+- [x] Public functions exist for sending SubscribeOk and SubscribeDrop on a
       Subscribe transaction stream.
-- [ ] Public functions exist for opening a publisher-created Group stream and
+- [x] Public functions exist for opening a publisher-created Group stream and
       sending Group plus Frame messages.
-- [ ] SubscribeDrop before SubscribeOk is rejected through the client API using
+- [x] SubscribeDrop before SubscribeOk is rejected through the client API using
       the Session reducer's structured error.
-- [ ] Duplicate Announce status for one suffix is rejected through the client
+- [x] Duplicate Announce status for one suffix is rejected through the client
       API using the Session reducer's structured error.
-- [ ] Group publishing is rejected unless the peer subscription is active.
-- [ ] `connect/2` remains role-neutral; no publisher/subscriber connect mode is
+- [x] Group publishing is rejected unless the peer subscription is active.
+- [x] `connect/2` remains role-neutral; no publisher/subscriber connect mode is
       added.
-- [ ] A support-transport smoke test proves one endpoint can subscribe and the
+- [x] A support-transport smoke test proves one endpoint can subscribe and the
       other can accept the subscription, send SubscribeOk, publish a Group, and
       deliver the original Frame payload.
-- [ ] The implementation preserves the pure Session reducer boundary and does
+- [x] The implementation preserves the pure Session reducer boundary and does
       not match raw `quicer` messages.
 
 ## Blocked by
 
 - `.scratch/moq-lite-04-protocol/issues/07-add-role-neutral-moq-lite-subscriber-operations.md`
-

@@ -57,6 +57,8 @@ defmodule MOQX.MOQLite04.Client do
   @type operation_result ::
           {:ok, t(), Stream.t(), [term()]} | {:error, t(), term(), [term()]}
 
+  @type accept_result :: {:ok, t(), Stream.t()} | {:error, t(), term()}
+
   @doc """
   Connects to a native QUIC MOQ Lite draft-04 endpoint.
   """
@@ -137,6 +139,27 @@ defmodule MOQX.MOQLite04.Client do
   end
 
   @doc """
+  Accepts a peer-opened stream and starts active transport delivery.
+  """
+  @spec accept_stream(t(), timeout()) :: accept_result()
+  def accept_stream(%__MODULE__{} = client, timeout \\ :infinity) do
+    with {:ok, stream, context} <-
+           Transport.accept_stream(client.context, client.connection, [], timeout),
+         {:ok, context} <- Transport.set_active(context, stream, true) do
+      {:ok, put_context(client, context), stream}
+    else
+      {:error, reason, context} ->
+        error =
+          Error.new(:transport_action_failed,
+            action: :accept_stream,
+            details: %{transport_reason: reason}
+          )
+
+        {:error, put_context(client, context), error}
+    end
+  end
+
+  @doc """
   Opens an Announce transaction stream and sends `ANNOUNCE_INTEREST`.
   """
   @spec announce_interest(t(), MOQLite04.AnnounceInterest.t()) :: operation_result()
@@ -194,6 +217,43 @@ defmodule MOQX.MOQLite04.Client do
   @spec goaway(t(), MOQLite04.Goaway.t()) :: operation_result()
   def goaway(%__MODULE__{} = client, %MOQLite04.Goaway{} = message) do
     open_transaction(client, :goaway, message)
+  end
+
+  @doc """
+  Sends `ANNOUNCE` on an existing Announce transaction stream.
+  """
+  @spec announce(t(), Stream.t(), MOQLite04.Announce.t()) :: operation_result()
+  def announce(%__MODULE__{} = client, %Stream{} = stream, %MOQLite04.Announce{} = message) do
+    send_on_transaction(client, stream, :announce, message)
+  end
+
+  @doc """
+  Sends `SUBSCRIBE_OK` on an existing Subscribe transaction stream.
+  """
+  @spec subscribe_ok(t(), Stream.t(), MOQLite04.SubscribeOk.t()) :: operation_result()
+  def subscribe_ok(%__MODULE__{} = client, %Stream{} = stream, %MOQLite04.SubscribeOk{} = message) do
+    send_on_transaction(client, stream, :subscribe, message)
+  end
+
+  @doc """
+  Sends `SUBSCRIBE_DROP` on an existing Subscribe transaction stream.
+  """
+  @spec subscribe_drop(t(), Stream.t(), MOQLite04.SubscribeDrop.t()) :: operation_result()
+  def subscribe_drop(
+        %__MODULE__{} = client,
+        %Stream{} = stream,
+        %MOQLite04.SubscribeDrop{} = message
+      ) do
+    send_on_transaction(client, stream, :subscribe, message)
+  end
+
+  @doc """
+  Opens a publisher Group stream and sends `GROUP` followed by `FRAME` messages.
+  """
+  @spec publish_group(t(), MOQLite04.Group.t(), [MOQLite04.Frame.t()]) :: operation_result()
+  def publish_group(%__MODULE__{} = client, %MOQLite04.Group{} = group, frames)
+      when is_list(frames) do
+    open_group_stream(client, [group | frames])
   end
 
   defp reject_mode(opts) do
@@ -279,8 +339,30 @@ defmodule MOQX.MOQLite04.Client do
     end
   end
 
+  defp open_group_stream(%__MODULE__{} = client, messages) do
+    case Transport.open_stream(client.context, client.connection, direction: :unidirectional) do
+      {:ok, stream, context} ->
+        client
+        |> put_context(context)
+        |> send_on_stream(stream, :group, messages)
+
+      {:error, reason, context} ->
+        error =
+          Error.new(:transport_action_failed,
+            action: {:open_stream, :group},
+            details: %{transport_reason: reason}
+          )
+
+        {:error, put_context(client, context), error, []}
+    end
+  end
+
   defp send_on_transaction(%__MODULE__{} = client, %Stream{} = stream, stream_type, message) do
-    case command(client, {:send, stream, stream_type, [message]}) do
+    send_on_stream(client, stream, stream_type, [message])
+  end
+
+  defp send_on_stream(%__MODULE__{} = client, %Stream{} = stream, stream_type, messages) do
+    case command(client, {:send, stream, stream_type, messages}) do
       {:ok, client, events} -> {:ok, client, stream, events}
       {:error, client, reason, events} -> {:error, client, reason, events}
     end

@@ -1,6 +1,6 @@
 # MOQ Lite 04 protocol layer
 
-Status: in-progress
+Status: done
 
 ## Problem Statement
 
@@ -171,11 +171,16 @@ Delivered so far:
 - Role-neutral subscriber operations on `MOQX.MOQLite04` for
   AnnounceInterest, Subscribe, SubscribeUpdate, Fetch, Probe, repeated Probe,
   and Goaway transaction streams
+- Role-neutral publisher operations on `MOQX.MOQLite04` for accepting
+  peer-opened streams, sending Announce, SubscribeOk, and SubscribeDrop
+  responses, and publishing Group plus Frame messages on publisher-created
+  unidirectional streams
+- A client-level support-transport smoke flow that subscribes, accepts the
+  subscription, sends SubscribeOk, publishes a Group, and delivers the original
+  Frame payload through public client APIs
 - Session tests for Announce, Subscribe, Fetch, Probe, Goaway, Group,
   stream lifecycle, support transport normalized events, and the
   reference-style subscribe/group/frame smoke flow
-- Client/API follow-up issues:
-  - issue 08: role-neutral publisher operations and smoke flow
 
 ## References
 

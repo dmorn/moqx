@@ -549,9 +549,9 @@ defmodule MOQX.Transport.Support do
         stream_loop(%{state | send_finished?: finish?})
 
       {:incoming_data, data} ->
-        if state.active && state.owner do
+        if active_delivery?(state.active) && state.owner do
           send(state.owner, {:moqx_transport, {:stream_data, %Stream{pid: self()}, data, %{}}})
-          stream_loop(state)
+          stream_loop(%{state | active: next_active(state.active)})
         else
           stream_loop(deliver_passive_data(%{state | buffer: state.buffer <> data}))
         end
@@ -589,7 +589,7 @@ defmodule MOQX.Transport.Support do
 
       {:set_active, caller, ref, active} ->
         send(caller, {ref, :ok})
-        stream_loop(%{state | active: active})
+        stream_loop(deliver_active_data(%{state | active: active}))
 
       {:recv_data, caller, ref, byte_count} ->
         case take_bytes(state.buffer, byte_count) do
@@ -605,6 +605,27 @@ defmodule MOQX.Transport.Support do
         :ok
     end
   end
+
+  defp active_delivery?(true), do: true
+  defp active_delivery?(:once), do: true
+  defp active_delivery?(count) when is_integer(count) and count > 0, do: true
+  defp active_delivery?(_active), do: false
+
+  defp next_active(:once), do: false
+  defp next_active(count) when is_integer(count) and count > 0, do: count - 1
+  defp next_active(active), do: active
+
+  defp deliver_active_data(%{owner: owner, buffer: buffer} = state)
+       when is_pid(owner) and byte_size(buffer) > 0 do
+    if active_delivery?(state.active) do
+      send(owner, {:moqx_transport, {:stream_data, %Stream{pid: self()}, buffer, %{}}})
+      %{state | active: next_active(state.active), buffer: <<>>}
+    else
+      state
+    end
+  end
+
+  defp deliver_active_data(state), do: state
 
   defp send_stream_event(state, event, metadata) do
     if state.owner do
