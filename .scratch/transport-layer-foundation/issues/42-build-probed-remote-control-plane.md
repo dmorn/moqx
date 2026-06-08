@@ -1,6 +1,6 @@
 # Build probed remote benchmark control plane
 
-Status: in-progress
+Status: closed
 Type: AFK
 
 ## Parent
@@ -618,3 +618,9 @@ Use the daemon to run the next #40 validation:
   Validated JSONL artifacts include the iperf3 baseline, reference stream
   measurement, and MOQX stream measurement. Reports validated successfully;
   the stream steps were smoke-sized and are not throughput claims.
+- 2026-06-08: Closed after #44 removed the remaining private-readiness
+  false-negative from the remote iteration loop. The control-plane scope is
+  complete: `probed` can supervise configured tools, collect artifacts, run the
+  repo-owned suite driver, and support dirty-source `moqxprobe` iteration. The
+  next lab work belongs to #40/#26: use this control plane to run the ARM
+  DATAGRAM bracket plus a short stream smoke.
