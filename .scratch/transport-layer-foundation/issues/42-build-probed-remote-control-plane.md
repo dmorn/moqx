@@ -384,6 +384,13 @@ Use the daemon to run the next #40 validation:
 - [x] The first remote smoke starts quicprobe server through `probed`, runs a
       `moqxprobe measure` client through `probed`, fetches JSONL/log artifacts,
       and validates the JSONL with `moqxprobe report`.
+- [ ] A repo-owned remote suite driver can run multiple tests through `probed`
+      in one API run, fetch bundles, validate JSONL reports, and write a local
+      manifest without relying on a temporary script.
+- [ ] The moqxprobe iteration loop can build from a dirty source snapshot,
+      deploy the new artifact to both lab nodes, run the selected `probed`
+      suite, and record the exact deployed artifact identity in the local
+      manifest.
 - [x] Documentation records that `probed` does not own benchmark semantics and
       does not manage cloud lifecycle.
 
@@ -541,3 +548,43 @@ Use the daemon to run the next #40 validation:
   error. The `moqxprobe` wrapper now forces `RELEASE_DISTRIBUTION=none` and
   uses a unique `MOQXPROBE_RELEASE_NODE` fallback. A regression test covers the
   wrapper environment.
+- 2026-06-08: Added the first repo-owned remote suite driver,
+  `bench/probed/scripts/remote_curl_suite.sh`, exposed through
+  `just bench-transport-probed-suite`. The driver keeps `probed` semantic-free:
+  it uses the HTTP API to create one run on both nodes, stages certificates,
+  starts `iperf3` and `quicprobe` server processes through server `probed`,
+  runs selected `moqxprobe` client workloads through client `probed`, fetches
+  bundles, validates JSONL with `moqxprobe report`, and writes a local
+  manifest under `bench/moqxprobe/results/<run-id>/probed-suite/<api-run-id>/`.
+  Supported suite steps are `iperf3`, `reference_stream`, `moqx_stream`,
+  `reference_datagram`, and `moqx_datagram`; the default stays short
+  (`iperf3,reference_stream,moqx_stream`) to avoid wasting remote time.
+  Remote proof of this new driver is still pending.
+- 2026-06-08: Identified the next iteration-loop blocker. The current
+  packaging/deploy model updates `/opt/moqx-bench/moqxprobe/current`, so
+  `probed` does not need an artifact registry, but operators still have to
+  manually build, deploy, and rerun. Worse, the native remote build path uses
+  `git archive HEAD`, which excludes dirty local changes and forces commits
+  just to test probe improvements. The desired loop is: create a clean or dirty
+  source snapshot, build it with remote caches preserved, deploy the resulting
+  artifact by updating the `current` symlink, run the selected suite through
+  `probed`, and write manifest evidence that identifies the exact artifact
+  used. `probed` remains a process supervisor/artifact store; the controller
+  owns deploy/update/run semantics.
+- 2026-06-08: Implemented the local side of that iteration loop. Added
+  `bench/moqxprobe/scripts/source_snapshot.sh` to package tracked files,
+  tracked modifications, and untracked non-ignored files into a source archive
+  with a clean-or-dirty artifact id. The remote native `moqxprobe` build now
+  uses that source snapshot instead of `git archive HEAD`, preserves Mix/Hex/
+  Rebar/deps/build caches under `/var/tmp/moqxprobe-native-build/cache/`, embeds
+  `.moqx-bench-artifact.json` into the release, records the latest built
+  artifact per target, and fetches matching local metadata. Added
+  `just bench-transport-update-moqxprobe` for build-and-deploy and
+  `just bench-transport-iterate-moqxprobe` for build, deploy, health-check, and
+  suite execution. The suite manifest now records resolved tool `current`
+  symlinks and `moqxprobe` artifact metadata. Local proof passed:
+  `source_snapshot.sh` produced a dirty artifact id and archive containing the
+  new scripts, `bash -n` passed for the shell scripts, `just --dry-run`
+  expanded the update/iterate recipes, invalid suite selection failed before
+  Terraform access, and the full root/bench format-test-credo gate passed.
+  Remote proof of the full iteration loop is still pending.

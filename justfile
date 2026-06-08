@@ -242,6 +242,20 @@ bench-transport-release-artifact-path moqxprobe_target="linux_arm64":
     artifact_rel="$(just --quiet bench-transport-release-artifact-rel "{{ moqxprobe_target }}")"
     printf '%s/%s\n' "{{ bench_dir }}" "$artifact_rel"
 
+# Print the most recently built moqxprobe artifact path for one Linux target.
+bench-transport-latest-release-artifact-rel moqxprobe_target="linux_arm64":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    marker="{{ bench_dir }}/{{ artifact_dir }}/.last-moqxprobe-{{ moqxprobe_target }}.txt"
+
+    if [ ! -s "$marker" ]; then
+      printf 'No latest moqxprobe artifact recorded for %s. Build it first.\n' "{{ moqxprobe_target }}" >&2
+      exit 2
+    fi
+
+    cat "$marker"
+
 # Build the moqxprobe Mix release artifact with Docker for one Linux target.
 bench-transport-build-release moqxprobe_target="linux_arm64":
     #!/usr/bin/env bash
@@ -307,9 +321,11 @@ bench-transport-build-release-remote-target target run_id moqxprobe_target="linu
     case "{{ moqxprobe_target }}" in
       linux_arm64)
         expected_uname="aarch64"
+        artifact_target="linux-arm64"
         ;;
       linux_x86_64)
         expected_uname="x86_64"
+        artifact_target="linux-x86_64"
         ;;
       *)
         printf 'Unsupported moqxprobe target: %s\n' "{{ moqxprobe_target }}" >&2
@@ -318,22 +334,50 @@ bench-transport-build-release-remote-target target run_id moqxprobe_target="linu
         ;;
     esac
 
-    artifact_rel="$(just --quiet bench-transport-release-artifact-rel "{{ moqxprobe_target }}")"
-    artifact_name="$(basename "$artifact_rel")"
-    artifact_path="{{ bench_dir }}/$artifact_rel"
     local_stage="$(mktemp -d "${TMPDIR:-/tmp}/moqxprobe-source.XXXXXX")"
-    remote_root="/var/tmp/moqxprobe-native-build"
-    remote_source="/tmp/moqxprobe-source-{{ git_sha }}.tar.gz"
-    remote_work="$remote_root/{{ git_sha }}"
-    remote_artifact="$remote_root/artifacts/$artifact_name"
 
     cleanup() {
       rm -rf "$local_stage"
     }
     trap cleanup EXIT
 
+    source_archive="$local_stage/source.tar.gz"
+    source_metadata="$local_stage/source-metadata.json"
+    source_id="$("{{ bench_dir }}/scripts/source_snapshot.sh" \
+      --output "$source_archive" \
+      --metadata "$source_metadata")"
+
+    artifact_name="{{ release_cli }}-{{ release_version }}-$source_id-$artifact_target.tar.gz"
+    artifact_rel="{{ artifact_dir }}/$artifact_name"
+    artifact_name="$(basename "$artifact_rel")"
+    artifact_path="{{ bench_dir }}/$artifact_rel"
+    artifact_metadata="$local_stage/artifact-metadata.json"
+    last_artifact="{{ bench_dir }}/{{ artifact_dir }}/.last-moqxprobe-{{ moqxprobe_target }}.txt"
+    remote_root="/var/tmp/moqxprobe-native-build"
+    remote_cache="$remote_root/cache/{{ moqxprobe_target }}"
+    remote_source="/tmp/moqxprobe-source-$source_id.tar.gz"
+    remote_metadata="/tmp/moqxprobe-source-$source_id.json"
+    remote_work="$remote_root/sources/$source_id"
+    remote_artifact="$remote_root/artifacts/$artifact_name"
+
     mkdir -p "$(dirname "$artifact_path")"
-    git archive --format=tar.gz --output "$local_stage/source.tar.gz" HEAD
+    jq \
+      --arg app "{{ release_cli }}" \
+      --arg version "{{ release_version }}" \
+      --arg release_name "{{ release_name }}" \
+      --arg artifact_name "$artifact_name" \
+      --arg artifact_rel "$artifact_rel" \
+      --arg target "{{ moqxprobe_target }}" \
+      --arg artifact_target "$artifact_target" \
+      '. + {
+        app: $app,
+        version: $version,
+        release_name: $release_name,
+        artifact_name: $artifact_name,
+        artifact_rel: $artifact_rel,
+        target: $target,
+        artifact_target: $artifact_target
+      }' "$source_metadata" > "$artifact_metadata"
 
     SSH_OPTS="-i {{ bench_dir }}/.keys/{{ run_id }}/id_ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile={{ bench_dir }}/.keys/{{ run_id }}/known_hosts"
 
@@ -346,13 +390,20 @@ bench-transport-build-release-remote-target target run_id moqxprobe_target="linu
     fi
 
     # shellcheck disable=SC2086
-    scp $SSH_OPTS "$local_stage/source.tar.gz" "{{ target }}:$remote_source"
+    scp $SSH_OPTS "$source_archive" "{{ target }}:$remote_source"
+    # shellcheck disable=SC2086
+    scp $SSH_OPTS "$artifact_metadata" "{{ target }}:$remote_metadata"
 
     # shellcheck disable=SC2086
     ssh $SSH_OPTS "{{ target }}" \
       "set -e; \
-       export MIX_ENV=prod LANG=C.UTF-8 MOQXPROBE_BUILD_GIT_SHA={{ git_sha }}; \
-       mkdir -p '$remote_root/artifacts'; \
+       export MIX_ENV=prod LANG=C.UTF-8 MOQXPROBE_BUILD_GIT_SHA=$source_id; \
+       export MIX_HOME='$remote_cache/mix_home'; \
+       export HEX_HOME='$remote_cache/hex_home'; \
+       export REBAR_CACHE_DIR='$remote_cache/rebar3'; \
+       export MIX_DEPS_PATH='$remote_cache/deps'; \
+       export MIX_BUILD_ROOT='$remote_cache/build'; \
+       mkdir -p '$remote_root/artifacts' '$remote_cache/mix_home' '$remote_cache/hex_home' '$remote_cache/rebar3' '$remote_cache/deps' '$remote_cache/build'; \
        if [ ! -f '$remote_artifact' ]; then \
          rm -rf '$remote_work'; \
          mkdir -p '$remote_work'; \
@@ -363,13 +414,16 @@ bench-transport-build-release-remote-target target run_id moqxprobe_target="linu
          mix deps.get --only prod; \
          mix release '{{ release_name }}' --overwrite; \
          test -x '_build/prod/rel/{{ release_name }}/bin/moqxprobe'; \
+         cp '$remote_metadata' '_build/prod/rel/{{ release_name }}/.moqx-bench-artifact.json'; \
          tar -C '_build/prod/rel/{{ release_name }}' -czf '$remote_artifact' .; \
        fi; \
-       rm -f '$remote_source'; \
+       rm -f '$remote_source' '$remote_metadata'; \
        test -f '$remote_artifact'"
 
     # shellcheck disable=SC2086
     scp $SSH_OPTS "{{ target }}:$remote_artifact" "$artifact_path"
+    cp "$artifact_metadata" "$artifact_path.json"
+    printf '%s\n' "$artifact_rel" > "$last_artifact"
     printf 'Built %s on %s and fetched %s\n' "{{ moqxprobe_target }}" "{{ target }}" "$artifact_path"
 
 # Print the quicprobe artifact path for one target.
@@ -666,6 +720,15 @@ bench-transport-deploy-quicprobe quicprobe_target="linux_arm64" run_id=current_r
 # Deploy the probed daemon artifact to both Terraform roles in parallel.
 [parallel]
 bench-transport-deploy-probed probed_target="linux_arm64" run_id=current_run: (bench-transport-deploy-probed-role probed_target run_id "client") (bench-transport-deploy-probed-role probed_target run_id "server")
+
+# Build the current worktree moqxprobe release on a lab node and deploy it to both roles.
+bench-transport-update-moqxprobe run_id=current_run moqxprobe_target="linux_x86_64" builder_role="client":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    just bench-transport-build-release-remote-role "{{ run_id }}" "{{ builder_role }}" "{{ moqxprobe_target }}"
+    artifact="$(just --quiet bench-transport-latest-release-artifact-rel "{{ moqxprobe_target }}")"
+    just bench-transport-deploy "{{ run_id }}" "$artifact"
 
 # Deploy the release artifact to one Terraform role.
 bench-transport-deploy-role run_id role artifact=artifact_rel:
@@ -1020,6 +1083,25 @@ bench-transport-probed-health-target target run_id bind:
 
     # shellcheck disable=SC2086
     ssh $SSH_OPTS "{{ target }}" "curl -fsS -H 'Authorization: Bearer $token' 'http://{{ bind }}/v1/health'"
+
+# Run a remote multi-test benchmark suite through probed.
+bench-transport-probed-suite run_id=current_run tests="iperf3,reference_stream,moqx_stream" port=probed_port quic_port="55433" iperf3_port="55201":
+    bench/probed/scripts/remote_curl_suite.sh \
+      --run-id "{{ run_id }}" \
+      --tests "{{ tests }}" \
+      --probed-port "{{ port }}" \
+      --quic-port "{{ quic_port }}" \
+      --iperf3-port "{{ iperf3_port }}"
+
+# Build/deploy the current moqxprobe worktree, then run selected tests through probed.
+bench-transport-iterate-moqxprobe run_id=current_run moqxprobe_target="linux_x86_64" tests="iperf3,reference_stream,moqx_stream" builder_role="client" port=probed_port quic_port="55433" iperf3_port="55201":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    just bench-transport-update-moqxprobe "{{ run_id }}" "{{ moqxprobe_target }}" "{{ builder_role }}"
+    just bench-transport-probed-health-role "{{ run_id }}" client "{{ port }}"
+    just bench-transport-probed-health-role "{{ run_id }}" server "{{ port }}"
+    just bench-transport-probed-suite "{{ run_id }}" "{{ tests }}" "{{ port }}" "{{ quic_port }}" "{{ iperf3_port }}"
 
 # Remove local transport benchmark release artifacts.
 bench-transport-clean:

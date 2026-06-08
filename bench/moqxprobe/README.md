@@ -939,13 +939,29 @@ artifact back locally:
 just bench-transport-build-release-remote-role <run-id> client linux_x86_64
 ```
 
-The native remote build uploads a `git archive HEAD` source snapshot over SSH,
-checks that the remote machine architecture matches the requested target, builds
-the normal glibc-compatible Mix release on that host, and stores the fetched
-artifact under the same local `build/artifacts/` naming convention:
+The native remote build creates a source snapshot from the current worktree,
+including tracked modifications and untracked non-ignored files, then uploads
+that snapshot over SSH. This lets operators test `moqxprobe` changes without
+committing first. Clean snapshots use the current git SHA in the artifact name;
+dirty snapshots include a content hash:
 
 ```text
 bench/moqxprobe/build/artifacts/moqxprobe-<version>-<git>-linux-x86_64.tar.gz
+bench/moqxprobe/build/artifacts/moqxprobe-<version>-<git>-dirty-<hash>-linux-x86_64.tar.gz
+```
+
+The remote builder preserves Mix, Hex, Rebar, deps, and build caches under
+`/var/tmp/moqxprobe-native-build/cache/<target>/`, so repeated source snapshots
+reuse the expensive dependency/native build work when inputs permit it. Each
+release tarball contains `.moqx-bench-artifact.json`, and the same metadata is
+stored locally beside the artifact as `<artifact>.json`.
+
+After a lab is provisioned and `probed` is running, use the fast iteration loop
+to build the current worktree, deploy the new `current` symlink to both nodes,
+verify `probed` health, and run selected tests:
+
+```bash
+just bench-transport-iterate-moqxprobe <run-id> linux_x86_64 iperf3,reference_stream,moqx_stream
 ```
 
 The Dockerfile stages dependency resolution and `mix deps.compile quicer`

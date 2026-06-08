@@ -50,6 +50,14 @@ Source of truth:
   `just bench-transport-build-quicprobe <target>`, where target is one of
   `linux_arm64`, `linux_x86_64`, `darwin_arm64`, or `darwin_x86_64`. Deploys
   are Linux-only and use the same Linux target alias as the first argument.
+- Run repeated remote checks through the repo-owned `probed` suite driver:
+  `just bench-transport-probed-suite <run-id>`. Keep `probed` as the process
+  supervisor/artifact store; benchmark semantics stay in the suite arguments,
+  `moqxprobe`, and `quicprobe`.
+- For fast `moqxprobe` development on already-running lab nodes, use
+  `just bench-transport-iterate-moqxprobe <run-id> <target> <tests>`. It
+  snapshots the current dirty-or-clean worktree, builds remotely with caches,
+  deploys to both roles, verifies `probed`, and runs the selected suite.
 - Destroy disposable infrastructure immediately after validation or data
   capture, then verify no provider resources remain.
 - For transport decisions, consult quicer and the relevant MOQT draft text
@@ -92,15 +100,29 @@ Source of truth:
    just bench-transport-deploy-release linux_arm64
    ```
 
-7. Run the path baseline:
-   start `iperf3 --server` on the receiver, run
-   `moqxprobe iperf3-baseline --path-json ...` on the sender, then
-   fetch the JSONL results. During local development, the equivalent wrapper is
-   `mix moqx.transport.iperf3_baseline` from `bench/moqxprobe/`.
+7. Deploy and start `probed`, `moqxprobe`, and `quicprobe`, then run the
+   repo-owned suite driver:
 
-8. Only after a valid path baseline, run QUIC or MOQT-shaped pressure tasks.
-   Keep workloads explicit: profile, direction, stream/datagram counts, payload
-   size, offered load, duration, repetitions, and stop conditions.
+   ```bash
+   just bench-transport-probed-suite <run-id>
+   ```
+
+   The default suite runs `iperf3`, `reference_stream`, and `moqx_stream`.
+   Extend `PROBED_SUITE_TESTS` for DATAGRAM checks, for example
+   `reference_datagram,moqx_datagram`, and keep offered load explicit through
+   env such as `DATAGRAM_RATE`, `DURATION_SECONDS`, and `DATAGRAM_SIZE`.
+
+   Once the lab is already running and the work is `moqxprobe` tuning, use the
+   inner loop instead:
+
+   ```bash
+   just bench-transport-iterate-moqxprobe <run-id> linux_x86_64 iperf3,reference_stream,moqx_stream
+   ```
+
+8. Only after a valid path baseline, trust QUIC or MOQT-shaped pressure
+   results. Keep workloads explicit: profile, direction, stream/datagram
+   counts, payload size, offered load, duration, repetitions, and stop
+   conditions.
 
 9. Tear down and verify:
 

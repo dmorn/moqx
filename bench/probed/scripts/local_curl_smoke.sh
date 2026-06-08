@@ -237,19 +237,30 @@ wait_process_state() {
   local expected="$3"
   local body
   local state
+  local exit_status
 
   for _attempt in $(seq 1 200); do
     body="$(api "$node" GET "/v1/runs/$run_id/processes/$process_id")"
     state="$(printf '%s' "$body" | jq -r '.state')"
 
     if [ "$state" = "$expected" ]; then
+      if [ "$expected" = "exited" ]; then
+        exit_status="$(printf '%s' "$body" | jq -r '.exit_status')"
+
+        if [ "$exit_status" != "0" ]; then
+          printf 'process %s on %s exited with status %s\n%s\n' \
+            "$process_id" "$node" "$exit_status" "$body" >&2
+          return 1
+        fi
+      fi
+
       printf '%s\n' "$body"
       return 0
     fi
 
-    if [ "$state" = "failed" ] || [ "$state" = "timed_out" ]; then
-      printf 'process %s on %s reached terminal state %s\n%s\n' \
-        "$process_id" "$node" "$state" "$body" >&2
+    if [ "$state" = "failed" ] || [ "$state" = "timed_out" ] || [ "$state" = "exited" ]; then
+      printf 'process %s on %s reached terminal state %s while waiting for %s\n%s\n' \
+        "$process_id" "$node" "$state" "$expected" "$body" >&2
       return 1
     fi
 

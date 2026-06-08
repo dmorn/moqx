@@ -184,7 +184,73 @@ api_server -X DELETE "$SERVER/v1/runs/$RUN_ID"
 
 ## Remote Use
 
-The remote smoke should use the same API calls, with only these substitutions:
+Use the repo-owned remote suite driver after Terraform apply, private-path
+readiness, artifact deploys, and `probed` startup:
+
+```bash
+just bench-transport-probed-suite <run-id>
+```
+
+When the lab is already up and the task is to iterate on `moqxprobe`, use the
+single update-and-run command instead:
+
+```bash
+just bench-transport-iterate-moqxprobe <run-id> linux_x86_64 iperf3,reference_stream,moqx_stream
+```
+
+It snapshots the current worktree, including dirty non-ignored changes, builds
+the release natively on the selected lab role with remote caches preserved,
+deploys the artifact to both nodes, verifies `probed` health, and runs the
+selected suite.
+
+The default suite is deliberately short:
+
+```text
+iperf3,reference_stream,moqx_stream
+```
+
+It creates one API run on both `probed` nodes, stages a temporary certificate,
+starts server-side `iperf3`/`quicprobe` processes through server `probed`, runs
+client-side `moqxprobe` workloads through client `probed`, fetches
+client/server bundles, validates every JSONL with `moqxprobe report`, and
+writes a manifest with tool symlink/artifact identity under:
+
+```text
+bench/moqxprobe/results/<infra-run-id>/probed-suite/<api-run-id>/
+```
+
+To include the current DATAGRAM probes without changing the daemon:
+
+```bash
+PROBED_SUITE_TESTS=iperf3,reference_stream,moqx_stream,reference_datagram,moqx_datagram \
+DATAGRAM_RATE=1000 \
+DURATION_SECONDS=1 \
+just bench-transport-probed-suite <run-id>
+```
+
+Useful suite knobs:
+
+```text
+STREAM_COUNT
+PAYLOAD_SIZE
+PAYLOAD_COUNT
+IPERF3_TCP_DURATION
+IPERF3_UDP_DURATION
+IPERF3_UDP_BITRATES
+IPERF3_UDP_LENGTH
+DATAGRAM_SIZE
+DATAGRAM_COUNT
+DATAGRAM_RATE
+DURATION_SECONDS
+DATAGRAM_DRAIN_LIMIT
+DATAGRAM_DIAGNOSTICS
+DELIVERY_THRESHOLD
+OFFERED_RATE_TOLERANCE
+PROCESS_TIMEOUT_MS
+```
+
+The driver uses the same API calls as the manual examples, with these remote
+substitutions:
 
 - `CLIENT` and `SERVER` become the private `probed` endpoints on the lab nodes;
 - tool paths come from `/opt/moqx-bench/.../current/bin/...`;
@@ -192,4 +258,4 @@ The remote smoke should use the same API calls, with only these substitutions:
 - output paths use `/var/lib/probed/runs/<run_id>/artifacts/...`;
 - the server address passed to clients is the private IP of the server node.
 
-Run the remote smoke only after the local curl smoke passes.
+Run the remote suite only after the local curl smoke passes.

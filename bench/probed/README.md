@@ -217,3 +217,42 @@ The start recipe installs:
 
 The token is generated locally under the per-run key directory and copied to the
 node over SSH.
+
+## Suite Driver
+
+`probed` is intentionally not the benchmark runner. The repo-owned controller
+for repeated remote runs is:
+
+```bash
+just bench-transport-probed-suite <run-id>
+```
+
+By default it runs the fast remote suite
+`iperf3,reference_stream,moqx_stream`. It drives all processes through the
+`probed` HTTP API, fetches bundles from both nodes, validates every produced
+JSONL with `moqxprobe report`, and writes a manifest under
+`bench/moqxprobe/results/<run-id>/probed-suite/<api-run-id>/`.
+
+For DATAGRAM checks, extend the suite instead of changing the daemon:
+
+```bash
+PROBED_SUITE_TESTS=iperf3,reference_stream,moqx_stream,reference_datagram,moqx_datagram \
+DATAGRAM_RATE=1000 \
+DURATION_SECONDS=1 \
+just bench-transport-probed-suite <run-id>
+```
+
+When iterating on `moqxprobe`, prefer the update-and-run loop:
+
+```bash
+just bench-transport-iterate-moqxprobe <run-id> linux_x86_64 iperf3,reference_stream,moqx_stream
+```
+
+That command snapshots the current source tree, including dirty non-ignored
+changes, builds a target release natively on the selected lab role with remote
+caches preserved, deploys the resulting artifact to both nodes, verifies
+`probed` health, and then runs the suite. The suite manifest records the
+resolved `/opt/moqx-bench/*/current` symlinks and `moqxprobe` artifact metadata
+before the run.
+
+See `PLAYBOOK.md` for the full curl-level shape and environment overrides.
