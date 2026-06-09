@@ -330,3 +330,12 @@ requested load on the link.
   `datagram_delivery_loss`. The quicprobe server sidecar again matched the
   delivered counts. Do not disable MsQuic send buffering by default from this
   evidence.
+- 2026-06-09: Tested MsQuic's BBR congestion-control option on the same clean
+  x86-control artifact with
+  `QUICER_SETTINGS=congestion_control_algorithm=1`, suite
+  `20260609T093717Z-issue40-x86-control-probed-suite-104330`. Reference
+  remained healthy at 99.98% delivery. MOQX again sustained full offered rate
+  but delivered only 72.11%, versus 70.57% for the immediately preceding Cubic
+  control. This is not enough signal to change defaults: BBR does not close the
+  current DATAGRAM gap, and the remaining loss still happens before the
+  quicprobe server application receives the DATAGRAMs.

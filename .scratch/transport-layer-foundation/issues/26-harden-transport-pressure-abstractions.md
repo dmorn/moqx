@@ -547,3 +547,8 @@ seams without `Application` env.
   MOQX while `quicprobe` delivered 99.89%. Disabling send buffering worsened
   MOQX to 54.78% delivery while `quicprobe` stayed at 99.70%. Keep the default
   MsQuic send buffering enabled.
+- 2026-06-09: #40 also A/B tested MsQuic BBR by passing
+  `QUICER_SETTINGS=congestion_control_algorithm=1`. It left reference healthy
+  at 99.98% and MOQX at full offered rate, but MOQX delivery only reached
+  72.11% versus the immediate Cubic control's 70.57%. Treat BBR as a non-fix
+  for the current DATAGRAM gap.
