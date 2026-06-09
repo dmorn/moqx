@@ -79,5 +79,10 @@ defmodule MOQX.Transport.Quicer.OptionsTest do
     test "does not add ALPN when absent" do
       assert Options.normalize_opts(active: false) == %{active: false}
     end
+
+    test "drops backend-private datagram send flags before calling quicer" do
+      assert Options.normalize_opts(alpn: "moq-00", datagram_send_flags: [:dgram_priority]) ==
+               %{alpn: [~c"moq-00"]}
+    end
   end
 end

@@ -249,6 +249,13 @@ already provisioned, private-path checked, and tools are deployed:
 just bench-transport-probed-datagram-bracket <run-id> 30000,32000
 ```
 
+Use `QUICER_SETTINGS=pacing_enabled=1` to pass whitelisted quicer connection
+settings to MOQX-client measurements. Use
+`QUICER_DATAGRAM_SEND_FLAGS=dgram_priority,priority_work` to pass repeatable
+quicer DATAGRAM send flags to MOQX-client DATAGRAM measurements. Keep
+send-flag experiments explicit in the manifest until a default has stable
+real-path evidence.
+
 It runs `iperf3,reference_stream,moqx_stream` once, then runs
 `reference_datagram,moqx_datagram` once per requested DATAGRAM rate. Defaults
 are tuned for the ARM near-limit check: 1180-byte DATAGRAMs, 3-second paced

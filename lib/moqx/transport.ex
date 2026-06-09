@@ -55,6 +55,9 @@ defmodule MOQX.Transport do
 
   @callback send_datagram(connection(), binary()) :: :ok | {:error, term()}
 
+  @callback send_datagram(connection(), binary(), opts :: keyword() | map()) ::
+              :ok | {:error, term()}
+
   @callback finish_sending(stream()) :: :ok | {:error, term()}
 
   @callback abort_sending(stream(), non_neg_integer()) :: :ok | {:error, term()}
@@ -75,7 +78,7 @@ defmodule MOQX.Transport do
 
   @callback capabilities(connection()) :: MOQX.Transport.Capabilities.t() | {:error, term()}
 
-  @optional_callbacks close_listener: 2, local_address: 1, stream_info: 3
+  @optional_callbacks close_listener: 2, local_address: 1, stream_info: 3, send_datagram: 3
 
   @doc """
   Creates caller-owned transport context for backend module.
@@ -399,7 +402,12 @@ defmodule MOQX.Transport do
 
     result =
       require_same_backend(ctx, connection, fn ->
-        case ctx.backend.module.send_datagram(connection.backend.data, data) do
+        case backend_send_datagram(
+               ctx.backend.module,
+               connection.backend.data,
+               data,
+               ctx.backend.data.opts
+             ) do
           :ok -> {:ok, ctx}
           {:error, reason} -> {:error, reason, ctx}
         end
@@ -674,6 +682,14 @@ defmodule MOQX.Transport do
     case ctx.backend.module.close_listener(raw_listener, timeout) do
       :ok -> {:ok, ctx}
       {:error, reason} -> {:error, reason, ctx}
+    end
+  end
+
+  defp backend_send_datagram(backend, raw_connection, data, opts) do
+    if backend_exports?(backend, :send_datagram, 3) do
+      backend.send_datagram(raw_connection, data, opts)
+    else
+      backend.send_datagram(raw_connection, data)
     end
   end
 

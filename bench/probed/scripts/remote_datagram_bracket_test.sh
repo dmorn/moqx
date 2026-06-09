@@ -64,6 +64,7 @@ jq -n \
   --arg duration_seconds "${DURATION_SECONDS:-}" \
   --arg delivery_threshold "${DELIVERY_THRESHOLD:-}" \
   --arg quicer_settings "${QUICER_SETTINGS:-}" \
+  --arg quicer_datagram_send_flags "${QUICER_DATAGRAM_SEND_FLAGS:-}" \
   --arg stream_count "${STREAM_COUNT:-}" \
   '{
     status: $status,
@@ -76,6 +77,7 @@ jq -n \
       duration_seconds: $duration_seconds,
       delivery_threshold: $delivery_threshold,
       quicer_settings: $quicer_settings,
+      quicer_datagram_send_flags: $quicer_datagram_send_flags,
       stream_count: $stream_count
     }
   }' > "$result_dir/manifest.json"
@@ -87,6 +89,7 @@ chmod +x "$fake_suite"
 FAKE_REPO_ROOT="$repo_root" \
 PROBED_BRACKET_SUITE_BIN="$fake_suite" \
 QUICER_SETTINGS="pacing_enabled=1" \
+QUICER_DATAGRAM_SEND_FLAGS="dgram_priority,priority_work" \
 "$bracket" \
   --run-id "$run_id" \
   --bracket-id "$bracket_id" \
@@ -104,6 +107,7 @@ jq -e '
   .configuration.datagram_size_bytes == 1180 and
   .configuration.duration_seconds == 3 and
   .configuration.quicer_settings == "pacing_enabled=1" and
+  .configuration.quicer_datagram_send_flags == "dgram_priority,priority_work" and
   (.suite_invocations | length) == 3 and
   .suite_invocations[0].kind == "baseline" and
   .suite_invocations[0].tests == ["iperf3", "reference_stream", "moqx_stream"] and
@@ -120,7 +124,8 @@ jq -e '
   .env.datagram_size == "1180" and
   .env.duration_seconds == "3" and
   .env.delivery_threshold == "0.95" and
-  .env.quicer_settings == "pacing_enabled=1"
+  .env.quicer_settings == "pacing_enabled=1" and
+  .env.quicer_datagram_send_flags == "dgram_priority,priority_work"
 ' "$first_datagram_manifest" >/dev/null
 
 printf '%s\n' 'remote_datagram_bracket.sh fake-suite regression passed.'

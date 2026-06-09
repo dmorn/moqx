@@ -375,3 +375,21 @@ requested load on the link.
   Any quicer/MsQuic DATAGRAM send-flag or queue/drop change should stay
   experimental until it improves the 30k MOQX gap on this path; if it does not,
   revert the change and retain only the negative evidence.
+- 2026-06-09: Added experimental quicer DATAGRAM send-flag plumbing on branch
+  state `baf6d2b-dirty-8ff4a84fd36f` with quicer NIF ref `3c6c6b0`, deployed
+  it to the still-running x86-control lab, and ran 30k pps A/B suites against
+  `quicprobe`. The no-flag dirty baseline
+  `probed-suite-130837` reproduced the gap: reference 99.26% delivery, MOQX
+  51.60%, both at valid offered rate. `dgram_priority` alone
+  (`probed-suite-131804`) kept reference healthy at 99.91% and lifted MOQX only
+  to 56.84%. `priority_work` alone (`probed-suite-131918`) kept reference
+  healthy at 99.82% and left MOQX at 51.31%. The combined
+  `dgram_priority,priority_work` case is materially better but still variable:
+  `probed-suite-133025` recorded MOQX 79.50% while the reference client's
+  offered-rate record was invalid, `probed-suite-133135` was the first clean
+  30k pass with reference 99.80% and MOQX 95.19%, and
+  `probed-suite-133250` kept reference healthy at 99.60% but MOQX fell back to
+  84.57%. Keep the send-flag plumbing because it moves the bottleneck, but do
+  not declare the 30k path fixed or change defaults yet. The next loop should
+  explain the variance and verify whether the combined flags remain safe under
+  mixed control-plus-DATAGRAM pressure.

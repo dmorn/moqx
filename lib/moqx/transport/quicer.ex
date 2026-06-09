@@ -14,7 +14,15 @@ defmodule MOQX.Transport.Quicer do
   alias MOQX.Transport.Quicer.Options
 
   @quic_send_flag_fin 0x0004
+  @quic_send_flag_dgram_priority 0x0008
+  @quic_send_flag_priority_work 0x0040
+  @quic_send_flag_cancel_on_blocked 0x0080
   @quicer_send_flag_sync 0x1000
+  @datagram_send_flags %{
+    dgram_priority: @quic_send_flag_dgram_priority,
+    priority_work: @quic_send_flag_priority_work,
+    cancel_on_blocked: @quic_send_flag_cancel_on_blocked
+  }
 
   @impl true
   def listen(port, opts) do
@@ -128,7 +136,20 @@ defmodule MOQX.Transport.Quicer do
 
   @impl true
   def send_datagram(connection, data) when is_binary(data) do
-    case send_quicer_datagram(connection, data) do
+    send_datagram(connection, data, [])
+  end
+
+  @doc false
+  @spec datagram_send_flags(keyword() | map()) :: non_neg_integer()
+  def datagram_send_flags(opts) do
+    opts
+    |> option(:datagram_send_flags, [])
+    |> normalize_datagram_send_flags()
+  end
+
+  @impl true
+  def send_datagram(connection, data, opts) when is_binary(data) do
+    case send_quicer_datagram(connection, data, datagram_send_flags(opts)) do
       {:ok, _bytes} -> :ok
       {:error, :dgram_send_error, :invalid_state} -> {:error, :datagrams_unavailable}
       {:error, _reason} = error -> error
@@ -136,8 +157,11 @@ defmodule MOQX.Transport.Quicer do
     end
   end
 
-  defp send_quicer_datagram(connection, data) do
-    :quicer.async_send_dgram(connection, data, report_send_state: false)
+  defp send_quicer_datagram(connection, data, send_flags) do
+    :quicer.async_send_dgram(connection, data,
+      report_send_state: false,
+      send_flags: send_flags
+    )
   end
 
   @impl true
@@ -328,6 +352,18 @@ defmodule MOQX.Transport.Quicer do
 
   defp maybe_add_fin_flag(flags, true), do: flags ||| @quic_send_flag_fin
   defp maybe_add_fin_flag(flags, false), do: flags
+
+  defp normalize_datagram_send_flags(flags) when is_integer(flags) and flags >= 0, do: flags
+  defp normalize_datagram_send_flags(nil), do: 0
+
+  defp normalize_datagram_send_flags(flags) when is_list(flags) do
+    Enum.reduce(flags, 0, fn flag, acc ->
+      case Map.fetch(@datagram_send_flags, flag) do
+        {:ok, value} -> acc ||| value
+        :error -> raise ArgumentError, "unknown quicer DATAGRAM send flag: #{inspect(flag)}"
+      end
+    end)
+  end
 
   defp option(opts, key, default) when is_map(opts), do: Map.get(opts, key, default)
   defp option(opts, key, default) when is_list(opts), do: Keyword.get(opts, key, default)

@@ -301,6 +301,27 @@ defmodule MOQX.TransportTest do
       assert timeout_metadata.event_name == nil
     end
 
+    test "passes backend context options to backends that opt into datagram send options" do
+      assert {:ok, ctx} =
+               MOQX.Transport.new(__MODULE__.DatagramSendOptionsBackend,
+                 owner: self(),
+                 datagram_send_flags: [:dgram_priority]
+               )
+
+      connection = %MOQX.Transport.Connection{
+        backend: %MOQX.Transport.BackendRef{
+          module: __MODULE__.DatagramSendOptionsBackend,
+          data: :connection
+        },
+        local_role: :client
+      }
+
+      assert {:ok, ^ctx} = MOQX.Transport.send_datagram(ctx, connection, "payload")
+
+      assert_receive {:datagram_send_options, :connection, "payload",
+                      [owner: _, datagram_send_flags: [:dgram_priority]]}
+    end
+
     test "controlling_process transfers whole context handles" do
       {ctx, _client, _server} = support_pair(:moq_lite_04)
 
@@ -436,5 +457,14 @@ defmodule MOQX.TransportTest do
     assert {:ok, client, ctx} = MOQX.Transport.handshake(ctx, client, 100)
     assert {:ok, server, ctx} = MOQX.Transport.handshake(ctx, server, 100)
     {ctx, client, server}
+  end
+
+  defmodule DatagramSendOptionsBackend do
+    @moduledoc false
+
+    def send_datagram(connection, data, opts) do
+      send(Keyword.fetch!(opts, :owner), {:datagram_send_options, connection, data, opts})
+      :ok
+    end
   end
 end

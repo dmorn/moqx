@@ -540,6 +540,65 @@ defmodule MOQXProbe.MeasureTest do
            }
   end
 
+  test "passes quicer datagram send flags to MOQX client datagram sends and records them" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-quicer-datagram-send-flags.jsonl")
+    table = :ets.new(__MODULE__.CapturingDatagramEchoTransport, [:named_table, :public])
+
+    on_exit(fn ->
+      if :ets.whereis(__MODULE__.CapturingDatagramEchoTransport) != :undefined do
+        :ets.delete(table)
+      end
+    end)
+
+    Measure.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "datagram_pressure",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--datagram-size",
+        "1192",
+        "--datagram-count",
+        "2",
+        "--quicer-datagram-send-flag",
+        "dgram_priority",
+        "--quicer-datagram-send-flag",
+        "priority_work",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-quicer-datagram-send-flags-test"
+      ],
+      script: "test measure",
+      transport_backend: __MODULE__.CapturingDatagramEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    [{:send_datagram_opts, send_datagram_opts}] =
+      :ets.lookup(__MODULE__.CapturingDatagramEchoTransport, :send_datagram_opts)
+
+    assert Keyword.fetch!(send_datagram_opts, :datagram_send_flags) == [
+             :dgram_priority,
+             :priority_work
+           ]
+
+    assert record["profile"]["settings"]["quicer_datagram_send_flags"] == [
+             "dgram_priority",
+             "priority_work"
+           ]
+  end
+
   test "keeps paced MOQX datagram sending on schedule when no receive events are pending" do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-paced-datagram-silent-peer.jsonl")
@@ -1396,6 +1455,12 @@ defmodule MOQXProbe.MeasureTest do
     def send_datagram(connection, data) do
       send(self(), {:moqx_transport, {:datagram, connection, data, %{}}})
       :ok
+    end
+
+    @impl true
+    def send_datagram(connection, data, opts) do
+      :ets.insert(__MODULE__, {:send_datagram_opts, opts})
+      send_datagram(connection, data)
     end
 
     @impl true

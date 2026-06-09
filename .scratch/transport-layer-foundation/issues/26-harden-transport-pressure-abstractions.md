@@ -568,3 +568,12 @@ seams without `Application` env.
   server application receive, confirmed by the sidecar counts. Stop spending
   effort on BEAM pacing-loop shape until lower-level quicer/MsQuic DATAGRAM
   send flags and queue/drop behavior have been inspected.
+- 2026-06-09: #40 added controlled quicer DATAGRAM send-flag plumbing and tested
+  it on the x86-control path. Single flags did not help enough, but the
+  combined `dgram_priority,priority_work` setting moved MOQX 30k delivery from
+  roughly 51% to a variable 79.50%/95.19%/84.57% range while maintaining full
+  offered rate. This is a useful pressure-abstraction knob and evidence that
+  send scheduling below local admission matters, but it is not yet stable
+  enough to become the default. Keep the current sender architecture small and
+  use the next loop to explain the variance under DATAGRAM-only and mixed
+  pressure before claiming #26 closed.

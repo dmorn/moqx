@@ -3,6 +3,21 @@ defmodule MOQX.Transport.QuicerTest do
 
   alias MOQX.Transport.Quicer
 
+  describe "datagram_send_flags/1" do
+    test "normalizes named DATAGRAM send flags to MsQuic bitmask" do
+      assert Quicer.datagram_send_flags(datagram_send_flags: [:dgram_priority]) == 0x0008
+
+      assert Quicer.datagram_send_flags(datagram_send_flags: [:dgram_priority, :priority_work]) ==
+               0x0048
+    end
+
+    test "rejects unknown DATAGRAM send flags" do
+      assert_raise ArgumentError, fn ->
+        Quicer.datagram_send_flags(datagram_send_flags: [:unknown])
+      end
+    end
+  end
+
   describe "stream_info_from_id/3" do
     test "derives exact local and peer role metadata from QUIC stream IDs" do
       assert Quicer.stream_info_from_id(0, :client, :local) ==

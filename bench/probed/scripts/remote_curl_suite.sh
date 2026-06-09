@@ -34,6 +34,7 @@ delivery_threshold="${DELIVERY_THRESHOLD:-1.0}"
 offered_rate_tolerance="${OFFERED_RATE_TOLERANCE:-0.95}"
 process_timeout_ms="${PROCESS_TIMEOUT_MS:-60000}"
 quicer_settings="${QUICER_SETTINGS:-}"
+quicer_datagram_send_flags="${QUICER_DATAGRAM_SEND_FLAGS:-}"
 
 usage() {
   cat <<EOF
@@ -61,7 +62,7 @@ Useful environment overrides:
   IPERF3_TCP_DURATION IPERF3_UDP_DURATION IPERF3_UDP_BITRATES IPERF3_UDP_LENGTH
   DATAGRAM_SIZE DATAGRAM_COUNT DATAGRAM_RATE DURATION_SECONDS
   DATAGRAM_DRAIN_LIMIT DATAGRAM_DIAGNOSTICS DELIVERY_THRESHOLD OFFERED_RATE_TOLERANCE
-  PROCESS_TIMEOUT_MS QUICER_SETTINGS
+  PROCESS_TIMEOUT_MS QUICER_SETTINGS QUICER_DATAGRAM_SEND_FLAGS
 EOF
 }
 
@@ -271,7 +272,21 @@ quicer_setting_args() {
       | split(",")
       | map(select(length > 0))
       | map(["--quicer-setting", .])
-      | add
+      | add // []
+    end
+  '
+}
+
+quicer_datagram_send_flag_args() {
+  jq -n --arg flags "$quicer_datagram_send_flags" '
+    if $flags == "" then
+      []
+    else
+      $flags
+      | split(",")
+      | map(select(length > 0))
+      | map(["--quicer-datagram-send-flag", .])
+      | add // []
     end
   '
 }
@@ -383,6 +398,7 @@ jq -n \
   --arg client_probed_current "$client_probed_current" \
   --arg server_probed_current "$server_probed_current" \
   --arg quicer_settings "$quicer_settings" \
+  --arg quicer_datagram_send_flags "$quicer_datagram_send_flags" \
   --argjson client_moqxprobe_artifact "$client_moqxprobe_artifact" \
   --argjson server_moqxprobe_artifact "$server_moqxprobe_artifact" \
   --argjson tests "$tests_json" \
@@ -394,7 +410,8 @@ jq -n \
     client: {public_ipv4: $client_public, private_ip: $client_private, probed: $client_base},
     server: {public_ipv4: $server_public, private_ip: $server_private, probed: $server_base},
     env: {
-      quicer_settings: $quicer_settings
+      quicer_settings: $quicer_settings,
+      quicer_datagram_send_flags: $quicer_datagram_send_flags
     },
     tools: {
       client: {
@@ -686,6 +703,13 @@ run_measure() {
     argv="$(jq -n \
       --argjson argv "$argv" \
       --argjson quicer_args "$(quicer_setting_args)" \
+      '$argv + $quicer_args')"
+  fi
+
+  if [ "$role" = "moqx_client" ] && [ -n "$quicer_datagram_send_flags" ]; then
+    argv="$(jq -n \
+      --argjson argv "$argv" \
+      --argjson quicer_args "$(quicer_datagram_send_flag_args)" \
       '$argv + $quicer_args')"
   fi
 

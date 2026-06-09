@@ -327,7 +327,12 @@ reproduction or when the observer effect is acceptable. `--quicer-setting
 pacing_enabled=0` disables MsQuic pacing for this paced load-generator path so
 the benchmark's own offered-rate scheduler controls timing. Pass
 `--quicer-setting KEY=VALUE` to override or add whitelisted quicer connection
-settings for an experiment.
+settings for an experiment. For MOQX-client DATAGRAM experiments, pass
+`--quicer-datagram-send-flag NAME` one or more times to set backend-specific
+MsQuic DATAGRAM send flags on the quicer adapter. Supported names are
+`dgram_priority`, `priority_work`, and `cancel_on_blocked`. Keep these flags
+explicit in benchmark runs until the default has real-path evidence across
+DATAGRAM-only and mixed-control workloads.
 
 Use `sender-admission` only for lower-level BEAM-to-NIF admission calibration.
 It answers whether local DATAGRAM admission can keep up when pacing is already

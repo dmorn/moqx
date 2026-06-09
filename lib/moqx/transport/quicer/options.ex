@@ -28,6 +28,7 @@ defmodule MOQX.Transport.Quicer.Options do
 
   def normalize_opts(opts) when is_map(opts) do
     opts
+    |> Map.delete(:datagram_send_flags)
     |> normalize_option(:alpn, &normalize_alpn/1)
     |> normalize_option(:cacertfile, &normalize_text/1)
     |> normalize_option(:certfile, &normalize_text/1)

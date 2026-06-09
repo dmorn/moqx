@@ -239,6 +239,10 @@ just bench-transport-probed-datagram-bracket <run-id> 30000,32000
 
 Use `QUICER_SETTINGS=pacing_enabled=1` to pass whitelisted quicer connection
 settings to the MOQX-client measurements in the suite or bracket.
+Use `QUICER_DATAGRAM_SEND_FLAGS=dgram_priority,priority_work` to pass
+repeatable quicer DATAGRAM send flags to MOQX-client DATAGRAM measurements.
+Keep send-flag experiments explicit in the manifest until a default has stable
+real-path evidence.
 
 The wrapper runs one baseline/stream-smoke suite
 (`iperf3,reference_stream,moqx_stream`) and then one DATAGRAM suite

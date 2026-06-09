@@ -44,6 +44,11 @@ defmodule MOQXProbe.Measure do
   }
   @quicer_boolean_settings MapSet.new([:pacing_enabled, :send_buffering_enabled])
   @quicer_uint8_settings MapSet.new([:max_operations_per_drain])
+  @quicer_datagram_send_flag_keys %{
+    "cancel_on_blocked" => :cancel_on_blocked,
+    "dgram_priority" => :dgram_priority,
+    "priority_work" => :priority_work
+  }
   @reference_client_topology "reference-client-to-reference-server"
   @moqx_client_topology "moqx-client-to-reference-server"
   @supported_topologies [
@@ -101,6 +106,7 @@ defmodule MOQXProbe.Measure do
           timeout_margin_seconds: :integer,
           quicprobe_command: :string,
           quicer_setting: :keep,
+          quicer_datagram_send_flag: :keep,
           path_json: :string,
           evidence_tier: :string,
           path_id: :string,
@@ -153,6 +159,9 @@ defmodule MOQXProbe.Measure do
   defp build_config(opts, argv, script, transport_backend) do
     explicit_quicer_settings = parse_quicer_settings(Keyword.get_values(opts, :quicer_setting))
 
+    quicer_datagram_send_flags =
+      parse_quicer_datagram_send_flags(Keyword.get_values(opts, :quicer_datagram_send_flag))
+
     config = %{
       argv: argv,
       script: script,
@@ -191,6 +200,7 @@ defmodule MOQXProbe.Measure do
       timeout_margin_seconds: Keyword.get(opts, :timeout_margin_seconds, 2),
       quicprobe_command: Keyword.get(opts, :quicprobe_command, "quicprobe"),
       quicer_settings: %{},
+      quicer_datagram_send_flags: quicer_datagram_send_flags,
       path_json: opts[:path_json],
       path_overrides: path_overrides(opts),
       run_id: opts[:run_id] || default_run_id(opts[:topology], opts[:server]),
@@ -219,9 +229,19 @@ defmodule MOQXProbe.Measure do
          :ok <- validate_positive(config.timeout_seconds, "--timeout-seconds"),
          :ok <- validate_positive(config.timeout_margin_seconds, "--timeout-margin-seconds"),
          :ok <- validate_quicer_settings(config.quicer_settings),
+         :ok <- validate_quicer_datagram_send_flags(config.quicer_datagram_send_flags),
          :ok <- validate_stream_direction(config.stream_direction) do
       {:ok, config}
     end
+  end
+
+  defp parse_quicer_datagram_send_flags(values) do
+    Enum.map(values, fn value ->
+      case Map.fetch(@quicer_datagram_send_flag_keys, value) do
+        {:ok, flag} -> flag
+        :error -> {:invalid, value}
+      end
+    end)
   end
 
   defp parse_quicer_settings(values) do
@@ -261,6 +281,18 @@ defmodule MOQXProbe.Measure do
         :ok -> {:cont, :ok}
         {:error, _reason} = error -> {:halt, error}
       end
+    end)
+  end
+
+  defp validate_quicer_datagram_send_flags(flags) do
+    Enum.reduce_while(flags, :ok, fn
+      {:invalid, flag}, :ok ->
+        {:halt,
+         {:error,
+          "--quicer-datagram-send-flag #{flag} is not supported. Supported flags: #{supported_quicer_datagram_send_flags()}."}}
+
+      flag, :ok when is_atom(flag) ->
+        {:cont, :ok}
     end)
   end
 
@@ -330,6 +362,13 @@ defmodule MOQXProbe.Measure do
 
   defp supported_quicer_settings do
     @quicer_setting_keys
+    |> Map.keys()
+    |> Enum.sort()
+    |> Enum.join(", ")
+  end
+
+  defp supported_quicer_datagram_send_flags do
+    @quicer_datagram_send_flag_keys
     |> Map.keys()
     |> Enum.sort()
     |> Enum.join(", ")
@@ -628,7 +667,7 @@ defmodule MOQXProbe.Measure do
   defp append_mixed_args(args, _config), do: args
 
   defp do_run_moqx_client(config) do
-    {:ok, ctx} = Transport.new(config.transport_backend)
+    {:ok, ctx} = Transport.new(config.transport_backend, transport_backend_opts(config))
     connect_started_at = monotonic_us()
 
     case Transport.connect(
@@ -657,6 +696,16 @@ defmodule MOQXProbe.Measure do
     kind, reason ->
       {:error, Exception.format(kind, reason, __STACKTRACE__)}
   end
+
+  defp transport_backend_opts(%{topology: @moqx_client_topology} = config) do
+    if config.quicer_datagram_send_flags == [] do
+      []
+    else
+      [datagram_send_flags: config.quicer_datagram_send_flags]
+    end
+  end
+
+  defp transport_backend_opts(_config), do: []
 
   defp diagnostic_measurement(config), do: diagnostic_measurement(config, %{})
 
@@ -4239,6 +4288,8 @@ defmodule MOQXProbe.Measure do
         "client_implementation" => measurement["client_implementation"] || "quicprobe",
         "server_implementation" => server_implementation(ctx.config),
         "quicer_settings" => stringify_quicer_settings(ctx.config.quicer_settings),
+        "quicer_datagram_send_flags" =>
+          stringify_quicer_datagram_send_flags(ctx.config.quicer_datagram_send_flags),
         "stream_scheduling" => stream_scheduling(ctx.config, measurement),
         "stream_send_window" => stream_send_window(ctx.config, measurement),
         "stream_event_batch_size" => stream_event_batch_size(ctx.config, measurement),
@@ -4248,6 +4299,10 @@ defmodule MOQXProbe.Measure do
   end
 
   defp stringify_quicer_settings(settings), do: settings
+
+  defp stringify_quicer_datagram_send_flags(flags) do
+    Enum.map(flags, &Atom.to_string/1)
+  end
 
   defp stream_send_window(%{topology: @moqx_client_topology} = config, measurement),
     do: measurement["stream_send_window"] || config.stream_send_window
@@ -5173,6 +5228,9 @@ defmodule MOQXProbe.Measure do
       --quicprobe-command PATH       quicprobe executable for reference-client topologies (default: quicprobe)
       --quicer-setting KEY=VALUE     whitelisted quicer connection setting for MOQX client runs; repeatable
                                      paced MOQX DATAGRAM runs default to pacing_enabled=0
+      --quicer-datagram-send-flag NAME
+                                     quicer DATAGRAM send flag for MOQX client runs; repeatable
+                                     supported: #{supported_quicer_datagram_send_flags()}
       --path-json PATH_OR_JSON       path metadata file or inline JSON object
       --output PATH                  write JSONL to a file instead of stdout
       --run-id ID                    run identifier
