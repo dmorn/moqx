@@ -310,3 +310,23 @@ requested load on the link.
   delivered counts. This falsifies "millisecond burst compression is the main
   loss source" for this setup. The temporary implementation was reverted and
   no burst-spacing knob was kept.
+- 2026-06-09: Inspected quicer/MsQuic DATAGRAM buffer ownership before testing
+  MsQuic send buffering. `send_dgram/3` copies the BEAM iodata into a per-send
+  NIF environment, passes that buffer as `ClientSendContext` to
+  `MsQuic->DatagramSend`, and destroys the send context only on final
+  `DATAGRAM_SEND_STATE_CHANGED` states (`LOST_DISCARDED`, `ACKNOWLEDGED`,
+  `ACKNOWLEDGED_SPURIOUS`, or `CANCELED`). MsQuic documents `SENT` as the
+  earliest point where the app may free DATAGRAM buffers, so quicer's lifetime
+  is conservative enough to safely A/B `send_buffering_enabled=0`.
+- 2026-06-09: Redeployed clean artifact
+  `moqxprobe-0.1.0-fe0a5db-linux-x86_64.tar.gz` to remove the previous
+  temporary dirty spacing build, then ran a 30k pps send-buffering A/B on the
+  x86-control lab. Clean default suite
+  `20260609T093717Z-issue40-x86-control-probed-suite-103907` kept reference at
+  99.89% delivery and MOQX at full offered rate with 70.57% delivery.
+  `QUICER_SETTINGS=send_buffering_enabled=0` suite
+  `20260609T093717Z-issue40-x86-control-probed-suite-104035` kept reference at
+  99.70% but made MOQX worse: full offered rate, 54.78% delivery, and
+  `datagram_delivery_loss`. The quicprobe server sidecar again matched the
+  delivered counts. Do not disable MsQuic send buffering by default from this
+  evidence.

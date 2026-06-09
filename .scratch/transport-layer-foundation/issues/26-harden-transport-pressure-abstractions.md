@@ -540,3 +540,10 @@ seams without `Application` env.
   burst reduced MOQX offered rate to 28.76k pps and delivery to 57.23%, while
   `quicprobe` still delivered 99.80%. Keep the sender small: do not retain an
   intra-burst spacing knob from this evidence.
+- 2026-06-09: #40 then tested MsQuic send buffering after verifying quicer's
+  DATAGRAM send context keeps buffers alive until final send state, which is
+  safe for `send_buffering_enabled=0`. The clean x86-control 30k pps control
+  used `moqxprobe-0.1.0-fe0a5db-linux-x86_64.tar.gz` and delivered 70.57% for
+  MOQX while `quicprobe` delivered 99.89%. Disabling send buffering worsened
+  MOQX to 54.78% delivery while `quicprobe` stayed at 99.70%. Keep the default
+  MsQuic send buffering enabled.
