@@ -431,3 +431,34 @@ requested load on the link.
   server kernel, and quic-go DATAGRAM delivery. The send flags remain diagnostic
   because they improved delivery in one clean capture without making the wire
   cadence reference-like.
+- 2026-06-09: Followed up with paired client/server pcaps for the same suite
+  run. No-flag MOQX run
+  `paired-pcap-moqx30-noflags` showed the client pcap and server pcap both saw
+  90,005 large client-to-server UDP packets at full offered rate, but the
+  quicprobe server sidecar delivered only 46,047 DATAGRAMs (51.16% client
+  delivery). Combined `dgram_priority,priority_work` run
+  `paired-pcap-moqx30-flags` had the same paired pcap count of 90,005 large
+  packets, but still delivered only 50,299 DATAGRAMs (55.88%). Linux UDP
+  counters on the server reported `UdpInErrors=0` and `UdpRcvbufErrors=0`.
+  Inspecting quic-go v0.50.1 showed a hard-coded DATAGRAM receive queue length
+  of 128 frames (`maxDatagramRcvQueueLen`), with overflow silently discarding
+  received DATAGRAM frames unless debug logging is enabled. The current
+  quicprobe server loop reads one DATAGRAM and then immediately echoes it, so
+  echo-send pressure can slow receive draining enough for that quic-go receive
+  queue to overflow even when tcpdump sees every UDP packet on the host.
+- 2026-06-09: Tested and reverted a dirty MOQX benchmark-client
+  high-resolution `window` pacing experiment. The implementation changed the
+  client pcap shape from the earlier no-flag burst pattern to a reference-like
+  sender cadence (`paired-pcap-window30-dirty`: client p50 about 32.9 us, p95
+  about 66.0 us, p99 about 122.1 us, 90,005 large packets), but it did not
+  close the actual delivery gap: `window30-dirty-1` delivered 49.44% with a
+  healthy reference control, `paired-pcap-window30-dirty` delivered 70.65%, and
+  `window30-flags-dirty-1` with `dgram_priority,priority_work` delivered
+  61.76%. Because the mode improved pcap shape but not 30k DATAGRAM delivery,
+  the code was reverted and the lab was restored to the clean `da54a2d`
+  moqxprobe artifact on both nodes. Next work should stop tuning the
+  Flow/GenStage sender cadence against the echoing quicprobe server and instead
+  fix the benchmark semantics: either decouple/drain quicprobe server DATAGRAM
+  receive from echo sending, expose server-side receive as the publisher-path
+  success metric, or use a reference peer that does not impose the 128-frame
+  echo-loop receive-queue artifact.
