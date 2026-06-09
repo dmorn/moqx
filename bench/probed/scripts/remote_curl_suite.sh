@@ -33,6 +33,7 @@ datagram_diagnostics="${DATAGRAM_DIAGNOSTICS:-summary}"
 delivery_threshold="${DELIVERY_THRESHOLD:-1.0}"
 offered_rate_tolerance="${OFFERED_RATE_TOLERANCE:-0.95}"
 process_timeout_ms="${PROCESS_TIMEOUT_MS:-60000}"
+quicer_settings="${QUICER_SETTINGS:-}"
 
 usage() {
   cat <<EOF
@@ -60,7 +61,7 @@ Useful environment overrides:
   IPERF3_TCP_DURATION IPERF3_UDP_DURATION IPERF3_UDP_BITRATES IPERF3_UDP_LENGTH
   DATAGRAM_SIZE DATAGRAM_COUNT DATAGRAM_RATE DURATION_SECONDS
   DATAGRAM_DRAIN_LIMIT DATAGRAM_DIAGNOSTICS DELIVERY_THRESHOLD OFFERED_RATE_TOLERANCE
-  PROCESS_TIMEOUT_MS
+  PROCESS_TIMEOUT_MS QUICER_SETTINGS
 EOF
 }
 
@@ -261,6 +262,20 @@ remote_readlink() {
   ssh "${ssh_opts[@]}" "root@$host" "readlink -f '$path' 2>/dev/null || true"
 }
 
+quicer_setting_args() {
+  jq -n --arg settings "$quicer_settings" '
+    if $settings == "" then
+      []
+    else
+      $settings
+      | split(",")
+      | map(select(length > 0))
+      | map(["--quicer-setting", .])
+      | add
+    end
+  '
+}
+
 remote_json_file() {
   local node="$1"
   local path="$2"
@@ -367,6 +382,7 @@ jq -n \
   --arg server_quicprobe_current "$server_quicprobe_current" \
   --arg client_probed_current "$client_probed_current" \
   --arg server_probed_current "$server_probed_current" \
+  --arg quicer_settings "$quicer_settings" \
   --argjson client_moqxprobe_artifact "$client_moqxprobe_artifact" \
   --argjson server_moqxprobe_artifact "$server_moqxprobe_artifact" \
   --argjson tests "$tests_json" \
@@ -377,6 +393,9 @@ jq -n \
     tests: $tests,
     client: {public_ipv4: $client_public, private_ip: $client_private, probed: $client_base},
     server: {public_ipv4: $server_public, private_ip: $server_private, probed: $server_base},
+    env: {
+      quicer_settings: $quicer_settings
+    },
     tools: {
       client: {
         moqxprobe: {current: $client_moqxprobe_current, artifact: $client_moqxprobe_artifact},
@@ -661,6 +680,13 @@ run_measure() {
       --argjson argv "$argv" \
       --arg topology "$topology" \
       '["measure", "--topology", $topology] + ($argv | .[1:])')"
+  fi
+
+  if [ "$role" = "moqx_client" ] && [ -n "$quicer_settings" ]; then
+    argv="$(jq -n \
+      --argjson argv "$argv" \
+      --argjson quicer_args "$(quicer_setting_args)" \
+      '$argv + $quicer_args')"
   fi
 
   process="$(

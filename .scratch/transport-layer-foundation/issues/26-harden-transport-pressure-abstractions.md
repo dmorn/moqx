@@ -516,3 +516,13 @@ seams without `Application` env.
   same path with a fresh iperf3 baseline, not against old ARM absolute
   capacity numbers. ARM remains a confirmation lane for portability and
   architecture sensitivity when Hetzner can place a CAX pair.
+- 2026-06-09: The x86-control #40 lab is running as
+  `20260609T093717Z-issue40-x86-control`. The first real-path DATAGRAM evidence
+  changes the bottleneck classification: the extracted Flow/GenStage sender can
+  now offer 30k/32k pps on x86, but peer receive/delivery collapses after local
+  DATAGRAM admission while `quicprobe -> quicprobe` remains near 100% delivery
+  on the same path. Enabling MsQuic pacing through the new probed
+  `QUICER_SETTINGS=pacing_enabled=1` knob did not help; it worsened 30k and
+  left 32k around the same loss level. The next useful #26/#40 work is
+  sender/path/congestion diagnosis below local admission, not more BEAM
+  pacing-loop work or a default change to MsQuic pacing.

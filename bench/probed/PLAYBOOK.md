@@ -237,6 +237,9 @@ use ARM later as a confirmation lane, not as a blocker:
 just bench-transport-probed-datagram-bracket <run-id> 30000,32000
 ```
 
+Use `QUICER_SETTINGS=pacing_enabled=1` to pass whitelisted quicer connection
+settings to the MOQX-client measurements in the suite or bracket.
+
 The wrapper runs one baseline/stream-smoke suite
 (`iperf3,reference_stream,moqx_stream`) and then one DATAGRAM suite
 (`reference_datagram,moqx_datagram`) per requested rate. The default bracket

@@ -257,3 +257,28 @@ requested load on the link.
   older ARM CAX numbers. ARM remains valuable as a later portability and
   confirmation check when capacity is available, but it no longer blocks the
   DATAGRAM sender tuning loop.
+- 2026-06-09: Brought up the dedicated x86-control lab
+  `20260609T093717Z-issue40-x86-control` (`ccx23`, `fsn1 -> hel1`, private
+  path `10.88.0.11 -> 10.88.0.12`) and kept it running for iteration. Private
+  network/toolchain checks passed. `probed`, `quicprobe`, and `moqxprobe` were
+  deployed and the baseline suite passed. The first x86 DATAGRAM bracket
+  `20260609T093717Z-issue40-x86-control-dgram-bracket-094959` used 1180-byte
+  DATAGRAMs for 3 seconds at 30k and 32k pps with MOQX's current
+  `pacing_enabled=0` default. `quicprobe -> quicprobe` sustained target
+  offered rate with 99.94% delivery at 30k and 99.46% at 32k. MOQX-client also
+  sustained target offered rate, so the old offered-rate failure is gone, but
+  delivery collapsed after local admission: 85.89% at 30k and 48.59% at 32k,
+  both with `datagram_delivery_loss`. The quicprobe server sidecar received
+  roughly the same counts reported by MOQX as delivered, so this is not a
+  client echo-drain or mailbox-backlog artifact; the missing DATAGRAMs are lost
+  before the reference server application receives them.
+- 2026-06-09: Added a benchmark-control knob for this diagnosis:
+  `QUICER_SETTINGS` is forwarded by the probed suite/bracket and appended as
+  `--quicer-setting` only to MOQX-client measurements. The fake bracket
+  regression covers forwarding. Reran the same x86 bracket as
+  `20260609T093717Z-issue40-x86-control-dgram-bracket-100620` with
+  `QUICER_SETTINGS=pacing_enabled=1`. This isolated MsQuic pacing as a
+  non-fix: reference stayed healthy at 99.86%/99.97% delivery for 30k/32k,
+  while MOQX still sustained offered rate but delivered only 53.32% at 30k and
+  49.32% at 32k. Keep the knob for controlled experiments, but do not change
+  the default away from `pacing_enabled=0` based on this evidence.

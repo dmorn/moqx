@@ -20,6 +20,7 @@ offered_rate_tolerance="${OFFERED_RATE_TOLERANCE:-0.95}"
 process_timeout_ms="${PROCESS_TIMEOUT_MS:-120000}"
 datagram_diagnostics="${DATAGRAM_DIAGNOSTICS:-summary}"
 datagram_drain_limit="${DATAGRAM_DRAIN_LIMIT:-0}"
+quicer_settings="${QUICER_SETTINGS:-}"
 
 stream_count="${STREAM_COUNT:-1}"
 payload_size="${PAYLOAD_SIZE:-256}"
@@ -46,6 +47,7 @@ Options:
 Environment overrides forwarded to remote_curl_suite.sh:
   DATAGRAM_SIZE DATAGRAM_DIAGNOSTICS DATAGRAM_DRAIN_LIMIT
   DURATION_SECONDS DELIVERY_THRESHOLD OFFERED_RATE_TOLERANCE PROCESS_TIMEOUT_MS
+  QUICER_SETTINGS
   STREAM_COUNT PAYLOAD_SIZE PAYLOAD_COUNT
   IPERF3_TCP_DURATION IPERF3_UDP_DURATION IPERF3_UDP_BITRATES IPERF3_UDP_LENGTH
 
@@ -169,6 +171,7 @@ jq -n \
   --arg process_timeout_ms "$process_timeout_ms" \
   --arg datagram_diagnostics "$datagram_diagnostics" \
   --arg datagram_drain_limit "$datagram_drain_limit" \
+  --arg quicer_settings "$quicer_settings" \
   --arg stream_count "$stream_count" \
   --arg payload_size "$payload_size" \
   --arg payload_count "$payload_count" \
@@ -193,6 +196,7 @@ jq -n \
       process_timeout_ms: ($process_timeout_ms | tonumber),
       datagram_diagnostics: $datagram_diagnostics,
       datagram_drain_limit: ($datagram_drain_limit | tonumber),
+      quicer_settings: $quicer_settings,
       stream_smoke: {
         stream_count: ($stream_count | tonumber),
         payload_size_bytes: ($payload_size | tonumber),
@@ -285,6 +289,7 @@ run_suite() {
       DURATION_SECONDS="$duration_seconds" \
       DATAGRAM_DRAIN_LIMIT="$datagram_drain_limit" \
       DATAGRAM_DIAGNOSTICS="$datagram_diagnostics" \
+      QUICER_SETTINGS="$quicer_settings" \
       DELIVERY_THRESHOLD="$delivery_threshold" \
       OFFERED_RATE_TOLERANCE="$offered_rate_tolerance" \
       PROCESS_TIMEOUT_MS="$process_timeout_ms" \
