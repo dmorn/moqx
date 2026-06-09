@@ -498,3 +498,21 @@ seams without `Application` env.
   were removed. This keeps the transport benchmark focused on the product's
   first caller-side use cases. Listener/relay performance should return as a
   new relay-scoped issue only when relays become a target.
+- 2026-06-09: #40 retried the remote ARM DATAGRAM validation with run id
+  `20260609T075017Z-issue40-arm-bracket`, but Hetzner placement was still
+  unavailable. The retry covered the available CAX ladder from `cax11` through
+  `cax41` across same-region and cross-region EU profiles, and every server
+  placement failed with `resource_unavailable` for both roles. Partial shared
+  resources were destroyed immediately, `just bench-transport-verify-clean`
+  passed, and no bracket artifacts were produced. The performance-hardening
+  state is therefore unchanged: the next useful evidence step is still the
+  ARM `probed` DATAGRAM bracket for the new caller-side sender architecture,
+  not an x86 substitute.
+- 2026-06-09: Updated the #40 lab strategy after the repeated ARM placement
+  failures. Dedicated `x86-control` nodes are now the primary real-path
+  iteration target for caller-side DATAGRAM hardening because they are more
+  provisionable and reduce feedback-loop latency. Interpret x86 results as
+  their own controlled evidence tier: compare MOQX against `quicprobe` on the
+  same path with a fresh iperf3 baseline, not against old ARM absolute
+  capacity numbers. ARM remains a confirmation lane for portability and
+  architecture sensitivity when Hetzner can place a CAX pair.

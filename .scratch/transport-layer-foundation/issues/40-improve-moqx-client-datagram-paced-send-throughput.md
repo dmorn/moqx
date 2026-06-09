@@ -34,9 +34,11 @@ unbounded mailbox backlog.
       `send_datagram/3` wait for peer delivery or backend completion.
 - [x] Add only the low-overhead diagnostics needed to classify the ceiling, and
       keep the `transport-bench-v1` summary contract stable.
-- [x] If an implementation change is made, rerun the real-path ARM DATAGRAM
-      bracket with an iperf3 baseline and compare against the reference
-      quicprobe control.
+- [x] If an implementation change is made, rerun a controlled real-path
+      DATAGRAM bracket with an iperf3 baseline and compare against the
+      reference quicprobe control. Use the dedicated x86-control profile as the
+      primary iteration lab while Hetzner ARM placement is unavailable; treat
+      ARM as an opportunistic confirmation lane, not as a blocker.
 - [x] Record the result in #26, including whether MOQX-client can sustain the
       20k pps offered-rate contract and what remains to close versus the
       reference client.
@@ -229,3 +231,29 @@ requested load on the link.
   artifacts or performance measurements were produced. This keeps the next
   #40 action unchanged: run the `probed` DATAGRAM bracket on ARM once Hetzner
   can place a pair, not on x86 as a substitute.
+- 2026-06-09: Retried the ARM real-path bracket with run id
+  `20260609T075017Z-issue40-arm-bracket`. Hetzner ARM placement is still
+  unavailable across the useful ARM ladder: `arm-hel1-tiny` (`cax11`,
+  `hel1 -> hel1`), `arm-nbg1-tiny` (`cax11`, `nbg1 -> nbg1`),
+  `arm-nbg1-hel1-tiny` (`cax11`, `nbg1 -> hel1`), `arm-smoke` (`cax21`,
+  `fsn1 -> nbg1`), `arm-default` (`cax31`, `fsn1 -> hel1`), and
+  `arm-nbg1-hel1-stress` (`cax41`, `nbg1 -> hel1`). Every apply that reached
+  server creation failed during placement with `resource_unavailable` for both
+  client and server roles. A Terraform plan-version mismatch occurred during
+  the first `arm-nbg1-hel1-stress` apply attempt; regenerating the plan with
+  the active Terraform `1.15.5` resolved that tooling issue before the final
+  placement attempt, and it did not create server resources. Each partial
+  network/firewall/SSH-key apply was destroyed immediately, the current run
+  marker was cleared, and `just bench-transport-verify-clean` reported no
+  Terraform state entries or labelled Hetzner resources remaining. No bracket
+  artifacts or performance measurements were produced. The next #40 action is
+  unchanged: rerun the `probed` DATAGRAM bracket on ARM when Hetzner can place
+  a pair.
+- 2026-06-09: Revised the #40 evidence contract after repeated Hetzner CAX
+  placement misses. The active performance-hardening lab is now the dedicated
+  `x86-control` profile: run iperf3, `quicprobe -> quicprobe`, and
+  `moqxprobe -> quicprobe` on the same x86 path and compare MOQX against that
+  reference baseline. Do not mix the new x86 absolute capacity numbers with
+  older ARM CAX numbers. ARM remains valuable as a later portability and
+  confirmation check when capacity is available, but it no longer blocks the
+  DATAGRAM sender tuning loop.

@@ -228,8 +228,10 @@ DURATION_SECONDS=1 \
 just bench-transport-probed-suite <run-id>
 ```
 
-For the #40 ARM DATAGRAM validation, use the bracket wrapper after the lab is
-up, private-path checked, and tools are deployed:
+For the #40 DATAGRAM validation, use the bracket wrapper after the lab is up,
+private-path checked, and tools are deployed. The primary iteration target is
+the dedicated `x86-control` profile while Hetzner ARM placement is unreliable;
+use ARM later as a confirmation lane, not as a blocker:
 
 ```bash
 just bench-transport-probed-datagram-bracket <run-id> 30000,32000
