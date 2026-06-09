@@ -481,3 +481,23 @@ requested load on the link.
   client echo delivery remains a stricter round-trip diagnostic and can fail
   after successful ingress. Next step is to commit this quicprobe fix, rebuild
   a clean artifact, redeploy it, and rerun one confirmation suite.
+- 2026-06-09: Rebuilt and redeployed clean quicprobe artifact
+  `quicprobe-60695bf-linux-x86_64` to the x86-control lab, then ran
+  confirmation suite
+  `20260609T093717Z-issue40-x86-control-quicprobe-echoqueue-clean-30k-1`
+  with 1180-byte DATAGRAMs at 30k pps for 3 seconds. The manifest recorded
+  clean server quicprobe path
+  `/opt/moqx-bench/quicprobe/releases/quicprobe-60695bf-linux-x86_64` and
+  clean client moqxprobe path
+  `/opt/moqx-bench/moqxprobe/releases/moqxprobe-0.1.0-da54a2d-linux-x86_64`.
+  MOQX-client delivered 99.976% (`22` drops) at valid offered rate
+  (`offered_rate_ratio=0.999844`) and the quicprobe server received
+  90,000/90,000 DATAGRAMs, echoed all 90,000, and peaked at echo queue depth
+  40,695. The reference client delivered only 69.883% echo returns in this run,
+  but the server still received 89,988/90,000 DATAGRAMs and the echo queue
+  peaked at 80,077 before the client closed. This clean run confirms the fix:
+  #40's current sender-side MOQX gap at 30k pps is not reproduced when the
+  reference server drains DATAGRAM ingress independently from echo return. The
+  next harness improvement should surface server-side receive in reports or
+  suite summaries so operators do not misread echo-backlog artifacts as
+  publisher-path loss.
