@@ -295,3 +295,18 @@ requested load on the link.
   suspect below local send admission and before server-application receive.
   Keep the setting available for experiments, but do not raise
   `max_operations_per_drain` by default from this run.
+- 2026-06-09: Tested the next sender-shape hypothesis by temporarily adding an
+  optional quicprobe-like intra-burst spacing knob to the MOQX DATAGRAM sink,
+  deploying dirty artifact
+  `moqxprobe-0.1.0-0caab6d-dirty-9da5c5e9ae49-linux-x86_64.tar.gz`, and
+  running a tight 30k pps A/B on the still-running x86 lab. Default spacing
+  (`DATAGRAM_BURST_SPACING_US=0`) in suite
+  `20260609T093717Z-issue40-x86-control-probed-suite-103202` kept the reference
+  healthy at 99.99% delivery and MOQX at full offered rate with 90.15%
+  delivery. The spaced variant (`DATAGRAM_BURST_SPACING_US=33`) in suite
+  `20260609T093717Z-issue40-x86-control-probed-suite-103348` made MOQX worse:
+  offered rate fell to 28.76k pps and delivery fell to 57.23%, while reference
+  stayed healthy at 99.80%. The quicprobe server sidecar again matched the
+  delivered counts. This falsifies "millisecond burst compression is the main
+  loss source" for this setup. The temporary implementation was reverted and
+  no burst-spacing knob was kept.

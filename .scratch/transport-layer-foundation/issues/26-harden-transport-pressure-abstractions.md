@@ -533,3 +533,10 @@ seams without `Application` env.
   collapsed to 11.05%, making that sample low-confidence path/lab evidence.
   Treat this as another negative knob test, not a default-setting candidate.
   The lab remains intentionally up for the current tuning loop.
+- 2026-06-09: #40 also falsified the "over-compressed 1 ms sender burst" theory
+  with a temporary moqxprobe A/B that was reverted after measurement. On the
+  x86-control path at 30k pps, default sink bursts delivered 90.15% for MOQX
+  while `quicprobe` delivered 99.99%; adding 33 us spacing inside each MOQX
+  burst reduced MOQX offered rate to 28.76k pps and delivery to 57.23%, while
+  `quicprobe` still delivered 99.80%. Keep the sender small: do not retain an
+  intra-burst spacing knob from this evidence.
