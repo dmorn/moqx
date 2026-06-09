@@ -339,3 +339,17 @@ requested load on the link.
   control. This is not enough signal to change defaults: BBR does not close the
   current DATAGRAM gap, and the remaining loss still happens before the
   quicprobe server application receives the DATAGRAMs.
+- 2026-06-09: Ran a clean lower-rate DATAGRAM bracket on the still-running
+  x86-control lab, bracket
+  `20260609T093717Z-issue40-x86-control-dgram-bracket-105141`, using clean
+  artifact `moqxprobe-0.1.0-fe0a5db-linux_x86_64`, 1180-byte DATAGRAMs, 3
+  second send windows, and default quicer settings. The result is useful but
+  qualified. MOQX sustained target offered rate at every point and delivered
+  95.76% at 20k pps, 94.45% at 26k pps, and 91.27% at 30k pps. The 24k and
+  28k points were lower (69.04% and 80.83%), but the reference control itself
+  collapsed at those same rates (13.71% and 12.02%), while reference was healthy
+  at 26k and 30k (99.90% and 99.94%). Treat this as evidence that MOQX has a
+  plausible usable envelope around 20k pps on this x86 path and remains
+  full-offer up to 30k, but do not use this one-pass broad bracket as the final
+  threshold. The next measurement loop should use repeated single-rate runs
+  with valid reference controls before claiming a stable cliff.

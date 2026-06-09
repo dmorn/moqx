@@ -552,3 +552,11 @@ seams without `Application` env.
   at 99.98% and MOQX at full offered rate, but MOQX delivery only reached
   72.11% versus the immediate Cubic control's 70.57%. Treat BBR as a non-fix
   for the current DATAGRAM gap.
+- 2026-06-09: #40 then ran a clean lower-rate x86-control DATAGRAM bracket
+  across 20k, 24k, 26k, 28k, and 30k pps. This changed the next diagnostic
+  shape: MOQX can now sustain target offered rate at all tested rates, and it
+  crossed the 95% delivery threshold at 20k pps (95.76%) while getting close at
+  26k pps (94.45%) and reaching 91.27% at 30k pps. However, the reference
+  control was itself unstable at 24k and 28k, so the broad bracket is not clean
+  enough for a final threshold claim. Prefer repeated single-rate runs with a
+  healthy reference control before doing more implementation churn.
