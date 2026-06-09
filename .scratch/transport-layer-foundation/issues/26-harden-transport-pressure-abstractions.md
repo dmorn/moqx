@@ -577,3 +577,10 @@ seams without `Application` env.
   enough to become the default. Keep the current sender architecture small and
   use the next loop to explain the variance under DATAGRAM-only and mixed
   pressure before claiming #26 closed.
+- 2026-06-09: Clean-artifact repeats on `da54a2d` weakened the send-flag
+  conclusion. The combined flags produced 87.83% and then 51.38% MOQX delivery,
+  while a no-flag clean control produced 62.03%; all three used the same
+  artifact, path, 30k pps offered load, and server sidecar. Keep the flag
+  plumbing as a diagnostic mechanism, but do not make the flags the default or
+  treat them as the #26 fix. The next useful hardening work is variance
+  diagnosis below local admission and before quicprobe server receive.

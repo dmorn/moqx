@@ -393,3 +393,16 @@ requested load on the link.
   not declare the 30k path fixed or change defaults yet. The next loop should
   explain the variance and verify whether the combined flags remain safe under
   mixed control-plus-DATAGRAM pressure.
+- 2026-06-09: Rebuilt and redeployed the clean `da54a2d` artifact
+  (`moqxprobe-0.1.0-da54a2d-linux-x86_64.tar.gz`) to verify that the dirty
+  send-flag evidence still holds after commit. It does not hold strongly enough
+  to become a default. With `dgram_priority,priority_work`,
+  `probed-suite-135645` delivered 87.83% for MOQX at full offered rate, then
+  `probed-suite-135755` fell back to 51.38% at full offered rate. A clean
+  no-flag control, `probed-suite-140356`, delivered 62.03%. In all three clean
+  suites the reference client's JSONL offered-rate record was invalid, but the
+  quicprobe server sidecar received all 90,000 reference DATAGRAMs, so the
+  client-to-server reference path was still capable. Treat the send flags as a
+  useful diagnostic control, not a fix. The next loop should stop adding send
+  flags and instead explain the run-to-run MOQX server-receive variance on the
+  same artifact, rate, path, and server sidecar.
