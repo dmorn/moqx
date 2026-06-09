@@ -406,3 +406,28 @@ requested load on the link.
   useful diagnostic control, not a fix. The next loop should stop adding send
   flags and instead explain the run-to-run MOQX server-receive variance on the
   same artifact, rate, path, and server sidecar.
+- 2026-06-09: Added CLI packet-capture evidence on the still-running
+  x86-control lab using `tcpdump` on the private interfaces and local `tshark`
+  reduction. Timed captures that started before suite setup missed the traffic,
+  so the usable samples used live captures explicitly stopped after each suite;
+  all usable pcaps reported zero tcpdump kernel drops. Reference sender capture
+  `pcap-ref30-live` showed 90,005 large outbound UDP packets over 3.03 seconds
+  with gap p50 about 32.9 us, p95 about 42.0 us, p99 about 125.9 us, and the
+  server sidecar received 89,577 DATAGRAMs (99.53% delivery). MOQX no-flag
+  sender capture `pcap-moqx30-live` also showed 90,005 large outbound UDP
+  packets over 3.03 seconds, but with a much burstier shape: gap p50 about 9.1
+  us, p95 about 16.9 us, and p99 about 759.8 us; that paired run delivered only
+  52.53% and the server sidecar received 47,280 DATAGRAMs. Combined
+  `dgram_priority,priority_work` sender capture `pcap-moqx30-flags-live`
+  again showed 90,005 large outbound UDP packets with the same bursty shape
+  (p50 about 8.1 us, p95 about 14.8 us, p99 about 799.9 us), while the server
+  sidecar received 86,000 DATAGRAMs and the run passed at 95.55% delivery.
+  A receiver-side no-flag capture `pcap-server-moqx30-live` was a higher
+  delivery sample (94.22%): the server pcap saw 90,005 large incoming UDP
+  packets, while the quicprobe sidecar delivered 84,801 DATAGRAMs. Current
+  interpretation: MOQX/quicer is not failing to produce the intended large
+  UDP packet count at 30k pps. The remaining gap is tied to burst shape and/or
+  lower-level queueing/receive processing between sender capture, real wire,
+  server kernel, and quic-go DATAGRAM delivery. The send flags remain diagnostic
+  because they improved delivery in one clean capture without making the wire
+  cadence reference-like.
