@@ -42,8 +42,9 @@ unbounded mailbox backlog.
 - [x] Record the result in #26, including whether MOQX-client can sustain the
       20k pps offered-rate contract and what remains to close versus the
       reference client.
-- [x] Destroy disposable infrastructure and verify no provider resources remain
-      after any remote run.
+- [ ] Keep the active x86-control lab alive during the agreed tuning loop; when
+      the loop ends or the operator asks, destroy disposable infrastructure and
+      verify no provider resources remain.
 
 ## Blocked by
 
@@ -282,3 +283,15 @@ requested load on the link.
   while MOQX still sustained offered rate but delivered only 53.32% at 30k and
   49.32% at 32k. Keep the knob for controlled experiments, but do not change
   the default away from `pacing_enabled=0` based on this evidence.
+- 2026-06-09: Tested another quicer/MsQuic scheduling hypothesis on the same
+  running x86 lab with
+  `QUICER_SETTINGS=max_operations_per_drain=255`, bracket
+  `20260609T093717Z-issue40-x86-control-dgram-bracket-101312`. This is not a
+  fix. At 30k pps, reference delivered 98.45% but MOQX delivered only 43.30%.
+  At 32k pps, the reference control itself collapsed to 11.05% delivery while
+  MOQX delivered 12.89%, so that sample is low-confidence path/lab evidence
+  rather than a clean MOQX-specific signal. The quicprobe server sidecar again
+  received and echoed roughly the delivered counts, which keeps the remaining
+  suspect below local send admission and before server-application receive.
+  Keep the setting available for experiments, but do not raise
+  `max_operations_per_drain` by default from this run.

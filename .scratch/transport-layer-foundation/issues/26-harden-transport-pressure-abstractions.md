@@ -526,3 +526,10 @@ seams without `Application` env.
   left 32k around the same loss level. The next useful #26/#40 work is
   sender/path/congestion diagnosis below local admission, not more BEAM
   pacing-loop work or a default change to MsQuic pacing.
+- 2026-06-09: A follow-up x86-control bracket with
+  `QUICER_SETTINGS=max_operations_per_drain=255` also failed to improve the
+  MOQX-client DATAGRAM gap. MOQX delivered only 43.30% at 30k pps while the
+  reference control delivered 98.45%; at 32k pps the reference control itself
+  collapsed to 11.05%, making that sample low-confidence path/lab evidence.
+  Treat this as another negative knob test, not a default-setting candidate.
+  The lab remains intentionally up for the current tuning loop.
