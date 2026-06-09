@@ -368,3 +368,10 @@ requested load on the link.
   repeatable pass on this x86 path; 30k pps remains a clean MOQX-specific gap.
   Next implementation work should inspect MsQuic/quicer DATAGRAM send flags or
   queue/drop semantics rather than more BEAM pacing-loop changes.
+- 2026-06-09: Bookkeeping checkpoint before the next implementation experiment:
+  keep the existing x86-control lab up for the current tuning loop, use 30k pps
+  with a healthy `quicprobe` reference control as the discriminator, and treat
+  ARM as the later architecture-confirmation lane once CAX capacity is available.
+  Any quicer/MsQuic DATAGRAM send-flag or queue/drop change should stay
+  experimental until it improves the 30k MOQX gap on this path; if it does not,
+  revert the change and retain only the negative evidence.

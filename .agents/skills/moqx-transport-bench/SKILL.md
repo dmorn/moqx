@@ -143,7 +143,8 @@ Source of truth:
 - Use `moqxprobe report <jsonl>` or the local
   `mix moqx.transport.report <jsonl>` wrapper to inspect JSONL artifacts
   without changing the canonical machine-readable format.
-- Before committing repo changes, run the project gate from `AGENTS.md`:
-  `mix format`, tests, `mix credo --strict`, plus the nested benchmark project
-  gate when changing `bench/ledger/`, `bench/moqxprobe/`, or `bench/probed/`,
-  and relevant Terraform checks.
+- Before committing code or benchmark-tooling changes, run the project gate from
+  `AGENTS.md`: `mix format`, tests, `mix credo --strict`, plus the nested
+  benchmark project gate when changing `bench/ledger/`, `bench/moqxprobe/`, or
+  `bench/probed/`, and relevant Terraform checks. Documentation-only and
+  issue-only bookkeeping commits do not require the Elixir gate.
