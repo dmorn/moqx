@@ -462,3 +462,22 @@ requested load on the link.
   receive from echo sending, expose server-side receive as the publisher-path
   success metric, or use a reference peer that does not impose the 128-frame
   echo-loop receive-queue artifact.
+- 2026-06-09: Implemented the benchmark-semantics fix in `bench/quicprobe`.
+  The server DATAGRAM loop now drains `ReceiveDatagram` into a large echo queue
+  while a separate goroutine sends echoes back, and `quicprobe-stats.jsonl`
+  reports `echo_queue_capacity` plus `echo_queue_max_depth`. This avoids
+  measuring quic-go's 128-frame receive queue overflow caused by echo-send
+  backpressure. Dirty validation on the still-running x86-control lab with
+  clean `moqxprobe` artifact `da54a2d` and dirty quicprobe artifact
+  `5569e2d` showed the expected shift. At 30k pps for 3 seconds,
+  `quicprobe -> quicprobe` delivered 100% and the MOQX-client path delivered
+  99.862% (`124` drops) with valid offered rate; the server sidecar received
+  89,898/90,000 MOQX DATAGRAMs and peaked at echo queue depth 41,750. At 32k
+  pps, the server sidecar received all 96,000 DATAGRAMs for both reference and
+  MOQX clients. The MOQX-client echo metric passed at 99.973%, while the
+  reference client echo metric dropped to 66.196% because the client closed
+  before the server finished echoing the queued backlog. Current conclusion:
+  server-side DATAGRAM receive is the primary publisher-path signal for #40;
+  client echo delivery remains a stricter round-trip diagnostic and can fail
+  after successful ingress. Next step is to commit this quicprobe fix, rebuild
+  a clean artifact, redeploy it, and rerun one confirmation suite.

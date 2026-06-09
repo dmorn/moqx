@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -354,6 +356,53 @@ func TestClientServerJSONDatagramPressure(t *testing.T) {
 	}
 }
 
+func TestEchoDatagramsDrainsReceivesWhileEchoSendIsBlocked(t *testing.T) {
+	t.Parallel()
+
+	payloads := make([][]byte, 256)
+	for i := range payloads {
+		payloads[i] = []byte{byte(i)}
+	}
+
+	conn := newBlockingEchoConn(payloads)
+	resultc := make(chan datagramEchoStats, 1)
+	go func() {
+		resultc <- echoDatagrams(context.Background(), conn)
+	}()
+
+	select {
+	case <-conn.sendStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SendDatagram was not called")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt64(&conn.receivedCount) < int64(len(payloads)) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+
+	if received := atomic.LoadInt64(&conn.receivedCount); received != int64(len(payloads)) {
+		t.Fatalf("received count while send blocked = %d, want %d", received, len(payloads))
+	}
+
+	close(conn.unblockSend)
+
+	select {
+	case stats := <-resultc:
+		if stats.datagramsReceived != len(payloads) {
+			t.Fatalf("datagramsReceived = %d, want %d", stats.datagramsReceived, len(payloads))
+		}
+		if stats.datagramsEchoAccepted != len(payloads) {
+			t.Fatalf("datagramsEchoAccepted = %d, want %d", stats.datagramsEchoAccepted, len(payloads))
+		}
+		if stats.echoQueueMaxDepth == 0 {
+			t.Fatal("echoQueueMaxDepth = 0, want buffered echo backlog")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("echoDatagrams did not finish after unblocking sends")
+	}
+}
+
 func TestClientServerJSONPacedDatagramPressure(t *testing.T) {
 	t.Parallel()
 
@@ -645,6 +694,54 @@ func awaitServerDatagramSummary(t *testing.T, path string) serverDatagramSummary
 
 	t.Fatalf("server stats were not written to %s", path)
 	return serverDatagramSummary{}
+}
+
+type blockingEchoConn struct {
+	mu            sync.Mutex
+	payloads      [][]byte
+	receivedCount int64
+	sendStarted   chan struct{}
+	unblockSend   chan struct{}
+}
+
+func newBlockingEchoConn(payloads [][]byte) *blockingEchoConn {
+	return &blockingEchoConn{
+		payloads:    payloads,
+		sendStarted: make(chan struct{}, 1),
+		unblockSend: make(chan struct{}),
+	}
+}
+
+func (c *blockingEchoConn) ReceiveDatagram(_ context.Context) ([]byte, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if len(c.payloads) == 0 {
+		return nil, errors.New("receive complete")
+	}
+
+	payload := c.payloads[0]
+	c.payloads = c.payloads[1:]
+	atomic.AddInt64(&c.receivedCount, 1)
+	return payload, nil
+}
+
+func (c *blockingEchoConn) SendDatagram(_ []byte) error {
+	select {
+	case c.sendStarted <- struct{}{}:
+	default:
+	}
+
+	<-c.unblockSend
+	return nil
+}
+
+func (c *blockingEchoConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4433}
+}
+
+func (c *blockingEchoConn) RemoteAddr() net.Addr {
+	return &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9443}
 }
 
 type testCerts struct {

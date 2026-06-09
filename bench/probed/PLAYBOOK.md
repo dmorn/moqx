@@ -237,6 +237,13 @@ use ARM later as a confirmation lane, not as a blocker:
 just bench-transport-probed-datagram-bracket <run-id> 30000,32000
 ```
 
+For DATAGRAM runs against `quicprobe` server, inspect the fetched
+`server/quicprobe-stats.jsonl` beside the client JSONL. Its
+`datagrams_received` count is the publisher-path ingress signal. Client echo
+delivery is a stricter round-trip diagnostic and may fail after ingress has
+succeeded when echo return is backlogged; use `echo_queue_capacity` and
+`echo_queue_max_depth` to see that condition.
+
 Use `QUICER_SETTINGS=pacing_enabled=1` to pass whitelisted quicer connection
 settings to the MOQX-client measurements in the suite or bracket.
 Use `QUICER_DATAGRAM_SEND_FLAGS=dgram_priority,priority_work` to pass

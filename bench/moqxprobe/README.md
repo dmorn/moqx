@@ -232,7 +232,14 @@ single reference client run. That output is an implementation-specific
 reference measurement, not the canonical benchmark schema; `moqxprobe`
 commands are responsible for converting reference measurements into
 `transport-bench-v1` JSONL records. The `server` mode is an explicit peer
-process; it supports stream echo/drain and QUIC DATAGRAM echo.
+process; it supports stream echo/drain and QUIC DATAGRAM echo. For DATAGRAM
+pressure, the server drains QUIC DATAGRAM receive independently from echo
+sending and writes server-side ingress statistics when `--stats-output` is set.
+Those records include received DATAGRAMs, echo-accepted DATAGRAMs,
+`echo_queue_capacity`, and `echo_queue_max_depth`. Treat server-side received
+DATAGRAMs as the publisher-path ingress signal; client echo delivery remains a
+stricter round-trip diagnostic and can fail because echo return is backlogged
+after ingress has already succeeded.
 
 ```bash
 go run ./bench/quicprobe server --addr :4433 \

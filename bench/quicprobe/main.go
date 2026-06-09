@@ -29,6 +29,7 @@ const streamPressureWorkload = "stream_pressure"
 const datagramPressureWorkload = "datagram_pressure"
 const mixedMOQTShapedWorkload = "mixed_moqt_shaped"
 const datagramHeaderSize = 16
+const datagramEchoQueueLen = 131_072
 const pacedSpinThreshold = 200 * time.Microsecond
 
 type serverConfig struct {
@@ -134,6 +135,8 @@ type serverDatagramSummary struct {
 	DatagramsEchoAccepted  int     `json:"datagrams_echo_accepted"`
 	BytesReceived          int64   `json:"bytes_received"`
 	BytesEchoAccepted      int64   `json:"bytes_echo_accepted"`
+	EchoQueueCapacity      int     `json:"echo_queue_capacity,omitempty"`
+	EchoQueueMaxDepth      int     `json:"echo_queue_max_depth,omitempty"`
 	ReceiveError           string  `json:"receive_error,omitempty"`
 	SendError              string  `json:"send_error,omitempty"`
 	FirstDatagramLatencyMS float64 `json:"first_datagram_latency_ms,omitempty"`
@@ -148,9 +151,18 @@ type datagramEchoStats struct {
 	datagramsEchoAccepted int
 	bytesReceived         int64
 	bytesEchoAccepted     int64
+	echoQueueCapacity     int
+	echoQueueMaxDepth     int
 	receiveErr            error
 	sendErr               error
 	firstDatagramLatency  time.Duration
+}
+
+type datagramConn interface {
+	ReceiveDatagram(context.Context) ([]byte, error)
+	SendDatagram([]byte) error
+	LocalAddr() net.Addr
+	RemoteAddr() net.Addr
 }
 
 type datagramSendResult struct {
@@ -441,20 +453,34 @@ func drainUniStream(stream quic.ReceiveStream) {
 	_, _ = io.Copy(io.Discard, stream)
 }
 
-func echoDatagrams(ctx context.Context, conn quic.Connection) (stats datagramEchoStats) {
+func echoDatagrams(ctx context.Context, conn datagramConn) (stats datagramEchoStats) {
 	stats = datagramEchoStats{
-		startedAt:  time.Now(),
-		localAddr:  conn.LocalAddr().String(),
-		remoteAddr: conn.RemoteAddr().String(),
+		startedAt:         time.Now(),
+		localAddr:         conn.LocalAddr().String(),
+		remoteAddr:        conn.RemoteAddr().String(),
+		echoQueueCapacity: datagramEchoQueueLen,
+		echoQueueMaxDepth: 0,
 	}
 	defer func() {
 		stats.finishedAt = time.Now()
+	}()
+
+	echoQueue := make(chan []byte, datagramEchoQueueLen)
+	echoStats := make(chan datagramEchoStats, 1)
+
+	go func() {
+		echoStats <- sendDatagramEchoes(conn, echoQueue)
 	}()
 
 	for {
 		datagram, err := conn.ReceiveDatagram(ctx)
 		if err != nil {
 			stats.receiveErr = err
+			close(echoQueue)
+			echo := <-echoStats
+			stats.datagramsEchoAccepted = echo.datagramsEchoAccepted
+			stats.bytesEchoAccepted = echo.bytesEchoAccepted
+			stats.sendErr = echo.sendErr
 			return
 		}
 		if stats.datagramsReceived == 0 {
@@ -462,13 +488,30 @@ func echoDatagrams(ctx context.Context, conn quic.Connection) (stats datagramEch
 		}
 		stats.datagramsReceived++
 		stats.bytesReceived += int64(len(datagram))
+
+		echoQueue <- datagram
+		if depth := len(echoQueue); depth > stats.echoQueueMaxDepth {
+			stats.echoQueueMaxDepth = depth
+		}
+	}
+}
+
+func sendDatagramEchoes(conn datagramConn, echoQueue <-chan []byte) (stats datagramEchoStats) {
+	for datagram := range echoQueue {
+		if stats.sendErr != nil {
+			continue
+		}
+
 		if err := conn.SendDatagram(datagram); err != nil {
 			stats.sendErr = err
-			return
+			continue
 		}
+
 		stats.datagramsEchoAccepted++
 		stats.bytesEchoAccepted += int64(len(datagram))
 	}
+
+	return stats
 }
 
 func appendServerDatagramSummary(path string, stats datagramEchoStats) error {
@@ -493,6 +536,8 @@ func appendServerDatagramSummary(path string, stats datagramEchoStats) error {
 		DatagramsEchoAccepted:  stats.datagramsEchoAccepted,
 		BytesReceived:          stats.bytesReceived,
 		BytesEchoAccepted:      stats.bytesEchoAccepted,
+		EchoQueueCapacity:      stats.echoQueueCapacity,
+		EchoQueueMaxDepth:      stats.echoQueueMaxDepth,
 		FirstDatagramLatencyMS: durationMillis(stats.firstDatagramLatency),
 	}
 
