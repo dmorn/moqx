@@ -353,3 +353,18 @@ requested load on the link.
   full-offer up to 30k, but do not use this one-pass broad bracket as the final
   threshold. The next measurement loop should use repeated single-rate runs
   with valid reference controls before claiming a stable cliff.
+- 2026-06-09: Followed the qualified bracket with two repeated single-rate
+  suites each at 20k, 26k, and 30k pps (`probed-suite-122202`,
+  `probed-suite-122238`, `probed-suite-122318`, `probed-suite-122359`,
+  `probed-suite-122441`, `probed-suite-122521`). At 20k, MOQX sustained target
+  offered rate and crossed the 95% delivery bar twice (95.87% and 95.27%); one
+  reference run was clean and one reference run took too long to offer the
+  target rate, but the server sidecar still received almost all reference
+  DATAGRAMs. At 26k, the reference control collapsed in both runs, so those
+  samples are not useful as a fair threshold. At 30k, the reference control was
+  healthy twice (99.87% and 99.97%), while MOQX sustained full offered rate but
+  delivered only 51.14% and 49.18%; the server sidecar received 46,033 and
+  44,270 MOQX DATAGRAMs. Current working envelope: 20k pps is the first
+  repeatable pass on this x86 path; 30k pps remains a clean MOQX-specific gap.
+  Next implementation work should inspect MsQuic/quicer DATAGRAM send flags or
+  queue/drop semantics rather than more BEAM pacing-loop changes.

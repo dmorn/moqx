@@ -560,3 +560,11 @@ seams without `Application` env.
   control was itself unstable at 24k and 28k, so the broad bracket is not clean
   enough for a final threshold claim. Prefer repeated single-rate runs with a
   healthy reference control before doing more implementation churn.
+- 2026-06-09: The repeated single-rate follow-up sharpened that conclusion.
+  MOQX is repeatably good enough at 20k pps on the current x86-control path
+  (95.87% and 95.27% delivery with full offered rate), but still not close at
+  30k pps when the reference control is healthy (MOQX 51.14% and 49.18%;
+  reference 99.87% and 99.97%). The remaining 30k loss is before quicprobe
+  server application receive, confirmed by the sidecar counts. Stop spending
+  effort on BEAM pacing-loop shape until lower-level quicer/MsQuic DATAGRAM
+  send flags and queue/drop behavior have been inspected.
