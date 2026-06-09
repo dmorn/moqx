@@ -242,7 +242,9 @@ For DATAGRAM runs against `quicprobe` server, inspect the fetched
 `datagrams_received` count is the publisher-path ingress signal. Client echo
 delivery is a stricter round-trip diagnostic and may fail after ingress has
 succeeded when echo return is backlogged; use `echo_queue_capacity` and
-`echo_queue_max_depth` to see that condition.
+`echo_queue_max_depth` to see that condition. The suite manifest embeds the
+derived `server_quicprobe_stats` summary and also writes it to
+`reports/server-quicprobe-stats-summary.json`.
 
 Use `QUICER_SETTINGS=pacing_enabled=1` to pass whitelisted quicer connection
 settings to the MOQX-client measurements in the suite or bracket.

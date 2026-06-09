@@ -768,6 +768,27 @@ mkdir -p "$extract_dir/client" "$extract_dir/server"
 tar -xzf "$bundle_dir/client-bundle.tar.gz" -C "$extract_dir/client"
 tar -xzf "$bundle_dir/server-bundle.tar.gz" -C "$extract_dir/server"
 
+server_quicprobe_stats_summary="null"
+server_quicprobe_stats_path="$(find "$extract_dir/server" -path "*/artifacts/server/quicprobe-stats.jsonl" -print -quit)"
+
+if [ -n "$server_quicprobe_stats_path" ]; then
+  server_quicprobe_stats_report="$report_dir/server-quicprobe-stats-summary.json"
+  "$script_dir/quicprobe_stats_summary.sh" \
+    --stats-jsonl "$server_quicprobe_stats_path" \
+    --tests "$tests" \
+    --datagram-count "$datagram_count" \
+    --datagram-rate "$datagram_rate" \
+    --duration-seconds "$duration_seconds" \
+    --output "$server_quicprobe_stats_report"
+
+  server_quicprobe_stats_summary="$(
+    jq -c \
+      --arg summary_json "$server_quicprobe_stats_report" \
+      '. + {summary_json: $summary_json}' \
+      "$server_quicprobe_stats_report"
+  )"
+fi
+
 report_jsonl() {
   local label="$1"
   local jsonl="$2"
@@ -823,11 +844,13 @@ jq \
   --arg client_bundle "$bundle_dir/client-bundle.tar.gz" \
   --arg server_bundle "$bundle_dir/server-bundle.tar.gz" \
   --argjson validated "$(printf '%s\n' "${validated_jsonl[@]}" | jq -R . | jq -s .)" \
+  --argjson server_quicprobe_stats "$server_quicprobe_stats_summary" \
   '. + {
     status: $status,
     result_dir: $result_dir,
     bundles: {client: $client_bundle, server: $server_bundle},
-    validated_jsonl: $validated
+    validated_jsonl: $validated,
+    server_quicprobe_stats: $server_quicprobe_stats
   }' "$manifest_path" > "$manifest_path.tmp"
 mv "$manifest_path.tmp" "$manifest_path"
 

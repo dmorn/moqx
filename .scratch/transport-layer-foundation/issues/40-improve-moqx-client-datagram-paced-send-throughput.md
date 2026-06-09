@@ -501,3 +501,15 @@ requested load on the link.
   next harness improvement should surface server-side receive in reports or
   suite summaries so operators do not misread echo-backlog artifacts as
   publisher-path loss.
+- 2026-06-09: Added the follow-up harness summary for server-side
+  `quicprobe` DATAGRAM stats. `remote_curl_suite.sh` now writes
+  `reports/server-quicprobe-stats-summary.json` and embeds the same data under
+  `manifest.server_quicprobe_stats`, preserving ordered server connection
+  summaries and a DATAGRAM-focused `datagram_ingress` view. A short remote
+  smoke
+  `20260609T093717Z-issue40-x86-control-server-stats-summary-smoke-1` at
+  1k pps for 1 second verified the field on the live x86-control lab:
+  `reference_datagram` and `moqx_datagram` each reported 1000/1000
+  server-side DATAGRAM ingress, both with echo accepted 1000/1000. This closes
+  the immediate observability gap that made client echo delivery look like the
+  only DATAGRAM success metric.

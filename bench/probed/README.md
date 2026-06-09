@@ -255,7 +255,9 @@ publisher-path ingress signal. Client-side echo delivery is still reported, but
 it is a round-trip diagnostic: it can drop when the server has received the
 DATAGRAMs and the echo backlog outlives the client observation window. The
 server stats expose `echo_queue_capacity` and `echo_queue_max_depth` to make
-that distinction visible in the artifact bundle.
+that distinction visible in the artifact bundle. The suite manifest embeds the
+derived `server_quicprobe_stats` summary and writes the same JSON under
+`reports/server-quicprobe-stats-summary.json`.
 
 Use `QUICER_SETTINGS=pacing_enabled=1` to pass whitelisted quicer connection
 settings to MOQX-client measurements. Use
