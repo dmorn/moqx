@@ -596,3 +596,19 @@ seams without `Application` env.
   send path is now close enough to the reference on this controlled x86 path;
   keep future #26 work focused on remaining observability, mixed workload, or
   listener/relay concerns rather than more DATAGRAM sender churn.
+- 2026-06-09: Added `reference_mixed` and `moqx_mixed` to the `probed` remote
+  suite runner so mixed MOQT-shaped stream/control pressure can run through the
+  same artifact/manifest path as stream and DATAGRAM checks. The current mixed
+  workload is stream/control shaped, not QUIC DATAGRAM pressure. A smoke run
+  `20260609T093717Z-issue40-x86-control-mixed-suite-smoke-1` verified the
+  remote argument plumbing. A pressure-sized x86-control run
+  `20260609T093717Z-issue40-x86-control-mixed-pressure-32x1000-1` used 32
+  streams, 1000 x 1180-byte object payloads per stream, and 100 x 64-byte
+  control messages at 100 messages/sec. Both reference and MOQX records had no
+  break symptom. Reference reached 116.99 Mbps with control p99 37.95 ms;
+  MOQX reached 73.37 Mbps with control p99 139.43 ms. The previous mailbox
+  artifact remains fixed: final `message_queue_len=0`, peak 497, 32,000 object
+  send completions, 100 control send completions, and zero pending
+  object/control completions. This is an adjacent mixed stream/control
+  performance gap, not evidence against the corrected DATAGRAM sender
+  conclusion.

@@ -18,6 +18,9 @@ payload_size="${PAYLOAD_SIZE:-256}"
 payload_count="${PAYLOAD_COUNT:-2}"
 timeout_seconds="${TIMEOUT_SECONDS:-5}"
 timeout_margin_seconds="${TIMEOUT_MARGIN_SECONDS:-2}"
+control_payload_size="${CONTROL_PAYLOAD_SIZE:-64}"
+control_message_count="${CONTROL_MESSAGE_COUNT:-10}"
+control_rate="${CONTROL_RATE:-10}"
 
 tcp_duration="${IPERF3_TCP_DURATION:-1}"
 udp_duration="${IPERF3_UDP_DURATION:-1}"
@@ -56,9 +59,12 @@ Supported tests:
   moqx_stream
   reference_datagram
   moqx_datagram
+  reference_mixed
+  moqx_mixed
 
 Useful environment overrides:
   STREAM_COUNT PAYLOAD_SIZE PAYLOAD_COUNT
+  CONTROL_PAYLOAD_SIZE CONTROL_MESSAGE_COUNT CONTROL_RATE
   IPERF3_TCP_DURATION IPERF3_UDP_DURATION IPERF3_UDP_BITRATES IPERF3_UDP_LENGTH
   DATAGRAM_SIZE DATAGRAM_COUNT DATAGRAM_RATE DURATION_SECONDS
   DATAGRAM_DRAIN_LIMIT DATAGRAM_DIAGNOSTICS DELIVERY_THRESHOLD OFFERED_RATE_TOLERANCE
@@ -146,7 +152,7 @@ validate_tests() {
 
   for test_name in "${selected_tests[@]}"; do
     case "$test_name" in
-      iperf3|reference_stream|moqx_stream|reference_datagram|moqx_datagram) ;;
+      iperf3|reference_stream|moqx_stream|reference_datagram|moqx_datagram|reference_mixed|moqx_mixed) ;;
       "")
         printf '%s\n' 'Empty test name in --tests.' >&2
         exit 2
@@ -399,6 +405,9 @@ jq -n \
   --arg server_probed_current "$server_probed_current" \
   --arg quicer_settings "$quicer_settings" \
   --arg quicer_datagram_send_flags "$quicer_datagram_send_flags" \
+  --arg control_payload_size "$control_payload_size" \
+  --arg control_message_count "$control_message_count" \
+  --arg control_rate "$control_rate" \
   --argjson client_moqxprobe_artifact "$client_moqxprobe_artifact" \
   --argjson server_moqxprobe_artifact "$server_moqxprobe_artifact" \
   --argjson tests "$tests_json" \
@@ -411,7 +420,10 @@ jq -n \
     server: {public_ipv4: $server_public, private_ip: $server_private, probed: $server_base},
     env: {
       quicer_settings: $quicer_settings,
-      quicer_datagram_send_flags: $quicer_datagram_send_flags
+      quicer_datagram_send_flags: $quicer_datagram_send_flags,
+      control_payload_size: $control_payload_size,
+      control_message_count: $control_message_count,
+      control_rate: $control_rate
     },
     tools: {
       client: {
@@ -563,6 +575,9 @@ measure_args() {
     --arg datagram_diagnostics "$datagram_diagnostics" \
     --arg delivery_threshold "$delivery_threshold" \
     --arg offered_rate_tolerance "$offered_rate_tolerance" \
+    --arg control_payload_size "$control_payload_size" \
+    --arg control_message_count "$control_message_count" \
+    --arg control_rate "$control_rate" \
     --argjson path_args "$extra_path_args" \
     '[
       "measure",
@@ -574,6 +589,7 @@ measure_args() {
       "--stream-count", $stream_count,
       "--payload-size", $payload_size,
       "--payload-count", $payload_count,
+      "--workload", $workload,
       "--timeout-seconds", $timeout_seconds,
       "--timeout-margin-seconds", $timeout_margin_seconds,
       "--run-id", $run_id,
@@ -581,7 +597,6 @@ measure_args() {
     ] + (
       if $workload == "datagram_pressure" then
         [
-          "--workload", "datagram_pressure",
           "--datagram-size", $datagram_size,
           "--datagram-drain-limit", $datagram_drain_limit,
           "--datagram-diagnostics", $datagram_diagnostics,
@@ -594,6 +609,16 @@ measure_args() {
             ["--datagram-rate", $datagram_rate, "--duration-seconds", $duration_seconds]
           end
         )
+      else
+        []
+      end
+    ) + (
+      if $workload == "mixed_moqt_shaped" then
+        [
+          "--control-payload-size", $control_payload_size,
+          "--control-message-count", $control_message_count,
+          "--control-rate", $control_rate
+        ]
       else
         []
       end
@@ -752,6 +777,14 @@ if test_enabled moqx_datagram; then
   run_measure moqx-datagram moqx-client-to-reference-server datagram_pressure moqx_client
 fi
 
+if test_enabled reference_mixed; then
+  run_measure reference-mixed reference-client-to-reference-server mixed_moqt_shaped reference_client
+fi
+
+if test_enabled moqx_mixed; then
+  run_measure moqx-mixed moqx-client-to-reference-server mixed_moqt_shaped moqx_client
+fi
+
 stop_process server "$quic_server_process"
 quic_server_process=""
 
@@ -836,6 +869,14 @@ fi
 
 if test_enabled moqx_datagram; then
   validate_artifact client/moqx-datagram
+fi
+
+if test_enabled reference_mixed; then
+  validate_artifact client/reference-mixed
+fi
+
+if test_enabled moqx_mixed; then
+  validate_artifact client/moqx-mixed
 fi
 
 jq \

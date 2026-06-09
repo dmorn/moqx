@@ -228,6 +228,22 @@ DURATION_SECONDS=1 \
 just bench-transport-probed-suite <run-id>
 ```
 
+To include mixed MOQT-shaped stream/control pressure:
+
+```bash
+PROBED_SUITE_TESTS=reference_mixed,moqx_mixed \
+STREAM_COUNT=4 \
+PAYLOAD_SIZE=1180 \
+PAYLOAD_COUNT=8000 \
+CONTROL_MESSAGE_COUNT=100 \
+CONTROL_RATE=100 \
+just bench-transport-probed-suite <run-id>
+```
+
+The current mixed workload is stream/control shaped, not QUIC DATAGRAM
+pressure. Use it to check adjacent caller-side control/object pressure after
+DATAGRAM-only evidence is healthy.
+
 For the #40 DATAGRAM validation, use the bracket wrapper after the lab is up,
 private-path checked, and tools are deployed. The primary iteration target is
 the dedicated `x86-control` profile while Hetzner ARM placement is unreliable;
@@ -269,6 +285,9 @@ Useful suite knobs:
 STREAM_COUNT
 PAYLOAD_SIZE
 PAYLOAD_COUNT
+CONTROL_PAYLOAD_SIZE
+CONTROL_MESSAGE_COUNT
+CONTROL_RATE
 IPERF3_TCP_DURATION
 IPERF3_UDP_DURATION
 IPERF3_UDP_BITRATES

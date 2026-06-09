@@ -78,7 +78,14 @@ tests_json="$(printf '%s' "$tests" | jq -R 'split(",") | map(select(length > 0))
 quic_tests_json="$(
   printf '%s' "$tests" | jq -R '
     split(",") as $enabled |
-    ["reference_stream", "moqx_stream", "reference_datagram", "moqx_datagram"]
+    [
+      "reference_stream",
+      "moqx_stream",
+      "reference_datagram",
+      "moqx_datagram",
+      "reference_mixed",
+      "moqx_mixed"
+    ]
     | map(. as $candidate | select($enabled | index($candidate)))
   '
 )"
