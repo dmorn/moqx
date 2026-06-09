@@ -584,3 +584,15 @@ seams without `Application` env.
   plumbing as a diagnostic mechanism, but do not make the flags the default or
   treat them as the #26 fix. The next useful hardening work is variance
   diagnosis below local admission and before quicprobe server receive.
+- 2026-06-09: #40 corrected that variance diagnosis with paired pcaps,
+  quic-go receive-queue inspection, and a quicprobe server fix that decouples
+  DATAGRAM receive draining from echo sending. With clean quicprobe
+  `60695bf` and clean moqxprobe `da54a2d` on the x86-control lab, the corrected
+  32k pps comparison delivered 99.981% for `quicprobe -> quicprobe` and
+  99.932% for `moqxprobe -> quicprobe`; the server-ingress summary showed
+  reference at 96,000/96,000 DATAGRAMs and MOQX at 95,958/96,000. Reclassify
+  the earlier 30k collapse as a benchmark reference-server echo/receive
+  artifact, not a MOQX Transport sender bottleneck. The caller-side DATAGRAM
+  send path is now close enough to the reference on this controlled x86 path;
+  keep future #26 work focused on remaining observability, mixed workload, or
+  listener/relay concerns rather than more DATAGRAM sender churn.

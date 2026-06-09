@@ -26,7 +26,7 @@ unbounded mailbox backlog.
 - [x] Reproduce or isolate the paced-send ceiling with the smallest useful
       local or remote harness while keeping local evidence clearly labeled as
       calibration only.
-- [ ] Identify whether the limiting cost is benchmark pacing/timer logic,
+- [x] Identify whether the limiting cost is benchmark pacing/timer logic,
       `MOQX.Transport.send_datagram/3` admission cost, receive-event draining,
       telemetry collection, binary allocation, scheduler pressure, or quicer
       callback/event traffic.
@@ -513,3 +513,18 @@ requested load on the link.
   server-side DATAGRAM ingress, both with echo accepted 1000/1000. This closes
   the immediate observability gap that made client echo delivery look like the
   only DATAGRAM success metric.
+- 2026-06-09: Ran the corrected clean 32k pps comparison with the new
+  server-ingress summary as
+  `20260609T093717Z-issue40-x86-control-server-ingress-clean-32k-1`, using
+  clean `moqxprobe-0.1.0-da54a2d-linux-x86_64` and clean
+  `quicprobe-60695bf-linux-x86_64`. Both clients sustained valid offered rate
+  for 96,000 DATAGRAMs over 3 seconds. Client echo delivery was 99.981% for
+  `quicprobe -> quicprobe` (`18` drops) and 99.932% for
+  `moqxprobe -> quicprobe` (`65` drops). The corrected server-ingress summary
+  showed reference at 96,000/96,000 and MOQX at 95,958/96,000
+  (`ingress_ratio=0.9995625`). Current #40 conclusion: the extracted MOQX
+  DATAGRAM sender and `MOQX.Transport.send_datagram/3` path are close enough to
+  the reference client on this x86-control publisher path at 32k pps; the
+  earlier 30k collapse was a reference-server echo/receive measurement artifact,
+  not a Transport sender bottleneck. Keep the lab up for the remaining tuning
+  loop until the operator asks to destroy it.
