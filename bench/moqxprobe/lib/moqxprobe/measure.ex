@@ -1348,9 +1348,10 @@ defmodule MOQXProbe.Measure do
 
         case Transport.receive_event(ctx, timeout_ms) do
           {:ok, event, ctx} ->
-            state =
-              handle_mixed_event(
+            {state, ctx} =
+              handle_ready_mixed_events(
                 state,
+                ctx,
                 event,
                 object_payload,
                 object_config,
@@ -1406,6 +1407,58 @@ defmodule MOQXProbe.Measure do
               deadline_us
             )
         end
+    end
+  end
+
+  defp handle_ready_mixed_events(
+         state,
+         ctx,
+         event,
+         object_payload,
+         object_config,
+         control_payload,
+         config,
+         application_started_at
+       ) do
+    {ctx, events, drained_count} =
+      drain_ready_mixed_events(ctx, [event], 0, @mixed_completion_drain_limit - 1)
+
+    state =
+      events
+      |> Enum.reduce(state, fn event, state ->
+        handle_mixed_event(
+          state,
+          event,
+          object_payload,
+          object_config,
+          control_payload,
+          config,
+          application_started_at
+        )
+      end)
+      |> Map.update!(:completion_drain_events, &(&1 + drained_count))
+
+    {state, ctx}
+  end
+
+  defp drain_ready_mixed_events(ctx, events, drained_count, remaining)
+       when remaining <= 0 do
+    {ctx, Enum.reverse(events), drained_count}
+  end
+
+  defp drain_ready_mixed_events(ctx, events, drained_count, remaining) do
+    case Transport.receive_event(ctx, 0) do
+      {:ok, event, ctx} ->
+        drain_ready_mixed_events(ctx, [event | events], drained_count + 1, remaining - 1)
+
+      {:unknown, _message, ctx} ->
+        drain_ready_mixed_events(ctx, events, drained_count + 1, remaining - 1)
+
+      {:error, _reason, ctx} ->
+        drain_ready_mixed_events(ctx, events, drained_count + 1, remaining - 1)
+
+      {:timeout, ctx} ->
+        {ctx, Enum.reverse(events), drained_count}
     end
   end
 

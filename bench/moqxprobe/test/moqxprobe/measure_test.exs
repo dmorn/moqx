@@ -851,7 +851,7 @@ defmodule MOQXProbe.MeasureTest do
     assert record["diagnostics"]["summary"]["bytes_sent"] == 288
     assert record["diagnostics"]["summary"]["bytes_received"] == 32
     assert record["diagnostics"]["summary"]["events_drained"] >= 6
-    assert record["diagnostics"]["summary"]["completion_drain_events"] == 1
+    assert record["diagnostics"]["summary"]["completion_drain_events"] > 1
     assert record["diagnostics"]["summary"]["control_data_events"] == 2
   end
 
