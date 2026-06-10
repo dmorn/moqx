@@ -169,3 +169,18 @@ with object publishing.
   completions (~277k completions/sec, 563 scheduler ticks). This is local
   calibration only; the next required evidence is a clean x86-control rerun
   against same-run `reference_object_stream`.
+- 2026-06-10: Clean x86-control validation from artifact `3075447`
+  (`moqxprobe-0.1.0-3075447-linux_x86_64`) confirms the send-only object-stream
+  lane is no longer harness-limited for the selected 32 x 1000 x 1180-byte
+  workload. Repetition `issue46-object-stream-batched-clean-1` reached
+  reference 55.32 Mbps and MOQX 49.05 Mbps (88.7% of reference), with
+  32,000/32,000 send completions, zero pending completions, mailbox peak 72,
+  no send errors/cancellations, and no break symptom. Repetition
+  `issue46-object-stream-batched-clean-2` reached reference 55.07 Mbps and
+  MOQX 49.05 Mbps (89.1% of reference), again with 32,000 completions, zero
+  pending completions, mailbox peak 69, no send errors/cancellations, and no
+  break symptom. This satisfies the candidate #46 stop threshold for the
+  object-stream-only caller lane: at least 80% of same-run reference for two
+  clean repetitions, zero final pending completions, bounded mailbox, and no
+  break symptom. Keep #45 open until the mixed object/control workload is
+  rerun from the same clean artifact.

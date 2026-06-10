@@ -705,3 +705,12 @@ seams without `Application` env.
   previous object-stream-only timeout was plausibly harness-induced. This is
   not real-path evidence; rerun the x86-control object-stream lane from a clean
   artifact before updating #45 performance conclusions.
+- 2026-06-10: Clean x86-control reruns from `3075447` converted the local
+  sender/sink fix into real-path evidence for the object-stream-only lane.
+  `issue46-object-stream-batched-clean-1` reached reference 55.32 Mbps and
+  MOQX 49.05 Mbps; `issue46-object-stream-batched-clean-2` reached reference
+  55.07 Mbps and MOQX 49.05 Mbps. Both completed all 32,000 sends with zero
+  pending completions, mailbox peaks under 75, no send errors/cancellations,
+  and no break symptom. Treat #46's isolated caller object stream as good
+  enough for now; continue #45 by rerunning mixed object/control pressure from
+  the same artifact.

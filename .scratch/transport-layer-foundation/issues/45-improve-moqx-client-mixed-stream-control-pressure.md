@@ -196,3 +196,13 @@ evidence for performance claims.
   does not close #45 by itself; the next #45-relevant check is a clean x86 run
   proving the object-stream-only lane is no longer harness-limited, then a
   mixed object/control rerun if the object lane becomes credible.
+- 2026-06-10: The #46 object-stream-only lane is now credible after two clean
+  x86-control repetitions from artifact `3075447`. With 32 streams,
+  1000 x 1180-byte payloads, `STREAM_SEND_WINDOW=16`, default
+  `STREAM_EVENT_BATCH_SIZE=1024`, and final diagnostics, same-run reference was
+  55.32/55.07 Mbps while MOQX was 49.05/49.05 Mbps, with 32,000 send
+  completions, zero pending completions, mailbox peaks 72/69, and no break
+  symptoms. That clears the isolated object-stream harness bottleneck. The next
+  #45 step is to rerun the mixed object/control workload from the same clean
+  artifact and compare object goodput plus recurring control latency against
+  same-run reference.
