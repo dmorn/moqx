@@ -255,3 +255,38 @@ evidence for performance claims.
   mixed runs that isolate `send_buffering_enabled=1`, stream completion
   cadence, flow-control/window behavior, and MsQuic/quicer buffering effects;
   compare against reference only after MOQX run-to-run variance is bounded.
+- 2026-06-10: The first variance isolation pass confirms that the 3.6x MOQX
+  goodput swing is real and still unexplained. On the active x86-control lab,
+  three MOQX-only mixed repetitions with stream priorities preserved but
+  without `send_buffering_enabled=1`
+  (`issue45-mixed-priority-nosb-repeat-1` through
+  `issue45-mixed-priority-nosb-repeat-3`) produced 49.78 Mbps,
+  231.04 Mbps, and 49.54 Mbps. Control remained healthy with p99 around
+  61-64 ms and first control byte around 27 ms. Server `stream_ingress`
+  confirmed each run accepted 1 bidirectional control stream, 32
+  unidirectional object streams, completed all 33 streams, received the full
+  37,766,400 object/control bytes plus 6,400 echo-accepted control bytes, and
+  reported zero stream errors. This rejects `send_buffering_enabled=1` as the
+  sole explanation: the high-throughput mode can appear without it.
+- 2026-06-10: A second MOQX-only mixed isolation pass with
+  `QUICER_SETTINGS=pacing_enabled=0` produced stable but slow-mode results:
+  `issue45-mixed-priority-pacing0-repeat-1` through
+  `issue45-mixed-priority-pacing0-repeat-3` reached 51.93 Mbps,
+  51.80 Mbps, and 51.71 Mbps, with control p99 65.25/67.98/70.04 ms and
+  complete server ingress in all three runs. Async `send_stream` admission
+  stayed tiny (`p99` about 0.011-0.013 ms, max 0.204 ms), scheduler
+  utilization stayed under 1%, and run queue peak stayed at 1. This rejects
+  BEAM scheduler saturation or long stream-send NIF calls as the primary
+  explanation for the slow mode. Disabling MsQuic pacing bounds the variance
+  by removing the opportunistic fast mode; it does not improve the object
+  stream goodput ceiling.
+- 2026-06-10: The current #45 bottleneck hypothesis is stream
+  completion/event cadence and/or quicer/MsQuic flow-control, pacing, or
+  buffering behavior under mixed unidirectional object pressure. The clearest
+  signal is the event cadence split: slow-mode runs spend about 5.5-5.7 s
+  blocked in `receive_event_blocking` with small mailbox peaks, while the fast
+  no-sendbuffer outlier spent about 1.0 s blocked and accumulated completion
+  bursts with mailbox peak 472. Before trying another tuning knob, add
+  low-overhead mixed diagnostics for connection `statistics_v2` and
+  per-stream/object completion cadence, then compare one slow-mode run against
+  any reproduced fast-mode run. Keep #45 open.

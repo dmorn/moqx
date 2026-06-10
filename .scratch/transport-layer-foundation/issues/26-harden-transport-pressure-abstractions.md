@@ -735,3 +735,15 @@ seams without `Application` env.
   has bounded run-to-run variance; next isolate `send_buffering_enabled=1`,
   stream completion cadence, flow-control/window behavior, and MsQuic/quicer
   buffering effects before making another closure call.
+- 2026-06-10: The first #45 variance-isolation pass rejects two easy
+  explanations. Without `send_buffering_enabled=1`, three MOQX-only mixed
+  repetitions still produced a bimodal spread: 49.78 Mbps, 231.04 Mbps, and
+  49.54 Mbps, with complete server-side stream ingress and healthy control
+  latency. With `QUICER_SETTINGS=pacing_enabled=0`, three repetitions became
+  stable but slow at 51.93/51.80/51.71 Mbps, again with complete server
+  ingress. Across those runs, `send_stream` admission remained about
+  0.011-0.013 ms at p99, scheduler utilization stayed low, and run queue peak
+  stayed at 1, so this is not currently explained by BEAM scheduler saturation
+  or long stream-send NIF calls. The next #26/#45 slice is to instrument mixed
+  connection `statistics_v2` and object stream completion cadence so the slow
+  and fast modes can be compared before another tuning attempt.
