@@ -81,6 +81,8 @@ quic_tests_json="$(
     [
       "reference_stream",
       "moqx_stream",
+      "reference_object_stream",
+      "moqx_object_stream",
       "reference_datagram",
       "moqx_datagram",
       "reference_mixed",

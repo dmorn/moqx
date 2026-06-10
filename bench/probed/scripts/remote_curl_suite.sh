@@ -60,6 +60,8 @@ Supported tests:
   iperf3
   reference_stream
   moqx_stream
+  reference_object_stream
+  moqx_object_stream
   reference_datagram
   moqx_datagram
   reference_mixed
@@ -156,7 +158,7 @@ validate_tests() {
 
   for test_name in "${selected_tests[@]}"; do
     case "$test_name" in
-      iperf3|reference_stream|moqx_stream|reference_datagram|moqx_datagram|reference_mixed|moqx_mixed) ;;
+      iperf3|reference_stream|moqx_stream|reference_object_stream|moqx_object_stream|reference_datagram|moqx_datagram|reference_mixed|moqx_mixed) ;;
       "")
         printf '%s\n' 'Empty test name in --tests.' >&2
         exit 2
@@ -559,6 +561,7 @@ iperf_args() {
 measure_args() {
   local output="$1"
   local workload="$2"
+  local direction="${3:-bidirectional}"
   local extra_path_args
 
   extra_path_args="$(path_args)"
@@ -580,6 +583,7 @@ measure_args() {
     --arg run_id "$api_run_id" \
     --arg output "$output" \
     --arg workload "$workload" \
+    --arg stream_direction "$direction" \
     --arg datagram_size "$datagram_size" \
     --arg datagram_count "$datagram_count" \
     --arg datagram_rate "$datagram_rate" \
@@ -603,6 +607,7 @@ measure_args() {
       "--payload-size", $payload_size,
       "--payload-count", $payload_count,
       "--workload", $workload,
+      "--stream-direction", $stream_direction,
       "--timeout-seconds", $timeout_seconds,
       "--timeout-margin-seconds", $timeout_margin_seconds,
       "--run-id", $run_id,
@@ -735,12 +740,13 @@ run_measure() {
   local topology="$2"
   local workload="$3"
   local role="$4"
+  local direction="${5:-bidirectional}"
   local output="/var/lib/probed/runs/$api_run_id/artifacts/client/$test_name.jsonl"
   local process
   local argv
 
   start_quic_server
-  argv="$(measure_args "$output" "$workload")"
+  argv="$(measure_args "$output" "$workload" "$direction")"
 
   if [ "$topology" = "reference-client-to-reference-server" ]; then
     argv="$(jq -n \
@@ -798,6 +804,24 @@ fi
 
 if test_enabled moqx_stream; then
   run_measure moqx-stream moqx-client-to-reference-server stream_pressure moqx_client
+fi
+
+if test_enabled reference_object_stream; then
+  run_measure \
+    reference-object-stream \
+    reference-client-to-reference-server \
+    stream_pressure \
+    reference_client \
+    unidirectional
+fi
+
+if test_enabled moqx_object_stream; then
+  run_measure \
+    moqx-object-stream \
+    moqx-client-to-reference-server \
+    stream_pressure \
+    moqx_client \
+    unidirectional
 fi
 
 if test_enabled reference_datagram; then
@@ -892,6 +916,14 @@ fi
 
 if test_enabled moqx_stream; then
   validate_artifact client/moqx-stream
+fi
+
+if test_enabled reference_object_stream; then
+  validate_artifact client/reference-object-stream
+fi
+
+if test_enabled moqx_object_stream; then
+  validate_artifact client/moqx-object-stream
 fi
 
 if test_enabled reference_datagram; then

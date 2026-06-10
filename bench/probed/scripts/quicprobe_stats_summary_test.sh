@@ -96,3 +96,29 @@ jq -e '
 ' "$mixed_output" >/dev/null
 
 printf '%s\n' 'quicprobe_stats_summary.sh mixed regression passed.'
+
+object_stats="$tmpdir/quicprobe-object-stats.jsonl"
+object_output="$tmpdir/object-summary.json"
+
+cat > "$object_stats" <<'JSONL'
+{"schema_version":"quicprobe-server-stats-v1","record_type":"server_datagram_summary","duration_ms":1040.1,"datagrams_received":0,"datagrams_echo_accepted":0,"bytes_received":0,"bytes_echo_accepted":0,"receive_error":"Application error 0x0 (remote): done"}
+{"schema_version":"quicprobe-server-stats-v1","record_type":"server_datagram_summary","duration_ms":1039.7,"datagrams_received":0,"datagrams_echo_accepted":0,"bytes_received":0,"bytes_echo_accepted":0,"receive_error":"Application error 0x0 (remote)"}
+JSONL
+
+"$summary" \
+  --stats-jsonl "$object_stats" \
+  --tests "reference_object_stream,moqx_object_stream" \
+  --output "$object_output"
+
+jq -e '
+  .expected_datagrams == null and
+  .connection_count == 2 and
+  .expected_connection_count == 2 and
+  .connections[0].test == "reference_object_stream" and
+  .connections[0].datagram_test == false and
+  .connections[1].test == "moqx_object_stream" and
+  .connections[1].datagram_test == false and
+  .datagram_ingress == []
+' "$object_output" >/dev/null
+
+printf '%s\n' 'quicprobe_stats_summary.sh object-stream regression passed.'

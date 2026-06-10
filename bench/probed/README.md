@@ -242,6 +242,21 @@ DURATION_SECONDS=1 \
 just bench-transport-probed-suite <run-id>
 ```
 
+For object-stream-only pressure, use the unidirectional object stream suite
+tests. This isolates caller-side object publishing from the mixed control
+stream:
+
+```bash
+PROBED_SUITE_TESTS=reference_object_stream,moqx_object_stream \
+STREAM_COUNT=32 \
+PAYLOAD_SIZE=1180 \
+PAYLOAD_COUNT=1000 \
+TIMEOUT_SECONDS=15 \
+TIMEOUT_MARGIN_SECONDS=5 \
+STREAM_DIAGNOSTICS_SAMPLING=final \
+just bench-transport-probed-suite <run-id>
+```
+
 For mixed MOQT-shaped stream/control pressure, use the mixed suite tests:
 
 ```bash
