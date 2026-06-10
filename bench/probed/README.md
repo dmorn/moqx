@@ -288,14 +288,16 @@ already provisioned, private-path checked, and tools are deployed:
 just bench-transport-probed-datagram-bracket <run-id> 30000,32000
 ```
 
-DATAGRAM suites fetch the server-side `quicprobe-stats.jsonl` artifact when the
-reference server is involved. Use `datagrams_received` there as the
-publisher-path ingress signal. Client-side echo delivery is still reported, but
-it is a round-trip diagnostic: it can drop when the server has received the
-DATAGRAMs and the echo backlog outlives the client observation window. The
-server stats expose `echo_queue_capacity` and `echo_queue_max_depth` to make
-that distinction visible in the artifact bundle. The suite manifest embeds the
-derived `server_quicprobe_stats` summary and writes the same JSON under
+Suites that use `quicprobe` as the reference server fetch the server-side
+`quicprobe-stats.jsonl` artifact. Use `datagrams_received` for DATAGRAM
+publisher-path ingress and `stream_bytes_received` for stream or mixed
+publisher-path ingress. Client-side echo delivery is still reported, but it is
+a stricter round-trip diagnostic: it can drop when the server has received the
+payloads and the echo backlog outlives the client observation window. The
+server stats expose `echo_queue_capacity`, `echo_queue_max_depth`, stream
+counts, stream byte counts, and stream error counts to make that distinction
+visible in the artifact bundle. The suite manifest embeds the derived
+`server_quicprobe_stats` summary and writes the same JSON under
 `reports/server-quicprobe-stats-summary.json`.
 
 Use `QUICER_SETTINGS=pacing_enabled=1` to pass whitelisted quicer connection

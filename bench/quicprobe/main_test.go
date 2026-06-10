@@ -190,14 +190,16 @@ func TestClientServerJSONMixedMOQTShapedPressure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	statsOutput := filepath.Join(t.TempDir(), "server-stats.jsonl")
 	ready := make(chan string, 1)
 	errc := make(chan error, 1)
 	go func() {
 		errc <- runServer(ctx, serverConfig{
-			addr:     "127.0.0.1:0",
-			certFile: certs.serverCert,
-			keyFile:  certs.serverKey,
-			alpn:     "moqx-test",
+			addr:        "127.0.0.1:0",
+			certFile:    certs.serverCert,
+			keyFile:     certs.serverKey,
+			alpn:        "moqx-test",
+			statsOutput: statsOutput,
 		}, ready)
 	}()
 
@@ -274,6 +276,32 @@ func TestClientServerJSONMixedMOQTShapedPressure(t *testing.T) {
 		t.Fatalf("control_latency_ms = %#v, want p99 > 0", result.ControlLatencyMS)
 	}
 
+	serverStats := awaitServerDatagramSummary(t, statsOutput)
+	if serverStats.BidiStreamsAccepted != 1 {
+		t.Fatalf("server bidi_streams_accepted = %d, want 1", serverStats.BidiStreamsAccepted)
+	}
+	if serverStats.UniStreamsAccepted != 2 {
+		t.Fatalf("server uni_streams_accepted = %d, want 2", serverStats.UniStreamsAccepted)
+	}
+	if serverStats.StreamsCompleted != 3 {
+		t.Fatalf("server streams_completed = %d, want 3", serverStats.StreamsCompleted)
+	}
+	if serverStats.StreamBytesReceived != expectedBytesSent {
+		t.Fatalf("server stream_bytes_received = %d, want %d", serverStats.StreamBytesReceived, expectedBytesSent)
+	}
+	if serverStats.StreamBytesEchoAccepted != expectedControlBytes {
+		t.Fatalf("server stream_bytes_echo_accepted = %d, want %d", serverStats.StreamBytesEchoAccepted, expectedControlBytes)
+	}
+	if serverStats.StreamReceiveErrorCount != 0 {
+		t.Fatalf("server stream_receive_error_count = %d, want 0", serverStats.StreamReceiveErrorCount)
+	}
+	if serverStats.StreamSendErrorCount != 0 {
+		t.Fatalf("server stream_send_error_count = %d, want 0", serverStats.StreamSendErrorCount)
+	}
+	if serverStats.DatagramsReceived != 0 {
+		t.Fatalf("server datagrams_received = %d, want 0", serverStats.DatagramsReceived)
+	}
+
 	cancel()
 	select {
 	case err := <-errc:
@@ -343,6 +371,18 @@ func TestClientServerJSONDatagramPressure(t *testing.T) {
 	}
 	if serverStats.BytesEchoAccepted != 4*64 {
 		t.Fatalf("server bytes_echo_accepted = %d, want %d", serverStats.BytesEchoAccepted, 4*64)
+	}
+	if serverStats.BidiStreamsAccepted != 0 {
+		t.Fatalf("server bidi_streams_accepted = %d, want 0", serverStats.BidiStreamsAccepted)
+	}
+	if serverStats.UniStreamsAccepted != 0 {
+		t.Fatalf("server uni_streams_accepted = %d, want 0", serverStats.UniStreamsAccepted)
+	}
+	if serverStats.StreamBytesReceived != 0 {
+		t.Fatalf("server stream_bytes_received = %d, want 0", serverStats.StreamBytesReceived)
+	}
+	if serverStats.StreamBytesEchoAccepted != 0 {
+		t.Fatalf("server stream_bytes_echo_accepted = %d, want 0", serverStats.StreamBytesEchoAccepted)
 	}
 
 	cancel()

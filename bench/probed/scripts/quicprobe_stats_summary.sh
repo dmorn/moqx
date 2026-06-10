@@ -114,6 +114,14 @@ jq -s \
   def datagram_test($test):
     $test == "reference_datagram" or $test == "moqx_datagram";
 
+  def stream_test($test):
+    $test == "reference_stream" or
+    $test == "moqx_stream" or
+    $test == "reference_object_stream" or
+    $test == "moqx_object_stream" or
+    $test == "reference_mixed" or
+    $test == "moqx_mixed";
+
   def ingress_ratio($received):
     if $expected_datagrams == null or $expected_datagrams <= 0 then
       null
@@ -134,6 +142,17 @@ jq -s \
       datagrams_echo_accepted: ($row.datagrams_echo_accepted // 0),
       bytes_received: ($row.bytes_received // 0),
       bytes_echo_accepted: ($row.bytes_echo_accepted // 0),
+      stream_test: stream_test($test),
+      bidi_streams_accepted: ($row.bidi_streams_accepted // 0),
+      uni_streams_accepted: ($row.uni_streams_accepted // 0),
+      streams_completed: ($row.streams_completed // 0),
+      stream_bytes_received: ($row.stream_bytes_received // 0),
+      stream_bytes_echo_accepted: ($row.stream_bytes_echo_accepted // 0),
+      stream_receive_error_count: ($row.stream_receive_error_count // 0),
+      stream_send_error_count: ($row.stream_send_error_count // 0),
+      stream_receive_error: ($row.stream_receive_error // null),
+      stream_send_error: ($row.stream_send_error // null),
+      first_stream_byte_latency_ms: ($row.first_stream_byte_latency_ms // null),
       echo_queue_capacity: ($row.echo_queue_capacity // null),
       echo_queue_max_depth: ($row.echo_queue_max_depth // null),
       receive_error: ($row.receive_error // null),
@@ -174,6 +193,24 @@ jq -s \
           echo_queue_max_depth,
           receive_error,
           send_error
+        }
+    ],
+    stream_ingress: [
+      $connections[]
+      | select(.stream_test)
+      | {
+          test,
+          connection_index,
+          bidi_streams_accepted,
+          uni_streams_accepted,
+          streams_completed,
+          stream_bytes_received,
+          stream_bytes_echo_accepted,
+          stream_receive_error_count,
+          stream_send_error_count,
+          stream_receive_error,
+          stream_send_error,
+          first_stream_byte_latency_ms
         }
     ]
   }' "$stats_jsonl" > "$output"

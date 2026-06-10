@@ -75,8 +75,8 @@ mixed_stats="$tmpdir/quicprobe-mixed-stats.jsonl"
 mixed_output="$tmpdir/mixed-summary.json"
 
 cat > "$mixed_stats" <<'JSONL'
-{"schema_version":"quicprobe-server-stats-v1","record_type":"server_datagram_summary","duration_ms":1040.1,"datagrams_received":0,"datagrams_echo_accepted":0,"bytes_received":0,"bytes_echo_accepted":0,"receive_error":"Application error 0x0 (remote): done"}
-{"schema_version":"quicprobe-server-stats-v1","record_type":"server_datagram_summary","duration_ms":1039.7,"datagrams_received":0,"datagrams_echo_accepted":0,"bytes_received":0,"bytes_echo_accepted":0,"receive_error":"Application error 0x0 (remote)"}
+{"schema_version":"quicprobe-server-stats-v1","record_type":"server_datagram_summary","duration_ms":1040.1,"datagrams_received":0,"datagrams_echo_accepted":0,"bytes_received":0,"bytes_echo_accepted":0,"bidi_streams_accepted":1,"uni_streams_accepted":32,"streams_completed":33,"stream_bytes_received":37766400,"stream_bytes_echo_accepted":6400,"stream_receive_error_count":0,"stream_send_error_count":0,"first_stream_byte_latency_ms":26.8,"receive_error":"Application error 0x0 (remote): done"}
+{"schema_version":"quicprobe-server-stats-v1","record_type":"server_datagram_summary","duration_ms":1039.7,"datagrams_received":0,"datagrams_echo_accepted":0,"bytes_received":0,"bytes_echo_accepted":0,"bidi_streams_accepted":1,"uni_streams_accepted":32,"streams_completed":33,"stream_bytes_received":37766400,"stream_bytes_echo_accepted":6400,"stream_receive_error_count":0,"stream_send_error_count":0,"first_stream_byte_latency_ms":27.1,"receive_error":"Application error 0x0 (remote)"}
 JSONL
 
 "$summary" \
@@ -90,9 +90,41 @@ jq -e '
   .expected_connection_count == 2 and
   .connections[0].test == "reference_mixed" and
   .connections[0].datagram_test == false and
+  .connections[0].stream_test == true and
+  .connections[0].stream_bytes_received == 37766400 and
   .connections[1].test == "moqx_mixed" and
   .connections[1].datagram_test == false and
-  .datagram_ingress == []
+  .datagram_ingress == [] and
+  .stream_ingress == [
+    {
+      "test": "reference_mixed",
+      "connection_index": 0,
+      "bidi_streams_accepted": 1,
+      "uni_streams_accepted": 32,
+      "streams_completed": 33,
+      "stream_bytes_received": 37766400,
+      "stream_bytes_echo_accepted": 6400,
+      "stream_receive_error_count": 0,
+      "stream_send_error_count": 0,
+      "stream_receive_error": null,
+      "stream_send_error": null,
+      "first_stream_byte_latency_ms": 26.8
+    },
+    {
+      "test": "moqx_mixed",
+      "connection_index": 1,
+      "bidi_streams_accepted": 1,
+      "uni_streams_accepted": 32,
+      "streams_completed": 33,
+      "stream_bytes_received": 37766400,
+      "stream_bytes_echo_accepted": 6400,
+      "stream_receive_error_count": 0,
+      "stream_send_error_count": 0,
+      "stream_receive_error": null,
+      "stream_send_error": null,
+      "first_stream_byte_latency_ms": 27.1
+    }
+  ]
 ' "$mixed_output" >/dev/null
 
 printf '%s\n' 'quicprobe_stats_summary.sh mixed regression passed.'
@@ -116,9 +148,12 @@ jq -e '
   .expected_connection_count == 2 and
   .connections[0].test == "reference_object_stream" and
   .connections[0].datagram_test == false and
+  .connections[0].stream_test == true and
   .connections[1].test == "moqx_object_stream" and
   .connections[1].datagram_test == false and
-  .datagram_ingress == []
+  .connections[1].stream_test == true and
+  .datagram_ingress == [] and
+  (.stream_ingress | length) == 2
 ' "$object_output" >/dev/null
 
 printf '%s\n' 'quicprobe_stats_summary.sh object-stream regression passed.'

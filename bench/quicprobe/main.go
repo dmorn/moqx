@@ -121,25 +121,35 @@ type clientRunResult struct {
 }
 
 type serverDatagramSummary struct {
-	SchemaVersion          string  `json:"schema_version"`
-	RecordType             string  `json:"record_type"`
-	Tool                   string  `json:"tool"`
-	ReferenceImpl          string  `json:"reference_implementation"`
-	ReferenceVersion       string  `json:"reference_version"`
-	StartedAt              string  `json:"started_at"`
-	FinishedAt             string  `json:"finished_at"`
-	LocalAddr              string  `json:"local_addr"`
-	RemoteAddr             string  `json:"remote_addr"`
-	DurationMS             float64 `json:"duration_ms"`
-	DatagramsReceived      int     `json:"datagrams_received"`
-	DatagramsEchoAccepted  int     `json:"datagrams_echo_accepted"`
-	BytesReceived          int64   `json:"bytes_received"`
-	BytesEchoAccepted      int64   `json:"bytes_echo_accepted"`
-	EchoQueueCapacity      int     `json:"echo_queue_capacity,omitempty"`
-	EchoQueueMaxDepth      int     `json:"echo_queue_max_depth,omitempty"`
-	ReceiveError           string  `json:"receive_error,omitempty"`
-	SendError              string  `json:"send_error,omitempty"`
-	FirstDatagramLatencyMS float64 `json:"first_datagram_latency_ms,omitempty"`
+	SchemaVersion            string  `json:"schema_version"`
+	RecordType               string  `json:"record_type"`
+	Tool                     string  `json:"tool"`
+	ReferenceImpl            string  `json:"reference_implementation"`
+	ReferenceVersion         string  `json:"reference_version"`
+	StartedAt                string  `json:"started_at"`
+	FinishedAt               string  `json:"finished_at"`
+	LocalAddr                string  `json:"local_addr"`
+	RemoteAddr               string  `json:"remote_addr"`
+	DurationMS               float64 `json:"duration_ms"`
+	DatagramsReceived        int     `json:"datagrams_received"`
+	DatagramsEchoAccepted    int     `json:"datagrams_echo_accepted"`
+	BytesReceived            int64   `json:"bytes_received"`
+	BytesEchoAccepted        int64   `json:"bytes_echo_accepted"`
+	BidiStreamsAccepted      int     `json:"bidi_streams_accepted"`
+	UniStreamsAccepted       int     `json:"uni_streams_accepted"`
+	StreamsCompleted         int     `json:"streams_completed"`
+	StreamBytesReceived      int64   `json:"stream_bytes_received"`
+	StreamBytesEchoAccepted  int64   `json:"stream_bytes_echo_accepted"`
+	StreamReceiveErrorCount  int     `json:"stream_receive_error_count"`
+	StreamSendErrorCount     int     `json:"stream_send_error_count"`
+	EchoQueueCapacity        int     `json:"echo_queue_capacity,omitempty"`
+	EchoQueueMaxDepth        int     `json:"echo_queue_max_depth,omitempty"`
+	ReceiveError             string  `json:"receive_error,omitempty"`
+	SendError                string  `json:"send_error,omitempty"`
+	StreamReceiveError       string  `json:"stream_receive_error,omitempty"`
+	StreamSendError          string  `json:"stream_send_error,omitempty"`
+	FirstDatagramLatencyMS   float64 `json:"first_datagram_latency_ms,omitempty"`
+	FirstStreamByteLatencyMS float64 `json:"first_stream_byte_latency_ms,omitempty"`
 }
 
 type datagramEchoStats struct {
@@ -156,6 +166,51 @@ type datagramEchoStats struct {
 	receiveErr            error
 	sendErr               error
 	firstDatagramLatency  time.Duration
+}
+
+type serverConnectionStats struct {
+	mu                     sync.Mutex
+	startedAt              time.Time
+	finishedAt             time.Time
+	localAddr              string
+	remoteAddr             string
+	datagrams              datagramEchoStats
+	bidiStreamsAccepted    int
+	uniStreamsAccepted     int
+	streamsCompleted       int
+	streamBytesReceived    int64
+	streamBytesEchoed      int64
+	streamReceiveErrCount  int
+	streamSendErrCount     int
+	streamReceiveErr       error
+	streamSendErr          error
+	firstStreamByteLatency time.Duration
+}
+
+type serverConnectionStatsSnapshot struct {
+	startedAt                 time.Time
+	finishedAt                time.Time
+	localAddr                 string
+	remoteAddr                string
+	datagramsReceived         int
+	datagramsEchoAccepted     int
+	datagramBytesReceived     int64
+	datagramBytesEchoAccepted int64
+	echoQueueCapacity         int
+	echoQueueMaxDepth         int
+	datagramReceiveErr        error
+	datagramSendErr           error
+	firstDatagramLatency      time.Duration
+	bidiStreamsAccepted       int
+	uniStreamsAccepted        int
+	streamsCompleted          int
+	streamBytesReceived       int64
+	streamBytesEchoed         int64
+	streamReceiveErrCount     int
+	streamSendErrCount        int
+	streamReceiveErr          error
+	streamSendErr             error
+	firstStreamByteLatency    time.Duration
 }
 
 type datagramConn interface {
@@ -233,7 +288,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&cfg.certFile, "cert", "", "TLS certificate PEM file")
 	flags.StringVar(&cfg.keyFile, "key", "", "TLS private key PEM file")
 	flags.StringVar(&cfg.alpn, "alpn", envOrDefault("QUICPROBE_ALPN", defaultALPN), "QUIC ALPN")
-	flags.StringVar(&cfg.statsOutput, "stats-output", "", "optional JSONL path for per-connection server DATAGRAM echo summaries")
+	flags.StringVar(&cfg.statsOutput, "stats-output", "", "optional JSONL path for per-connection server ingress summaries")
 
 	if err := flags.Parse(args); err != nil {
 		return serverConfig{}, err
@@ -374,69 +429,208 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string) error
 	}
 }
 
+func newServerConnectionStats(conn quic.Connection) *serverConnectionStats {
+	return &serverConnectionStats{
+		startedAt:  time.Now(),
+		localAddr:  conn.LocalAddr().String(),
+		remoteAddr: conn.RemoteAddr().String(),
+	}
+}
+
 func handleConnection(ctx context.Context, conn quic.Connection, statsOutput string) {
+	stats := newServerConnectionStats(conn)
 	var wg sync.WaitGroup
+	var streamHandlers sync.WaitGroup
+	var datagramStats datagramEchoStats
+
 	wg.Add(3)
 
 	go func() {
 		defer wg.Done()
-		acceptBidiStreams(ctx, conn)
+		acceptBidiStreams(ctx, conn, &streamHandlers, stats)
 	}()
 
 	go func() {
 		defer wg.Done()
-		acceptUniStreams(ctx, conn)
+		acceptUniStreams(ctx, conn, &streamHandlers, stats)
 	}()
 
 	go func() {
 		defer wg.Done()
-		stats := echoDatagrams(ctx, conn)
-		if statsOutput != "" {
-			_ = appendServerDatagramSummary(statsOutput, stats)
-		}
+		datagramStats = echoDatagrams(ctx, conn)
 	}()
 
 	wg.Wait()
+	streamHandlers.Wait()
+
+	stats.setDatagrams(datagramStats)
+	stats.finish()
+
+	if statsOutput != "" {
+		_ = appendServerDatagramSummary(statsOutput, stats.snapshot())
+	}
 }
 
-func acceptBidiStreams(ctx context.Context, conn quic.Connection) {
+func (s *serverConnectionStats) recordBidiStreamAccepted() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.bidiStreamsAccepted++
+}
+
+func (s *serverConnectionStats) recordUniStreamAccepted() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.uniStreamsAccepted++
+}
+
+func (s *serverConnectionStats) recordStreamBytesReceived(count int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.streamBytesReceived += count
+	if s.firstStreamByteLatency == 0 {
+		s.firstStreamByteLatency = time.Since(s.startedAt)
+	}
+}
+
+func (s *serverConnectionStats) recordStreamBytesEchoed(count int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.streamBytesEchoed += count
+}
+
+func (s *serverConnectionStats) recordStreamCompleted() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.streamsCompleted++
+}
+
+func (s *serverConnectionStats) recordStreamReceiveError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.streamReceiveErrCount++
+	if s.streamReceiveErr == nil {
+		s.streamReceiveErr = err
+	}
+}
+
+func (s *serverConnectionStats) recordStreamSendError(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.streamSendErrCount++
+	if s.streamSendErr == nil {
+		s.streamSendErr = err
+	}
+}
+
+func (s *serverConnectionStats) setDatagrams(stats datagramEchoStats) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.datagrams = stats
+}
+
+func (s *serverConnectionStats) finish() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.finishedAt = time.Now()
+}
+
+func (s *serverConnectionStats) snapshot() serverConnectionStatsSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return serverConnectionStatsSnapshot{
+		startedAt:                 s.startedAt,
+		finishedAt:                s.finishedAt,
+		localAddr:                 s.localAddr,
+		remoteAddr:                s.remoteAddr,
+		datagramsReceived:         s.datagrams.datagramsReceived,
+		datagramsEchoAccepted:     s.datagrams.datagramsEchoAccepted,
+		datagramBytesReceived:     s.datagrams.bytesReceived,
+		datagramBytesEchoAccepted: s.datagrams.bytesEchoAccepted,
+		echoQueueCapacity:         s.datagrams.echoQueueCapacity,
+		echoQueueMaxDepth:         s.datagrams.echoQueueMaxDepth,
+		datagramReceiveErr:        s.datagrams.receiveErr,
+		datagramSendErr:           s.datagrams.sendErr,
+		firstDatagramLatency:      s.datagrams.firstDatagramLatency,
+		bidiStreamsAccepted:       s.bidiStreamsAccepted,
+		uniStreamsAccepted:        s.uniStreamsAccepted,
+		streamsCompleted:          s.streamsCompleted,
+		streamBytesReceived:       s.streamBytesReceived,
+		streamBytesEchoed:         s.streamBytesEchoed,
+		streamReceiveErrCount:     s.streamReceiveErrCount,
+		streamSendErrCount:        s.streamSendErrCount,
+		streamReceiveErr:          s.streamReceiveErr,
+		streamSendErr:             s.streamSendErr,
+		firstStreamByteLatency:    s.firstStreamByteLatency,
+	}
+}
+
+func acceptBidiStreams(ctx context.Context, conn quic.Connection, streamHandlers *sync.WaitGroup, stats *serverConnectionStats) {
 	for {
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
 			return
 		}
 
-		go handleBidiEchoStream(stream)
+		stats.recordBidiStreamAccepted()
+		streamHandlers.Add(1)
+		go func() {
+			defer streamHandlers.Done()
+			handleBidiEchoStream(stream, stats)
+		}()
 	}
 }
 
-func acceptUniStreams(ctx context.Context, conn quic.Connection) {
+func acceptUniStreams(ctx context.Context, conn quic.Connection, streamHandlers *sync.WaitGroup, stats *serverConnectionStats) {
 	for {
 		stream, err := conn.AcceptUniStream(ctx)
 		if err != nil {
 			return
 		}
 
-		go drainUniStream(stream)
+		stats.recordUniStreamAccepted()
+		streamHandlers.Add(1)
+		go func() {
+			defer streamHandlers.Done()
+			drainUniStream(stream, stats)
+		}()
 	}
 }
 
-func handleBidiEchoStream(stream quic.Stream) {
-	if err := echoStream(stream); err != nil {
+func handleBidiEchoStream(stream quic.Stream, stats *serverConnectionStats) {
+	if err := echoStream(stream, stats); err != nil {
 		stream.CancelWrite(1)
 		return
 	}
 
-	_ = stream.Close()
+	if err := stream.Close(); err != nil {
+		stats.recordStreamSendError(err)
+		return
+	}
+
+	stats.recordStreamCompleted()
 }
 
-func echoStream(stream quic.Stream) error {
+func echoStream(stream quic.Stream, stats *serverConnectionStats) error {
 	buffer := make([]byte, 32*1024)
 
 	for {
 		n, readErr := stream.Read(buffer)
 		if n > 0 {
-			if _, err := writeFull(stream, buffer[:n]); err != nil {
+			stats.recordStreamBytesReceived(int64(n))
+			written, err := writeFull(stream, buffer[:n])
+			stats.recordStreamBytesEchoed(int64(written))
+			if err != nil {
+				stats.recordStreamSendError(err)
 				return err
 			}
 		}
@@ -444,13 +638,29 @@ func echoStream(stream quic.Stream) error {
 			return nil
 		}
 		if readErr != nil {
+			stats.recordStreamReceiveError(readErr)
 			return readErr
 		}
 	}
 }
 
-func drainUniStream(stream quic.ReceiveStream) {
-	_, _ = io.Copy(io.Discard, stream)
+func drainUniStream(stream quic.ReceiveStream, stats *serverConnectionStats) {
+	buffer := make([]byte, 32*1024)
+
+	for {
+		n, err := stream.Read(buffer)
+		if n > 0 {
+			stats.recordStreamBytesReceived(int64(n))
+		}
+		if err == io.EOF {
+			stats.recordStreamCompleted()
+			return
+		}
+		if err != nil {
+			stats.recordStreamReceiveError(err)
+			return
+		}
+	}
 }
 
 func echoDatagrams(ctx context.Context, conn datagramConn) (stats datagramEchoStats) {
@@ -514,7 +724,7 @@ func sendDatagramEchoes(conn datagramConn, echoQueue <-chan []byte) (stats datag
 	return stats
 }
 
-func appendServerDatagramSummary(path string, stats datagramEchoStats) error {
+func appendServerDatagramSummary(path string, stats serverConnectionStatsSnapshot) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return fmt.Errorf("open server stats output: %w", err)
@@ -522,30 +732,44 @@ func appendServerDatagramSummary(path string, stats datagramEchoStats) error {
 	defer file.Close()
 
 	summary := serverDatagramSummary{
-		SchemaVersion:          "quicprobe-server-stats-v1",
-		RecordType:             "server_datagram_summary",
-		Tool:                   "quicprobe",
-		ReferenceImpl:          "quic-go",
-		ReferenceVersion:       moduleVersion(quicGoModulePath),
-		StartedAt:              stats.startedAt.UTC().Format(time.RFC3339Nano),
-		FinishedAt:             stats.finishedAt.UTC().Format(time.RFC3339Nano),
-		LocalAddr:              stats.localAddr,
-		RemoteAddr:             stats.remoteAddr,
-		DurationMS:             durationMillis(stats.finishedAt.Sub(stats.startedAt)),
-		DatagramsReceived:      stats.datagramsReceived,
-		DatagramsEchoAccepted:  stats.datagramsEchoAccepted,
-		BytesReceived:          stats.bytesReceived,
-		BytesEchoAccepted:      stats.bytesEchoAccepted,
-		EchoQueueCapacity:      stats.echoQueueCapacity,
-		EchoQueueMaxDepth:      stats.echoQueueMaxDepth,
-		FirstDatagramLatencyMS: durationMillis(stats.firstDatagramLatency),
+		SchemaVersion:            "quicprobe-server-stats-v1",
+		RecordType:               "server_datagram_summary",
+		Tool:                     "quicprobe",
+		ReferenceImpl:            "quic-go",
+		ReferenceVersion:         moduleVersion(quicGoModulePath),
+		StartedAt:                stats.startedAt.UTC().Format(time.RFC3339Nano),
+		FinishedAt:               stats.finishedAt.UTC().Format(time.RFC3339Nano),
+		LocalAddr:                stats.localAddr,
+		RemoteAddr:               stats.remoteAddr,
+		DurationMS:               durationMillis(stats.finishedAt.Sub(stats.startedAt)),
+		DatagramsReceived:        stats.datagramsReceived,
+		DatagramsEchoAccepted:    stats.datagramsEchoAccepted,
+		BytesReceived:            stats.datagramBytesReceived,
+		BytesEchoAccepted:        stats.datagramBytesEchoAccepted,
+		BidiStreamsAccepted:      stats.bidiStreamsAccepted,
+		UniStreamsAccepted:       stats.uniStreamsAccepted,
+		StreamsCompleted:         stats.streamsCompleted,
+		StreamBytesReceived:      stats.streamBytesReceived,
+		StreamBytesEchoAccepted:  stats.streamBytesEchoed,
+		StreamReceiveErrorCount:  stats.streamReceiveErrCount,
+		StreamSendErrorCount:     stats.streamSendErrCount,
+		EchoQueueCapacity:        stats.echoQueueCapacity,
+		EchoQueueMaxDepth:        stats.echoQueueMaxDepth,
+		FirstDatagramLatencyMS:   durationMillis(stats.firstDatagramLatency),
+		FirstStreamByteLatencyMS: durationMillis(stats.firstStreamByteLatency),
 	}
 
-	if stats.receiveErr != nil {
-		summary.ReceiveError = stats.receiveErr.Error()
+	if stats.datagramReceiveErr != nil {
+		summary.ReceiveError = stats.datagramReceiveErr.Error()
 	}
-	if stats.sendErr != nil {
-		summary.SendError = stats.sendErr.Error()
+	if stats.datagramSendErr != nil {
+		summary.SendError = stats.datagramSendErr.Error()
+	}
+	if stats.streamReceiveErr != nil {
+		summary.StreamReceiveError = stats.streamReceiveErr.Error()
+	}
+	if stats.streamSendErr != nil {
+		summary.StreamSendError = stats.streamSendErr.Error()
 	}
 
 	return json.NewEncoder(file).Encode(summary)
