@@ -1603,7 +1603,8 @@ defmodule MOQXProbe.Measure do
 
   defp maybe_schedule_mixed_control(state, ctx, payload, config, application_started_at) do
     if mixed_control_ready_to_send?(state.control, config, application_started_at) do
-      schedule_mixed_control_message(state, ctx, payload, config)
+      {state, ctx} = schedule_mixed_control_message(state, ctx, payload, config)
+      maybe_schedule_mixed_control(state, ctx, payload, config, application_started_at)
     else
       {state, ctx}
     end
@@ -1620,7 +1621,7 @@ defmodule MOQXProbe.Measure do
       control.messages_scheduled >= config.control_message_count ->
         false
 
-      control.messages_echoed < control.messages_scheduled ->
+      control.send_inflight >= config.stream_send_window ->
         false
 
       true ->
@@ -1686,7 +1687,7 @@ defmodule MOQXProbe.Measure do
       is_nil(control.stream) -> nil
       control.failure -> nil
       control.messages_scheduled >= config.control_message_count -> nil
-      control.messages_echoed < control.messages_scheduled -> nil
+      control.send_inflight >= config.stream_send_window -> nil
       true -> mixed_control_due_us(control.messages_scheduled + 1, config, application_started_at)
     end
   end

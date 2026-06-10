@@ -914,6 +914,62 @@ defmodule MOQXProbe.MeasureTest do
     assert {:mixed_send, {:stream, _ref, :bidirectional}, 16, _opts} = first_send
   end
 
+  test "mixed MOQX client schedules due control traffic without waiting for echo" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-mixed-control-trickle.jsonl")
+
+    Measure.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "mixed_moqt_shaped",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-count",
+        "1",
+        "--stream-send-window",
+        "1",
+        "--payload-size",
+        "64",
+        "--payload-count",
+        "1",
+        "--control-payload-size",
+        "16",
+        "--control-message-count",
+        "2",
+        "--control-rate",
+        "1000",
+        "--timeout-seconds",
+        "1",
+        "--timeout-margin-seconds",
+        "1",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-mixed-control-trickle-test"
+      ],
+      script: "test measure",
+      transport_backend: __MODULE__.DelayedControlEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["limits"]["first_break_symptom"] == :null
+
+    assert record["diagnostics"]["summary"]["control_send_events"] == 2
+    assert record["diagnostics"]["summary"]["control_send_completions"] == 2
+    assert record["diagnostics"]["summary"]["control_data_events"] == 2
+    assert record["diagnostics"]["summary"]["control_bytes_received"] == 32
+  end
+
   test "records structured diagnostics when MOQX bidirectional echo closes early" do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-peer-shutdown.jsonl")
@@ -1800,6 +1856,82 @@ defmodule MOQXProbe.MeasureTest do
 
     @impl true
     def close_connection(_connection, _error_code), do: :ok
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process(_handle, _pid), do: :ok
+
+    @impl true
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+  end
+
+  defmodule DelayedControlEchoTransport do
+    @behaviour MOQX.Transport
+
+    @impl true
+    def listen(_port, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept(_listener, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def handshake(connection, _timeout), do: {:ok, connection}
+
+    @impl true
+    def connect(_host, _port, _opts, _timeout) do
+      {:ok, {:connection, :ets.new(__MODULE__, [:set, :public])}}
+    end
+
+    @impl true
+    def open_stream({:connection, table}, opts),
+      do: {:ok, {:stream, table, make_ref(), Keyword.fetch!(opts, :direction)}}
+
+    @impl true
+    def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def send_stream({:stream, table, _ref, :bidirectional} = stream, data, _opts) do
+      control_sends = :ets.update_counter(table, :control_sends, {2, 1}, {:control_sends, 0})
+      send(self(), {:moqx_transport, {:stream_event, stream, :send_complete, false}})
+
+      if control_sends == 2 do
+        send(self(), {:moqx_transport, {:stream_data, stream, data, %{}}})
+        send(self(), {:moqx_transport, {:stream_data, stream, data, %{}}})
+      end
+
+      :ok
+    end
+
+    def send_stream(stream, _data, _opts) do
+      send(self(), {:moqx_transport, {:stream_event, stream, :send_complete, false}})
+      :ok
+    end
+
+    @impl true
+    def recv_stream(_stream, byte_count), do: {:ok, :binary.copy(<<0>>, byte_count)}
+
+    @impl true
+    def send_datagram(_connection, _data), do: {:error, :unsupported}
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection({:connection, table}, _error_code) do
+      :ets.delete(table)
+      :ok
+    end
 
     @impl true
     def set_active(_stream, _active), do: :ok
