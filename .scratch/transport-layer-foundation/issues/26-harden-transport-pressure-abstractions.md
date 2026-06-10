@@ -95,6 +95,9 @@ child issues in evidence order:
 9. #40 is closed: the apparent DATAGRAM bottleneck was reclassified after the
    quicprobe receive/echo fix, and the corrected x86-control evidence is close
    enough for the current limited draft-14 DATAGRAM support.
+10. #45 is the next focused loop: improve MOQX-client mixed stream/control
+    pressure against the `quicprobe` reference, using same-run remote evidence,
+    explicit stop thresholds, and no DATAGRAM-specific churn.
 
 The first implementation slice is #32. Do not start broad transport API
 refactors from this umbrella issue; any API change should be motivated by
@@ -620,3 +623,12 @@ seams without `Application` env.
   low leverage. Keep the x86-control lab alive under the standing operator
   instruction, but shift #26 attention to stream/control pressure and protocol
   readiness rather than reopening #40.
+- 2026-06-10: Opened #45 as the focused stream/control performance tracker.
+  It takes over the role #40 played for DATAGRAM: reproduce the current
+  mixed-pressure gap, classify the first bottleneck with evidence, keep
+  `transport-bench-v1` stable, reject low-value knobs explicitly, and stop only
+  when MOQX is close enough to the same-run `quicprobe` reference for the
+  current caller-side mixed workload. The initial target evidence is the
+  x86-control mixed run where reference reached 116.99 Mbps with control p99
+  37.95 ms and MOQX reached 73.37 Mbps with control p99 139.43 ms, while the
+  old mailbox/completion artifact stayed fixed.
