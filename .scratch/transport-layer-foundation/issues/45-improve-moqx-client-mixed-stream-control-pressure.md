@@ -178,3 +178,13 @@ evidence for performance claims.
   completions. Current conclusion: control scheduling is improved, but the
   object stream throughput ceiling should be isolated in #46 before declaring
   #45 close enough.
+- 2026-06-10: #46 now has an object-stream-only probed lane, but its first
+  clean x86-control runs are not valid transport throughput evidence yet. The
+  lane exposed a `StreamSender`/`StreamSink` bottleneck: `cf3925e` with
+  `STREAM_SEND_WINDOW=16` timed out at 4.54 Mbps with 512 pending send
+  completions, and `STREAM_SEND_WINDOW=64` timed out at 4.76 Mbps with 2,048
+  pending completions, while same-run reference stayed around 55.3 Mbps. This
+  is worse than the #45 mixed manual scheduler, which completed all object
+  payloads around 35 Mbps. Treat the next step as benchmark sender/sink
+  hardening before drawing conclusions about the transport object-stream
+  ceiling.

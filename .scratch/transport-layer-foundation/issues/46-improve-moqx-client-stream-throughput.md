@@ -128,3 +128,31 @@ with object publishing.
   completion experiment reached 35.33 Mbps against a same-run reference of
   115.01 Mbps with 32/32 object stream finishes and zero pending completions,
   so per-payload completion bookkeeping alone is not the throughput ceiling.
+- 2026-06-10: Added `reference_object_stream` and `moqx_object_stream` to the
+  probed suite as explicit object-stream-only checks. They run
+  `stream_pressure` with `--stream-direction unidirectional`, giving #46 a
+  caller-side object-publish isolation lane that is separate from #45 mixed
+  control traffic.
+- 2026-06-10: Fixed two measurement bugs before trusting the object-stream
+  lane. First, unidirectional `stream_pressure` now keeps the stream sender
+  alive and drains backend send-completion events instead of reporting accepted
+  sends while leaving completions in the process mailbox. Second, the
+  unidirectional path now respects `--stream-send-window` instead of using
+  `payload_count` as the implicit per-stream window. Local regression coverage
+  verifies nonzero bytes, goodput, completed sends, zero pending completions,
+  and a drained mailbox for the fake transport.
+- 2026-06-10: Clean x86-control object-stream evidence shows the next
+  bottleneck is the benchmark stream sender/sink, not a proven transport
+  ceiling. Run `issue46-object-stream-clean-2` used clean artifact `cf3925e`,
+  32 unidirectional streams, 1000 x 1180-byte payloads, `STREAM_SEND_WINDOW=16`,
+  and `STREAM_DIAGNOSTICS_SAMPLING=final`. Same-run reference completed at
+  55.26 Mbps with no break symptom. MOQX timed out at 15.02 s with
+  4.54 Mbps, 7,227 accepted payloads, 6,715 send completions, 512 pending
+  completions, mailbox peak 512, and `send_completion_timeout`. A no-rebuild
+  window64 A/B (`issue46-object-stream-window64-clean-1`) did not help:
+  reference reached 55.30 Mbps, while MOQX reached 4.76 Mbps with 7,591
+  accepted payloads, 5,543 completions, 2,048 pending completions, and the same
+  timeout. Since #45 mixed manual scheduling had already completed all 32,000
+  object payloads around 35 Mbps on the same lab, this isolates a benchmark
+  `StreamSender`/`StreamSink` completion-driven scheduling bottleneck that must
+  be fixed before using object-stream-only results as transport evidence.

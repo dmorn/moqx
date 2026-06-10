@@ -688,3 +688,12 @@ seams without `Application` env.
   #45 open: the next target is the mixed unidirectional object-stream
   goodput/send-completion cadence ceiling, and window size should remain an
   experiment knob until two clean repetitions meet the stop threshold.
+- 2026-06-10: #46 added an object-stream-only probed suite lane and fixed its
+  basic unidirectional accounting. Clean x86-control reruns then showed the
+  lane is currently limited by benchmark sender/sink behavior: `cf3925e`
+  reached only 4.54 Mbps with `STREAM_SEND_WINDOW=16` and 4.76 Mbps with
+  `STREAM_SEND_WINDOW=64`, both timing out on pending send completions, while
+  same-run reference stayed around 55.3 Mbps. Because the #45 mixed manual
+  scheduler had already completed the same object payload volume around
+  35 Mbps, do not use the object-stream-only lane as transport evidence until
+  `StreamSender`/`StreamSink` completion-driven scheduling is hardened.
