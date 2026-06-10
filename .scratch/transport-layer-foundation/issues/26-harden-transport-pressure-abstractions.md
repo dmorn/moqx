@@ -98,6 +98,9 @@ child issues in evidence order:
 10. #45 is the next focused loop: improve MOQX-client mixed stream/control
     pressure against the `quicprobe` reference, using same-run remote evidence,
     explicit stop thresholds, and no DATAGRAM-specific churn.
+11. #46 tracks the narrower caller-side stream throughput loop so object stream
+    goodput can be improved or bounded independently from mixed control
+    scheduling.
 
 The first implementation slice is #32. Do not start broad transport API
 refactors from this umbrella issue; any API change should be motivated by
@@ -259,6 +262,17 @@ seams without `Application` env.
   a generous listener accept window when external capture/setup is involved.
   Artifacts are under
   `bench/transport/results/20260527T073033Z-listener-tcpdump/`.
+- 2026-06-10: Added #46 as the dedicated stream-throughput progress tracker.
+  #45 remains the mixed object/control health issue, while #46 owns the
+  stream/object goodput loop that now matters most for caller-side MOQ Lite 04
+  work. The current clean x86-control reference point is
+  `issue45-control-first-window64-clean-1`: reference 117.60 Mbps, MOQX
+  35.28 Mbps, control p99 improved to 78.60 ms with `STREAM_SEND_WINDOW=64`,
+  zero pending completions, and no break symptom. Dirty A/Bs narrowed but did
+  not solve the throughput ceiling: event batching reduced receive-event calls
+  without moving goodput, window 1000 worsened control without improving
+  goodput, and stream-finish completion still reached only 35.33 Mbps against
+  a 115.01 Mbps same-run reference.
 - 2026-05-27: Implemented the harness split implied by the tcpdump smoke.
   `moqx-transport-bench moqx-listener` now accepts
   `--accept-timeout-seconds` for the listener readiness/connection accept

@@ -168,3 +168,13 @@ evidence for performance claims.
   current stop threshold remains unmet because MOQX object goodput is still
   about 30% of same-run reference; the next #45 slice must isolate object
   stream send-completion cadence/throughput rather than control-first ordering.
+- 2026-06-10: Split the broader stream-throughput progress loop into #46 so #45
+  can remain focused on mixed object/control behavior. Dirty A/B evidence from
+  the active x86-control lab further narrowed #45: mixed ready-event batching
+  reduced event-call count but not goodput; `STREAM_SEND_WINDOW=1000` did not
+  improve goodput and worsened control latency; and the dirty stream-finish
+  completion experiment still reached only 35.33 Mbps against a same-run
+  reference of 115.01 Mbps, with 32/32 object stream finishes and zero pending
+  completions. Current conclusion: control scheduling is improved, but the
+  object stream throughput ceiling should be isolated in #46 before declaring
+  #45 close enough.
