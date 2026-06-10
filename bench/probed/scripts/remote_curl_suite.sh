@@ -24,6 +24,7 @@ stream_diagnostics_sampling="${STREAM_DIAGNOSTICS_SAMPLING:-}"
 control_payload_size="${CONTROL_PAYLOAD_SIZE:-64}"
 control_message_count="${CONTROL_MESSAGE_COUNT:-10}"
 control_rate="${CONTROL_RATE:-10}"
+control_echo_window="${CONTROL_ECHO_WINDOW:-}"
 
 tcp_duration="${IPERF3_TCP_DURATION:-1}"
 udp_duration="${IPERF3_UDP_DURATION:-1}"
@@ -70,7 +71,7 @@ Supported tests:
 Useful environment overrides:
   STREAM_COUNT PAYLOAD_SIZE PAYLOAD_COUNT TIMEOUT_SECONDS TIMEOUT_MARGIN_SECONDS
   STREAM_SEND_WINDOW STREAM_EVENT_BATCH_SIZE STREAM_DIAGNOSTICS_SAMPLING
-  CONTROL_PAYLOAD_SIZE CONTROL_MESSAGE_COUNT CONTROL_RATE
+  CONTROL_PAYLOAD_SIZE CONTROL_MESSAGE_COUNT CONTROL_RATE CONTROL_ECHO_WINDOW
   IPERF3_TCP_DURATION IPERF3_UDP_DURATION IPERF3_UDP_BITRATES IPERF3_UDP_LENGTH
   DATAGRAM_SIZE DATAGRAM_COUNT DATAGRAM_RATE DURATION_SECONDS
   DATAGRAM_DRAIN_LIMIT DATAGRAM_DIAGNOSTICS DELIVERY_THRESHOLD OFFERED_RATE_TOLERANCE
@@ -417,6 +418,7 @@ jq -n \
   --arg control_payload_size "$control_payload_size" \
   --arg control_message_count "$control_message_count" \
   --arg control_rate "$control_rate" \
+  --arg control_echo_window "$control_echo_window" \
   --argjson client_moqxprobe_artifact "$client_moqxprobe_artifact" \
   --argjson server_moqxprobe_artifact "$server_moqxprobe_artifact" \
   --argjson tests "$tests_json" \
@@ -435,7 +437,8 @@ jq -n \
       stream_diagnostics_sampling: $stream_diagnostics_sampling,
       control_payload_size: $control_payload_size,
       control_message_count: $control_message_count,
-      control_rate: $control_rate
+      control_rate: $control_rate,
+      control_echo_window: $control_echo_window
     },
     tools: {
       client: {
@@ -595,6 +598,7 @@ measure_args() {
     --arg control_payload_size "$control_payload_size" \
     --arg control_message_count "$control_message_count" \
     --arg control_rate "$control_rate" \
+    --arg control_echo_window "$control_echo_window" \
     --argjson path_args "$extra_path_args" \
     '[
       "measure",
@@ -654,7 +658,13 @@ measure_args() {
           "--control-payload-size", $control_payload_size,
           "--control-message-count", $control_message_count,
           "--control-rate", $control_rate
-        ]
+        ] + (
+          if $control_echo_window == "" then
+            []
+          else
+            ["--control-echo-window", $control_echo_window]
+          end
+        )
       else
         []
       end

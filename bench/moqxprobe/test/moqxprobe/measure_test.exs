@@ -824,6 +824,7 @@ defmodule MOQXProbe.MeasureTest do
 
     assert record["profile"]["settings"]["workload"] == "mixed_moqt_shaped"
     assert record["profile"]["settings"]["stream_scheduling"] == "mixed_control_bidi_object_uni"
+    assert record["profile"]["settings"]["control_echo_window"] == 8
     assert record["workload"]["family"] == "mixed_moqt_shaped"
     assert record["workload"]["tool"] == "moqx"
     assert record["workload"]["stream_direction"] == "mixed"
@@ -848,6 +849,10 @@ defmodule MOQXProbe.MeasureTest do
     assert record["diagnostics"]["summary"]["object_payloads_accepted"] == 4
     assert record["diagnostics"]["summary"]["object_send_completions"] == 4
     assert record["diagnostics"]["summary"]["object_send_completions_pending"] == 0
+    assert record["diagnostics"]["summary"]["control_echo_window"] == 8
+    assert record["diagnostics"]["summary"]["control_messages_scheduled"] == 2
+    assert record["diagnostics"]["summary"]["control_messages_echoed"] == 2
+    assert record["diagnostics"]["summary"]["control_echo_inflight"] == 0
     assert record["diagnostics"]["summary"]["bytes_sent"] == 288
     assert record["diagnostics"]["summary"]["bytes_received"] == 32
     assert record["diagnostics"]["summary"]["events_drained"] >= 6
@@ -946,6 +951,8 @@ defmodule MOQXProbe.MeasureTest do
         "2",
         "--control-rate",
         "1000",
+        "--control-echo-window",
+        "2",
         "--timeout-seconds",
         "1",
         "--timeout-margin-seconds",
@@ -968,6 +975,76 @@ defmodule MOQXProbe.MeasureTest do
     assert record["diagnostics"]["summary"]["control_send_completions"] == 2
     assert record["diagnostics"]["summary"]["control_data_events"] == 2
     assert record["diagnostics"]["summary"]["control_bytes_received"] == 32
+  end
+
+  test "mixed MOQX client bounds control messages waiting for echo" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-mixed-control-echo-window.jsonl")
+
+    Process.register(self(), __MODULE__.ControlEchoWindowObserver)
+
+    on_exit(fn ->
+      if Process.whereis(__MODULE__.ControlEchoWindowObserver) == self() do
+        Process.unregister(__MODULE__.ControlEchoWindowObserver)
+      end
+    end)
+
+    Measure.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "mixed_moqt_shaped",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-count",
+        "1",
+        "--stream-send-window",
+        "1",
+        "--payload-size",
+        "64",
+        "--payload-count",
+        "1",
+        "--control-payload-size",
+        "16",
+        "--control-message-count",
+        "3",
+        "--control-rate",
+        "1000",
+        "--control-echo-window",
+        "1",
+        "--timeout-seconds",
+        "1",
+        "--timeout-margin-seconds",
+        "1",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-mixed-control-echo-window-test"
+      ],
+      script: "test measure",
+      transport_backend: __MODULE__.DelayedControlEchoWindowTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["limits"]["first_break_symptom"] == :null
+    assert record["profile"]["settings"]["control_echo_window"] == 1
+    assert record["diagnostics"]["summary"]["control_echo_window"] == 1
+    assert record["diagnostics"]["summary"]["control_send_events"] == 3
+    assert record["diagnostics"]["summary"]["control_data_events"] == 3
+    assert record["diagnostics"]["summary"]["control_messages_scheduled"] == 3
+    assert record["diagnostics"]["summary"]["control_messages_echoed"] == 3
+    assert record["diagnostics"]["summary"]["control_echo_inflight"] == 0
+
+    assert max_observed_control_echo_inflight() == 1
   end
 
   test "records structured diagnostics when MOQX bidirectional echo closes early" do
@@ -1216,6 +1293,15 @@ defmodule MOQXProbe.MeasureTest do
 
   defp fake_quicprobe_command(dir, args_path) do
     fake_quicprobe_command(dir, args_path, stream_quicprobe_json())
+  end
+
+  defp max_observed_control_echo_inflight(max_seen \\ 0) do
+    receive do
+      {:control_echo_inflight, count} ->
+        max_observed_control_echo_inflight(max(max_seen, count))
+    after
+      0 -> max_seen
+    end
   end
 
   defp fake_quicprobe_command(dir, args_path, json) do
@@ -1944,5 +2030,96 @@ defmodule MOQXProbe.MeasureTest do
 
     @impl true
     def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+  end
+
+  defmodule DelayedControlEchoWindowTransport do
+    @behaviour MOQX.Transport
+
+    @impl true
+    def listen(_port, _opts), do: {:error, :unsupported}
+
+    @impl true
+    def accept(_listener, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def handshake(connection, _timeout), do: {:ok, connection}
+
+    @impl true
+    def connect(_host, _port, _opts, _timeout) do
+      {:ok, {:connection, :ets.new(__MODULE__, [:set, :public])}}
+    end
+
+    @impl true
+    def open_stream({:connection, table}, opts),
+      do: {:ok, {:stream, table, make_ref(), Keyword.fetch!(opts, :direction)}}
+
+    @impl true
+    def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
+
+    @impl true
+    def send_stream({:stream, table, _ref, :bidirectional} = stream, data, _opts) do
+      owner = self()
+
+      echo_inflight =
+        :ets.update_counter(table, :control_echo_inflight, {2, 1}, {:control_echo_inflight, 0})
+
+      notify_control_echo_inflight(echo_inflight)
+      send(owner, {:moqx_transport, {:stream_event, stream, :send_complete, false}})
+
+      Task.start(fn ->
+        Process.sleep(10)
+
+        _remaining =
+          :ets.update_counter(table, :control_echo_inflight, {2, -1}, {:control_echo_inflight, 0})
+
+        send(owner, {:moqx_transport, {:stream_data, stream, data, %{}}})
+      end)
+
+      :ok
+    end
+
+    def send_stream(stream, _data, _opts) do
+      send(self(), {:moqx_transport, {:stream_event, stream, :send_complete, false}})
+      :ok
+    end
+
+    @impl true
+    def recv_stream(_stream, byte_count), do: {:ok, :binary.copy(<<0>>, byte_count)}
+
+    @impl true
+    def send_datagram(_connection, _data), do: {:error, :unsupported}
+
+    @impl true
+    def finish_sending(_stream), do: :ok
+
+    @impl true
+    def abort_sending(_stream, _error_code), do: :ok
+
+    @impl true
+    def abort_receiving(_stream, _error_code), do: :ok
+
+    @impl true
+    def close_connection({:connection, table}, _error_code) do
+      :ets.delete(table)
+      :ok
+    end
+
+    @impl true
+    def set_active(_stream, _active), do: :ok
+
+    @impl true
+    def controlling_process(_handle, _pid), do: :ok
+
+    @impl true
+    def normalize_message(_message), do: :unknown
+
+    @impl true
+    def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+
+    defp notify_control_echo_inflight(count) do
+      if observer = Process.whereis(MOQXProbe.MeasureTest.ControlEchoWindowObserver) do
+        send(observer, {:control_echo_inflight, count})
+      end
+    end
   end
 end

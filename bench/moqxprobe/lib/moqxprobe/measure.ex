@@ -20,6 +20,7 @@ defmodule MOQXProbe.Measure do
   @mixed_moqt_shaped_workload "mixed_moqt_shaped"
   @default_stream_send_window 16
   @default_stream_event_batch_size 1024
+  @default_control_echo_window 8
   @stream_diagnostics_sampling_modes ~w(event final)
   @mixed_completion_drain_limit 1024
   @datagram_cadence_sample_interval_us 100_000
@@ -100,6 +101,7 @@ defmodule MOQXProbe.Measure do
           control_payload_size: :integer,
           control_message_count: :integer,
           control_rate: :integer,
+          control_echo_window: :integer,
           delivery_threshold: :string,
           offered_rate_tolerance: :string,
           timeout_seconds: :integer,
@@ -193,6 +195,7 @@ defmodule MOQXProbe.Measure do
       control_payload_size: Keyword.get(opts, :control_payload_size, 64),
       control_message_count: Keyword.get(opts, :control_message_count, 10),
       control_rate: Keyword.get(opts, :control_rate, 10),
+      control_echo_window: Keyword.get(opts, :control_echo_window, @default_control_echo_window),
       delivery_threshold: parse_delivery_threshold(Keyword.get(opts, :delivery_threshold, "1.0")),
       offered_rate_tolerance:
         parse_delivery_threshold(Keyword.get(opts, :offered_rate_tolerance, "0.95")),
@@ -419,8 +422,9 @@ defmodule MOQXProbe.Measure do
 
   defp validate_mixed_control(%{workload: @mixed_moqt_shaped_workload} = config) do
     with :ok <- validate_positive(config.control_payload_size, "--control-payload-size"),
-         :ok <- validate_positive(config.control_message_count, "--control-message-count") do
-      validate_positive(config.control_rate, "--control-rate")
+         :ok <- validate_positive(config.control_message_count, "--control-message-count"),
+         :ok <- validate_positive(config.control_rate, "--control-rate") do
+      validate_positive(config.control_echo_window, "--control-echo-window")
     end
   end
 
@@ -618,6 +622,7 @@ defmodule MOQXProbe.Measure do
     ]
     |> append_datagram_args(config)
     |> append_mixed_args(config)
+    |> append_moqx_mixed_args(config)
     |> maybe_append_servername(config.servername)
   end
 
@@ -665,6 +670,16 @@ defmodule MOQXProbe.Measure do
   end
 
   defp append_mixed_args(args, _config), do: args
+
+  defp append_moqx_mixed_args(args, %{workload: @mixed_moqt_shaped_workload} = config) do
+    args ++
+      [
+        "--control-echo-window",
+        Integer.to_string(config.control_echo_window)
+      ]
+  end
+
+  defp append_moqx_mixed_args(args, _config), do: args
 
   defp do_run_moqx_client(config) do
     {:ok, ctx} = Transport.new(config.transport_backend, transport_backend_opts(config))
@@ -1210,6 +1225,7 @@ defmodule MOQXProbe.Measure do
       "control_payload_size_bytes" => config.control_payload_size,
       "control_message_count" => config.control_message_count,
       "control_messages_per_second" => config.control_rate * 1.0,
+      "control_echo_window" => config.control_echo_window,
       "control_trickle_bps" => control_trickle_bps(config),
       "bytes_sent" => bytes_sent,
       "bytes_received" => control_result.bytes_received,
@@ -1624,6 +1640,9 @@ defmodule MOQXProbe.Measure do
       control.send_inflight >= config.stream_send_window ->
         false
 
+      control_echo_inflight(control) >= config.control_echo_window ->
+        false
+
       true ->
         monotonic_us() >=
           mixed_control_due_us(control.messages_scheduled + 1, config, application_started_at)
@@ -1688,9 +1707,12 @@ defmodule MOQXProbe.Measure do
       control.failure -> nil
       control.messages_scheduled >= config.control_message_count -> nil
       control.send_inflight >= config.stream_send_window -> nil
+      control_echo_inflight(control) >= config.control_echo_window -> nil
       true -> mixed_control_due_us(control.messages_scheduled + 1, config, application_started_at)
     end
   end
+
+  defp control_echo_inflight(control), do: control.messages_scheduled - control.messages_echoed
 
   defp handle_mixed_event(
          state,
@@ -2038,6 +2060,10 @@ defmodule MOQXProbe.Measure do
           "bytes_received" => control_result.bytes_received,
           "object_bytes_sent" => object_bytes_sent,
           "control_message_count" => config.control_message_count,
+          "control_echo_window" => config.control_echo_window,
+          "control_messages_scheduled" => state.control.messages_scheduled,
+          "control_messages_echoed" => state.control.messages_echoed,
+          "control_echo_inflight" => control_echo_inflight(state.control),
           "control_bytes_sent" => control_result.bytes_sent,
           "control_bytes_received" => control_result.bytes_received,
           "control_send_completions" => state.control.send_completed,
@@ -4619,7 +4645,8 @@ defmodule MOQXProbe.Measure do
         "stream_scheduling" => stream_scheduling(ctx.config, measurement),
         "stream_send_window" => stream_send_window(ctx.config, measurement),
         "stream_event_batch_size" => stream_event_batch_size(ctx.config, measurement),
-        "stream_diagnostics_sampling" => stream_diagnostics_sampling(ctx.config, measurement)
+        "stream_diagnostics_sampling" => stream_diagnostics_sampling(ctx.config, measurement),
+        "control_echo_window" => control_echo_window(ctx.config, measurement)
       }
     }
   end
@@ -4659,6 +4686,14 @@ defmodule MOQXProbe.Measure do
     do: measurement["stream_diagnostics_sampling"] || config.stream_diagnostics_sampling
 
   defp stream_diagnostics_sampling(_config, _measurement), do: nil
+
+  defp control_echo_window(
+         %{topology: @moqx_client_topology, workload: @mixed_moqt_shaped_workload} = config,
+         measurement
+       ),
+       do: measurement["control_echo_window"] || config.control_echo_window
+
+  defp control_echo_window(_config, _measurement), do: nil
 
   defp stream_scheduling(%{workload: @datagram_pressure_workload}, _measurement), do: nil
 
@@ -5547,6 +5582,7 @@ defmodule MOQXProbe.Measure do
       --control-payload-size BYTES   bytes per control message for mixed_moqt_shaped (default: 64)
       --control-message-count N      control messages for mixed_moqt_shaped (default: 10)
       --control-rate N               target control messages/sec for mixed_moqt_shaped (default: 10)
+      --control-echo-window N        max mixed control messages awaiting echo (default: #{@default_control_echo_window})
       --delivery-threshold RATIO     minimum acceptable delivery ratio before loss stop (default: 1.0)
       --offered-rate-tolerance RATIO minimum actual/target offered rate for paced steps (default: 0.95)
       --timeout-seconds N            client timeout (default: 5)

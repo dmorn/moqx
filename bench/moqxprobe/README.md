@@ -460,6 +460,8 @@ session: one low-rate bidirectional control stream plus object-like
 unidirectional streams. The object stream pressure uses `--stream-count`,
 `--payload-size`, and `--payload-count`; the control trickle uses
 `--control-payload-size`, `--control-message-count`, and `--control-rate`.
+For MOQX-client runs, `--control-echo-window` bounds how many mixed control
+messages may be scheduled while waiting for peer echoes.
 The record reports `control_trickle_bps` and `control_latency_p99_ms`
 separately from aggregate stream/object goodput. For the MOQX-client topology,
 the mixed workload uses bounded object-stream send windows and drains async
@@ -480,6 +482,7 @@ moqxprobe measure \
   --control-payload-size 64 \
   --control-message-count 100 \
   --control-rate 10 \
+  --control-echo-window 8 \
   --output bench/moqxprobe/results/moqx-client-reference-mixed.jsonl
 ```
 
