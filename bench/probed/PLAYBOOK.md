@@ -248,6 +248,7 @@ PROBED_SUITE_TESTS=reference_mixed,moqx_mixed \
 STREAM_COUNT=4 \
 PAYLOAD_SIZE=1180 \
 PAYLOAD_COUNT=8000 \
+STREAM_SEND_WINDOW=512 \
 TIMEOUT_SECONDS=15 \
 TIMEOUT_MARGIN_SECONDS=5 \
 STREAM_DIAGNOSTICS_SAMPLING=final \
@@ -264,6 +265,8 @@ DATAGRAM-only evidence is healthy. Keep
 only when the next question needs detailed per-stream transition traces.
 For explicit stream-priority A/Bs, add `CONTROL_STREAM_PRIORITY` and
 `OBJECT_STREAM_PRIORITY`; leave them unset for baseline runs.
+The current mixed MOQX-client default is `STREAM_SEND_WINDOW=512`; keep it
+explicit in remote commands when comparing historical runs.
 
 For the #40 DATAGRAM validation, use the bracket wrapper after the lab is up,
 private-path checked, and tools are deployed. The primary iteration target is

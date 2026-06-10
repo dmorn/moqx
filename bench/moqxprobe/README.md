@@ -278,6 +278,10 @@ The MOQX-client stream-pressure path also exposes benchmark-only diagnostic
 knobs for performance isolation:
 
 - `--stream-send-window N` controls max in-flight async sends per stream.
+  Stream pressure defaults to `16`; mixed stream/control pressure defaults to
+  `512` so object streams do not depend on tiny send-completion batches to keep
+  the path filled. Use smaller values only when intentionally testing
+  backpressure behavior.
 - `--stream-event-batch-size N` drains up to `N` ready transport events after
   each blocking receive before waiting again. The default is `1024`, which
   keeps send-completion feedback batched enough for object-stream pressure
@@ -479,7 +483,8 @@ The record reports `control_trickle_bps` and `control_latency_p99_ms`
 separately from aggregate stream/object goodput. For the MOQX-client topology,
 the mixed workload uses bounded object-stream send windows and drains async
 send-completion events while the control stream is active, so object pressure
-does not silently accumulate in the caller mailbox.
+does not silently accumulate in the caller mailbox. The mixed default
+`--stream-send-window` is `512`; keep it explicit for remote comparisons.
 
 ```bash
 moqxprobe measure \
@@ -490,6 +495,7 @@ moqxprobe measure \
   --ca .tmp/integration-certs/ca.pem \
   --servername localhost \
   --stream-count 4 \
+  --stream-send-window 512 \
   --payload-size 1200 \
   --payload-count 100 \
   --control-payload-size 64 \
