@@ -798,6 +798,8 @@ defmodule MOQXProbe.MeasureTest do
         "localhost",
         "--stream-count",
         "2",
+        "--stream-send-window",
+        "1",
         "--payload-size",
         "64",
         "--payload-count",
@@ -1051,6 +1053,8 @@ defmodule MOQXProbe.MeasureTest do
         "unidirectional",
         "--stream-count",
         "2",
+        "--stream-send-window",
+        "1",
         "--payload-size",
         "64",
         "--payload-count",
@@ -1074,6 +1078,7 @@ defmodule MOQXProbe.MeasureTest do
     assert record["metrics"]["goodput_bps"] > 0
     assert diagnostics["summary"]["payloads_accepted"] == 4
     assert diagnostics["summary"]["payloads_completed"] == 4
+    assert diagnostics["summary"]["stream_send_window"] == 1
     assert diagnostics["summary"]["send_completions"] == 4
     assert diagnostics["summary"]["send_completions_pending"] == 0
     assert diagnostics["summary"]["events_drained"] >= 4

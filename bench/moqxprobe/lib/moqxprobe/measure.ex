@@ -2974,7 +2974,6 @@ defmodule MOQXProbe.Measure do
 
   defp send_unidirectional_pressure_payloads(ctx, streams, payload, config, started_at) do
     states = initial_stream_pressure_states(streams)
-    stream_send_window = max(config.payload_count, 1)
     diagnostics = initial_stream_pressure_runtime(started_at)
 
     with {:ok, sender} <-
@@ -2985,7 +2984,7 @@ defmodule MOQXProbe.Measure do
              payload,
              config,
              started_at,
-             stream_send_window
+             config.stream_send_window
            ),
          {:ok, snapshot} <- StreamSender.drain(sender) do
       {ctx, states} = stream_sender_context_and_states(snapshot)
