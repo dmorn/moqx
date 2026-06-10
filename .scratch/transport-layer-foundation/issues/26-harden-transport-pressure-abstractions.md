@@ -747,3 +747,18 @@ seams without `Application` env.
   or long stream-send NIF calls. The next #26/#45 slice is to instrument mixed
   connection `statistics_v2` and object stream completion cadence so the slow
   and fast modes can be compared before another tuning attempt.
+- 2026-06-10: #45 now has that mixed completion-cadence instrumentation from
+  `8de2d55`. The slow/fast split is visible in ready object-completion batch
+  size, not in QUIC loss or congestion counters: fast no-sendbuffer mode
+  reached 270.66 Mbps with object-completion batch p99 238/max 464 and
+  `receive_event_blocking` total 801 ms; the next no-sendbuffer run reached
+  only 49.42 Mbps with batch p99 16/max 136 and blocking total 5754 ms, while
+  both had full server ingress and nearly identical `statistics_v2` packet,
+  loss, and congestion counts. `pacing_enabled=0`, `STREAM_SEND_WINDOW=64`,
+  and `max_worker_queue_delay_us=0` did not reliably fix it. Larger windows
+  (`512`/`1000`) can produce fast runs, but committed default-window
+  validation with 512 was still bimodal, so that attempted default change was
+  reverted in `8ef045c`. The next slice should either explain quicer/MsQuic
+  stream send-completion release cadence directly or change the benchmark
+  object sender so media/object pressure is not paced by per-payload
+  completion feedback in this way.

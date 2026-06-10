@@ -290,3 +290,36 @@ evidence for performance claims.
   low-overhead mixed diagnostics for connection `statistics_v2` and
   per-stream/object completion cadence, then compare one slow-mode run against
   any reproduced fast-mode run. Keep #45 open.
+- 2026-06-10: Implemented mixed diagnostics in `8de2d55`: mixed MOQX-client
+  records now include backend connection `statistics_v2`, ready-event batch
+  summaries, ready object-completion batch summaries, and per-object-stream
+  completion snapshots. The diagnostics separate the fast/slow modes cleanly.
+  On the same `8de2d55` artifact and active x86-control lab, no-sendbuffer
+  run `issue45-mixed-diagnostics-nosb-1` hit fast mode at 270.66 Mbps,
+  1116.27 ms application duration, control p99 57.72 ms, object completion
+  p99 1115.58 ms, ready object-completion batch p99 238/max 464, and
+  `receive_event_blocking` total 801.11 ms. The immediately repeated
+  `issue45-mixed-diagnostics-nosb-2` hit slow mode at 49.42 Mbps,
+  6113.69 ms application duration, control p99 61.99 ms, object completion
+  p99 6045.98 ms, ready object-completion batch p99 16/max 136, and
+  `receive_event_blocking` total 5753.91 ms. Both runs had complete
+  server-side stream ingress, zero stream errors, 32,000 object send
+  completions, no pending completions, and nearly identical client
+  `statistics_v2` packet/loss/congestion counters (`send_total_packets`
+  about 27.5k, `send_suspected_lost_packets=3`, `send_congestion_count=3`).
+  That strongly points at send-completion/event release cadence, not network
+  loss, path collapse, BEAM scheduler saturation, or client JSON accounting.
+- 2026-06-10: Additional A/Bs rejected several tempting quick fixes.
+  `QUICER_SETTINGS=pacing_enabled=0` stayed in slow mode at 51.97 Mbps with
+  object completion p99 5795.77 ms. `STREAM_SEND_WINDOW=64` also stayed slow
+  at 49.87 Mbps. `QUICER_SETTINGS=max_worker_queue_delay_us=0` was still
+  bimodal: 257.60 Mbps on the first run and 50.21 Mbps on the repeat.
+  Deeper object windows can keep the pipe filled when completion batches are
+  favorable: `STREAM_SEND_WINDOW=1000` produced 259.20/230.63 Mbps in two
+  runs, and explicit `STREAM_SEND_WINDOW=512` produced 240.58/190.42 Mbps in
+  two MOQX-only runs plus 256.63 Mbps against a same-suite reference at
+  117.05 Mbps. However, making 512 the mixed default was disproved by
+  committed artifact `b0dffc7`: default-window validation produced 50.16 Mbps
+  and then 252.58 Mbps. That commit was reverted as `8ef045c`. Keep #45 open:
+  deeper in-flight windows are a useful diagnostic/tuning knob, but they do
+  not remove the underlying bimodal completion cadence.
