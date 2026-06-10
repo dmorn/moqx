@@ -825,6 +825,8 @@ defmodule MOQXProbe.MeasureTest do
     assert record["profile"]["settings"]["workload"] == "mixed_moqt_shaped"
     assert record["profile"]["settings"]["stream_scheduling"] == "mixed_control_bidi_object_uni"
     assert record["profile"]["settings"]["control_echo_window"] == 8
+    assert record["profile"]["settings"]["control_stream_priority"] == :null
+    assert record["profile"]["settings"]["object_stream_priority"] == :null
     assert record["workload"]["family"] == "mixed_moqt_shaped"
     assert record["workload"]["tool"] == "moqx"
     assert record["workload"]["stream_direction"] == "mixed"
@@ -853,6 +855,8 @@ defmodule MOQXProbe.MeasureTest do
     assert record["diagnostics"]["summary"]["object_send_completions"] == 4
     assert record["diagnostics"]["summary"]["object_send_completions_pending"] == 0
     assert record["diagnostics"]["summary"]["control_echo_window"] == 8
+    refute Map.has_key?(record["diagnostics"]["summary"], "control_stream_priority")
+    refute Map.has_key?(record["diagnostics"]["summary"], "object_stream_priority")
     assert record["diagnostics"]["summary"]["control_messages_scheduled"] == 2
     assert record["diagnostics"]["summary"]["control_messages_echoed"] == 2
     assert record["diagnostics"]["summary"]["control_echo_inflight"] == 0
@@ -861,6 +865,78 @@ defmodule MOQXProbe.MeasureTest do
     assert record["diagnostics"]["summary"]["events_drained"] >= 6
     assert record["diagnostics"]["summary"]["completion_drain_events"] > 1
     assert record["diagnostics"]["summary"]["control_data_events"] == 2
+  end
+
+  test "mixed MOQX client applies configured transport stream priorities" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-mixed-priority.jsonl")
+
+    Process.register(self(), __MODULE__.MixedOpenStreamObserver)
+
+    on_exit(fn ->
+      if Process.whereis(__MODULE__.MixedOpenStreamObserver) == self() do
+        Process.unregister(__MODULE__.MixedOpenStreamObserver)
+      end
+    end)
+
+    Measure.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "mixed_moqt_shaped",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-count",
+        "2",
+        "--stream-send-window",
+        "1",
+        "--payload-size",
+        "64",
+        "--payload-count",
+        "1",
+        "--control-payload-size",
+        "16",
+        "--control-message-count",
+        "1",
+        "--control-rate",
+        "100",
+        "--control-stream-priority",
+        "65535",
+        "--object-stream-priority",
+        "1",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-mixed-priority-test"
+      ],
+      script: "test measure",
+      transport_backend: __MODULE__.MixedEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    assert record["profile"]["settings"]["control_stream_priority"] == 65_535
+    assert record["profile"]["settings"]["object_stream_priority"] == 1
+    assert record["diagnostics"]["summary"]["control_stream_priority"] == 65_535
+    assert record["diagnostics"]["summary"]["object_stream_priority"] == 1
+
+    open_opts = receive_mixed_open_stream_opts()
+    assert Enum.count(open_opts, &(Keyword.fetch!(&1, :direction) == :unidirectional)) == 2
+
+    assert Enum.all?(open_opts, fn opts ->
+             case Keyword.fetch!(opts, :direction) do
+               :bidirectional -> Keyword.fetch!(opts, :priority) == 65_535
+               :unidirectional -> Keyword.fetch!(opts, :priority) == 1
+             end
+           end)
   end
 
   test "mixed MOQX client schedules ready control traffic before object windows" do
@@ -1304,6 +1380,15 @@ defmodule MOQXProbe.MeasureTest do
         max_observed_control_echo_inflight(max(max_seen, count))
     after
       0 -> max_seen
+    end
+  end
+
+  defp receive_mixed_open_stream_opts(opts \\ []) do
+    receive do
+      {:mixed_open_stream, stream_opts} ->
+        receive_mixed_open_stream_opts([stream_opts | opts])
+    after
+      0 -> Enum.reverse(opts)
     end
   end
 
@@ -1899,8 +1984,13 @@ defmodule MOQXProbe.MeasureTest do
     def connect(_host, _port, _opts, _timeout), do: {:ok, :connection}
 
     @impl true
-    def open_stream(_connection, opts),
-      do: {:ok, {:stream, make_ref(), Keyword.fetch!(opts, :direction)}}
+    def open_stream(_connection, opts) do
+      if observer = Process.whereis(MOQXProbe.MeasureTest.MixedOpenStreamObserver) do
+        send(observer, {:mixed_open_stream, opts})
+      end
+
+      {:ok, {:stream, make_ref(), Keyword.fetch!(opts, :direction)}}
+    end
 
     @impl true
     def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}

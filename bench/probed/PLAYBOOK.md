@@ -253,6 +253,7 @@ TIMEOUT_MARGIN_SECONDS=5 \
 STREAM_DIAGNOSTICS_SAMPLING=final \
 CONTROL_MESSAGE_COUNT=100 \
 CONTROL_RATE=100 \
+CONTROL_ECHO_WINDOW=8 \
 just bench-transport-probed-suite <run-id>
 ```
 
@@ -261,6 +262,8 @@ pressure. Use it to check adjacent caller-side control/object pressure after
 DATAGRAM-only evidence is healthy. Keep
 `STREAM_DIAGNOSTICS_SAMPLING=final` for performance comparisons; use `event`
 only when the next question needs detailed per-stream transition traces.
+For explicit stream-priority A/Bs, add `CONTROL_STREAM_PRIORITY` and
+`OBJECT_STREAM_PRIORITY`; leave them unset for baseline runs.
 
 For the #40 DATAGRAM validation, use the bracket wrapper after the lab is up,
 private-path checked, and tools are deployed. The primary iteration target is

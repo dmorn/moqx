@@ -37,6 +37,16 @@ defmodule MOQX.Transport.Quicer.OptionsTest do
                start_flag: 1
              }
     end
+
+    test "preserves transport stream priority for backend application" do
+      assert Options.normalize_stream_opts(direction: :unidirectional, priority: 65_535) == %{
+               active: false,
+               quic_event_mask: 1,
+               open_flag: 1,
+               priority: 65_535,
+               start_flag: 1
+             }
+    end
   end
 
   describe "normalize_accept_stream_opts/1" do

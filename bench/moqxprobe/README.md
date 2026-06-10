@@ -461,7 +461,11 @@ unidirectional streams. The object stream pressure uses `--stream-count`,
 `--payload-size`, and `--payload-count`; the control trickle uses
 `--control-payload-size`, `--control-message-count`, and `--control-rate`.
 For MOQX-client runs, `--control-echo-window` bounds how many mixed control
-messages may be scheduled while waiting for peer echoes.
+messages may be scheduled while waiting for peer echoes. Optional
+`--control-stream-priority` and `--object-stream-priority` values set quicer /
+MsQuic transport stream priorities for the mixed MOQX-client control and object
+streams. Leave them unset for baseline runs; use them only for explicit stream
+priority A/Bs.
 The record reports `control_trickle_bps` and `control_latency_p99_ms`
 separately from aggregate stream/object goodput. For the MOQX-client topology,
 the mixed workload uses bounded object-stream send windows and drains async
@@ -485,6 +489,9 @@ moqxprobe measure \
   --control-echo-window 8 \
   --output bench/moqxprobe/results/moqx-client-reference-mixed.jsonl
 ```
+
+For a priority A/B, add values such as
+`--control-stream-priority 65535 --object-stream-priority 1`.
 
 The measurement command does not start the peer server. For reference server
 topologies, start `bench/quicprobe server` explicitly on the chosen endpoint

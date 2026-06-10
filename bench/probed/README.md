@@ -278,6 +278,8 @@ not add QUIC DATAGRAMs; use DATAGRAM suites for publisher-path DATAGRAM
 evidence and mixed suites for adjacent caller-side control/object pressure.
 Use `STREAM_DIAGNOSTICS_SAMPLING=final` for performance comparisons, and
 switch to `event` only when debugging per-stream state transitions.
+For stream-priority A/Bs, set `CONTROL_STREAM_PRIORITY` and
+`OBJECT_STREAM_PRIORITY`; leave both unset for baseline runs.
 
 For the current #40 validation loop, prefer the bracket wrapper once the lab is
 already provisioned, private-path checked, and tools are deployed:

@@ -25,6 +25,8 @@ control_payload_size="${CONTROL_PAYLOAD_SIZE:-64}"
 control_message_count="${CONTROL_MESSAGE_COUNT:-10}"
 control_rate="${CONTROL_RATE:-10}"
 control_echo_window="${CONTROL_ECHO_WINDOW:-}"
+control_stream_priority="${CONTROL_STREAM_PRIORITY:-}"
+object_stream_priority="${OBJECT_STREAM_PRIORITY:-}"
 
 tcp_duration="${IPERF3_TCP_DURATION:-1}"
 udp_duration="${IPERF3_UDP_DURATION:-1}"
@@ -72,6 +74,7 @@ Useful environment overrides:
   STREAM_COUNT PAYLOAD_SIZE PAYLOAD_COUNT TIMEOUT_SECONDS TIMEOUT_MARGIN_SECONDS
   STREAM_SEND_WINDOW STREAM_EVENT_BATCH_SIZE STREAM_DIAGNOSTICS_SAMPLING
   CONTROL_PAYLOAD_SIZE CONTROL_MESSAGE_COUNT CONTROL_RATE CONTROL_ECHO_WINDOW
+  CONTROL_STREAM_PRIORITY OBJECT_STREAM_PRIORITY
   IPERF3_TCP_DURATION IPERF3_UDP_DURATION IPERF3_UDP_BITRATES IPERF3_UDP_LENGTH
   DATAGRAM_SIZE DATAGRAM_COUNT DATAGRAM_RATE DURATION_SECONDS
   DATAGRAM_DRAIN_LIMIT DATAGRAM_DIAGNOSTICS DELIVERY_THRESHOLD OFFERED_RATE_TOLERANCE
@@ -419,6 +422,8 @@ jq -n \
   --arg control_message_count "$control_message_count" \
   --arg control_rate "$control_rate" \
   --arg control_echo_window "$control_echo_window" \
+  --arg control_stream_priority "$control_stream_priority" \
+  --arg object_stream_priority "$object_stream_priority" \
   --argjson client_moqxprobe_artifact "$client_moqxprobe_artifact" \
   --argjson server_moqxprobe_artifact "$server_moqxprobe_artifact" \
   --argjson tests "$tests_json" \
@@ -438,7 +443,9 @@ jq -n \
       control_payload_size: $control_payload_size,
       control_message_count: $control_message_count,
       control_rate: $control_rate,
-      control_echo_window: $control_echo_window
+      control_echo_window: $control_echo_window,
+      control_stream_priority: $control_stream_priority,
+      object_stream_priority: $object_stream_priority
     },
     tools: {
       client: {
@@ -599,6 +606,8 @@ measure_args() {
     --arg control_message_count "$control_message_count" \
     --arg control_rate "$control_rate" \
     --arg control_echo_window "$control_echo_window" \
+    --arg control_stream_priority "$control_stream_priority" \
+    --arg object_stream_priority "$object_stream_priority" \
     --argjson path_args "$extra_path_args" \
     '[
       "measure",
@@ -663,6 +672,18 @@ measure_args() {
             []
           else
             ["--control-echo-window", $control_echo_window]
+          end
+        ) + (
+          if $control_stream_priority == "" then
+            []
+          else
+            ["--control-stream-priority", $control_stream_priority]
+          end
+        ) + (
+          if $object_stream_priority == "" then
+            []
+          else
+            ["--object-stream-priority", $object_stream_priority]
           end
         )
       else

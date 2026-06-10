@@ -102,7 +102,12 @@ defmodule MOQX.Transport.Quicer do
 
   @impl true
   def open_stream(connection, opts \\ []) do
-    :quicer.start_stream(connection, Options.normalize_stream_opts(opts))
+    with {:ok, stream} <- :quicer.start_stream(connection, Options.normalize_stream_opts(opts)),
+         :ok <- maybe_set_stream_priority(stream, option(opts, :priority, nil)) do
+      {:ok, stream}
+    else
+      error -> error
+    end
   end
 
   @impl true
@@ -352,6 +357,15 @@ defmodule MOQX.Transport.Quicer do
 
   defp maybe_add_fin_flag(flags, true), do: flags ||| @quic_send_flag_fin
   defp maybe_add_fin_flag(flags, false), do: flags
+
+  defp maybe_set_stream_priority(_stream, nil), do: :ok
+
+  defp maybe_set_stream_priority(stream, priority) do
+    case :quicer.setopt(stream, :priority, priority) do
+      :ok -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp normalize_datagram_send_flags(flags) when is_integer(flags) and flags >= 0, do: flags
   defp normalize_datagram_send_flags(nil), do: 0

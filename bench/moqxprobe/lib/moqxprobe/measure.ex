@@ -102,6 +102,8 @@ defmodule MOQXProbe.Measure do
           control_message_count: :integer,
           control_rate: :integer,
           control_echo_window: :integer,
+          control_stream_priority: :integer,
+          object_stream_priority: :integer,
           delivery_threshold: :string,
           offered_rate_tolerance: :string,
           timeout_seconds: :integer,
@@ -196,6 +198,8 @@ defmodule MOQXProbe.Measure do
       control_message_count: Keyword.get(opts, :control_message_count, 10),
       control_rate: Keyword.get(opts, :control_rate, 10),
       control_echo_window: Keyword.get(opts, :control_echo_window, @default_control_echo_window),
+      control_stream_priority: opts[:control_stream_priority],
+      object_stream_priority: opts[:object_stream_priority],
       delivery_threshold: parse_delivery_threshold(Keyword.get(opts, :delivery_threshold, "1.0")),
       offered_rate_tolerance:
         parse_delivery_threshold(Keyword.get(opts, :offered_rate_tolerance, "0.95")),
@@ -227,6 +231,10 @@ defmodule MOQXProbe.Measure do
          :ok <- validate_non_negative(config.datagram_drain_limit, "--datagram-drain-limit"),
          :ok <- validate_datagram_diagnostics(config.datagram_diagnostics),
          :ok <- validate_mixed_control(config),
+         :ok <-
+           validate_stream_priority(config.control_stream_priority, "--control-stream-priority"),
+         :ok <-
+           validate_stream_priority(config.object_stream_priority, "--object-stream-priority"),
          :ok <- validate_ratio(config.delivery_threshold, "--delivery-threshold"),
          :ok <- validate_positive_ratio(config.offered_rate_tolerance, "--offered-rate-tolerance"),
          :ok <- validate_positive(config.timeout_seconds, "--timeout-seconds"),
@@ -268,6 +276,15 @@ defmodule MOQXProbe.Measure do
 
   defp validate_optional_positive(nil, _name), do: :ok
   defp validate_optional_positive(value, name), do: validate_positive(value, name)
+
+  defp validate_stream_priority(nil, _name), do: :ok
+
+  defp validate_stream_priority(value, _name)
+       when is_integer(value) and value >= 0 and value <= 65_535,
+       do: :ok
+
+  defp validate_stream_priority(_value, name),
+    do: {:error, "#{name} must be an integer from 0 to 65535."}
 
   defp validate_non_negative(value, _name) when is_integer(value) and value >= 0, do: :ok
   defp validate_non_negative(_value, name), do: {:error, "#{name} must be 0 or greater."}
@@ -672,14 +689,25 @@ defmodule MOQXProbe.Measure do
   defp append_mixed_args(args, _config), do: args
 
   defp append_moqx_mixed_args(args, %{workload: @mixed_moqt_shaped_workload} = config) do
-    args ++
-      [
-        "--control-echo-window",
-        Integer.to_string(config.control_echo_window)
-      ]
+    args =
+      args ++
+        [
+          "--control-echo-window",
+          Integer.to_string(config.control_echo_window)
+        ]
+
+    args
+    |> maybe_append_stream_priority("--control-stream-priority", config.control_stream_priority)
+    |> maybe_append_stream_priority("--object-stream-priority", config.object_stream_priority)
   end
 
   defp append_moqx_mixed_args(args, _config), do: args
+
+  defp maybe_append_stream_priority(args, _name, nil), do: args
+
+  defp maybe_append_stream_priority(args, name, priority) do
+    args ++ [name, Integer.to_string(priority)]
+  end
 
   defp do_run_moqx_client(config) do
     {:ok, ctx} = Transport.new(config.transport_backend, transport_backend_opts(config))
@@ -1185,7 +1213,7 @@ defmodule MOQXProbe.Measure do
     {object_streams, ctx} = open_pressure_streams(ctx, connection, object_config)
 
     {state, _ctx} =
-      case Transport.open_stream(ctx, connection, direction: :bidirectional, active: true) do
+      case Transport.open_stream(ctx, connection, mixed_control_stream_opts(config)) do
         {:ok, control_stream, ctx} ->
           object_streams
           |> initial_mixed_pressure_state(control_stream)
@@ -1226,6 +1254,8 @@ defmodule MOQXProbe.Measure do
       "control_message_count" => config.control_message_count,
       "control_messages_per_second" => config.control_rate * 1.0,
       "control_echo_window" => config.control_echo_window,
+      "control_stream_priority" => config.control_stream_priority,
+      "object_stream_priority" => config.object_stream_priority,
       "control_trickle_bps" => control_trickle_bps(config),
       "bytes_sent" => bytes_sent,
       "bytes_received" => control_result.bytes_received,
@@ -2061,6 +2091,8 @@ defmodule MOQXProbe.Measure do
           "object_bytes_sent" => object_bytes_sent,
           "control_message_count" => config.control_message_count,
           "control_echo_window" => config.control_echo_window,
+          "control_stream_priority" => config.control_stream_priority,
+          "object_stream_priority" => config.object_stream_priority,
           "control_messages_scheduled" => state.control.messages_scheduled,
           "control_messages_echoed" => state.control.messages_echoed,
           "control_echo_inflight" => control_echo_inflight(state.control),
@@ -2995,7 +3027,20 @@ defmodule MOQXProbe.Measure do
     [direction: stream_direction(config), active: true]
   end
 
+  defp open_stream_opts(%{workload: @mixed_moqt_shaped_workload} = config) do
+    [direction: stream_direction(config)]
+    |> maybe_put_priority(config.object_stream_priority)
+  end
+
   defp open_stream_opts(config), do: [direction: stream_direction(config)]
+
+  defp mixed_control_stream_opts(config) do
+    [direction: :bidirectional, active: true]
+    |> maybe_put_priority(config.control_stream_priority)
+  end
+
+  defp maybe_put_priority(opts, nil), do: opts
+  defp maybe_put_priority(opts, priority), do: Keyword.put(opts, :priority, priority)
 
   defp collect_pressure_streams(
          ctx,
@@ -4649,7 +4694,9 @@ defmodule MOQXProbe.Measure do
         "stream_send_window" => stream_send_window(ctx.config, measurement),
         "stream_event_batch_size" => stream_event_batch_size(ctx.config, measurement),
         "stream_diagnostics_sampling" => stream_diagnostics_sampling(ctx.config, measurement),
-        "control_echo_window" => control_echo_window(ctx.config, measurement)
+        "control_echo_window" => control_echo_window(ctx.config, measurement),
+        "control_stream_priority" => control_stream_priority(ctx.config, measurement),
+        "object_stream_priority" => object_stream_priority(ctx.config, measurement)
       }
     }
   end
@@ -4697,6 +4744,22 @@ defmodule MOQXProbe.Measure do
        do: measurement["control_echo_window"] || config.control_echo_window
 
   defp control_echo_window(_config, _measurement), do: nil
+
+  defp control_stream_priority(
+         %{topology: @moqx_client_topology, workload: @mixed_moqt_shaped_workload} = config,
+         measurement
+       ),
+       do: measurement["control_stream_priority"] || config.control_stream_priority
+
+  defp control_stream_priority(_config, _measurement), do: nil
+
+  defp object_stream_priority(
+         %{topology: @moqx_client_topology, workload: @mixed_moqt_shaped_workload} = config,
+         measurement
+       ),
+       do: measurement["object_stream_priority"] || config.object_stream_priority
+
+  defp object_stream_priority(_config, _measurement), do: nil
 
   defp stream_scheduling(%{workload: @datagram_pressure_workload}, _measurement), do: nil
 
@@ -5586,6 +5649,8 @@ defmodule MOQXProbe.Measure do
       --control-message-count N      control messages for mixed_moqt_shaped (default: 10)
       --control-rate N               target control messages/sec for mixed_moqt_shaped (default: 10)
       --control-echo-window N        max mixed control messages awaiting echo (default: #{@default_control_echo_window})
+      --control-stream-priority N    quicer/MsQuic priority for the mixed control stream, 0..65535
+      --object-stream-priority N     quicer/MsQuic priority for mixed object streams, 0..65535
       --delivery-threshold RATIO     minimum acceptable delivery ratio before loss stop (default: 1.0)
       --offered-rate-tolerance RATIO minimum actual/target offered rate for paced steps (default: 0.95)
       --timeout-seconds N            client timeout (default: 5)
