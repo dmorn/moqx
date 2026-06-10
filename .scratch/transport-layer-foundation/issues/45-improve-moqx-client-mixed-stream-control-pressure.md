@@ -56,7 +56,7 @@ progress tracker, equivalent to what #40 did for DATAGRAM.
 - [x] Preserve the async stream send model and explicit completion accounting;
       do not hide backpressure by making `send_stream/4` wait for peer
       delivery.
-- [ ] If implementation changes are made, rerun the controlled comparison
+- [x] If implementation changes are made, rerun the controlled comparison
       against the same reference workload and record whether goodput, control
       p99, mailbox pressure, completion counts, and break symptoms improved.
 - [ ] Define the next stop point in evidence terms. For the current 32-stream
@@ -64,9 +64,12 @@ progress tracker, equivalent to what #40 did for DATAGRAM.
       at least 80% of the same-run reference and MOQX control p99 no worse
       than 2x the same-run reference for two clean repetitions, with no break
       symptom, zero pending completions, and bounded final mailbox depth.
-- [ ] Record each round in #26 with run id, artifact versions, lab topology,
+- [x] Record each round in #26 with run id, artifact versions, lab topology,
       reference result, MOQX result, any rejected knobs, and whether the lab
       remains alive or was destroyed.
+- [ ] Explain and improve the remaining object-stream goodput ceiling, or split
+      it into a narrower follow-up with enough evidence that #45 can close
+      without hiding the gap.
 
 ## Non-goals
 
@@ -149,3 +152,19 @@ evidence for performance claims.
   Conclusion: control-first scheduling is worth keeping, but #45 is not
   complete; the remaining gap is object stream throughput/send-completion
   cadence under mixed pressure, not the first control-message ordering alone.
+- 2026-06-10: Committed the control-first scheduling and remote suite stream
+  knob plumbing as `5382547` (`moqxprobe-0.1.0-5382547-linux-x86_64`) after
+  local gates passed. Clean x86-control validation
+  `issue45-control-first-clean-1` confirmed the control-first effect on the
+  committed artifact: same-run reference reached 117.22 Mbps with control p99
+  31.47 ms and first byte 25.86 ms; MOQX reached 35.23 Mbps with control p99
+  1564.85 ms and first byte 26.52 ms, zero pending object/control completions,
+  and mailbox peak 21. Clean window A/B
+  `issue45-control-first-window64-clean-1` showed `STREAM_SEND_WINDOW=64`
+  improves recurring control latency but not object throughput: reference
+  reached 117.60 Mbps with control p99 35.14 ms, while MOQX reached
+  35.28 Mbps with control p99 78.60 ms, first byte 26.70 ms, zero pending
+  completions, and mailbox peak 148. No break symptoms were recorded. The
+  current stop threshold remains unmet because MOQX object goodput is still
+  about 30% of same-run reference; the next #45 slice must isolate object
+  stream send-completion cadence/throughput rather than control-first ordering.

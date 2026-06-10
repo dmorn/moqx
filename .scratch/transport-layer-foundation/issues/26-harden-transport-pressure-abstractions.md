@@ -659,3 +659,18 @@ seams without `Application` env.
   committed artifact. The next #26/#45 target is object stream
   throughput/send-completion cadence under mixed pressure, not more DATAGRAM
   tuning and not the old mailbox artifact.
+- 2026-06-10: The clean committed #45 rerun used `5382547`
+  (`moqxprobe-0.1.0-5382547-linux_x86_64`) on the still-alive x86-control lab.
+  Default-window clean validation `issue45-control-first-clean-1` confirmed the
+  fix: MOQX first control byte improved to 26.52 ms, matching the same-run
+  reference at 25.86 ms, with zero pending object/control completions and
+  mailbox peak 21. The remaining issue is still throughput and recurring
+  control latency: reference reached 117.22 Mbps with control p99 31.47 ms,
+  while MOQX reached 35.23 Mbps with control p99 1564.85 ms. Clean
+  `STREAM_SEND_WINDOW=64` validation
+  `issue45-control-first-window64-clean-1` improved MOQX control p99 to
+  78.60 ms against 35.14 ms reference, again with zero pending completions, but
+  object goodput remained 35.28 Mbps versus 117.60 Mbps reference. This keeps
+  #45 open: the next target is the mixed unidirectional object-stream
+  goodput/send-completion cadence ceiling, and window size should remain an
+  experiment knob until two clean repetitions meet the stop threshold.
