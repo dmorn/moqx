@@ -19,7 +19,6 @@ defmodule MOQXProbe.Measure do
   @datagram_pressure_workload "datagram_pressure"
   @mixed_moqt_shaped_workload "mixed_moqt_shaped"
   @default_stream_send_window 16
-  @default_mixed_stream_send_window 512
   @default_stream_event_batch_size 1024
   @default_control_echo_window 8
   @stream_diagnostics_sampling_modes ~w(event final)
@@ -167,8 +166,6 @@ defmodule MOQXProbe.Measure do
     quicer_datagram_send_flags =
       parse_quicer_datagram_send_flags(Keyword.get_values(opts, :quicer_datagram_send_flag))
 
-    workload = Keyword.get(opts, :workload, @stream_pressure_workload)
-
     config = %{
       argv: argv,
       script: script,
@@ -180,11 +177,10 @@ defmodule MOQXProbe.Measure do
       ca: opts[:ca],
       servername: opts[:servername],
       alpn: Keyword.get(opts, :alpn, "moqx-test"),
-      workload: workload,
+      workload: Keyword.get(opts, :workload, @stream_pressure_workload),
       stream_direction: Keyword.get(opts, :stream_direction, "bidirectional"),
       stream_count: Keyword.get(opts, :stream_count, 1),
-      stream_send_window:
-        Keyword.get(opts, :stream_send_window, default_stream_send_window(workload)),
+      stream_send_window: Keyword.get(opts, :stream_send_window, @default_stream_send_window),
       stream_event_batch_size:
         Keyword.get(opts, :stream_event_batch_size, @default_stream_event_batch_size),
       stream_diagnostics_sampling: Keyword.get(opts, :stream_diagnostics_sampling, "event"),
@@ -473,11 +469,6 @@ defmodule MOQXProbe.Measure do
 
   defp validate_positive_ratio(_value, name),
     do: {:error, "#{name} must be a number greater than 0.0 and at most 1.0."}
-
-  defp default_stream_send_window(@mixed_moqt_shaped_workload),
-    do: @default_mixed_stream_send_window
-
-  defp default_stream_send_window(_workload), do: @default_stream_send_window
 
   defp validate_stream_direction(direction)
        when direction in ["bidirectional", "unidirectional"],
@@ -5722,7 +5713,7 @@ defmodule MOQXProbe.Measure do
       --workload VALUE               stream_pressure, datagram_pressure, or mixed_moqt_shaped (default: stream_pressure)
       --stream-direction VALUE       bidirectional or unidirectional (default: bidirectional)
       --stream-count N               concurrent streams (default: 1)
-      --stream-send-window N         max in-flight sends per MOQX stream (default: #{@default_stream_send_window}; mixed_moqt_shaped default: #{@default_mixed_stream_send_window})
+      --stream-send-window N         max in-flight sends per MOQX stream (default: #{@default_stream_send_window})
       --stream-event-batch-size N    ready events to drain after each blocking receive (default: #{@default_stream_event_batch_size})
       --stream-diagnostics-sampling VALUE
                                      event sampler or final diagnostics snapshot for MOQX streams (default: event)

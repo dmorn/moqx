@@ -264,7 +264,6 @@ PROBED_SUITE_TESTS=reference_mixed,moqx_mixed \
 STREAM_COUNT=4 \
 PAYLOAD_SIZE=1180 \
 PAYLOAD_COUNT=8000 \
-STREAM_SEND_WINDOW=512 \
 TIMEOUT_SECONDS=15 \
 TIMEOUT_MARGIN_SECONDS=5 \
 STREAM_DIAGNOSTICS_SAMPLING=final \
@@ -281,9 +280,6 @@ Use `STREAM_DIAGNOSTICS_SAMPLING=final` for performance comparisons, and
 switch to `event` only when debugging per-stream state transitions.
 For stream-priority A/Bs, set `CONTROL_STREAM_PRIORITY` and
 `OBJECT_STREAM_PRIORITY`; leave both unset for baseline runs.
-The mixed MOQX-client default is `STREAM_SEND_WINDOW=512`; keep it explicit
-in remote commands when comparing against older runs that used the former
-window 16 default.
 
 For the current #40 validation loop, prefer the bracket wrapper once the lab is
 already provisioned, private-path checked, and tools are deployed:

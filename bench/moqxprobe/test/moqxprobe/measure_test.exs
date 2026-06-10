@@ -887,52 +887,6 @@ defmodule MOQXProbe.MeasureTest do
            ] = record["diagnostics"]["objects"]
   end
 
-  test "mixed MOQX client defaults to the validated wider stream send window" do
-    dir = tmp_dir()
-    output_path = Path.join(dir, "moqx-mixed-default-window.jsonl")
-
-    Measure.main(
-      [
-        "--topology",
-        "moqx-client-to-reference-server",
-        "--workload",
-        "mixed_moqt_shaped",
-        "--server",
-        "127.0.0.1",
-        "--port",
-        "4433",
-        "--ca",
-        "/tmp/ca.pem",
-        "--servername",
-        "localhost",
-        "--stream-count",
-        "1",
-        "--payload-size",
-        "64",
-        "--payload-count",
-        "1",
-        "--control-payload-size",
-        "16",
-        "--control-message-count",
-        "1",
-        "--control-rate",
-        "100",
-        "--output",
-        output_path,
-        "--run-id",
-        "moqx-mixed-default-window-test"
-      ],
-      script: "test measure",
-      transport_backend: __MODULE__.MixedEchoTransport
-    )
-
-    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
-    assert Contract.validate_records([record]).valid?
-
-    assert record["profile"]["settings"]["stream_send_window"] == 512
-    assert record["diagnostics"]["summary"]["object_send_completions_pending"] == 0
-  end
-
   test "mixed MOQX client applies configured transport stream priorities" do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-mixed-priority.jsonl")
