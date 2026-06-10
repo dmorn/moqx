@@ -1031,6 +1031,61 @@ defmodule MOQXProbe.MeasureTest do
            end)
   end
 
+  test "records completed MOQX unidirectional stream pressure" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-unidirectional-stream-diagnostics.jsonl")
+
+    Measure.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-direction",
+        "unidirectional",
+        "--stream-count",
+        "2",
+        "--payload-size",
+        "64",
+        "--payload-count",
+        "2",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-unidirectional-stream-diagnostics-test"
+      ],
+      script: "test measure",
+      transport_backend: __MODULE__.MixedEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    diagnostics = record["diagnostics"]
+
+    assert record["workload"]["stream_direction"] == "unidirectional"
+    assert record["metrics"]["bytes_sent"] == 256
+    assert record["metrics"]["goodput_bps"] > 0
+    assert diagnostics["summary"]["payloads_accepted"] == 4
+    assert diagnostics["summary"]["payloads_completed"] == 4
+    assert diagnostics["summary"]["send_completions"] == 4
+    assert diagnostics["summary"]["send_completions_pending"] == 0
+    assert diagnostics["summary"]["events_drained"] >= 4
+    assert diagnostics["process"]["message_queue_len"] == 0
+
+    assert Enum.all?(diagnostics["streams"], fn stream ->
+             stream["phase"] == "send_only_complete" and
+               stream["send_completed"] == 2 and
+               stream["send_completions_pending"] == 0
+           end)
+  end
+
   test "records stream-pressure pump tuning knobs" do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-stream-pump-tuning.jsonl")
