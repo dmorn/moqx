@@ -188,3 +188,11 @@ evidence for performance claims.
   payloads around 35 Mbps. Treat the next step as benchmark sender/sink
   hardening before drawing conclusions about the transport object-stream
   ceiling.
+- 2026-06-10: #46 now has a local sender/sink fix for that bottleneck:
+  send-only `stream_pressure` batches ready transport events, applies grouped
+  send-completion feedback through `StreamSender.complete_many/2`, and defaults
+  `--stream-event-batch-size` to `1024`. Local fake-send calibration improved
+  the 32-stream/32,000-payload completion loop from 64.416 s to 0.115 s. This
+  does not close #45 by itself; the next #45-relevant check is a clean x86 run
+  proving the object-stream-only lane is no longer harness-limited, then a
+  mixed object/control rerun if the object lane becomes credible.

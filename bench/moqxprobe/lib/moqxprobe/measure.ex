@@ -19,7 +19,7 @@ defmodule MOQXProbe.Measure do
   @datagram_pressure_workload "datagram_pressure"
   @mixed_moqt_shaped_workload "mixed_moqt_shaped"
   @default_stream_send_window 16
-  @default_stream_event_batch_size 1
+  @default_stream_event_batch_size 1024
   @stream_diagnostics_sampling_modes ~w(event final)
   @mixed_completion_drain_limit 1024
   @datagram_cadence_sample_interval_us 100_000
@@ -3219,61 +3219,97 @@ defmodule MOQXProbe.Measure do
         sender = put_stream_sender_context_and_states(sender, ctx, states)
         {:ok, snapshot} = StreamSender.drain(sender)
         {ctx, states} = stream_sender_context_and_states(snapshot)
-        timeout_ms = max(div(deadline_us - monotonic_us(), 1000), 0)
 
-        case Transport.receive_event(ctx, timeout_ms) do
-          {:ok, event, ctx} ->
-            {ctx, sender, states, diagnostics} =
-              handle_send_only_received_event(ctx, sender, states, diagnostics, event, config)
-
-            {ctx, sender, states, diagnostics} =
-              drain_ready_send_only_events(ctx, sender, states, diagnostics, config)
-
+        case receive_send_only_event(ctx, sender, states, diagnostics, config, deadline_us) do
+          {:cont, ctx, sender, states, diagnostics} ->
             collect_send_only_events(ctx, sender, states, diagnostics, config, deadline_us)
 
-          {:unknown, _message, ctx} ->
-            collect_send_only_events(ctx, sender, states, diagnostics, config, deadline_us)
-
-          {:error, reason, ctx} ->
-            failure = send_only_receive_event_failure(states, config, reason)
-            states = mark_timeout_failure(states, failure)
-            {ctx, states} = stop_stream_pressure_sender(sender, ctx, states)
-            send_only_result(ctx, states, config, failure, diagnostics)
-
-          {:timeout, ctx} ->
-            failure = timeout_send_only_failure(states, config)
-            diagnostics = timeout_stream_pressure_runtime(diagnostics, config, "send_completion")
-            states = mark_timeout_failure(states, failure)
-            {ctx, states} = stop_stream_pressure_sender(sender, ctx, states)
-            send_only_result(ctx, states, config, failure, diagnostics)
+          {:halt, result} ->
+            result
         end
     end
   end
 
-  defp handle_send_only_received_event(ctx, sender, states, diagnostics, event, config) do
+  defp receive_send_only_event(ctx, sender, states, diagnostics, config, deadline_us) do
+    timeout_ms = max(div(deadline_us - monotonic_us(), 1000), 0)
+
+    case Transport.receive_event(ctx, timeout_ms) do
+      {:ok, event, ctx} ->
+        handle_send_only_event_batch(ctx, sender, states, diagnostics, event, config)
+
+      {:unknown, _message, ctx} ->
+        {:cont, ctx, sender, states, diagnostics}
+
+      {:error, reason, ctx} ->
+        {:halt, stop_send_only_receive_error(ctx, sender, states, diagnostics, config, reason)}
+
+      {:timeout, ctx} ->
+        {:halt, stop_send_only_timeout(ctx, sender, states, diagnostics, config)}
+    end
+  end
+
+  defp handle_send_only_event_batch(ctx, sender, states, diagnostics, event, config) do
+    {ctx, events, receive_error} =
+      drain_ready_send_only_events(ctx, [event], config.stream_event_batch_size - 1)
+
+    {ctx, sender, states, diagnostics} =
+      handle_send_only_events(ctx, sender, states, diagnostics, events, config)
+
+    case receive_error do
+      nil ->
+        {:cont, ctx, sender, states, diagnostics}
+
+      reason ->
+        result = stop_send_only_receive_error(ctx, sender, states, diagnostics, config, reason)
+        {:halt, result}
+    end
+  end
+
+  defp stop_send_only_receive_error(ctx, sender, states, diagnostics, config, reason) do
+    failure = send_only_receive_event_failure(states, config, reason)
+    states = mark_timeout_failure(states, failure)
+    {ctx, states} = stop_stream_pressure_sender(sender, ctx, states)
+    send_only_result(ctx, states, config, failure, diagnostics)
+  end
+
+  defp stop_send_only_timeout(ctx, sender, states, diagnostics, config) do
+    failure = timeout_send_only_failure(states, config)
+    diagnostics = timeout_stream_pressure_runtime(diagnostics, config, "send_completion")
+    states = mark_timeout_failure(states, failure)
+    {ctx, states} = stop_stream_pressure_sender(sender, ctx, states)
+    send_only_result(ctx, states, config, failure, diagnostics)
+  end
+
+  defp handle_send_only_events(ctx, sender, states, diagnostics, events, config) do
     sender = put_stream_sender_context_and_states(sender, ctx, states)
-    {states, ctx, sender} = handle_send_only_event(ctx, sender, states, event, config)
+
+    {states, ctx, sender, completions} =
+      Enum.reduce(events, {states, ctx, sender, %{}}, fn event,
+                                                         {states, ctx, sender, completions} ->
+        handle_send_only_event(ctx, sender, states, completions, event, config)
+      end)
+
+    {ctx, states} = complete_stream_sender_batch(sender, ctx, states, completions)
+
     {ctx, sender, states, diagnostics}
   end
 
   defp handle_send_only_event(
          ctx,
          sender,
-         _states,
+         states,
+         completions,
          {:stream_event, stream, :send_completed, _metadata},
          _config
        ) do
-    sender = put_stream_sender_context(sender, ctx)
-    {:ok, snapshot} = StreamSender.complete(sender, stream, 1)
-    {ctx, states} = stream_sender_context_and_states(snapshot)
-
-    {states, ctx, sender}
+    {states, ctx, sender, increment_completion(completions, stream)}
   end
 
   defp handle_send_only_event(
          ctx,
          sender,
          states,
+         completions,
          {:stream_event, stream, :send_cancelled, _metadata},
          config
        ) do
@@ -3283,49 +3319,48 @@ defmodule MOQXProbe.Measure do
         fail_send_only_stream(state, config, "send_cancelled")
       end)
 
-    {states, ctx, sender}
+    {states, ctx, sender, completions}
   end
 
-  defp handle_send_only_event(ctx, sender, states, _event, _config), do: {states, ctx, sender}
-
-  defp drain_ready_send_only_events(ctx, sender, states, diagnostics, config) do
-    drain_ready_send_only_events(
-      ctx,
-      sender,
-      states,
-      diagnostics,
-      config,
-      config.stream_event_batch_size - 1
-    )
+  defp handle_send_only_event(ctx, sender, states, completions, _event, _config) do
+    {states, ctx, sender, completions}
   end
 
-  defp drain_ready_send_only_events(ctx, sender, states, diagnostics, _config, remaining)
+  defp drain_ready_send_only_events(ctx, events, remaining)
        when remaining <= 0 do
-    {ctx, sender, states, diagnostics}
+    {ctx, Enum.reverse(events), nil}
   end
 
-  defp drain_ready_send_only_events(ctx, sender, states, diagnostics, config, remaining) do
-    if all_stream_sends_complete?(states, config) or first_stream_failure(states) do
-      {ctx, sender, states, diagnostics}
-    else
-      case Transport.receive_event(ctx, 0) do
-        {:ok, event, ctx} ->
-          {ctx, sender, states, diagnostics} =
-            handle_send_only_received_event(ctx, sender, states, diagnostics, event, config)
+  defp drain_ready_send_only_events(ctx, events, remaining) do
+    case Transport.receive_event(ctx, 0) do
+      {:ok, event, ctx} ->
+        drain_ready_send_only_events(ctx, [event | events], remaining - 1)
 
-          drain_ready_send_only_events(ctx, sender, states, diagnostics, config, remaining - 1)
+      {:unknown, _message, ctx} ->
+        drain_ready_send_only_events(ctx, events, remaining - 1)
 
-        {:unknown, _message, ctx} ->
-          drain_ready_send_only_events(ctx, sender, states, diagnostics, config, remaining - 1)
+      {:error, reason, ctx} ->
+        {ctx, Enum.reverse(events), reason}
 
-        {:error, reason, ctx} ->
-          failure = send_only_receive_event_failure(states, config, reason)
-          {ctx, sender, mark_timeout_failure(states, failure), diagnostics}
-
-        {:timeout, ctx} ->
-          {ctx, sender, states, diagnostics}
-      end
+      {:timeout, ctx} ->
+        {ctx, Enum.reverse(events), nil}
     end
+  end
+
+  defp complete_stream_sender_batch(_sender, ctx, states, completions)
+       when map_size(completions) == 0 do
+    {ctx, states}
+  end
+
+  defp complete_stream_sender_batch(sender, ctx, states, completions) do
+    sender = put_stream_sender_context_and_states(sender, ctx, states)
+    completions = Enum.map(completions, fn {stream, count} -> {stream, count} end)
+    {:ok, snapshot} = StreamSender.complete_many(sender, completions)
+    stream_sender_context_and_states(snapshot)
+  end
+
+  defp increment_completion(completions, stream) do
+    Map.update(completions, stream, 1, &(&1 + 1))
   end
 
   defp collect_active_echo_events(

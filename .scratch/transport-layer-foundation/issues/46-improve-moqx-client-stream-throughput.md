@@ -156,3 +156,16 @@ with object publishing.
   object payloads around 35 Mbps on the same lab, this isolates a benchmark
   `StreamSender`/`StreamSink` completion-driven scheduling bottleneck that must
   be fixed before using object-stream-only results as transport evidence.
+- 2026-06-10: Added local regression coverage and a sender/sink fix for the
+  isolated completion-driven bottleneck. `StreamSender.complete_many/2` now
+  passes grouped completion feedback through one `StreamSink` call and drains
+  once, while the send-only `stream_pressure` measurement loop batches ready
+  transport events before applying completion counts. The default
+  `--stream-event-batch-size` is now `1024` so the probed object-stream lane
+  uses the batched path unless an experiment overrides it. A local synthetic
+  32-stream, 32,000-payload calibration with fake sends completed 32,000
+  per-payload completions in 64.416 s with the old per-completion drain shape
+  (~497 completions/sec, ~62,985 scheduler ticks) versus 0.115 s with batched
+  completions (~277k completions/sec, 563 scheduler ticks). This is local
+  calibration only; the next required evidence is a clean x86-control rerun
+  against same-run `reference_object_stream`.

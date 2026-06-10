@@ -1079,6 +1079,7 @@ defmodule MOQXProbe.MeasureTest do
     assert diagnostics["summary"]["payloads_accepted"] == 4
     assert diagnostics["summary"]["payloads_completed"] == 4
     assert diagnostics["summary"]["stream_send_window"] == 1
+    assert diagnostics["summary"]["stream_event_batch_size"] == 1024
     assert diagnostics["summary"]["send_completions"] == 4
     assert diagnostics["summary"]["send_completions_pending"] == 0
     assert diagnostics["summary"]["events_drained"] >= 4

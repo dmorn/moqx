@@ -23,6 +23,10 @@ defmodule MOQXProbe.Traffic.StreamSink do
     GenStage.call(sink, {:complete, stream, count})
   end
 
+  def complete_many(sink, completions) when is_list(completions) do
+    GenStage.call(sink, {:complete_many, completions})
+  end
+
   def snapshot(sink) do
     GenStage.call(sink, :snapshot)
   end
@@ -107,6 +111,10 @@ defmodule MOQXProbe.Traffic.StreamSink do
 
   def handle_call({:complete, stream, count}, _from, state) do
     {:reply, :ok, [], complete_stream_sends(state, stream, count)}
+  end
+
+  def handle_call({:complete_many, completions}, _from, state) do
+    {:reply, :ok, [], complete_many_stream_sends(state, completions)}
   end
 
   def handle_call(:snapshot, _from, state) do
@@ -412,6 +420,23 @@ defmodule MOQXProbe.Traffic.StreamSink do
   end
 
   defp complete_stream_sends(state, stream, count) do
+    state
+    |> do_complete_stream_sends(stream, count)
+    |> ask_for_demand()
+  end
+
+  defp complete_many_stream_sends(state, []), do: state
+
+  defp complete_many_stream_sends(state, completions) do
+    state =
+      Enum.reduce(completions, state, fn {stream, count}, state ->
+        do_complete_stream_sends(state, stream, count)
+      end)
+
+    ask_for_demand(state)
+  end
+
+  defp do_complete_stream_sends(state, stream, count) do
     streams =
       Map.update(state.streams, stream, %{in_flight: 0}, fn stream_state ->
         %{stream_state | in_flight: max(stream_state.in_flight - count, 0)}
@@ -423,7 +448,6 @@ defmodule MOQXProbe.Traffic.StreamSink do
     |> Map.put(:streams, streams)
     |> Map.put(:transport_state, transport_state)
     |> Map.update!(:completed, &(&1 + count))
-    |> ask_for_demand()
   end
 
   defp default_complete_fun(_stream, _count, transport_state), do: transport_state

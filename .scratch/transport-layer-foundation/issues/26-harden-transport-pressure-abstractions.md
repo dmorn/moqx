@@ -697,3 +697,11 @@ seams without `Application` env.
   scheduler had already completed the same object payload volume around
   35 Mbps, do not use the object-stream-only lane as transport evidence until
   `StreamSender`/`StreamSink` completion-driven scheduling is hardened.
+- 2026-06-10: Hardened the local send-only stream-pressure pump shape:
+  `StreamSender.complete_many/2` batches completion feedback, the send-only
+  measurement loop drains ready events before completing streams, and the
+  default stream event batch is now `1024`. Local fake-send calibration moved a
+  32-stream/32,000-payload completion loop from 64.416 s to 0.115 s, so the
+  previous object-stream-only timeout was plausibly harness-induced. This is
+  not real-path evidence; rerun the x86-control object-stream lane from a clean
+  artifact before updating #45 performance conclusions.

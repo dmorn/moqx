@@ -68,7 +68,11 @@ defmodule MOQXProbe.Traffic.StreamSender do
 
   def complete(%__MODULE__{} = sender, stream, count \\ 1)
       when is_integer(count) and count >= 0 do
-    :ok = StreamSink.complete(sender.sink, stream, count)
+    complete_many(sender, [{stream, count}])
+  end
+
+  def complete_many(%__MODULE__{} = sender, completions) when is_list(completions) do
+    :ok = StreamSink.complete_many(sender.sink, completions)
     drain(sender)
   end
 

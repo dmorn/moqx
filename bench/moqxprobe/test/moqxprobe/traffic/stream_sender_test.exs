@@ -59,6 +59,49 @@ defmodule MOQXProbe.Traffic.StreamSenderTest do
     assert {:ok, _snapshot} = StreamSender.finish(sender)
   end
 
+  test "batches send completion feedback before draining more payloads" do
+    streams =
+      Enum.map(1..32, fn index ->
+        %{stream: {:stream, make_ref()}, index: index}
+      end)
+
+    parent = self()
+
+    send_fun = fn event, transport_state ->
+      send(parent, {:sent, event.stream_index, event.payload_index})
+      {:ok, make_ref(), transport_state}
+    end
+
+    assert {:ok, sender} =
+             StreamSender.start(
+               count: 64,
+               started_at_us: System.monotonic_time(:microsecond),
+               streams: streams,
+               payload: "x",
+               payload_count: 2,
+               stream_send_window: 1,
+               send_fun: send_fun,
+               transport_state: %{},
+               idle_retries: 1_000
+             )
+
+    assert {:ok, snapshot} = StreamSender.drain(sender)
+    assert snapshot.accepted == 32
+    assert snapshot.in_flight == 32
+    assert snapshot.queue_depth > 0
+    initial_tick_count = snapshot.pacer.tick_count
+
+    completions = Enum.map(streams, &{&1.stream, 1})
+
+    assert {:ok, snapshot} = StreamSender.complete_many(sender, completions)
+    assert snapshot.accepted == 64
+    assert snapshot.completed == 32
+    assert snapshot.stop_reason == :complete
+    assert snapshot.pacer.tick_count == initial_tick_count + 1
+
+    assert {:ok, _snapshot} = StreamSender.finish(sender)
+  end
+
   test "bounds producer demand by configured queue depth before draining" do
     stream = %{stream: {:stream, make_ref()}, index: 1}
 

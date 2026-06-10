@@ -277,7 +277,9 @@ knobs for performance isolation:
 
 - `--stream-send-window N` controls max in-flight async sends per stream.
 - `--stream-event-batch-size N` drains up to `N` ready transport events after
-  each blocking receive before waiting again.
+  each blocking receive before waiting again. The default is `1024`, which
+  keeps send-completion feedback batched enough for object-stream pressure
+  while still bounding each receive-loop turn.
 - `--stream-diagnostics-sampling event|final` keeps the default fixed-interval
   mailbox sampler while the stream-pressure step runs, or records only the
   final stream/process snapshot.
