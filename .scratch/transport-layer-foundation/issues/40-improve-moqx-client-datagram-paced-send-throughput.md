@@ -1,6 +1,6 @@
 # Improve MOQX-client DATAGRAM paced-send throughput
 
-Status: in-progress
+Status: closed
 Type: AFK
 
 ## Parent
@@ -42,7 +42,7 @@ unbounded mailbox backlog.
 - [x] Record the result in #26, including whether MOQX-client can sustain the
       20k pps offered-rate contract and what remains to close versus the
       reference client.
-- [ ] Keep the active x86-control lab alive during the agreed tuning loop; when
+- [x] Keep the active x86-control lab alive during the agreed tuning loop; when
       the loop ends or the operator asks, destroy disposable infrastructure and
       verify no provider resources remain.
 
@@ -56,6 +56,23 @@ The current target is offered-rate capacity, not delivery semantics. A run that
 receives almost every DATAGRAM but stretches a 3-second send phase into 5
 seconds is still a failed pressure measurement because it did not put the
 requested load on the link.
+
+## Resolution
+
+Closed on 2026-06-10. Stop DATAGRAM-specific tuning for now.
+
+The corrected real-path evidence is good enough for the current limited
+draft-14 DATAGRAM support: clean 32k pps x86-control comparison sustained valid
+offered rate for both reference and MOQX clients, with reference server ingress
+at 96,000/96,000 DATAGRAMs and MOQX ingress at 95,958/96,000. `moq_lite_04`
+does not use QUIC DATAGRAM at all, so further DATAGRAM-only optimization would
+have poor leverage relative to the remaining stream/control pressure gap.
+
+Do not add more DATAGRAM sender knobs from the previous A/B experiments. The
+extra knobs either did not help, made results worse, or were diagnostic-only.
+Keep the async `MOQX.Transport.send_datagram/3` model and the extracted paced
+benchmark sender as-is. The x86-control lab remains intentionally alive by
+operator instruction; teardown is deferred until the operator asks for it.
 
 ## Progress
 

@@ -92,10 +92,9 @@ child issues in evidence order:
    measurements move onto `:telemetry` events, `telemetry_metrics`
    declarations, and a custom benchmark collector while preserving the
    existing `transport-bench-v1` output.
-9. #40 attacks the next DATAGRAM bottleneck identified after the telemetry
-   migration: MOQX-client paced-send/event-pump throughput falls below the
-   offered-rate contract around 20k pps even while delivery, mailbox depth,
-   and send-admission errors remain healthy.
+9. #40 is closed: the apparent DATAGRAM bottleneck was reclassified after the
+   quicprobe receive/echo fix, and the corrected x86-control evidence is close
+   enough for the current limited draft-14 DATAGRAM support.
 
 The first implementation slice is #32. Do not start broad transport API
 refactors from this umbrella issue; any API change should be motivated by
@@ -612,3 +611,12 @@ seams without `Application` env.
   object/control completions. This is an adjacent mixed stream/control
   performance gap, not evidence against the corrected DATAGRAM sender
   conclusion.
+- 2026-06-10: Closed #40 and stopped DATAGRAM-specific tuning. The decisive
+  evidence is the corrected clean x86-control 32k pps run: valid offered rate,
+  reference server ingress 96,000/96,000, MOQX ingress 95,958/96,000, and no
+  need for retained sender hacks or default MsQuic/quicer flag changes.
+  DATAGRAM is only relevant to the current limited draft-14 path;
+  `moq_lite_04` disables QUIC DATAGRAM, so more DATAGRAM-only optimization has
+  low leverage. Keep the x86-control lab alive under the standing operator
+  instruction, but shift #26 attention to stream/control pressure and protocol
+  readiness rather than reopening #40.
