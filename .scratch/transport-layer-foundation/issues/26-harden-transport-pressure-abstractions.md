@@ -714,3 +714,18 @@ seams without `Application` env.
   and no break symptom. Treat #46's isolated caller object stream as good
   enough for now; continue #45 by rerunning mixed object/control pressure from
   the same artifact.
+- 2026-06-10: Closed #45 after adding server-side stream ingress accounting to
+  `quicprobe` (`3fd8c6d`) and rerunning the mixed caller workload twice on the
+  x86-control lab. With `CONTROL_STREAM_PRIORITY=65535`,
+  `OBJECT_STREAM_PRIORITY=1`, and `QUICER_SETTINGS=send_buffering_enabled=1`,
+  `issue45-mixed-priority-sendbuffer-streamstats-clean-1` reached same-run
+  reference 55.36 Mbps/control p99 53.47 ms and MOQX 178.30 Mbps/control p99
+  62.44 ms; `issue45-mixed-priority-sendbuffer-streamstats-clean-2` reached
+  reference 55.07 Mbps/control p99 54.55 ms and MOQX 49.59 Mbps/control p99
+  61.26 ms. Server `stream_ingress` confirmed both reference and MOQX delivered
+  the full 37,766,400 stream bytes, completed 33 streams, and had zero stream
+  receive/send errors in both repetitions. MOQX had zero pending object/control
+  completions, no break symptom, bounded mailbox depth, and sub-millisecond
+  async `send_stream` admission. The mixed caller-side object/control shape is
+  now close enough for the current v1 transport target; keep broader stream
+  throughput variance or relay/listener work as separate #26 follow-ups.

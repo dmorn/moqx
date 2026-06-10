@@ -2,7 +2,7 @@
 
 # Improve MOQX-client mixed stream/control pressure
 
-Status: ready-for-agent
+Status: closed
 Type: AFK
 Category: performance
 
@@ -59,7 +59,7 @@ progress tracker, equivalent to what #40 did for DATAGRAM.
 - [x] If implementation changes are made, rerun the controlled comparison
       against the same reference workload and record whether goodput, control
       p99, mailbox pressure, completion counts, and break symptoms improved.
-- [ ] Define the next stop point in evidence terms. For the current 32-stream
+- [x] Define the next stop point in evidence terms. For the current 32-stream
       mixed shape, a reasonable first "close enough" threshold is MOQX goodput
       at least 80% of the same-run reference and MOQX control p99 no worse
       than 2x the same-run reference for two clean repetitions, with no break
@@ -67,7 +67,7 @@ progress tracker, equivalent to what #40 did for DATAGRAM.
 - [x] Record each round in #26 with run id, artifact versions, lab topology,
       reference result, MOQX result, any rejected knobs, and whether the lab
       remains alive or was destroyed.
-- [ ] Explain and improve the remaining object-stream goodput ceiling, or split
+- [x] Explain and improve the remaining object-stream goodput ceiling, or split
       it into a narrower follow-up with enough evidence that #45 can close
       without hiding the gap.
 
@@ -206,3 +206,38 @@ evidence for performance claims.
   #45 step is to rerun the mixed object/control workload from the same clean
   artifact and compare object goodput plus recurring control latency against
   same-run reference.
+- 2026-06-10: Added server-side stream ingress accounting to `quicprobe` in
+  `3fd8c6d` and deployed `quicprobe-3fd8c6d-linux-x86_64` to the still-alive
+  x86-control lab. The new `server_quicprobe_stats.stream_ingress` rows prove
+  accepted bidirectional/unidirectional stream counts, completed stream counts,
+  stream bytes received, stream bytes echo-accepted, and stream error counts,
+  so #45 no longer depends only on client-side send-completion accounting. The
+  local verification for that tooling was `go test ./bench/quicprobe`,
+  `bench/probed/scripts/quicprobe_stats_summary_test.sh`, `git diff --check`,
+  root `mix format`, root `mix test`, and root `mix credo --strict`; the root
+  suite still reports the pre-existing bitstring/test-support warnings.
+- 2026-06-10: Final #45 remote validation used infra run id
+  `20260609T093717Z-issue40-x86-control`, `moqxprobe-0.1.0-8d5ab5e-linux_x86_64`,
+  `quicprobe-3fd8c6d-linux_x86_64`, and `probed-0.1.0-8c3b48e-linux_x86_64` on
+  the `hetzner-fsn1-hel1-ccx23-private-network` path. Both repetitions used
+  `reference_mixed,moqx_mixed`, 32 object streams, 1000 x 1180-byte object
+  payloads per stream, 100 x 64-byte control messages at 100/sec,
+  `STREAM_SEND_WINDOW=16`, `STREAM_DIAGNOSTICS_SAMPLING=final`,
+  `CONTROL_STREAM_PRIORITY=65535`, `OBJECT_STREAM_PRIORITY=1`, and
+  `QUICER_SETTINGS=send_buffering_enabled=1`.
+  `issue45-mixed-priority-sendbuffer-streamstats-clean-1` had reference
+  55.36 Mbps/control p99 53.47 ms and MOQX 178.30 Mbps/control p99 62.44 ms;
+  `issue45-mixed-priority-sendbuffer-streamstats-clean-2` had reference
+  55.07 Mbps/control p99 54.55 ms and MOQX 49.59 Mbps/control p99 61.26 ms.
+  In both runs the server observed exactly 1 bidirectional control stream,
+  32 unidirectional object streams, 33 completed streams, 37,766,400 stream
+  bytes received, 6,400 stream bytes echo-accepted, and zero stream receive or
+  send errors for both reference and MOQX connections. MOQX had no break
+  symptom, 32,000 object send completions, 100 control send completions, zero
+  pending object/control completions, bounded mailbox depth, and short async
+  `send_stream` admission (`p99` about 0.011 ms, max 0.126/0.173 ms). The
+  conservative second repetition is about 90% of the same-run reference
+  goodput and about 1.12x reference control p99, so the #45 stop threshold is
+  met twice with server-side ingress proof. Close #45; keep any broader stream
+  throughput or variance work under #26/#46 rather than reopening mixed
+  control/object scheduling.
