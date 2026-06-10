@@ -1236,6 +1236,7 @@ defmodule MOQXProbe.Measure do
     control_result = mixed_control_result(state.control)
     bytes_sent = object_bytes_sent + control_result.bytes_sent
     collector_snapshot = TransportTelemetryCollector.snapshot(collector)
+    connection_diagnostics = transport_connection_diagnostics(connection)
 
     %{
       "schema_version" => "moqx-measurement-v1",
@@ -1278,8 +1279,10 @@ defmodule MOQXProbe.Measure do
           state,
           control_result,
           object_bytes_sent,
+          application_started_at,
           application_duration_ms,
-          collector_snapshot
+          collector_snapshot,
+          connection_diagnostics
         )
     }
   end
@@ -1304,7 +1307,9 @@ defmodule MOQXProbe.Measure do
       object_send_events: 0,
       control_send_events: 0,
       control_data_events: 0,
-      completion_drain_events: 0
+      completion_drain_events: 0,
+      ready_event_batch_sizes: [],
+      ready_object_completion_batch_sizes: []
     }
   end
 
@@ -1482,9 +1487,27 @@ defmodule MOQXProbe.Measure do
           application_started_at
         )
       end)
+      |> record_mixed_ready_batch(events)
       |> Map.update!(:completion_drain_events, &(&1 + drained_count))
 
     {state, ctx}
+  end
+
+  defp record_mixed_ready_batch(state, []), do: state
+
+  defp record_mixed_ready_batch(state, events) do
+    object_completion_count =
+      Enum.count(events, fn
+        {:stream_event, stream, :send_completed, _metadata} ->
+          Map.has_key?(state.object_streams, stream)
+
+        _event ->
+          false
+      end)
+
+    state
+    |> Map.update!(:ready_event_batch_sizes, &[length(events) | &1])
+    |> Map.update!(:ready_object_completion_batch_sizes, &[object_completion_count | &1])
   end
 
   defp drain_ready_mixed_events(ctx, events, drained_count, remaining)
@@ -2060,13 +2083,44 @@ defmodule MOQXProbe.Measure do
     end)
   end
 
+  defp mixed_object_stream_diagnostics(state, application_started_at) do
+    state.object_streams
+    |> Map.values()
+    |> Enum.sort_by(& &1.stream_state.index)
+    |> Enum.map(fn object ->
+      %{
+        "index" => object.stream_state.index,
+        "stream_id" => stream_id(object.stream_state.stream),
+        "bytes_sent" => object.stream_state.bytes_sent,
+        "payloads_scheduled" => object.payloads_scheduled,
+        "payloads_completed" => object.payloads_completed,
+        "send_completed" => object.send_completed,
+        "send_cancelled" => object.send_cancelled,
+        "send_inflight" => object.send_inflight,
+        "completion_elapsed_ms" =>
+          duration_ms_between(application_started_at, object.completed_at),
+        "duration_ms" => duration_ms_between(object.stream_state.started_at, object.completed_at),
+        "failure" => object.failure
+      }
+      |> compact()
+    end)
+  end
+
+  defp mixed_object_completion_elapsed_ms(object_streams, application_started_at) do
+    object_streams
+    |> Enum.map(&duration_ms_between(application_started_at, &1.completed_at))
+    |> Enum.reject(&is_nil/1)
+  end
+
   defp mixed_pressure_diagnostics(
          config,
          state,
          control_result,
          object_bytes_sent,
+         application_started_at,
          application_duration_ms,
-         collector_snapshot
+         collector_snapshot,
+         connection_diagnostics
        ) do
     object_streams = Map.values(state.object_streams)
     runtime = collector_snapshot.runtime_diagnostics
@@ -2117,6 +2171,13 @@ defmodule MOQXProbe.Measure do
             duration_summary_ms(runtime[:receive_event_blocking_call_durations_us] || []),
           "receive_event_drain_call_ms" =>
             duration_summary_ms(runtime[:receive_event_drain_call_durations_us] || []),
+          "ready_event_batch_size" => value_summary(state.ready_event_batch_sizes),
+          "ready_object_completion_batch_size" =>
+            value_summary(state.ready_object_completion_batch_sizes),
+          "object_stream_completion_elapsed_ms" =>
+            latency_summary(
+              mixed_object_completion_elapsed_ms(object_streams, application_started_at)
+            ),
           "object_send_events" => state.object_send_events,
           "control_send_events" => state.control_send_events,
           "control_data_events" => state.control_data_events,
@@ -2127,9 +2188,12 @@ defmodule MOQXProbe.Measure do
           "application_duration_ms" => application_duration_ms,
           "failure" => control_result.failure
         }),
+      "objects" => mixed_object_stream_diagnostics(state, application_started_at),
       "process" => process,
-      "beam" => runtime[:beam]
+      "beam" => runtime[:beam],
+      "transport" => connection_diagnostics
     }
+    |> compact()
   end
 
   defp datagram_pressure_diagnostics(
@@ -5437,6 +5501,22 @@ defmodule MOQXProbe.Measure do
       "p50" => percentile(sorted, 0.50),
       "p95" => percentile(sorted, 0.95),
       "p99" => percentile(sorted, 0.99)
+    }
+  end
+
+  defp value_summary(values) do
+    sorted = Enum.sort(values)
+    count = length(sorted)
+    total = Enum.sum(sorted)
+
+    %{
+      "count" => count,
+      "total" => total,
+      "mean" => mean(total, count),
+      "p50" => percentile(sorted, 0.50),
+      "p95" => percentile(sorted, 0.95),
+      "p99" => percentile(sorted, 0.99),
+      "max" => List.last(sorted)
     }
   end
 

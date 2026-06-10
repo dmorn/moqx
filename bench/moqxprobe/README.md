@@ -290,6 +290,13 @@ These knobs are not protocol semantics. Use them to distinguish benchmark
 event-pump overhead, event granularity, and transport/NIF behavior while
 preserving send admission and completion accounting.
 
+MOQX-client mixed stream/control pressure uses the same transport collector
+and adds mixed-specific diagnostics. Records include control/object send
+completion counts, ready-event batch summaries, per-object-stream completion
+snapshots, and backend connection statistics when the transport exposes them
+through `statistics_v2`. Use those diagnostics to compare slow and fast mixed
+runs before changing stream windows, priorities, or quicer/MsQuic settings.
+
 MOQX-client stream pressure uses `MOQXProbe.Traffic.StreamSender`. The sender
 composes a bounded Flow payload producer with a single GenStage stream sink:
 

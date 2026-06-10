@@ -865,6 +865,26 @@ defmodule MOQXProbe.MeasureTest do
     assert record["diagnostics"]["summary"]["events_drained"] >= 6
     assert record["diagnostics"]["summary"]["completion_drain_events"] > 1
     assert record["diagnostics"]["summary"]["control_data_events"] == 2
+    assert record["diagnostics"]["summary"]["ready_event_batch_size"]["count"] >= 1
+    assert record["diagnostics"]["summary"]["ready_object_completion_batch_size"]["max"] >= 1
+
+    assert %{"fake_rtt_us" => 1234} =
+             record["diagnostics"]["transport"]["statistics_v2"]
+
+    assert [
+             %{
+               "index" => 1,
+               "payloads_scheduled" => 2,
+               "payloads_completed" => 2,
+               "send_inflight" => 0
+             },
+             %{
+               "index" => 2,
+               "payloads_scheduled" => 2,
+               "payloads_completed" => 2,
+               "send_inflight" => 0
+             }
+           ] = record["diagnostics"]["objects"]
   end
 
   test "mixed MOQX client applies configured transport stream priorities" do
@@ -2047,6 +2067,8 @@ defmodule MOQXProbe.MeasureTest do
 
     @impl true
     def capabilities(_connection), do: %MOQX.Transport.Capabilities{}
+
+    def connection_statistics(:connection), do: {:ok, %{"fake_rtt_us" => 1234}}
   end
 
   defmodule DelayedControlEchoTransport do
