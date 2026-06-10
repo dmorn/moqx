@@ -1324,10 +1324,10 @@ defmodule MOQXProbe.Measure do
          application_started_at,
          deadline_us
        ) do
-    {state, ctx} = schedule_mixed_object_sends(state, ctx, object_payload, object_config)
-
     {state, ctx} =
       maybe_schedule_mixed_control(state, ctx, control_payload, config, application_started_at)
+
+    {state, ctx} = schedule_mixed_object_sends(state, ctx, object_payload, object_config)
 
     cond do
       mixed_complete?(state, config) ->

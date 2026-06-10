@@ -18,6 +18,9 @@ payload_size="${PAYLOAD_SIZE:-256}"
 payload_count="${PAYLOAD_COUNT:-2}"
 timeout_seconds="${TIMEOUT_SECONDS:-5}"
 timeout_margin_seconds="${TIMEOUT_MARGIN_SECONDS:-2}"
+stream_send_window="${STREAM_SEND_WINDOW:-}"
+stream_event_batch_size="${STREAM_EVENT_BATCH_SIZE:-}"
+stream_diagnostics_sampling="${STREAM_DIAGNOSTICS_SAMPLING:-}"
 control_payload_size="${CONTROL_PAYLOAD_SIZE:-64}"
 control_message_count="${CONTROL_MESSAGE_COUNT:-10}"
 control_rate="${CONTROL_RATE:-10}"
@@ -63,7 +66,8 @@ Supported tests:
   moqx_mixed
 
 Useful environment overrides:
-  STREAM_COUNT PAYLOAD_SIZE PAYLOAD_COUNT
+  STREAM_COUNT PAYLOAD_SIZE PAYLOAD_COUNT TIMEOUT_SECONDS TIMEOUT_MARGIN_SECONDS
+  STREAM_SEND_WINDOW STREAM_EVENT_BATCH_SIZE STREAM_DIAGNOSTICS_SAMPLING
   CONTROL_PAYLOAD_SIZE CONTROL_MESSAGE_COUNT CONTROL_RATE
   IPERF3_TCP_DURATION IPERF3_UDP_DURATION IPERF3_UDP_BITRATES IPERF3_UDP_LENGTH
   DATAGRAM_SIZE DATAGRAM_COUNT DATAGRAM_RATE DURATION_SECONDS
@@ -405,6 +409,9 @@ jq -n \
   --arg server_probed_current "$server_probed_current" \
   --arg quicer_settings "$quicer_settings" \
   --arg quicer_datagram_send_flags "$quicer_datagram_send_flags" \
+  --arg stream_send_window "$stream_send_window" \
+  --arg stream_event_batch_size "$stream_event_batch_size" \
+  --arg stream_diagnostics_sampling "$stream_diagnostics_sampling" \
   --arg control_payload_size "$control_payload_size" \
   --arg control_message_count "$control_message_count" \
   --arg control_rate "$control_rate" \
@@ -421,6 +428,9 @@ jq -n \
     env: {
       quicer_settings: $quicer_settings,
       quicer_datagram_send_flags: $quicer_datagram_send_flags,
+      stream_send_window: $stream_send_window,
+      stream_event_batch_size: $stream_event_batch_size,
+      stream_diagnostics_sampling: $stream_diagnostics_sampling,
       control_payload_size: $control_payload_size,
       control_message_count: $control_message_count,
       control_rate: $control_rate
@@ -564,6 +574,9 @@ measure_args() {
     --arg payload_count "$payload_count" \
     --arg timeout_seconds "$timeout_seconds" \
     --arg timeout_margin_seconds "$timeout_margin_seconds" \
+    --arg stream_send_window "$stream_send_window" \
+    --arg stream_event_batch_size "$stream_event_batch_size" \
+    --arg stream_diagnostics_sampling "$stream_diagnostics_sampling" \
     --arg run_id "$api_run_id" \
     --arg output "$output" \
     --arg workload "$workload" \
@@ -595,6 +608,24 @@ measure_args() {
       "--run-id", $run_id,
       "--output", $output
     ] + (
+      if $stream_send_window == "" then
+        []
+      else
+        ["--stream-send-window", $stream_send_window]
+      end
+    ) + (
+      if $stream_event_batch_size == "" then
+        []
+      else
+        ["--stream-event-batch-size", $stream_event_batch_size]
+      end
+    ) + (
+      if $stream_diagnostics_sampling == "" then
+        []
+      else
+        ["--stream-diagnostics-sampling", $stream_diagnostics_sampling]
+      end
+    ) + (
       if $workload == "datagram_pressure" then
         [
           "--datagram-size", $datagram_size,

@@ -853,6 +853,65 @@ defmodule MOQXProbe.MeasureTest do
     assert record["diagnostics"]["summary"]["control_data_events"] == 2
   end
 
+  test "mixed MOQX client schedules ready control traffic before object windows" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-mixed-control-first.jsonl")
+
+    Process.register(self(), __MODULE__.MixedSendOrderObserver)
+
+    on_exit(fn ->
+      if Process.whereis(__MODULE__.MixedSendOrderObserver) == self() do
+        Process.unregister(__MODULE__.MixedSendOrderObserver)
+      end
+    end)
+
+    Measure.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "mixed_moqt_shaped",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-count",
+        "2",
+        "--payload-size",
+        "64",
+        "--payload-count",
+        "1",
+        "--control-payload-size",
+        "16",
+        "--control-message-count",
+        "1",
+        "--control-rate",
+        "100",
+        "--stream-send-window",
+        "2",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-mixed-control-first-test"
+      ],
+      script: "test measure",
+      transport_backend: __MODULE__.MixedEchoTransport
+    )
+
+    first_send =
+      receive do
+        message -> message
+      after
+        100 -> flunk("expected at least one stream send")
+      end
+
+    assert {:mixed_send, {:stream, _ref, :bidirectional}, 16, _opts} = first_send
+  end
+
   test "records structured diagnostics when MOQX bidirectional echo closes early" do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-peer-shutdown.jsonl")
@@ -1642,6 +1701,10 @@ defmodule MOQXProbe.MeasureTest do
 
     @impl true
     def send_stream(stream, data, opts) do
+      if observer = Process.whereis(MOQXProbe.MeasureTest.MixedSendOrderObserver) do
+        send(observer, {:mixed_send, stream, byte_size(data), opts})
+      end
+
       send(self(), {:moqx_transport, {:stream_event, stream, :send_complete, false}})
 
       case stream do

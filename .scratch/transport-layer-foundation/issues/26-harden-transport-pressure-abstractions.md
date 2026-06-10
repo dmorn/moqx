@@ -632,3 +632,30 @@ seams without `Application` env.
   x86-control mixed run where reference reached 116.99 Mbps with control p99
   37.95 ms and MOQX reached 73.37 Mbps with control p99 139.43 ms, while the
   old mailbox/completion artifact stayed fixed.
+- 2026-06-10: #45 reproduced and sharpened the mixed stream/control gap on the
+  active x86-control lab (`20260609T093717Z-issue40-x86-control`). The clean
+  baseline repetitions used 32 object streams, 1000 x 1180-byte payloads per
+  stream, and 100 x 64-byte control messages at 100 messages/sec with
+  `TIMEOUT_SECONDS=15` and `TIMEOUT_MARGIN_SECONDS=5`. Reference reached
+  55.50/55.48 Mbps with control p99 53.53/55.58 ms. MOQX reached only
+  35.11/35.25 Mbps, while all 32,000 object send completions drained, pending
+  object completions were zero, and mailbox peaks stayed low at 9/14. The old
+  mailbox backlog is therefore not the current bottleneck.
+- 2026-06-10: #45 A/Bs also rejected two easy explanations. Switching stream
+  diagnostics from `event` to `final` reduced observer work but left MOQX
+  around 35.07 Mbps with control p99 1611.12 ms, so the current gap is not
+  measurement-agent overhead. Changing `STREAM_SEND_WINDOW` moved control
+  latency around but not object goodput: window 64 reached control p99
+  78.96 ms but first control byte 6070.63 ms and goodput 35.01 Mbps, while
+  window 4 reached first control byte 1458.07 ms, control p99 812.54 ms, and
+  goodput 36.57 Mbps.
+- 2026-06-10: The first #45 harness fix is control-first scheduling in the
+  mixed MOQX-client loop: when a control message is ready, schedule it before
+  refilling object-stream windows. Dirty remote validation showed first control
+  byte improving from about 4.5-6.1 seconds to about 27 ms. With
+  `STREAM_SEND_WINDOW=64`, MOQX control p99 improved to 78.88 ms against a
+  same-run reference p99 of 33.05 ms, but object goodput stayed 35.24 Mbps
+  versus 117.01 Mbps reference. Keep the change, then rerun from a clean
+  committed artifact. The next #26/#45 target is object stream
+  throughput/send-completion cadence under mixed pressure, not more DATAGRAM
+  tuning and not the old mailbox artifact.

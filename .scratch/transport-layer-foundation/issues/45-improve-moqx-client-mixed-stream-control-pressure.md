@@ -40,20 +40,20 @@ progress tracker, equivalent to what #40 did for DATAGRAM.
 
 ## Acceptance criteria
 
-- [ ] Reproduce the mixed stream/control gap on the active x86-control lab, or
+- [x] Reproduce the mixed stream/control gap on the active x86-control lab, or
       on a fresh controlled lab if the current one has been torn down, with a
       same-run iperf3 baseline and healthy `quicprobe -> quicprobe` reference.
-- [ ] Capture at least two clean same-shape repetitions before changing code so
+- [x] Capture at least two clean same-shape repetitions before changing code so
       normal lab variance is separated from implementation behavior.
-- [ ] Classify the first bottleneck hypothesis from evidence: benchmark mixed
+- [x] Classify the first bottleneck hypothesis from evidence: benchmark mixed
       scheduler, object stream sender, control stream scheduling, stream
       send-completion cadence, receive/event pump, telemetry collector,
       binary validation/allocation, quicer/MsQuic stream behavior, or reference
       peer behavior.
-- [ ] Add only low-overhead diagnostics needed to prove or falsify that
+- [x] Add only low-overhead diagnostics needed to prove or falsify that
       hypothesis, keeping `transport-bench-v1` summaries stable and putting
       richer detail in diagnostics/sidecars when needed.
-- [ ] Preserve the async stream send model and explicit completion accounting;
+- [x] Preserve the async stream send model and explicit completion accounting;
       do not hide backpressure by making `send_stream/4` wait for peer
       delivery.
 - [ ] If implementation changes are made, rerun the controlled comparison
@@ -96,3 +96,56 @@ evidence for performance claims.
   shows a meaningful gap: MOQX reached about 62.7% of reference goodput and
   control p99 was about 3.7x reference under the same workload. This is now the
   next transport performance-hardening loop.
+- 2026-06-10: First reproduction pass on the active x86-control lab used run id
+  `20260609T093717Z-issue40-x86-control`. The first two repetitions
+  (`issue45-mixed-repro-1` and `issue45-mixed-repro-2`) accidentally used the
+  suite defaults (`TIMEOUT_SECONDS=5`, `TIMEOUT_MARGIN_SECONDS=2`). Treat them
+  as harness evidence only: reference was healthy around 117.8/117.9 Mbps, but
+  MOQX hit the 5-second observation bound with pending object completions and
+  only about 41-42 Mbps recorded. The probed docs and suite examples now make
+  the longer mixed timeout explicit.
+- 2026-06-10: Clean same-shape baseline repetitions with
+  `TIMEOUT_SECONDS=15`, `TIMEOUT_MARGIN_SECONDS=5`, 32 streams, 1000 x
+  1180-byte object payloads per stream, and 100 x 64-byte control messages at
+  100 messages/sec reproduced the gap with all completions drained. In
+  `issue45-mixed-repro-3`, reference reached 55.50 Mbps with control p99
+  53.53 ms while MOQX reached 35.11 Mbps with control p99 1676.98 ms, first
+  control byte 4449.61 ms, zero pending object completions, and mailbox peak 9.
+  In `issue45-mixed-repro-4`, reference reached 55.48 Mbps with control p99
+  55.58 ms while MOQX reached 35.25 Mbps with control p99 1471.49 ms, first
+  control byte 4616.46 ms, zero pending object completions, and mailbox peak
+  14. This rules out the old undrained-mailbox artifact as the current cause.
+- 2026-06-10: Diagnostic A/Bs narrowed the first useful hypothesis without
+  changing the canonical `transport-bench-v1` summary. `event` versus `final`
+  stream diagnostics did not move object goodput: `issue45-mixed-final-1`
+  still put MOQX around 35.07 Mbps with control p99 1611.12 ms, while the
+  same-run reference reached 117.18 Mbps. Stream send-window tuning traded
+  control behavior but not object goodput: `STREAM_SEND_WINDOW=64` brought
+  recurring control p99 down to 78.96 ms but delayed first control byte to
+  6070.63 ms and kept goodput at 35.01 Mbps; `STREAM_SEND_WINDOW=4` moved first
+  control byte to 1458.07 ms, control p99 to 812.54 ms, and goodput to
+  36.57 Mbps.
+- 2026-06-10: A pure `stream_pressure` comparison with the same 32 x 1000 x
+  1180-byte shape is not a direct object-stream control because it is
+  bidirectional echo rather than the mixed workload's unidirectional object
+  stream pattern. It still shows that the old stream-pressure path remains
+  fragile under this shape: `issue45-stream-control-separate-1` had a healthy
+  reference at 54.82 Mbps, while MOQX timed out around 4.62 Mbps with
+  `stream_closed_before_expected_bytes`, 512 pending send completions, and
+  mailbox peak 1067. Do not use that record as the mixed object-stream result;
+  use it as a hint that send-completion cadence and receive/echo coupling are
+  still worth isolating separately.
+- 2026-06-10: Implemented and tested a small benchmark-harness scheduling
+  change locally: when control traffic is ready in a mixed MOQX-client loop,
+  schedule it before filling object stream windows. A focused regression now
+  asserts the first mixed send is the bidirectional control payload, not the
+  first object payload. Dirty remote validation showed the effect clearly:
+  `issue45-control-first-dirty-1` kept MOQX object goodput around 35.40 Mbps
+  but reduced the first control byte from multi-second latency to 26.79 ms.
+  With `STREAM_SEND_WINDOW=64`,
+  `issue45-control-first-window64-dirty-1` reached MOQX control p99 78.88 ms
+  and first control byte 27.22 ms against a same-run reference control p99
+  33.05 ms, but object goodput stayed 35.24 Mbps versus 117.01 Mbps reference.
+  Conclusion: control-first scheduling is worth keeping, but #45 is not
+  complete; the remaining gap is object stream throughput/send-completion
+  cadence under mixed pressure, not the first control-message ordering alone.

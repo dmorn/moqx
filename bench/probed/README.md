@@ -249,6 +249,9 @@ PROBED_SUITE_TESTS=reference_mixed,moqx_mixed \
 STREAM_COUNT=4 \
 PAYLOAD_SIZE=1180 \
 PAYLOAD_COUNT=8000 \
+TIMEOUT_SECONDS=15 \
+TIMEOUT_MARGIN_SECONDS=5 \
+STREAM_DIAGNOSTICS_SAMPLING=final \
 CONTROL_MESSAGE_COUNT=100 \
 CONTROL_RATE=100 \
 just bench-transport-probed-suite <run-id>
@@ -257,6 +260,8 @@ just bench-transport-probed-suite <run-id>
 Mixed pressure is still stream/control shaped in the current harness. It does
 not add QUIC DATAGRAMs; use DATAGRAM suites for publisher-path DATAGRAM
 evidence and mixed suites for adjacent caller-side control/object pressure.
+Use `STREAM_DIAGNOSTICS_SAMPLING=final` for performance comparisons, and
+switch to `event` only when debugging per-stream state transitions.
 
 For the current #40 validation loop, prefer the bracket wrapper once the lab is
 already provisioned, private-path checked, and tools are deployed:
