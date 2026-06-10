@@ -2,7 +2,7 @@
 
 # Improve MOQX-client mixed stream/control pressure
 
-Status: closed
+Status: ready-for-agent
 Type: AFK
 Category: performance
 
@@ -67,7 +67,7 @@ progress tracker, equivalent to what #40 did for DATAGRAM.
 - [x] Record each round in #26 with run id, artifact versions, lab topology,
       reference result, MOQX result, any rejected knobs, and whether the lab
       remains alive or was destroyed.
-- [x] Explain and improve the remaining object-stream goodput ceiling, or split
+- [ ] Explain and improve the remaining object-stream goodput ceiling, or split
       it into a narrower follow-up with enough evidence that #45 can close
       without hiding the gap.
 
@@ -237,7 +237,21 @@ evidence for performance claims.
   pending object/control completions, bounded mailbox depth, and short async
   `send_stream` admission (`p99` about 0.011 ms, max 0.126/0.173 ms). The
   conservative second repetition is about 90% of the same-run reference
-  goodput and about 1.12x reference control p99, so the #45 stop threshold is
-  met twice with server-side ingress proof. Close #45; keep any broader stream
-  throughput or variance work under #26/#46 rather than reopening mixed
-  control/object scheduling.
+  goodput and about 1.12x reference control p99, but the two MOQX repetitions
+  themselves are not stable: the same-shape MOQX mixed run swung from
+  178.30 Mbps to 49.59 Mbps, a roughly 3.6x goodput spread, while reference
+  stayed around 55 Mbps. Do not treat the stop threshold as satisfied. The
+  server-ingress evidence is useful because it proves both runs delivered the
+  full byte volume, but it also proves the variance is real server-observed
+  behavior rather than a client-side JSON/completion artifact. Keep #45 open.
+- 2026-06-10: Reopened #45 after reviewing the final two stream-ingress runs.
+  The corrected conclusion is: control latency is much healthier with
+  `CONTROL_STREAM_PRIORITY=65535`, `OBJECT_STREAM_PRIORITY=1`, and
+  `QUICER_SETTINGS=send_buffering_enabled=1`; full object/control bytes reach
+  the server; `send_stream` admission is not showing BEAM scheduler/NIF stalls
+  (`p99` about 0.011 ms, max 0.126/0.173 ms); but object goodput is unstable
+  under the mixed workload. The next work is to explain and reduce the 3.6x
+  MOQX goodput swing before closing this issue. Prioritize repeated MOQX-only
+  mixed runs that isolate `send_buffering_enabled=1`, stream completion
+  cadence, flow-control/window behavior, and MsQuic/quicer buffering effects;
+  compare against reference only after MOQX run-to-run variance is bounded.
