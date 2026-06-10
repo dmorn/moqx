@@ -121,6 +121,8 @@ defmodule MOQXProbe.TransportTelemetryCollector do
 
     started_at_us = monotonic_us()
     :ets.insert(table, {:started_at_us, started_at_us})
+    enable_scheduler_wall_time(table)
+    :ets.insert(table, {:beam_runtime_start, beam_runtime_snapshot(owner_pid)})
 
     {sampler_pid, sampler_ref, sampler_monitor_ref} =
       maybe_start_sampler(
@@ -203,6 +205,7 @@ defmodule MOQXProbe.TransportTelemetryCollector do
           duration_values(collector, :receive_event_blocking_call),
         receive_event_drain_call_durations_us:
           duration_values(collector, :receive_event_drain_call),
+        beam: beam_runtime_diagnostics(collector),
         datagram_sender: datagram_sender_snapshot(collector),
         stream_sender: stream_sender_snapshot(collector)
       }
@@ -655,17 +658,26 @@ defmodule MOQXProbe.TransportTelemetryCollector do
 
   defp sample_process(table, owner_pid, started_at_us) do
     message_queue_len = message_queue_len(owner_pid)
+    run_queue = statistics_value(:run_queue)
+    total_active_tasks = statistics_value(:total_active_tasks)
+    total_active_tasks_all = statistics_value(:total_active_tasks_all)
     sample_index = increment_sample_count(table)
     update_message_queue_peak(table, message_queue_len)
+    update_peak(table, :run_queue_peak, run_queue)
+    update_peak(table, :total_active_tasks_peak, total_active_tasks)
+    update_peak(table, :total_active_tasks_all_peak, total_active_tasks_all)
 
     if keep_message_queue_sample?(sample_index) do
       :ets.insert(table, {
         {:message_queue_sample, sample_index},
-        %{
+        compact(%{
           "sample_index" => sample_index,
           "elapsed_ms" => (monotonic_us() - started_at_us) / 1000,
-          "message_queue_len" => message_queue_len
-        }
+          "message_queue_len" => message_queue_len,
+          "run_queue" => run_queue,
+          "total_active_tasks" => total_active_tasks,
+          "total_active_tasks_all" => total_active_tasks_all
+        })
       })
     end
   end
@@ -680,13 +692,7 @@ defmodule MOQXProbe.TransportTelemetryCollector do
   end
 
   defp update_message_queue_peak(table, message_queue_len) do
-    peak =
-      case :ets.lookup(table, :message_queue_len_peak) do
-        [{:message_queue_len_peak, value}] -> max(value, message_queue_len)
-        [] -> message_queue_len
-      end
-
-    :ets.insert(table, {:message_queue_len_peak, peak})
+    update_peak(table, :message_queue_len_peak, message_queue_len)
   end
 
   defp process_samples(table) do
@@ -733,6 +739,266 @@ defmodule MOQXProbe.TransportTelemetryCollector do
       {:message_queue_len, value} -> value
       nil -> 0
     end
+  end
+
+  defp update_peak(_table, _key, nil), do: :ok
+
+  defp update_peak(table, key, value) do
+    peak =
+      case :ets.lookup(table, key) do
+        [{^key, current}] -> max(current, value)
+        [] -> value
+      end
+
+    :ets.insert(table, {key, peak})
+  end
+
+  defp enable_scheduler_wall_time(table) do
+    enabled_before =
+      try do
+        :erlang.system_flag(:scheduler_wall_time, true)
+      catch
+        _kind, _reason -> :unavailable
+      end
+
+    :ets.insert(table, {:scheduler_wall_time_enabled_before, enabled_before})
+  end
+
+  defp beam_runtime_diagnostics(%__MODULE__{table: table, owner_pid: owner_pid}) do
+    started = scalar(table, :beam_runtime_start, %{})
+    finished = beam_runtime_snapshot(owner_pid)
+
+    compact(%{
+      "schedulers_online" => finished["schedulers_online"],
+      "dirty_cpu_schedulers" => finished["dirty_cpu_schedulers"],
+      "dirty_io_schedulers" => finished["dirty_io_schedulers"],
+      "scheduler_wall_time_enabled_before" => scalar(table, :scheduler_wall_time_enabled_before),
+      "scheduler_wall_time" =>
+        scheduler_wall_time_diagnostics(
+          started["scheduler_wall_time"],
+          finished["scheduler_wall_time"]
+        ),
+      "run_queue" =>
+        delta_peak_diagnostics(
+          started["run_queue"],
+          finished["run_queue"],
+          scalar(table, :run_queue_peak)
+        ),
+      "total_active_tasks" =>
+        delta_peak_diagnostics(
+          started["total_active_tasks"],
+          finished["total_active_tasks"],
+          scalar(table, :total_active_tasks_peak)
+        ),
+      "total_active_tasks_all" =>
+        delta_peak_diagnostics(
+          started["total_active_tasks_all"],
+          finished["total_active_tasks_all"],
+          scalar(table, :total_active_tasks_all_peak)
+        ),
+      "total_run_queue_lengths_delta" =>
+        numeric_delta(started["total_run_queue_lengths"], finished["total_run_queue_lengths"]),
+      "reductions_delta" => numeric_delta(started["reductions"], finished["reductions"]),
+      "context_switches_delta" =>
+        numeric_delta(started["context_switches"], finished["context_switches"]),
+      "garbage_collection_count_delta" =>
+        numeric_delta(
+          started["garbage_collection_count"],
+          finished["garbage_collection_count"]
+        ),
+      "garbage_collection_words_reclaimed_delta" =>
+        numeric_delta(
+          started["garbage_collection_words_reclaimed"],
+          finished["garbage_collection_words_reclaimed"]
+        ),
+      "owner_process" => process_runtime_diagnostics(started["process"], finished["process"])
+    })
+  end
+
+  defp beam_runtime_snapshot(owner_pid) do
+    {garbage_collection_count, garbage_collection_words_reclaimed} = garbage_collection_stats()
+
+    compact(%{
+      "monotonic_us" => monotonic_us(),
+      "schedulers_online" => system_info(:schedulers_online),
+      "dirty_cpu_schedulers" => system_info(:dirty_cpu_schedulers),
+      "dirty_io_schedulers" => system_info(:dirty_io_schedulers),
+      "scheduler_wall_time" => scheduler_wall_time(),
+      "run_queue" => statistics_value(:run_queue),
+      "total_run_queue_lengths" => statistics_value(:total_run_queue_lengths),
+      "total_active_tasks" => statistics_value(:total_active_tasks),
+      "total_active_tasks_all" => statistics_value(:total_active_tasks_all),
+      "reductions" => reductions_total(),
+      "context_switches" => context_switches_total(),
+      "garbage_collection_count" => garbage_collection_count,
+      "garbage_collection_words_reclaimed" => garbage_collection_words_reclaimed,
+      "process" => process_runtime_snapshot(owner_pid)
+    })
+  end
+
+  defp process_runtime_snapshot(pid) do
+    compact(%{
+      "reductions" => process_info_value(pid, :reductions),
+      "memory_bytes" => process_info_value(pid, :memory),
+      "total_heap_size_words" => process_info_value(pid, :total_heap_size),
+      "heap_size_words" => process_info_value(pid, :heap_size),
+      "stack_size_words" => process_info_value(pid, :stack_size),
+      "message_queue_len" => message_queue_len(pid)
+    })
+  end
+
+  defp process_runtime_diagnostics(started, finished) when is_map(started) and is_map(finished) do
+    compact(%{
+      "reductions_delta" => numeric_delta(started["reductions"], finished["reductions"]),
+      "memory_bytes_start" => started["memory_bytes"],
+      "memory_bytes_finish" => finished["memory_bytes"],
+      "memory_bytes_delta" => numeric_delta(started["memory_bytes"], finished["memory_bytes"]),
+      "total_heap_size_words_start" => started["total_heap_size_words"],
+      "total_heap_size_words_finish" => finished["total_heap_size_words"],
+      "total_heap_size_words_delta" =>
+        numeric_delta(started["total_heap_size_words"], finished["total_heap_size_words"]),
+      "heap_size_words_finish" => finished["heap_size_words"],
+      "stack_size_words_finish" => finished["stack_size_words"],
+      "message_queue_len_start" => started["message_queue_len"],
+      "message_queue_len_finish" => finished["message_queue_len"]
+    })
+  end
+
+  defp process_runtime_diagnostics(_started, _finished), do: %{}
+
+  defp scheduler_wall_time do
+    case statistics_value(:scheduler_wall_time) do
+      value when is_list(value) -> value
+      _other -> nil
+    end
+  end
+
+  defp scheduler_wall_time_diagnostics(started, finished)
+       when is_list(started) and is_list(finished) do
+    started_by_id = Map.new(started, fn {id, active, total} -> {id, {active, total}} end)
+
+    deltas =
+      finished
+      |> Enum.flat_map(&scheduler_wall_time_delta(&1, started_by_id))
+
+    active_delta = deltas |> Enum.map(&elem(&1, 1)) |> Enum.sum()
+    total_delta = deltas |> Enum.map(&elem(&1, 2)) |> Enum.sum()
+    utilizations = Enum.map(deltas, &elem(&1, 3)) |> Enum.sort()
+
+    compact(%{
+      "entry_count" => length(deltas),
+      "active_time_delta" => active_delta,
+      "total_time_delta" => total_delta,
+      "utilization_percent" => percent(active_delta, total_delta),
+      "utilization_p50_percent" => percentile(utilizations, 0.50),
+      "utilization_p95_percent" => percentile(utilizations, 0.95),
+      "utilization_p99_percent" => percentile(utilizations, 0.99),
+      "utilization_max_percent" => List.last(utilizations)
+    })
+  end
+
+  defp scheduler_wall_time_diagnostics(_started, _finished), do: %{}
+
+  defp scheduler_wall_time_delta({id, active, total}, started_by_id) do
+    case Map.fetch(started_by_id, id) do
+      {:ok, {started_active, started_total}} ->
+        maybe_scheduler_wall_time_delta(
+          id,
+          active - started_active,
+          total - started_total
+        )
+
+      :error ->
+        []
+    end
+  end
+
+  defp maybe_scheduler_wall_time_delta(_id, _active_delta, total_delta)
+       when total_delta <= 0,
+       do: []
+
+  defp maybe_scheduler_wall_time_delta(id, active_delta, total_delta) do
+    [{id, active_delta, total_delta, active_delta * 100 / total_delta}]
+  end
+
+  defp delta_peak_diagnostics(started, finished, peak) do
+    compact(%{
+      "start" => started,
+      "finish" => finished,
+      "delta" => numeric_delta(started, finished),
+      "peak" => peak
+    })
+  end
+
+  defp reductions_total do
+    case statistics_value(:reductions) do
+      {total, _since_last} -> total
+      _other -> nil
+    end
+  end
+
+  defp context_switches_total do
+    case statistics_value(:context_switches) do
+      {total, _since_last} -> total
+      _other -> nil
+    end
+  end
+
+  defp garbage_collection_stats do
+    case statistics_value(:garbage_collection) do
+      {count, words_reclaimed, _since_last} -> {count, words_reclaimed}
+      _other -> {nil, nil}
+    end
+  end
+
+  defp statistics_value(key) do
+    :erlang.statistics(key)
+  catch
+    _kind, _reason -> nil
+  end
+
+  defp system_info(key) do
+    :erlang.system_info(key)
+  catch
+    _kind, _reason -> nil
+  end
+
+  defp process_info_value(pid, key) do
+    case Process.info(pid, key) do
+      {^key, value} -> value
+      nil -> nil
+    end
+  end
+
+  defp numeric_delta(started, finished) when is_number(started) and is_number(finished),
+    do: finished - started
+
+  defp numeric_delta(_started, _finished), do: nil
+
+  defp percent(_numerator, denominator) when denominator in [nil, 0], do: nil
+  defp percent(numerator, denominator), do: numerator * 100 / denominator
+
+  defp percentile([], _p), do: nil
+  defp percentile([value], _p), do: value
+
+  defp percentile(sorted, p) do
+    index = trunc((length(sorted) - 1) * p)
+    Enum.at(sorted, index)
+  end
+
+  defp compact(map) when is_map(map) do
+    map
+    |> Enum.reduce(%{}, fn
+      {_key, nil}, acc ->
+        acc
+
+      {key, value}, acc when is_map(value) ->
+        compacted = compact(value)
+        if compacted == %{}, do: acc, else: Map.put(acc, key, compacted)
+
+      {key, value}, acc ->
+        Map.put(acc, key, value)
+    end)
   end
 
   defp monotonic_us, do: System.monotonic_time(:microsecond)

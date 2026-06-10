@@ -196,6 +196,14 @@ defmodule MOQXProbe.TransportTelemetryCollectorTest do
       assert runtime.receive_event_drain_call_durations_us == [5, 7, 1]
       assert runtime.process["message_queue_len_samples"] >= 1
 
+      assert runtime.beam["schedulers_online"] >= 1
+      assert runtime.beam["dirty_cpu_schedulers"] >= 1
+      assert runtime.beam["dirty_io_schedulers"] >= 1
+      assert runtime.beam["scheduler_wall_time"]["entry_count"] >= 1
+      assert is_number(runtime.beam["scheduler_wall_time"]["utilization_percent"])
+      assert is_integer(runtime.beam["run_queue"]["finish"])
+      assert is_integer(runtime.beam["owner_process"]["reductions_delta"])
+
       assert runtime.datagram_sender == %{
                runs_started: 1,
                runs_stopped: 1,

@@ -845,6 +845,9 @@ defmodule MOQXProbe.MeasureTest do
 
     assert record["diagnostics"]["process"]["message_queue_len"] == 0
     assert record["diagnostics"]["process"]["message_queue_len_peak"] >= 0
+    assert record["diagnostics"]["beam"]["schedulers_online"] >= 1
+    assert is_number(record["diagnostics"]["beam"]["scheduler_wall_time"]["utilization_percent"])
+    assert is_integer(record["diagnostics"]["beam"]["run_queue"]["finish"])
 
     assert record["diagnostics"]["summary"]["object_payloads_accepted"] == 4
     assert record["diagnostics"]["summary"]["object_send_completions"] == 4

@@ -2095,7 +2095,8 @@ defmodule MOQXProbe.Measure do
           "application_duration_ms" => application_duration_ms,
           "failure" => control_result.failure
         }),
-      "process" => process
+      "process" => process,
+      "beam" => runtime[:beam]
     }
   end
 
@@ -2123,6 +2124,7 @@ defmodule MOQXProbe.Measure do
         ),
       "cadence" => receive_state.cadence_samples,
       "process" => process_diagnostics(runtime.process),
+      "beam" => runtime[:beam],
       "receiver_process" => receive_state.receiver_process_diagnostics,
       "transport" => args.connection_diagnostics
     }
@@ -4316,7 +4318,8 @@ defmodule MOQXProbe.Measure do
       "version" => "stream-pressure-diagnostics-v1",
       "summary" => summary,
       "streams" => stream_diagnostics,
-      "process" => process_diagnostics(Map.get(runtime, :process, %{}))
+      "process" => process_diagnostics(Map.get(runtime, :process, %{})),
+      "beam" => runtime[:beam]
     }
   end
 
