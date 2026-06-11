@@ -99,7 +99,7 @@ defmodule MOQX.Codec do
   end
 
   defp decode_sized_bytes(data, length) when byte_size(data) >= length do
-    <<value::binary-size(length), rest::binary>> = data
+    <<value::binary-size(^length), rest::binary>> = data
     {:ok, value, rest}
   end
 

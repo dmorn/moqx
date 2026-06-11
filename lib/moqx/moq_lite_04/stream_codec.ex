@@ -223,7 +223,7 @@ defmodule MOQX.MOQLite04.StreamCodec do
 
   defp decode_message_payload(codec, original_buffer, payload_buffer, length, decoder)
        when byte_size(payload_buffer) >= length do
-    <<payload::binary-size(length), rest::binary>> = payload_buffer
+    <<payload::binary-size(^length), rest::binary>> = payload_buffer
 
     case decoder.decode(payload, %{}) do
       {:ok, message} ->

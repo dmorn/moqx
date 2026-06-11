@@ -706,7 +706,6 @@ defmodule MOQX.TransportContract.QuicerReferenceServerFixture do
        }}
     else
       {:error, reason, _ctx} -> {:error, reason}
-      {:error, reason} -> {:error, reason}
     end
   end
 
