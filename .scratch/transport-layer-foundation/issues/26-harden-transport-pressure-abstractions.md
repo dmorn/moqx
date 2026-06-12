@@ -101,6 +101,10 @@ child issues in evidence order:
 11. #46 tracks the narrower caller-side stream throughput loop so object stream
     goodput can be improved or bounded independently from mixed control
     scheduling.
+12. #47 tracks the transport API refactor suggested by #45/#46 evidence:
+    rename the connection vocabulary to `Transport.Conn`, move stream-scoped
+    state under `Transport.Conn.Stream`, and make stream-local send completion
+    ownership possible without putting OTP processes inside the transport core.
 
 The first implementation slice is #32. Do not start broad transport API
 refactors from this umbrella issue; any API change should be motivated by
@@ -806,3 +810,18 @@ seams without `Application` env.
   next #45 slice should focus on object pump admission/wave policy and
   quicer/MsQuic send-completion release cadence rather than more mixed
   scheduler cleanup.
+- 2026-06-12: Opened #47 and ADR-0008 for the broader transport ownership
+  refactor implied by the stream evidence. The target is a functional
+  `Transport.Conn` / `Transport.Conn.Stream` model where stream-local send
+  completion credit can be owned by a per-stream process above transport. This
+  is expected to change stream and mixed benchmark behavior; #45/#46 evidence
+  remains useful for the old shape, but fresh remote baselines will be needed
+  after the refactor.
+- 2026-06-12: #47 is implemented locally. Public transport handles now use
+  `MOQX.Transport.Conn` and `MOQX.Transport.Conn.Stream`, stream info/send
+  tokens live under that namespace, and `Conn.Stream.Sender` owns
+  token-correlated send-completion credit. The broad context no longer stores
+  stream pending-send queues. `moqxprobe` stream and mixed records expose
+  `stream_sender_topology=context_owner` for the current harness shape. Local
+  loopback self-pair calibration passed, but #45/#46 still need fresh remote
+  baselines from a current artifact before making performance closure calls.

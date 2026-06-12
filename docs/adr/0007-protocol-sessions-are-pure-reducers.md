@@ -30,8 +30,8 @@ Mint and `mint_web_socket` provide useful prior art:
 
 Name the upper protocol state machine a `Session`, not a `Connection`.
 
-`Connection` remains transport vocabulary and should refer to
-`MOQX.Transport.Connection` or backend connection handles. `Session` is protocol
+`Conn` remains transport vocabulary and should refer to
+`MOQX.Transport.Conn` or backend connection handles. `Session` is protocol
 vocabulary and should refer to a variant-owned state machine such as
 `MOQX.MOQLite04.Session`.
 

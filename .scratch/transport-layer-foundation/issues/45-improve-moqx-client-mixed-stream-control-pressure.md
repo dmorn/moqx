@@ -410,3 +410,16 @@ evidence for performance claims.
   focus on object pump admission/wave behavior and quicer/MsQuic completion
   release cadence. Keep #45 open; the mixed `StreamSender` alignment removed a
   harness inconsistency, not the underlying variance.
+- 2026-06-12: Split the broader transport API response into #47 and ADR-0008.
+  #45 remains the evidence tracker for mixed stream/control behavior, but the
+  next implementation direction is no longer another local mixed-scheduler
+  patch. The suspected bottleneck is that the current functional context shape
+  forces independent QUIC streams through one BEAM-side completion-credit loop.
+  After #47 changes stream ownership, rerun the canonical mixed comparison
+  before making a closure call.
+- 2026-06-12: #47 landed locally. Mixed records now include
+  `stream_sender_topology=context_owner`, and the transport exposes
+  `Conn.Stream.Sender` for stream-local send-completion credit. Existing #45
+  remote records are pre-refactor evidence. Next #45 action is to build/deploy
+  a current artifact and rerun the canonical mixed comparison twice before
+  interpreting the fast/slow split or the remaining goodput gap.

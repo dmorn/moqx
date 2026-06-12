@@ -13,7 +13,8 @@ defmodule MOQX.MOQLite04.Client do
   alias MOQX.MOQLite04.Error, as: ProtocolError
   alias MOQX.MOQLite04.Session
   alias MOQX.Transport
-  alias MOQX.Transport.{Capabilities, Connection, Context, Stream}
+  alias MOQX.Transport.{Capabilities, Conn, Context}
+  alias MOQX.Transport.Conn.Stream
 
   @alpn "moq-lite-04"
 
@@ -50,7 +51,7 @@ defmodule MOQX.MOQLite04.Client do
   @type t :: %__MODULE__{
           uri: URI.t(),
           context: Context.t(),
-          connection: Connection.t(),
+          connection: Conn.t(),
           session: Session.t()
         }
 

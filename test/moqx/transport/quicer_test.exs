@@ -21,7 +21,7 @@ defmodule MOQX.Transport.QuicerTest do
   describe "stream_info_from_id/3" do
     test "derives exact local and peer role metadata from QUIC stream IDs" do
       assert Quicer.stream_info_from_id(0, :client, :local) ==
-               %MOQX.Transport.StreamInfo{
+               %MOQX.Transport.Conn.Stream.Info{
                  stream_id: 0,
                  direction: :bidirectional,
                  initiator: :local,
@@ -32,7 +32,7 @@ defmodule MOQX.Transport.QuicerTest do
                }
 
       assert Quicer.stream_info_from_id(2, :server, :peer) ==
-               %MOQX.Transport.StreamInfo{
+               %MOQX.Transport.Conn.Stream.Info{
                  stream_id: 2,
                  direction: :unidirectional,
                  initiator: :peer,

@@ -398,6 +398,9 @@ defmodule MOQX.TransportContract do
   defp send_completion_event_test do
     quote do
       test "send completion events carry the accepted send token", %{fixture: fixture} do
+        alias MOQX.Transport.Conn.Stream
+        alias MOQX.Transport.Conn.Stream.Sender
+
         pair = connect_pair(fixture, :moq_lite_04)
 
         try do
@@ -409,11 +412,15 @@ defmodule MOQX.TransportContract do
           assert {:ok, _server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
           ctx = flush_transport_events(ctx)
 
-          assert {:ok, send, ctx} = MOQX.Transport.send_stream(ctx, client_stream, "payload", [])
+          assert {:ok, sender} = Stream.sender(client_stream)
 
-          assert {%{send: ^send, ref: ref, byte_size: 7, finish?: false}, _ctx} =
-                   await_stream_event(ctx, client_stream, :send_completed, 100)
+          assert {:ok, send, sender} =
+                   Sender.send(sender, "payload", [])
 
+          assert {:ok, {:stream_event, ^client_stream, :send_completed, metadata}, _sender} =
+                   Sender.receive_event(sender, 100)
+
+          assert %{send: ^send, ref: ref, byte_size: 7, finish?: false} = metadata
           assert is_reference(ref)
         after
           cleanup_pair(pair)

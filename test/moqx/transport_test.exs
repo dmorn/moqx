@@ -1,6 +1,8 @@
 defmodule MOQX.TransportTest do
   use ExUnit.Case, async: true
 
+  alias MOQX.Transport.Conn.Stream
+  alias MOQX.Transport.Conn.Stream.Sender
   alias MOQX.Transport.Profile
   alias MOQX.Transport.Support
 
@@ -73,7 +75,7 @@ defmodule MOQX.TransportTest do
       assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
 
       assert {:ok,
-              %MOQX.Transport.StreamInfo{
+              %MOQX.Transport.Conn.Stream.Info{
                 stream_id: 0,
                 direction: :bidirectional,
                 initiator: :local,
@@ -84,7 +86,7 @@ defmodule MOQX.TransportTest do
               }, ctx} = MOQX.Transport.stream_info(ctx, client_stream)
 
       assert {:ok,
-              %MOQX.Transport.StreamInfo{
+              %MOQX.Transport.Conn.Stream.Info{
                 stream_id: 0,
                 direction: :bidirectional,
                 initiator: :peer,
@@ -165,6 +167,41 @@ defmodule MOQX.TransportTest do
                receive_context_stream_data(ctx, server_stream, "hello", 100)
     end
 
+    test "stream sender owns send completion credit independently from context" do
+      {ctx, client, server} = support_pair(:moq_lite_04)
+
+      assert {:ok, client_stream, ctx} =
+               MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
+
+      assert {:ok, server_stream, ctx} = MOQX.Transport.accept_stream(ctx, server, [], 100)
+      ctx = flush_context_events(ctx)
+
+      assert {:ok, ctx} = MOQX.Transport.set_active(ctx, server_stream, true)
+
+      parent = self()
+
+      spawn(fn ->
+        assert {:ok, sender} = Stream.sender(client_stream)
+        assert {:ok, send, sender} = Sender.send(sender, "hello", [])
+
+        assert {:ok, {:stream_event, ^client_stream, :send_completed, metadata}, _sender} =
+                 Sender.receive_event(sender, 100)
+
+        send(parent, {:stream_sender_done, send, metadata})
+      end)
+
+      assert {:ok, {:stream_data, ^server_stream, "hello", %{}}, ctx} =
+               receive_context_stream_data(ctx, server_stream, "hello", 100)
+
+      assert_receive {:stream_sender_done, send, metadata}, 1_000
+
+      assert metadata.send == send
+      assert metadata.byte_size == 5
+      assert metadata.finish? == false
+
+      assert {:timeout, ^ctx} = MOQX.Transport.receive_event(ctx, 0)
+    end
+
     test "emits telemetry for stream sends and normalized receive events" do
       {ctx, client, server} = support_pair(:moq_lite_04)
 
@@ -196,6 +233,7 @@ defmodule MOQX.TransportTest do
       assert stream_metadata.stream_direction == :bidirectional
       assert stream_metadata.stream_initiator == :local
       assert stream_metadata.local_role == :client
+      assert stream_metadata.sender_topology == :context_owner
 
       assert {:ok, {:stream_data, ^server_stream, "hello", %{}}, _ctx} =
                receive_context_stream_data(ctx, server_stream, "hello", 100)
@@ -308,7 +346,7 @@ defmodule MOQX.TransportTest do
                  datagram_send_flags: [:dgram_priority]
                )
 
-      connection = %MOQX.Transport.Connection{
+      connection = %MOQX.Transport.Conn{
         backend: %MOQX.Transport.BackendRef{
           module: __MODULE__.DatagramSendOptionsBackend,
           data: :connection
@@ -439,9 +477,9 @@ defmodule MOQX.TransportTest do
     assert {:ok, client, ctx} =
              MOQX.Transport.connect(ctx, "localhost", port, [profile: profile], 100)
 
-    assert %MOQX.Transport.Connection{local_role: :client} = client
+    assert %MOQX.Transport.Conn{local_role: :client} = client
     assert {:ok, server, ctx} = MOQX.Transport.accept(ctx, listener, [], 100)
-    assert %MOQX.Transport.Connection{local_role: :server} = server
+    assert %MOQX.Transport.Conn{local_role: :server} = server
     assert {:ok, client, ctx} = MOQX.Transport.handshake(ctx, client, 100)
     assert {:ok, server, ctx} = MOQX.Transport.handshake(ctx, server, 100)
     {ctx, client, server}

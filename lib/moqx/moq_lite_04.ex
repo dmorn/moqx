@@ -78,7 +78,7 @@ defmodule MOQX.MOQLite04 do
   Accepts a peer-opened transport stream and starts active delivery.
   """
   @spec accept_stream(Client.t(), timeout()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t()}
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t()}
           | {:error, Client.t(), term()}
   def accept_stream(client, timeout \\ :infinity), do: Client.accept_stream(client, timeout)
 
@@ -86,7 +86,7 @@ defmodule MOQX.MOQLite04 do
   Opens an Announce transaction stream and sends `ANNOUNCE_INTEREST`.
   """
   @spec announce_interest(Client.t(), AnnounceInterest.t()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def announce_interest(client, message), do: Client.announce_interest(client, message)
 
@@ -94,15 +94,15 @@ defmodule MOQX.MOQLite04 do
   Opens a Subscribe transaction stream and sends `SUBSCRIBE`.
   """
   @spec subscribe(Client.t(), Subscribe.t()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def subscribe(client, message), do: Client.subscribe(client, message)
 
   @doc """
   Sends `SUBSCRIBE_UPDATE` on an existing Subscribe transaction stream.
   """
-  @spec subscribe_update(Client.t(), MOQX.Transport.Stream.t(), SubscribeUpdate.t()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+  @spec subscribe_update(Client.t(), MOQX.Transport.Conn.Stream.t(), SubscribeUpdate.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def subscribe_update(client, stream, message),
     do: Client.subscribe_update(client, stream, message)
@@ -111,7 +111,7 @@ defmodule MOQX.MOQLite04 do
   Opens a Fetch transaction stream and sends `FETCH`.
   """
   @spec fetch(Client.t(), Fetch.t()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def fetch(client, message), do: Client.fetch(client, message)
 
@@ -119,15 +119,15 @@ defmodule MOQX.MOQLite04 do
   Opens a Probe transaction stream and sends `PROBE`.
   """
   @spec probe(Client.t(), Probe.t()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def probe(client, message), do: Client.probe(client, message)
 
   @doc """
   Sends `PROBE` on an existing Probe transaction stream.
   """
-  @spec probe(Client.t(), MOQX.Transport.Stream.t(), Probe.t()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+  @spec probe(Client.t(), MOQX.Transport.Conn.Stream.t(), Probe.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def probe(client, stream, message), do: Client.probe(client, stream, message)
 
@@ -135,31 +135,31 @@ defmodule MOQX.MOQLite04 do
   Opens a Goaway transaction stream and sends `GOAWAY`.
   """
   @spec goaway(Client.t(), Goaway.t()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def goaway(client, message), do: Client.goaway(client, message)
 
   @doc """
   Sends `ANNOUNCE` on an existing Announce transaction stream.
   """
-  @spec announce(Client.t(), MOQX.Transport.Stream.t(), Announce.t()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+  @spec announce(Client.t(), MOQX.Transport.Conn.Stream.t(), Announce.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def announce(client, stream, message), do: Client.announce(client, stream, message)
 
   @doc """
   Sends `SUBSCRIBE_OK` on an existing Subscribe transaction stream.
   """
-  @spec subscribe_ok(Client.t(), MOQX.Transport.Stream.t(), SubscribeOk.t()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+  @spec subscribe_ok(Client.t(), MOQX.Transport.Conn.Stream.t(), SubscribeOk.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def subscribe_ok(client, stream, message), do: Client.subscribe_ok(client, stream, message)
 
   @doc """
   Sends `SUBSCRIBE_DROP` on an existing Subscribe transaction stream.
   """
-  @spec subscribe_drop(Client.t(), MOQX.Transport.Stream.t(), SubscribeDrop.t()) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+  @spec subscribe_drop(Client.t(), MOQX.Transport.Conn.Stream.t(), SubscribeDrop.t()) ::
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def subscribe_drop(client, stream, message), do: Client.subscribe_drop(client, stream, message)
 
@@ -167,7 +167,7 @@ defmodule MOQX.MOQLite04 do
   Opens a publisher Group stream and sends `GROUP` followed by `FRAME` messages.
   """
   @spec publish_group(Client.t(), Group.t(), [Frame.t()]) ::
-          {:ok, Client.t(), MOQX.Transport.Stream.t(), [term()]}
+          {:ok, Client.t(), MOQX.Transport.Conn.Stream.t(), [term()]}
           | {:error, Client.t(), term(), [term()]}
   def publish_group(client, group, frames), do: Client.publish_group(client, group, frames)
 

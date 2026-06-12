@@ -61,7 +61,7 @@ defmodule MOQX.Transport.Quicer do
   Returns exact stream info for a quicer stream handle.
   """
   @spec stream_info(MOQX.Transport.stream(), :client | :server, :local | :peer) ::
-          {:ok, MOQX.Transport.StreamInfo.t()} | {:error, term()}
+          {:ok, MOQX.Transport.Conn.Stream.Info.t()} | {:error, term()}
   @impl true
   def stream_info(stream, local_role, initiator) do
     case :quicer.get_stream_id(stream) do
@@ -75,12 +75,12 @@ defmodule MOQX.Transport.Quicer do
   Builds exact stream info from QUIC stream ID and local endpoint role.
   """
   @spec stream_info_from_id(non_neg_integer(), :client | :server, :local | :peer) ::
-          MOQX.Transport.StreamInfo.t()
+          MOQX.Transport.Conn.Stream.Info.t()
   def stream_info_from_id(stream_id, local_role, initiator) do
     initiator_role = initiator_role_from_stream_id(stream_id)
     direction = direction_from_stream_id(stream_id)
 
-    %MOQX.Transport.StreamInfo{
+    %MOQX.Transport.Conn.Stream.Info{
       stream_id: stream_id,
       direction: direction,
       initiator: initiator,

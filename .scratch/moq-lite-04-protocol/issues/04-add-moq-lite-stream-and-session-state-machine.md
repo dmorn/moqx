@@ -19,7 +19,7 @@ bytes until complete messages are available, dispatches payload decoders, and
 emits typed protocol events or errors.
 
 The upper protocol state machine is `MOQX.MOQLite04.Session`; the transport
-handle remains `MOQX.Transport.Connection`.
+connection handle is `MOQX.Transport.Conn`.
 
 ## Acceptance criteria
 

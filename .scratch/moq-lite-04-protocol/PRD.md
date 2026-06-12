@@ -81,8 +81,8 @@ The implementation should proceed in narrow slices:
   atom tables, or session state.
 - `MOQX.MOQLite04` owns MOQ Lite draft-04 message structs, stream type lookup,
   stream codec, and session state.
-- The upper protocol state machine is called a Session. Connection remains
-  transport vocabulary for `MOQX.Transport.Connection`.
+- The upper protocol state machine is called a Session. Conn remains transport
+  vocabulary for `MOQX.Transport.Conn`.
 - Session APIs are pure reducers. `handle_transport/2` consumes normalized
   `MOQX.Transport` events and `handle_command/2` consumes local application
   intent.

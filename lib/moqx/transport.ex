@@ -7,7 +7,9 @@ defmodule MOQX.Transport do
   wrapper handles.
   """
 
-  alias MOQX.Transport.{BackendRef, Connection, Context, Listener, Send, Stream, StreamInfo}
+  alias MOQX.Transport.{BackendRef, Conn, Context, Listener}
+  alias MOQX.Transport.Conn.Stream
+  alias MOQX.Transport.Conn.Stream.{Info, Send, Sender}
 
   @type listener :: term()
   @type connection :: term()
@@ -74,7 +76,7 @@ defmodule MOQX.Transport do
   @callback normalize_message(term()) :: event() | :unknown
 
   @callback stream_info(stream(), :client | :server, :local | :peer) ::
-              {:ok, StreamInfo.t()} | {:error, term()}
+              {:ok, Info.t()} | {:error, term()}
 
   @callback capabilities(connection()) :: MOQX.Transport.Capabilities.t() | {:error, term()}
 
@@ -91,9 +93,7 @@ defmodule MOQX.Transport do
       connections: %{},
       streams: %{},
       stream_counters: %{},
-      pending_peer_streams: :queue.new(),
-      pending_sends: %{},
-      finished_sending: MapSet.new()
+      pending_peer_streams: :queue.new()
     }
 
     {:ok, %Context{backend: %BackendRef{module: backend, data: data}}}
@@ -130,7 +130,7 @@ defmodule MOQX.Transport do
     end)
   end
 
-  def local_address(%Context{} = ctx, %Connection{} = connection) do
+  def local_address(%Context{} = ctx, %Conn{} = connection) do
     require_same_backend(ctx, connection, fn ->
       backend_local_address(ctx.backend.module, connection.backend.data)
     end)
@@ -186,7 +186,7 @@ defmodule MOQX.Transport do
   @doc """
   Completes backend handshake.
   """
-  def handshake(%Context{} = ctx, %Connection{} = connection, timeout \\ 5_000) do
+  def handshake(%Context{} = ctx, %Conn{} = connection, timeout \\ 5_000) do
     require_same_backend(ctx, connection, fn ->
       backend = ctx.backend.module
 
@@ -204,7 +204,7 @@ defmodule MOQX.Transport do
   @doc """
   Opens local stream and records exact stream metadata.
   """
-  def open_stream(%Context{} = ctx, %Connection{} = connection, opts \\ []) do
+  def open_stream(%Context{} = ctx, %Conn{} = connection, opts \\ []) do
     require_same_backend(ctx, connection, fn ->
       backend = ctx.backend.module
       direction = option(opts, :direction, :bidirectional)
@@ -224,7 +224,7 @@ defmodule MOQX.Transport do
   """
   def accept_stream(
         %Context{} = ctx,
-        %Connection{} = connection,
+        %Conn{} = connection,
         opts \\ [],
         timeout \\ :infinity
       ) do
@@ -242,10 +242,12 @@ defmodule MOQX.Transport do
   end
 
   @doc """
-  Schedules bytes on stream.
+  Schedules bytes on stream from the context owner.
 
-  Returns a send token once the backend accepts the send request. Completion or
-  cancellation is reported later as a stream event where available.
+  Returns a send token once the backend accepts the send request. Context-owned
+  receive loops can observe later completion or cancellation events, but token
+  correlation is stream-local. Use `MOQX.Transport.Conn.Stream.Sender` when the
+  caller needs completion feedback as backend credit for accepted sends.
 
   Pass `finish: true` to attach FIN to this accepted payload.
   """
@@ -272,22 +274,13 @@ defmodule MOQX.Transport do
   end
 
   defp schedule_stream_send(ctx, raw_stream, data, opts) do
-    if finished_sending?(ctx, raw_stream) do
-      {:error, :send_side_finished, ctx}
-    else
-      send = build_send(data, opts)
-      accept_stream_send(ctx, raw_stream, data, opts, send)
-    end
+    send = build_send(data, opts)
+    accept_stream_send(ctx, raw_stream, data, opts, send)
   end
 
   defp accept_stream_send(ctx, raw_stream, data, opts, send) do
     case ctx.backend.module.send_stream(raw_stream, data, opts) do
       :ok ->
-        ctx =
-          ctx
-          |> enqueue_pending_send(raw_stream, send)
-          |> maybe_mark_finished_sending(raw_stream, send.finish?)
-
         {:ok, send, ctx}
 
       {:error, reason} ->
@@ -303,53 +296,77 @@ defmodule MOQX.Transport do
     }
   end
 
-  defp maybe_mark_finished_sending(ctx, raw_stream, true),
-    do: mark_finished_sending(ctx, raw_stream)
+  @doc false
+  def send_stream_sender(
+        %Sender{stream: %Stream{info: %{send_side?: false}}} = sender,
+        data,
+        opts
+      ) do
+    started_at = monotonic_us()
+    result = {:error, :send_side_unavailable, sender}
 
-  defp maybe_mark_finished_sending(ctx, _raw_stream, false), do: ctx
-
-  defp finished_sending?(ctx, raw_stream) do
-    MapSet.member?(ctx.backend.data.finished_sending, raw_stream)
+    emit_stream_send_stop(sender, data, opts, started_at, result)
+    result
   end
 
-  defp mark_finished_sending(ctx, raw_stream) do
-    update_backend_data(ctx, fn data ->
-      Map.update!(data, :finished_sending, &MapSet.put(&1, raw_stream))
-    end)
+  def send_stream_sender(%Sender{finished_sending?: true} = sender, data, opts) do
+    started_at = monotonic_us()
+    result = {:error, :send_side_finished, sender}
+
+    emit_stream_send_stop(sender, data, opts, started_at, result)
+    result
   end
 
-  defp enqueue_pending_send(ctx, raw_stream, send) do
-    update_backend_data(ctx, fn data ->
-      Map.update!(data, :pending_sends, fn pending ->
-        Map.update(pending, raw_stream, :queue.in(send, :queue.new()), &:queue.in(send, &1))
-      end)
-    end)
+  def send_stream_sender(%Sender{stream: %Stream{} = stream} = sender, data, opts) do
+    started_at = monotonic_us()
+    send = build_send(data, opts)
+
+    result =
+      case stream.backend.module.send_stream(stream.backend.data, data, opts) do
+        :ok ->
+          sender =
+            sender
+            |> enqueue_sender_send(send)
+            |> maybe_mark_sender_finished(send.finish?)
+
+          {:ok, send, sender}
+
+        {:error, reason} ->
+          {:error, reason, sender}
+      end
+
+    emit_stream_send_stop(sender, data, opts, started_at, result)
+    result
   end
 
-  defp pop_pending_send(ctx, raw_stream) do
-    pending = ctx.backend.data.pending_sends
-    queue = Map.get(pending, raw_stream, :queue.new())
+  @doc false
+  def receive_stream_event(%Sender{} = sender, timeout \\ :infinity) do
+    started_at = monotonic_us()
 
-    case :queue.out(queue) do
-      {{:value, send}, remaining} ->
-        {{:ok, send}, store_remaining_pending_sends(ctx, pending, raw_stream, remaining)}
+    result =
+      receive do
+        message -> normalize_stream_sender_message(sender, message)
+      after
+        timeout_value(timeout) -> {:timeout, sender}
+      end
 
-      {:empty, _queue} ->
-        {{:error, nil}, ctx}
-    end
+    emit_receive_stream_event_stop(sender, timeout, started_at, result)
+    result
   end
 
-  defp store_remaining_pending_sends(ctx, pending, raw_stream, remaining) do
-    update_backend_data(ctx, fn data ->
-      Map.put(data, :pending_sends, remaining_pending_sends(pending, raw_stream, remaining))
-    end)
+  defp enqueue_sender_send(%Sender{} = sender, %Send{} = send) do
+    %{sender | pending_sends: :queue.in(send, sender.pending_sends)}
   end
 
-  defp remaining_pending_sends(pending, raw_stream, remaining) do
-    if :queue.is_empty(remaining) do
-      Map.delete(pending, raw_stream)
-    else
-      Map.put(pending, raw_stream, remaining)
+  defp maybe_mark_sender_finished(%Sender{} = sender, true),
+    do: %{sender | finished_sending?: true}
+
+  defp maybe_mark_sender_finished(%Sender{} = sender, false), do: sender
+
+  defp pop_sender_send(%Sender{} = sender) do
+    case :queue.out(sender.pending_sends) do
+      {{:value, send}, remaining} -> {{:ok, send}, %{sender | pending_sends: remaining}}
+      {:empty, _queue} -> {{:error, nil}, sender}
     end
   end
 
@@ -397,7 +414,7 @@ defmodule MOQX.Transport do
   Completion, loss, or cancellation is reported asynchronously by backend
   connection events where available.
   """
-  def send_datagram(%Context{} = ctx, %Connection{} = connection, data) when is_binary(data) do
+  def send_datagram(%Context{} = ctx, %Conn{} = connection, data) when is_binary(data) do
     started_at = monotonic_us()
 
     result =
@@ -430,11 +447,7 @@ defmodule MOQX.Transport do
   end
 
   def finish_sending(%Context{} = ctx, %Stream{} = stream) do
-    if finished_sending?(ctx, stream.backend.data) do
-      {:error, :send_side_finished, ctx}
-    else
-      call_stream_shutdown(ctx, stream, :finish_sending, [], finish?: true)
-    end
+    call_stream_shutdown(ctx, stream, :finish_sending, [])
   end
 
   @doc """
@@ -481,7 +494,7 @@ defmodule MOQX.Transport do
   Peer observation: peer receives connection `:closed` event where backend exposes it.
   Completion: returns after backend accepts request; lifecycle events arrive later.
   """
-  def close_connection(%Context{} = ctx, %Connection{} = connection, error_code)
+  def close_connection(%Context{} = ctx, %Conn{} = connection, error_code)
       when is_integer(error_code) and error_code >= 0 do
     require_same_backend(ctx, connection, fn ->
       case ctx.backend.module.close_connection(connection.backend.data, error_code) do
@@ -501,7 +514,7 @@ defmodule MOQX.Transport do
   @doc """
   Returns normalized capabilities for a negotiated transport connection.
   """
-  def capabilities(%Context{} = ctx, %Connection{} = connection) do
+  def capabilities(%Context{} = ctx, %Conn{} = connection) do
     case same_backend(ctx, connection) do
       :ok -> ctx.backend.module.capabilities(connection.backend.data)
       {:error, reason} -> {:error, reason}
@@ -694,7 +707,7 @@ defmodule MOQX.Transport do
   end
 
   defp wrap_connection(backend, raw_connection, role) do
-    %Connection{backend: %BackendRef{module: backend, data: raw_connection}, local_role: role}
+    %Conn{backend: %BackendRef{module: backend, data: raw_connection}, local_role: role}
   end
 
   defp same_backend(%Context{backend: %BackendRef{module: module}}, %{
@@ -741,6 +754,17 @@ defmodule MOQX.Transport do
     end
   end
 
+  defp normalize_stream_sender_message(%Sender{} = sender, {:moqx_transport, event}) do
+    wrap_stream_sender_event(sender, event)
+  end
+
+  defp normalize_stream_sender_message(%Sender{stream: stream} = sender, message) do
+    case stream.backend.module.normalize_message(message) do
+      :unknown -> {:unknown, message, sender}
+      event -> wrap_stream_sender_event(sender, event)
+    end
+  end
+
   defp transfer_all(_backend, [], _pid, []), do: :ok
   defp transfer_all(_backend, [], _pid, failures), do: {:error, Enum.reverse(failures)}
 
@@ -751,15 +775,12 @@ defmodule MOQX.Transport do
     end
   end
 
-  defp call_stream_shutdown(ctx, stream, function, args, opts \\ []) do
+  defp call_stream_shutdown(ctx, stream, function, args) do
     require_same_backend(ctx, stream, fn ->
       result = apply(ctx.backend.module, function, [stream.backend.data | args])
 
       case result do
         :ok ->
-          ctx =
-            maybe_mark_finished_sending(ctx, stream.backend.data, option(opts, :finish?, false))
-
           {:ok, ctx}
 
         {:error, reason} ->
@@ -771,8 +792,7 @@ defmodule MOQX.Transport do
   defp wrap_event(ctx, {:stream_event, raw_stream, :send_complete, cancelled?}) do
     case Map.fetch(ctx.backend.data.streams, raw_stream) do
       {:ok, stream} ->
-        {{status, send}, ctx} = pop_pending_send(ctx, raw_stream)
-        {event, metadata} = send_completion_event(cancelled?, status, send)
+        {event, metadata} = send_completion_event(cancelled?, :error, nil)
         {:ok, {:stream_event, stream, event, metadata}, ctx}
 
       :error ->
@@ -816,6 +836,42 @@ defmodule MOQX.Transport do
   end
 
   defp wrap_event(ctx, event), do: {:ok, event, ctx}
+
+  defp wrap_stream_sender_event(
+         %Sender{stream: %Stream{backend: %BackendRef{data: raw_stream}} = stream} = sender,
+         {:stream_event, raw_stream, :send_complete, cancelled?}
+       ) do
+    {{status, send}, sender} = pop_sender_send(sender)
+    {event, metadata} = send_completion_event(cancelled?, status, send)
+    {:ok, {:stream_event, stream, event, metadata}, sender}
+  end
+
+  defp wrap_stream_sender_event(
+         %Sender{stream: %Stream{backend: %BackendRef{data: raw_stream}} = stream} = sender,
+         {:stream_event, raw_stream, event, metadata}
+       ) do
+    {:ok, {:stream_event, stream, event, metadata}, sender}
+  end
+
+  defp wrap_stream_sender_event(
+         %Sender{stream: %Stream{backend: %BackendRef{data: raw_stream}} = stream} = sender,
+         {:stream_data, raw_stream, data, metadata}
+       ) do
+    {:ok, {:stream_data, stream, data, metadata}, sender}
+  end
+
+  defp wrap_stream_sender_event(
+         %Sender{} = sender,
+         {:stream_event, raw_stream, _event, _metadata}
+       ) do
+    {:error, {:unknown_transport_handle, raw_stream}, sender}
+  end
+
+  defp wrap_stream_sender_event(%Sender{} = sender, {:stream_data, raw_stream, _data, _metadata}) do
+    {:error, {:unknown_transport_handle, raw_stream}, sender}
+  end
+
+  defp wrap_stream_sender_event(%Sender{} = sender, event), do: {:unknown, event, sender}
 
   defp send_completion_event(false, :ok, send) do
     {:send_completed, send_completion_metadata(send, false)}
@@ -898,7 +954,7 @@ defmodule MOQX.Transport do
     do: pop_first(rest, initiator_role, [item | kept])
 
   defp stream_info_from_parts(stream_id, direction, initiator, initiator_role, local_role) do
-    %StreamInfo{
+    %Info{
       stream_id: stream_id,
       direction: direction,
       initiator: initiator,
@@ -941,6 +997,24 @@ defmodule MOQX.Transport do
       stream_metadata(ctx, stream)
       |> Map.merge(result_metadata(result))
       |> Map.put(:finish?, option(opts, :finish, false) == true)
+      |> Map.put(:sender_topology, :context_owner)
+
+    :telemetry.execute([:moqx, :transport, :stream, :send, :stop], measurements, metadata)
+  end
+
+  defp emit_stream_send_stop(%Sender{stream: stream}, data, opts, started_at, result) do
+    measurements =
+      %{
+        duration_us: monotonic_us() - started_at,
+        byte_size: stream_send_byte_size(result, data)
+      }
+      |> compact_measurements()
+
+    metadata =
+      stream_metadata_with_backend(stream)
+      |> Map.merge(result_metadata(result))
+      |> Map.put(:finish?, option(opts, :finish, false) == true)
+      |> Map.put(:sender_topology, :stream_owner)
 
     :telemetry.execute([:moqx, :transport, :stream, :send, :stop], measurements, metadata)
   end
@@ -991,6 +1065,22 @@ defmodule MOQX.Transport do
 
     metadata =
       %{backend: ctx.backend.module}
+      |> Map.merge(receive_result_metadata(result))
+
+    :telemetry.execute([:moqx, :transport, :event, :receive, :stop], measurements, metadata)
+  end
+
+  defp emit_receive_stream_event_stop(%Sender{stream: stream}, timeout, started_at, result) do
+    measurements =
+      %{
+        duration_us: monotonic_us() - started_at,
+        timeout_ms: telemetry_timeout_ms(timeout),
+        byte_size: receive_event_byte_size(result)
+      }
+      |> compact_measurements()
+
+    metadata =
+      %{backend: stream.backend.module, receiver_topology: :stream_owner}
       |> Map.merge(receive_result_metadata(result))
 
     :telemetry.execute([:moqx, :transport, :event, :receive, :stop], measurements, metadata)
@@ -1051,6 +1141,11 @@ defmodule MOQX.Transport do
     |> Map.merge(stream_metadata(stream))
   end
 
+  defp stream_metadata_with_backend(%Stream{} = stream) do
+    %{backend: stream.backend.module}
+    |> Map.merge(stream_metadata(stream))
+  end
+
   defp stream_metadata(%Stream{info: info}) do
     %{
       stream_id: info.stream_id,
@@ -1060,12 +1155,12 @@ defmodule MOQX.Transport do
     }
   end
 
-  defp connection_metadata(ctx, %Connection{} = connection) do
+  defp connection_metadata(ctx, %Conn{} = connection) do
     %{backend: ctx.backend.module}
     |> Map.merge(connection_metadata(connection))
   end
 
-  defp connection_metadata(%Connection{local_role: local_role}) do
+  defp connection_metadata(%Conn{local_role: local_role}) do
     %{local_role: local_role}
   end
 

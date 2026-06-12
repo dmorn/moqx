@@ -29,7 +29,7 @@ defmodule MOQX.MOQLite04.ClientTest do
 
     assert %Session{alpn: "moq-lite-04", streams: %{}} = client.session
     assert %MOQX.Transport.Context{} = client.context
-    assert %MOQX.Transport.Connection{local_role: :client} = client.connection
+    assert %MOQX.Transport.Conn{local_role: :client} = client.connection
 
     assert %MOQX.Transport.Capabilities{alpn: "moq-lite-04"} =
              Transport.capabilities(client.context, client.connection)

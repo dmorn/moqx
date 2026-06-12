@@ -298,17 +298,22 @@ through `statistics_v2`. Use those diagnostics to compare slow and fast mixed
 runs before changing stream windows, priorities, or quicer/MsQuic settings.
 
 MOQX-client stream pressure uses `MOQXProbe.Traffic.StreamSender`. The sender
-composes a bounded Flow payload producer with a single GenStage stream sink:
+currently composes a bounded Flow payload producer with a single GenStage
+context-owner stream sink:
 
 ```text
-payload descriptors -> bounded stream sink -> MOQX.Transport.send_stream/4
-                                      ^ send-completion feedback
+payload descriptors -> bounded context-owner sink -> MOQX.Transport.send_stream/4
+                                             ^ send-completion feedback
 ```
 
 The sink is the only process that calls `MOQX.Transport.send_stream/4` for pure
-stream pressure. It owns per-stream admission windows, FIN placement on the
-final payload for each stream, bounded producer demand, and stream-sender
-telemetry under `[:moqx, :transport_bench, :stream_sender, ...]`.
+stream pressure. Records expose this as
+`stream_sender_topology=context_owner`. It owns per-stream admission windows,
+FIN placement on the final payload for each stream, bounded producer demand,
+and stream-sender telemetry under `[:moqx, :transport_bench, :stream_sender, ...]`.
+The transport layer now also exposes `MOQX.Transport.Conn.Stream.Sender` for
+future per-stream sender-owner runs where completion tokens are correlated
+inside stream-local sender state.
 Bidirectional pressure keeps echo validation, timeout/failure classification,
 and report assembly in the existing receive-event loop; send-completion events
 feed back into the sink to reopen per-stream windows.
@@ -511,10 +516,13 @@ streams, schedules payload rounds across those streams, and records
 `stream_scheduling=mixed_control_bidi_object_uni` for mixed pressure. Stream
 sends are accepted asynchronously by `MOQX.Transport.send_stream/4`; send
 completion is reported later as a transport event and is not peer-delivery
-proof. Mixed-pressure diagnostics include object send-completion counts,
-pending completion counts, drained event counts, current sender mailbox depth,
-peak observed sender mailbox depth, and zero-wait completion-drain events
-observed after the workload success condition has been met.
+proof. Stream and mixed diagnostics include `stream_sender_topology` so future
+per-stream `MOQX.Transport.Conn.Stream.Sender` runs can be compared against
+the current context-owner baseline. Mixed-pressure diagnostics include object
+send-completion counts, pending completion counts, drained event counts,
+current sender mailbox depth, peak observed sender mailbox depth, and
+zero-wait completion-drain events observed after the workload success condition
+has been met.
 
 ### Pressure Patterns
 

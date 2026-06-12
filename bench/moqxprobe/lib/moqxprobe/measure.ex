@@ -769,6 +769,7 @@ defmodule MOQXProbe.Measure do
       "stream_send_window" => config.stream_send_window,
       "stream_event_batch_size" => config.stream_event_batch_size,
       "stream_diagnostics_sampling" => config.stream_diagnostics_sampling,
+      "stream_sender_topology" => "context_owner",
       "payload_size_bytes" => config.payload_size,
       "payload_count" => config.payload_count,
       "bytes_sent" => Map.get(summary, "bytes_sent"),
@@ -957,6 +958,7 @@ defmodule MOQXProbe.Measure do
       "stream_send_window" => config.stream_send_window,
       "stream_event_batch_size" => config.stream_event_batch_size,
       "stream_diagnostics_sampling" => config.stream_diagnostics_sampling,
+      "stream_sender_topology" => "context_owner",
       "payload_size_bytes" => config.payload_size,
       "payload_count" => config.payload_count,
       "bytes_sent" => result.bytes_sent,
@@ -1269,6 +1271,7 @@ defmodule MOQXProbe.Measure do
       "control_echo_window" => config.control_echo_window,
       "control_stream_priority" => config.control_stream_priority,
       "object_stream_priority" => config.object_stream_priority,
+      "stream_sender_topology" => "context_owner",
       "control_trickle_bps" => control_trickle_bps(config),
       "bytes_sent" => bytes_sent,
       "bytes_received" => control_result.bytes_received,
@@ -2214,6 +2217,7 @@ defmodule MOQXProbe.Measure do
           "control_echo_window" => config.control_echo_window,
           "control_stream_priority" => config.control_stream_priority,
           "object_stream_priority" => config.object_stream_priority,
+          "stream_sender_topology" => "context_owner",
           "control_messages_scheduled" => state.control.messages_scheduled,
           "control_messages_echoed" => state.control.messages_echoed,
           "control_echo_inflight" => control_echo_inflight(state.control),
@@ -4446,6 +4450,7 @@ defmodule MOQXProbe.Measure do
         "stream_send_window" => config.stream_send_window,
         "stream_event_batch_size" => config.stream_event_batch_size,
         "stream_diagnostics_sampling" => config.stream_diagnostics_sampling,
+        "stream_sender_topology" => "context_owner",
         "payloads_accepted" =>
           stream_diagnostics |> Enum.map(&(&1["payloads_accepted"] || 0)) |> Enum.sum(),
         "payloads_completed" =>
@@ -4825,6 +4830,7 @@ defmodule MOQXProbe.Measure do
         "stream_send_window" => stream_send_window(ctx.config, measurement),
         "stream_event_batch_size" => stream_event_batch_size(ctx.config, measurement),
         "stream_diagnostics_sampling" => stream_diagnostics_sampling(ctx.config, measurement),
+        "stream_sender_topology" => stream_sender_topology(ctx.config, measurement),
         "control_echo_window" => control_echo_window(ctx.config, measurement),
         "control_stream_priority" => control_stream_priority(ctx.config, measurement),
         "object_stream_priority" => object_stream_priority(ctx.config, measurement)
@@ -4867,6 +4873,11 @@ defmodule MOQXProbe.Measure do
     do: measurement["stream_diagnostics_sampling"] || config.stream_diagnostics_sampling
 
   defp stream_diagnostics_sampling(_config, _measurement), do: nil
+
+  defp stream_sender_topology(%{topology: @moqx_client_topology}, measurement),
+    do: measurement["stream_sender_topology"]
+
+  defp stream_sender_topology(_config, _measurement), do: nil
 
   defp control_echo_window(
          %{topology: @moqx_client_topology, workload: @mixed_moqt_shaped_workload} = config,

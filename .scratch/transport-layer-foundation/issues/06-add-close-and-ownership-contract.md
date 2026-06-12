@@ -70,14 +70,14 @@ All public transport resources are stable MOQX wrapper structs with backend-priv
   local_role: :server
 }
 
-%MOQX.Transport.Connection{
+%MOQX.Transport.Conn{
   backend: %MOQX.Transport.BackendRef{module: module(), data: term()},
   local_role: :client | :server
 }
 
-%MOQX.Transport.Stream{
+%MOQX.Transport.Conn.Stream{
   backend: %MOQX.Transport.BackendRef{module: module(), data: term()},
-  info: %MOQX.Transport.StreamInfo{}
+  info: %MOQX.Transport.Conn.Stream.Info{}
 }
 ```
 
@@ -94,8 +94,8 @@ Backend implementation callbacks receive wrapper structs and backend-private con
 Example shape:
 
 ```elixir
-@callback open_stream(backend_state, MOQX.Transport.Connection.t(), opts) ::
-            {:ok, backend_state, MOQX.Transport.Stream.t()} |
+@callback open_stream(backend_state, MOQX.Transport.Conn.t(), opts) ::
+            {:ok, backend_state, MOQX.Transport.Conn.Stream.t()} |
             {:error, term(), backend_state}
 ```
 
@@ -103,12 +103,12 @@ Exact callback names/signatures may be adjusted during implementation, but the p
 
 ### Stream info is first-class
 
-Add `%MOQX.Transport.StreamInfo{}` and `Transport.stream_info/2`.
+Add `%MOQX.Transport.Conn.Stream.Info{}` and `Transport.stream_info/2`.
 
 Required fields:
 
 ```elixir
-%MOQX.Transport.StreamInfo{
+%MOQX.Transport.Conn.Stream.Info{
   stream_id: non_neg_integer(),
   direction: :bidirectional | :unidirectional,
   initiator: :local | :peer,
@@ -191,7 +191,7 @@ Connection close uses one canonical event with normalized metadata:
    initiator: :local | :peer | :unknown}}
 ```
 
-Stream event tuples should carry `%MOQX.Transport.Stream{}` values. Do not duplicate `stream.info` into event metadata; metadata should be event-specific only, such as `%{error_code: code}` or backend status details where useful and documented.
+Stream event tuples should carry `%MOQX.Transport.Conn.Stream{}` values. Do not duplicate `stream.info` into event metadata; metadata should be event-specific only, such as `%{error_code: code}` or backend status details where useful and documented.
 
 ### Context-aware event normalization
 
@@ -225,10 +225,12 @@ Semantics:
 
 - [x] `MOQX.Transport` exposes `new/2` and context-threaded façade functions with context-last tuples.
 - [x] Public protocol-facing tests use `MOQX.Transport.*` façade calls rather than direct backend calls, except backend-specific adapter/unit tests.
-- [x] Public wrapper structs exist for `Context`, `BackendRef`, `Listener`, `Connection`, `Stream`, and `StreamInfo`.
+- [x] Public wrapper structs exist for `Context`, `BackendRef`, `Listener`,
+      `Conn`, `Conn.Stream`, and `Conn.Stream.Info`.
 - [x] Wrapper handles carry backend module plus backend-opaque data; protocol-visible fields expose only stable transport metadata.
 - [x] The façade validates backend/context mismatches and returns a stable error.
-- [x] `StreamInfo` includes exact `stream_id`, `direction`, `initiator`, `initiator_role`, `local_role`, `send_side?`, and `receive_side?` fields.
+- [x] `Conn.Stream.Info` includes exact `stream_id`, `direction`, `initiator`,
+      `initiator_role`, `local_role`, `send_side?`, and `receive_side?` fields.
 - [x] Support transport assigns QUIC-shaped stream IDs and exact stream info for local/peer, bidirectional/unidirectional streams.
 - [x] `close_stream/2` is removed from the public transport behaviour/API.
 - [x] `finish_sending/2`, `abort_sending/3`, and `abort_receiving/3` exist and are documented with intent, QUIC mapping, peer observation, completion semantics, and directionality.

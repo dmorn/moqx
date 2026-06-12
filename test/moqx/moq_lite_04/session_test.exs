@@ -5,7 +5,9 @@ defmodule MOQX.MOQLite04.SessionTest do
   alias MOQX.MOQLite04.Error
   alias MOQX.MOQLite04.Session
   alias MOQX.MOQLite04.StreamCodec
-  alias MOQX.Transport.{BackendRef, Connection, Stream, StreamInfo, Support}
+  alias MOQX.Transport.{BackendRef, Conn, Support}
+  alias MOQX.Transport.Conn.Stream
+  alias MOQX.Transport.Conn.Stream.Info
 
   describe "session start" do
     test "starts active without emitting setup work" do
@@ -159,7 +161,7 @@ defmodule MOQX.MOQLite04.SessionTest do
     end
 
     test "returns connection-close transport actions as data" do
-      connection = %Connection{
+      connection = %Conn{
         backend: %BackendRef{module: __MODULE__, data: :connection},
         local_role: :client
       }
@@ -596,7 +598,7 @@ defmodule MOQX.MOQLite04.SessionTest do
 
     %Stream{
       backend: %BackendRef{module: __MODULE__, data: {:stream, id}},
-      info: %StreamInfo{
+      info: %Info{
         stream_id: id,
         direction: direction,
         initiator: initiator,

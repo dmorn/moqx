@@ -1,4 +1,4 @@
-defmodule MOQX.Transport.StreamInfo do
+defmodule MOQX.Transport.Conn.Stream.Info do
   @moduledoc """
   Stable metadata for one QUIC stream from local endpoint perspective.
   """

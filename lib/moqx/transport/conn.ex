@@ -1,6 +1,6 @@
-defmodule MOQX.Transport.Connection do
+defmodule MOQX.Transport.Conn do
   @moduledoc """
-  Opaque connection handle returned by `MOQX.Transport`.
+  Opaque QUIC connection handle returned by `MOQX.Transport`.
   """
 
   alias MOQX.Transport.BackendRef

@@ -1,4 +1,4 @@
-defmodule MOQX.Transport.Send do
+defmodule MOQX.Transport.Conn.Stream.Send do
   @moduledoc """
   Transport send request accepted by a backend.
 

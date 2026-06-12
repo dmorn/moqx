@@ -35,6 +35,7 @@ The architectural baseline is recorded in:
 - `docs/adr/0001-transport-boundary-support-transport-and-benchmark-harness.md`
 - `docs/adr/0002-native-quic-first-webtransport-out-of-scope.md`
 - `docs/adr/0003-validated-endpoints-above-raw-transport.md`
+- `docs/adr/0008-functional-conn-stream-ownership.md`
 
 ## User Stories
 
@@ -63,6 +64,11 @@ The architectural baseline is recorded in:
 23. As a maintainer, I want benchmark tooling isolated in dedicated bench subprojects, so that research dependencies and release packaging do not leak into the library dependency graph.
 24. As an operator, I want a Docker-built benchmark CLI release that can be copied to controlled servers, so that real-path experiments do not require cloning the repository on disposable hosts.
 25. As a future implementer of MOQT draft-14 or MOQ Lite, I want transport semantics to be documented and tested, so that protocol-specific work starts from solid ground.
+26. As a high-throughput caller implementer, I want connection-scoped and
+    stream-scoped transport state to be separable, so that object stream
+    senders can own their own backend-credit loop without a global stream pump.
+27. As a transport API user, I want one clear connection vocabulary, so that I
+    do not have to distinguish ambiguous `Conn` and `Connection` modules.
 
 ## Implementation Decisions
 
@@ -78,6 +84,18 @@ The architectural baseline is recorded in:
 - Stream finish, reset, and stop-sending behavior should be exposed as distinct operations and events.
 - Transport handles remain opaque.
 - Binary stream and datagram payloads remain binaries.
+- The clean connection vocabulary is `MOQX.Transport.Conn`; the transport API
+  must not expose both `Conn` and `Connection` modules.
+- Stream-scoped state belongs under the connection hierarchy as
+  `MOQX.Transport.Conn.Stream`. A single stream structure represents
+  bidirectional and unidirectional streams through stream metadata and side
+  availability.
+- `MOQX.Transport` remains functional and process-free. OTP/GenStage sender
+  processes are built above transport by owning `Conn` and `Conn.Stream` state
+  values explicitly.
+- Stream send completion is backend/buffer credit for an accepted send token,
+  not peer-delivery proof. Completion correlation should be stream-local so
+  one sender process per stream is possible.
 - A deterministic support transport will implement the transport behaviour for tests.
 - Shared contract tests will verify handshake, stream, datagram, active/passive, close/reset, capabilities, and ownership semantics across transport implementations.
 - Shared benchmark artifact specs live in a slim `bench/ledger` Mix project
@@ -94,6 +112,15 @@ The architectural baseline is recorded in:
 - Remote benchmark hosts should receive Docker-built release artifacts for the
   target OS/architecture. Deploy tooling must accept explicit SSH targets and
   must not call Terraform or start benchmark traffic implicitly.
+- The `Conn`/`Conn.Stream` ownership refactor is expected to affect stream and
+  mixed benchmark results. Existing #45/#46 evidence remains valid for the old
+  single-pump/global-context transport shape, but fresh stream and mixed
+  baselines are required after the refactor before closing performance issues.
+- As of 2026-06-12, the refactor is implemented locally with
+  `Conn.Stream.Sender` as the explicit stream-local send-completion credit
+  owner. The current benchmark harness still labels its stream topology as
+  `context_owner`; remote performance closure requires fresh runs from a
+  current artifact and, if needed, a follow-up per-stream sender topology.
 
 ## Testing Decisions
 

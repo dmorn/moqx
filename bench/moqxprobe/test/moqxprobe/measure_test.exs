@@ -945,8 +945,10 @@ defmodule MOQXProbe.MeasureTest do
 
     assert record["profile"]["settings"]["control_stream_priority"] == 65_535
     assert record["profile"]["settings"]["object_stream_priority"] == 1
+    assert record["profile"]["settings"]["stream_sender_topology"] == "context_owner"
     assert record["diagnostics"]["summary"]["control_stream_priority"] == 65_535
     assert record["diagnostics"]["summary"]["object_stream_priority"] == 1
+    assert record["diagnostics"]["summary"]["stream_sender_topology"] == "context_owner"
 
     open_opts = receive_mixed_open_stream_opts()
     assert Enum.count(open_opts, &(Keyword.fetch!(&1, :direction) == :unidirectional)) == 2
@@ -1307,8 +1309,10 @@ defmodule MOQXProbe.MeasureTest do
 
     diagnostics = record["diagnostics"]
     assert diagnostics["version"] == "stream-pressure-diagnostics-v1"
+    assert record["profile"]["settings"]["stream_sender_topology"] == "context_owner"
     assert diagnostics["summary"]["payloads_accepted"] == 4
     assert diagnostics["summary"]["payloads_completed"] == 4
+    assert diagnostics["summary"]["stream_sender_topology"] == "context_owner"
     assert diagnostics["summary"]["send_completions"] == 4
     assert diagnostics["summary"]["send_completions_pending"] == 0
     assert diagnostics["summary"]["events_drained"] >= 8

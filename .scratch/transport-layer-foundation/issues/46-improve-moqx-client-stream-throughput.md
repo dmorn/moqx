@@ -14,6 +14,7 @@ Category: performance
 
 - `.scratch/transport-layer-foundation/issues/43-build-stream-benchmark-sender-client.md`
 - `.scratch/transport-layer-foundation/issues/45-improve-moqx-client-mixed-stream-control-pressure.md`
+- `.scratch/transport-layer-foundation/issues/47-refactor-transport-conn-stream-ownership.md`
 
 ## What to build
 
@@ -184,3 +185,15 @@ with object publishing.
   clean repetitions, zero final pending completions, bounded mailbox, and no
   break symptom. Keep #45 open until the mixed object/control workload is
   rerun from the same clean artifact.
+- 2026-06-12: #47/ADR-0008 now track the transport-level ownership refactor
+  that can make one sender process per stream possible while keeping
+  `MOQX.Transport` functional. The existing #46 object-stream-only evidence is
+  still valid for the current single-pump/global-context implementation, but it
+  should be treated as a pre-refactor baseline. Rerun the object-stream lane
+  after #47 before using #46 as final stream-throughput closure evidence.
+- 2026-06-12: #47 is implemented locally. The current `moqxprobe`
+  object-stream lane still reports `stream_sender_topology=context_owner`, but
+  transport now provides `Conn.Stream.Sender` as the stream-local credit owner
+  needed for the next per-stream sender topology experiment. Rerun
+  `reference_object_stream,moqx_object_stream` remotely from a current artifact
+  before closing #46.

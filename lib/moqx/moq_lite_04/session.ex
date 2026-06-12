@@ -11,7 +11,8 @@ defmodule MOQX.MOQLite04.Session do
   alias MOQX.MOQLite04
   alias MOQX.MOQLite04.Error
   alias MOQX.MOQLite04.StreamCodec
-  alias MOQX.Transport.{Connection, Stream}
+  alias MOQX.Transport.Conn
+  alias MOQX.Transport.Conn.Stream
 
   @alpn "moq-lite-04"
 
@@ -160,7 +161,7 @@ defmodule MOQX.MOQLite04.Session do
 
   def handle_command(
         %__MODULE__{} = session,
-        {:close_connection, %Connection{} = connection, reason}
+        {:close_connection, %Conn{} = connection, reason}
       ) do
     case Error.code(reason) do
       {:ok, code} ->
