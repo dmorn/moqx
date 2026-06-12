@@ -244,10 +244,11 @@ just bench-transport-probed-suite <run-id>
 
 For object-stream-only pressure, use the unidirectional object stream suite
 tests. This isolates caller-side object publishing from the mixed control
-stream:
+stream. Include `moqx_object_stream_owner` when comparing the default
+context-owner sender topology with the per-stream owner topology:
 
 ```bash
-PROBED_SUITE_TESTS=reference_object_stream,moqx_object_stream \
+PROBED_SUITE_TESTS=reference_object_stream,moqx_object_stream,moqx_object_stream_owner \
 STREAM_COUNT=32 \
 PAYLOAD_SIZE=1180 \
 PAYLOAD_COUNT=1000 \

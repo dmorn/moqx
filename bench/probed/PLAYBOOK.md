@@ -231,7 +231,7 @@ just bench-transport-probed-suite <run-id>
 To isolate object-stream-only pressure from the mixed control stream:
 
 ```bash
-PROBED_SUITE_TESTS=reference_object_stream,moqx_object_stream \
+PROBED_SUITE_TESTS=reference_object_stream,moqx_object_stream,moqx_object_stream_owner \
 STREAM_COUNT=32 \
 PAYLOAD_SIZE=1180 \
 PAYLOAD_COUNT=1000 \

@@ -83,6 +83,7 @@ quic_tests_json="$(
       "moqx_stream",
       "reference_object_stream",
       "moqx_object_stream",
+      "moqx_object_stream_owner",
       "reference_datagram",
       "moqx_datagram",
       "reference_mixed",
@@ -119,6 +120,7 @@ jq -s \
     $test == "moqx_stream" or
     $test == "reference_object_stream" or
     $test == "moqx_object_stream" or
+    $test == "moqx_object_stream_owner" or
     $test == "reference_mixed" or
     $test == "moqx_mixed";
 

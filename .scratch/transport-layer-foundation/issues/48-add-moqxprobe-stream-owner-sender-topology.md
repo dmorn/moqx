@@ -76,6 +76,10 @@ None. #47 is done locally and provides the transport primitive.
   `MOQX.Transport.Conn.Stream.Sender`, schedules up to its stream send window,
   and drains sender-local completion credit before reporting the existing
   per-stream diagnostic shape.
+- 2026-06-12: Added the remote suite test name
+  `moqx_object_stream_owner`. A single probed suite can now run
+  `reference_object_stream,moqx_object_stream,moqx_object_stream_owner` and
+  label the reference-server stats for all three connections.
 
 ## Verification
 
@@ -90,6 +94,13 @@ None. #47 is done locally and provides the transport primitive.
 - 2026-06-12: root `mix format`.
 - 2026-06-12: root `mix test`: 178 passed, 18 excluded.
 - 2026-06-12: root `mix credo --strict`: no issues.
+- 2026-06-12: `bash bench/probed/scripts/quicprobe_stats_summary_test.sh`:
+  passed, including the three-way object-stream stats summary regression.
+- 2026-06-12: `mix format`, `mix test` (12 tests), and
+  `mix credo --strict` in `bench/probed`: no issues.
+- 2026-06-12: root `mix format`, root `mix test` (178 passed,
+  18 excluded), and root `mix credo --strict`: no issues after adding the
+  suite-driver test name.
 
 ## Follow-up
 

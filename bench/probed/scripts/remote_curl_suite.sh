@@ -65,6 +65,7 @@ Supported tests:
   moqx_stream
   reference_object_stream
   moqx_object_stream
+  moqx_object_stream_owner
   reference_datagram
   moqx_datagram
   reference_mixed
@@ -162,7 +163,7 @@ validate_tests() {
 
   for test_name in "${selected_tests[@]}"; do
     case "$test_name" in
-      iperf3|reference_stream|moqx_stream|reference_object_stream|moqx_object_stream|reference_datagram|moqx_datagram|reference_mixed|moqx_mixed) ;;
+      iperf3|reference_stream|moqx_stream|reference_object_stream|moqx_object_stream|moqx_object_stream_owner|reference_datagram|moqx_datagram|reference_mixed|moqx_mixed) ;;
       "")
         printf '%s\n' 'Empty test name in --tests.' >&2
         exit 2
@@ -772,6 +773,7 @@ run_measure() {
   local workload="$3"
   local role="$4"
   local direction="${5:-bidirectional}"
+  local stream_sender_topology="${6:-}"
   local output="/var/lib/probed/runs/$api_run_id/artifacts/client/$test_name.jsonl"
   local process
   local argv
@@ -804,6 +806,13 @@ run_measure() {
       --argjson argv "$argv" \
       --argjson quicer_args "$(quicer_datagram_send_flag_args)" \
       '$argv + $quicer_args')"
+  fi
+
+  if [ "$role" = "moqx_client" ] && [ -n "$stream_sender_topology" ]; then
+    argv="$(jq -n \
+      --argjson argv "$argv" \
+      --arg stream_sender_topology "$stream_sender_topology" \
+      '$argv + ["--stream-sender-topology", $stream_sender_topology]')"
   fi
 
   process="$(
@@ -853,6 +862,16 @@ if test_enabled moqx_object_stream; then
     stream_pressure \
     moqx_client \
     unidirectional
+fi
+
+if test_enabled moqx_object_stream_owner; then
+  run_measure \
+    moqx-object-stream-owner \
+    moqx-client-to-reference-server \
+    stream_pressure \
+    moqx_client \
+    unidirectional \
+    stream_owner
 fi
 
 if test_enabled reference_datagram; then
@@ -955,6 +974,10 @@ fi
 
 if test_enabled moqx_object_stream; then
   validate_artifact client/moqx-object-stream
+fi
+
+if test_enabled moqx_object_stream_owner; then
+  validate_artifact client/moqx-object-stream-owner
 fi
 
 if test_enabled reference_datagram; then
