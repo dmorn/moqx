@@ -391,3 +391,22 @@ evidence for performance claims.
   remaining delta between the credible #46 object-stream-only lane and the
   mixed loop: control echo interleaving, bidirectional control stream effects,
   object pump burst policy, and quicer/MsQuic completion release cadence.
+- 2026-06-12: Two more canonical repetitions on the same `449bd3d` artifact
+  proved the old fast/slow split is not gone. Run
+  `20260612T-issue45-mixed-streamsender-clean-3` is not a clean reference
+  comparison because the reference side completed only 32 streams, reported one
+  stream receive error, and missed one 1180-byte object payload on the server;
+  its MOQX side was clean but slow at 50.05 Mbps/control p99 52.37 ms, with
+  full server ingress, zero pending completions, mailbox peak 132, and no break
+  symptom. Run `20260612T-issue45-mixed-streamsender-clean-4` reproduced fast
+  mode: reference reached 117.40 Mbps/control p99 36.55 ms, while MOQX reached
+  196.92 Mbps/control p99 57.22 ms with full server ingress, 32,000 object
+  completions, zero pending completions, mailbox peak 507, and no break
+  symptom. The diagnostic split matches the earlier cadence evidence: slow
+  runs have ready object-completion batch p99 around 83-86 and object
+  completion p99 around 6.0 s, while the fast run has ready object-completion
+  p95/p99/max at 512 and object completion p99 around 1.53 s. Since 512 equals
+  32 streams times the default send window of 16, the next hypothesis should
+  focus on object pump admission/wave behavior and quicer/MsQuic completion
+  release cadence. Keep #45 open; the mixed `StreamSender` alignment removed a
+  harness inconsistency, not the underlying variance.

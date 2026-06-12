@@ -792,3 +792,17 @@ seams without `Application` env.
   the stable roughly 50 Mbps mixed-object ceiling under control echo traffic,
   compared with #46's object-stream-only lane around 49 Mbps against a slower
   55 Mbps reference and the mixed reference around 116 Mbps on the same path.
+- 2026-06-12: Two more `449bd3d` mixed repetitions corrected that conclusion:
+  the mixed path is still bimodal, not merely stable and slow. Run
+  `20260612T-issue45-mixed-streamsender-clean-3` had a suspect reference
+  result because server ingress recorded one stream receive error and one
+  missing 1180-byte object payload, but MOQX was a clean slow-mode run at
+  50.05 Mbps/control p99 52.37 ms. Run
+  `20260612T-issue45-mixed-streamsender-clean-4` was clean on both sides and
+  reproduced MOQX fast mode at 196.92 Mbps/control p99 57.22 ms against
+  reference 117.40 Mbps/control p99 36.55 ms. Fast mode correlates with
+  full-window object completion waves: ready object-completion batch
+  p95/p99/max was 512, compared with p99 around 83-86 in the slow runs. The
+  next #45 slice should focus on object pump admission/wave policy and
+  quicer/MsQuic send-completion release cadence rather than more mixed
+  scheduler cleanup.
