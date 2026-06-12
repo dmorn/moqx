@@ -368,3 +368,26 @@ evidence for performance claims.
   not peer delivery or ACK confirmation. This keeps the async model valid but
   explains why #45 should focus on completion release cadence rather than
   changing delivery semantics or defaulting quicer pacing settings.
+- 2026-06-12: Remote validation of `449bd3d` on the still-alive x86-control
+  lab did not satisfy #45, but it narrowed the failure mode. The current
+  artifact was built/deployed as
+  `moqxprobe-0.1.0-449bd3d-linux_x86_64` and validated with
+  `reference_mixed,moqx_mixed`, 32 object streams, 1000 x 1180-byte object
+  payloads per stream, 100 x 64-byte control messages at 100/sec,
+  `STREAM_SEND_WINDOW=16`, `STREAM_DIAGNOSTICS_SAMPLING=final`,
+  `CONTROL_STREAM_PRIORITY=65535`, and `OBJECT_STREAM_PRIORITY=1`.
+  `20260612T-issue45-mixed-streamsender-clean-1` reached reference
+  117.61 Mbps/control p99 37.60 ms and MOQX 49.86 Mbps/control p99
+  54.40 ms. `20260612T-issue45-mixed-streamsender-clean-2` reached reference
+  115.72 Mbps/control p99 38.86 ms and MOQX 50.01 Mbps/control p99
+  54.47 ms. Both MOQX runs delivered the full 37,766,400 stream bytes to the
+  server, completed 33 streams, reported zero stream receive/send errors, had
+  32,000 object send completions, zero pending object/control completions,
+  bounded mailbox peaks around 135-136, first control byte around 27 ms, and
+  no break symptom. The old 3.6x fast/slow swing was not reproduced in these
+  two repetitions, but the stable result is only about 43% of same-run
+  reference, so the #45 stop rule is still unmet. Next work should stop
+  treating the mixed benchmark scheduler as the primary suspect and inspect the
+  remaining delta between the credible #46 object-stream-only lane and the
+  mixed loop: control echo interleaving, bidirectional control stream effects,
+  object pump burst policy, and quicer/MsQuic completion release cadence.

@@ -780,3 +780,15 @@ seams without `Application` env.
   remote: redeploy a current artifact and rerun the canonical
   `reference_mixed,moqx_mixed` comparison twice before making the #45 closure
   call.
+- 2026-06-12: Remote #45 validation from clean artifact `449bd3d` produced two
+  stable but slow mixed runs, not a closure. On the x86-control lab,
+  `20260612T-issue45-mixed-streamsender-clean-1` reported reference
+  117.61 Mbps versus MOQX 49.86 Mbps; `...clean-2` reported reference
+  115.72 Mbps versus MOQX 50.01 Mbps. Control p99 stayed healthy around
+  54.4 ms for MOQX versus 38.9 ms reference, full server stream ingress was
+  observed, all completions drained, mailbox remained bounded, and no break
+  symptom appeared. This rejects the mixed benchmark's old manual object
+  scheduler as the main remaining explanation. The remaining #45/#26 work is
+  the stable roughly 50 Mbps mixed-object ceiling under control echo traffic,
+  compared with #46's object-stream-only lane around 49 Mbps against a slower
+  55 Mbps reference and the mixed reference around 116 Mbps on the same path.
