@@ -3531,17 +3531,15 @@ defmodule MOQXProbe.Measure do
     timeout_ms = max(div(deadline_us - monotonic_us(), 1000), 0)
 
     case Stream.Sender.receive_event(sender, timeout_ms) do
-      {:ok, {:stream_event, stream, :send_completed, _metadata}, sender}
-      when stream == state.stream_state.stream ->
-        {sender, complete_stream_owner_send(state, config)}
+      {:ok, event, sender} ->
+        state = handle_stream_owner_completion_event(state, config, event)
 
-      {:ok, {:stream_event, stream, :send_cancelled, _metadata}, sender}
-      when stream == state.stream_state.stream ->
-        state = update_in(state, [:send_cancelled], &((&1 || 0) + 1))
-        {sender, fail_send_only_stream(state, config, "send_cancelled")}
-
-      {:ok, _event, sender} ->
-        {sender, state}
+        drain_ready_stream_owner_completions(
+          sender,
+          state,
+          config,
+          config.stream_event_batch_size - 1
+        )
 
       {:unknown, _message, sender} ->
         {sender, state}
@@ -3553,6 +3551,60 @@ defmodule MOQXProbe.Measure do
         {sender, fail_send_only_stream(state, config, "send_completion_timeout")}
     end
   end
+
+  defp drain_ready_stream_owner_completions(
+         sender,
+         %{failure: failure} = state,
+         _config,
+         _remaining
+       )
+       when not is_nil(failure) do
+    {sender, state}
+  end
+
+  defp drain_ready_stream_owner_completions(sender, state, _config, remaining)
+       when remaining <= 0 do
+    {sender, state}
+  end
+
+  defp drain_ready_stream_owner_completions(sender, state, config, remaining) do
+    case Stream.Sender.receive_event(sender, 0) do
+      {:ok, event, sender} ->
+        state = handle_stream_owner_completion_event(state, config, event)
+        drain_ready_stream_owner_completions(sender, state, config, remaining - 1)
+
+      {:unknown, _message, sender} ->
+        drain_ready_stream_owner_completions(sender, state, config, remaining - 1)
+
+      {:timeout, sender} ->
+        {sender, state}
+
+      {:error, reason, sender} ->
+        {sender, fail_send_only_stream(state, config, reason_name(reason))}
+    end
+  end
+
+  defp handle_stream_owner_completion_event(
+         state,
+         config,
+         {:stream_event, stream, :send_completed, _metadata}
+       )
+       when stream == state.stream_state.stream do
+    complete_stream_owner_send(state, config)
+  end
+
+  defp handle_stream_owner_completion_event(
+         state,
+         config,
+         {:stream_event, stream, :send_cancelled, _metadata}
+       )
+       when stream == state.stream_state.stream do
+    state
+    |> update_in([:send_cancelled], &((&1 || 0) + 1))
+    |> fail_send_only_stream(config, "send_cancelled")
+  end
+
+  defp handle_stream_owner_completion_event(state, _config, _event), do: state
 
   defp complete_stream_owner_send(state, config) do
     payloads_completed = state.payloads_completed + 1

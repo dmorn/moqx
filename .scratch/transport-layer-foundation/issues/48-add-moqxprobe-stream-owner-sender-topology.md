@@ -80,6 +80,21 @@ None. #47 is done locally and provides the transport primitive.
   `moqx_object_stream_owner`. A single probed suite can now run
   `reference_object_stream,moqx_object_stream,moqx_object_stream_owner` and
   label the reference-server stats for all three connections.
+- 2026-06-12: Remote x86-control evidence from artifact `666db4c` shows the
+  first stream-owner implementation is correct but not fast enough. Runs
+  `...-140836`, `...-141113`, and `...-141242` all passed strict validation.
+  MOQX `stream_owner` stayed stable around 49.2-49.5 Mbps with 32,000
+  completions, zero pending completions, and clean server ingress. MOQX
+  `context_owner` remained bimodal: about 49 Mbps in two runs, then
+  159.4 Mbps in the third. The third fast context-owner run had far fewer
+  blocking receive calls (643 versus about 2,050 in slow runs) and a shorter
+  active send span (about 1.84s versus about 6.1s). `stream_owner` issued
+  32,000 nonzero-timeout receive calls and did not perform ready-event drains,
+  so it serialized completion feedback one credit at a time per stream.
+- 2026-06-12: Fixed the local stream-owner loop so one blocking sender receive
+  is followed by zero-time ready drains up to `stream_event_batch_size` before
+  the worker refills that stream's send window. The focused regression now
+  proves drain calls are observed for immediately queued completion batches.
 
 ## Verification
 
@@ -101,10 +116,16 @@ None. #47 is done locally and provides the transport primitive.
 - 2026-06-12: root `mix format`, root `mix test` (178 passed,
   18 excluded), and root `mix credo --strict`: no issues after adding the
   suite-driver test name.
+- 2026-06-12: `mix test test/moqxprobe/measure_test.exs:1397` in
+  `bench/moqxprobe`: passed after adding stream-owner ready-drain regression.
+- 2026-06-12: `mix format`, `mix test` (70 tests), and
+  `mix credo --strict` in `bench/moqxprobe`: no issues after the ready-drain
+  fix.
+- 2026-06-12: root `mix format`, root `mix test` (178 passed,
+  18 excluded), and root `mix credo --strict`: no issues after the ready-drain
+  fix.
 
 ## Follow-up
 
-Run fresh remote #46 object-stream comparisons from one artifact:
-`reference_object_stream`, `moqx_object_stream` with
-`stream_sender_topology=context_owner`, and `moqx_object_stream` with
-`stream_sender_topology=stream_owner`.
+Rebuild and rerun the same x86-control three-way comparison with the ready-drain
+fix.
