@@ -1394,6 +1394,68 @@ defmodule MOQXProbe.MeasureTest do
            end)
   end
 
+  test "records stream-owner MOQX unidirectional stream pressure" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-stream-owner-diagnostics.jsonl")
+
+    Measure.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-direction",
+        "unidirectional",
+        "--stream-sender-topology",
+        "stream_owner",
+        "--stream-count",
+        "2",
+        "--stream-send-window",
+        "1",
+        "--payload-size",
+        "64",
+        "--payload-count",
+        "2",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-stream-owner-diagnostics-test"
+      ],
+      script: "test measure",
+      transport_backend: __MODULE__.MixedEchoTransport
+    )
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+
+    diagnostics = record["diagnostics"]
+
+    assert record["profile"]["settings"]["stream_sender_topology"] == "stream_owner"
+    assert record["workload"]["stream_direction"] == "unidirectional"
+    assert record["metrics"]["bytes_sent"] == 256
+    assert diagnostics["summary"]["stream_sender_topology"] == "stream_owner"
+    assert diagnostics["summary"]["payloads_accepted"] == 4
+    assert diagnostics["summary"]["payloads_completed"] == 4
+    assert diagnostics["summary"]["send_completions"] == 4
+    assert diagnostics["summary"]["send_completions_pending"] == 0
+    assert diagnostics["summary"]["stream_send_accepted"] == 4
+    assert diagnostics["summary"]["stream_send_bytes_accepted"] == 256
+    assert diagnostics["summary"]["stream_send_errors"] == 0
+
+    assert Enum.all?(diagnostics["streams"], fn stream ->
+             stream["phase"] == "send_only_complete" and
+               stream["send_completed"] == 2 and
+               stream["send_completions_pending"] == 0 and
+               stream["completion_status"] == "completed"
+           end)
+  end
+
   test "records stream-pressure pump tuning knobs" do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-stream-pump-tuning.jsonl")

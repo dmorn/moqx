@@ -197,3 +197,11 @@ with object publishing.
   needed for the next per-stream sender topology experiment. Rerun
   `reference_object_stream,moqx_object_stream` remotely from a current artifact
   before closing #46.
+- 2026-06-12: Opened and implemented #48's local `moqxprobe`
+  `stream_sender_topology=stream_owner` slice for unidirectional
+  object-stream pressure. The next remote #46 run should use one current
+  artifact and collect three comparable steps on the same path:
+  `reference_object_stream`, `moqx_object_stream` with the default
+  `context_owner` topology, and `moqx_object_stream` with `stream_owner`.
+  Closure evidence should be based on that post-#47 comparison, not the older
+  context-owner-only results.

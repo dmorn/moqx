@@ -2,6 +2,7 @@ defmodule MOQXProbe.Measure do
   @moduledoc false
 
   alias MOQX.Transport
+  alias MOQX.Transport.Conn.Stream
   alias MOQXProbe.BuildInfo
   alias MOQXProbe.DatagramPayload
   alias MOQXProbe.Traffic.DatagramSender
@@ -20,6 +21,8 @@ defmodule MOQXProbe.Measure do
   @mixed_moqt_shaped_workload "mixed_moqt_shaped"
   @default_stream_send_window 16
   @default_stream_event_batch_size 1024
+  @default_stream_sender_topology "context_owner"
+  @stream_sender_topologies ~w(context_owner stream_owner)
   @default_control_echo_window 8
   @stream_diagnostics_sampling_modes ~w(event final)
   @mixed_completion_drain_limit 1024
@@ -90,6 +93,7 @@ defmodule MOQXProbe.Measure do
           stream_send_window: :integer,
           stream_event_batch_size: :integer,
           stream_diagnostics_sampling: :string,
+          stream_sender_topology: :string,
           payload_size: :integer,
           payload_count: :integer,
           datagram_size: :integer,
@@ -184,6 +188,8 @@ defmodule MOQXProbe.Measure do
       stream_event_batch_size:
         Keyword.get(opts, :stream_event_batch_size, @default_stream_event_batch_size),
       stream_diagnostics_sampling: Keyword.get(opts, :stream_diagnostics_sampling, "event"),
+      stream_sender_topology:
+        Keyword.get(opts, :stream_sender_topology, @default_stream_sender_topology),
       payload_size: Keyword.get(opts, :payload_size, 1200),
       payload_count: Keyword.get(opts, :payload_count, 1),
       datagram_size: Keyword.get(opts, :datagram_size, 1200),
@@ -241,7 +247,8 @@ defmodule MOQXProbe.Measure do
          :ok <- validate_positive(config.timeout_margin_seconds, "--timeout-margin-seconds"),
          :ok <- validate_quicer_settings(config.quicer_settings),
          :ok <- validate_quicer_datagram_send_flags(config.quicer_datagram_send_flags),
-         :ok <- validate_stream_direction(config.stream_direction) do
+         :ok <- validate_stream_direction(config.stream_direction),
+         :ok <- validate_stream_sender_topology(config) do
       {:ok, config}
     end
   end
@@ -486,6 +493,26 @@ defmodule MOQXProbe.Measure do
     {:error, "--stream-diagnostics-sampling must be event or final."}
   end
 
+  defp validate_stream_sender_topology(%{stream_sender_topology: topology})
+       when topology not in @stream_sender_topologies do
+    {:error, "--stream-sender-topology must be context_owner or stream_owner."}
+  end
+
+  defp validate_stream_sender_topology(%{stream_sender_topology: "context_owner"}), do: :ok
+
+  defp validate_stream_sender_topology(%{
+         topology: @moqx_client_topology,
+         workload: @stream_pressure_workload,
+         stream_direction: "unidirectional",
+         stream_sender_topology: "stream_owner"
+       }),
+       do: :ok
+
+  defp validate_stream_sender_topology(%{stream_sender_topology: "stream_owner"}) do
+    {:error,
+     "--stream-sender-topology stream_owner requires --topology moqx-client-to-reference-server --workload stream_pressure --stream-direction unidirectional."}
+  end
+
   defp full_datagram_diagnostics?(%{datagram_diagnostics: "full"}), do: true
   defp full_datagram_diagnostics?(_config_or_state), do: false
 
@@ -626,6 +653,8 @@ defmodule MOQXProbe.Measure do
       Integer.to_string(config.stream_event_batch_size),
       "--stream-diagnostics-sampling",
       config.stream_diagnostics_sampling,
+      "--stream-sender-topology",
+      config.stream_sender_topology,
       "--payload-size",
       Integer.to_string(config.payload_size),
       "--payload-count",
@@ -769,7 +798,7 @@ defmodule MOQXProbe.Measure do
       "stream_send_window" => config.stream_send_window,
       "stream_event_batch_size" => config.stream_event_batch_size,
       "stream_diagnostics_sampling" => config.stream_diagnostics_sampling,
-      "stream_sender_topology" => "context_owner",
+      "stream_sender_topology" => config.stream_sender_topology,
       "payload_size_bytes" => config.payload_size,
       "payload_count" => config.payload_count,
       "bytes_sent" => Map.get(summary, "bytes_sent"),
@@ -958,7 +987,7 @@ defmodule MOQXProbe.Measure do
       "stream_send_window" => config.stream_send_window,
       "stream_event_batch_size" => config.stream_event_batch_size,
       "stream_diagnostics_sampling" => config.stream_diagnostics_sampling,
-      "stream_sender_topology" => "context_owner",
+      "stream_sender_topology" => config.stream_sender_topology,
       "payload_size_bytes" => config.payload_size,
       "payload_count" => config.payload_count,
       "bytes_sent" => result.bytes_sent,
@@ -3234,6 +3263,25 @@ defmodule MOQXProbe.Measure do
     )
   end
 
+  defp send_unidirectional_pressure_payloads(
+         ctx,
+         streams,
+         payload,
+         %{stream_sender_topology: "stream_owner"} = config,
+         started_at
+       ) do
+    states = initial_stream_pressure_states(streams)
+    diagnostics = initial_stream_pressure_runtime(started_at)
+    deadline_us = monotonic_us() + client_timeout_ms(config) * 1000
+
+    states =
+      streams
+      |> start_stream_owner_workers(payload, config, deadline_us)
+      |> collect_stream_owner_workers(states, config, deadline_us)
+
+    send_only_result(ctx, states, config, first_stream_failure(states), diagnostics)
+  end
+
   defp send_unidirectional_pressure_payloads(ctx, streams, payload, config, started_at) do
     states = initial_stream_pressure_states(streams)
     diagnostics = initial_stream_pressure_runtime(started_at)
@@ -3269,26 +3317,257 @@ defmodule MOQXProbe.Measure do
 
   defp initial_stream_pressure_states(streams) do
     Map.new(streams, fn stream_state ->
-      {stream_state.stream,
-       %{
-         stream_state: stream_state,
-         bytes_received: 0,
-         first_byte_latency_ms: nil,
-         completed_at: nil,
-         first_send_accepted_at: nil,
-         last_send_accepted_at: nil,
-         first_echo_received_at: nil,
-         last_echo_received_at: nil,
-         payloads_scheduled: 0,
-         payloads_completed: 0,
-         send_inflight: 0,
-         send_completed: 0,
-         send_cancelled: 0,
-         send_call_durations_us: [],
-         peer_finished?: false,
-         failure: nil
-       }}
+      {stream_state.stream, initial_stream_pressure_state(stream_state)}
     end)
+  end
+
+  defp initial_stream_pressure_state(stream_state) do
+    %{
+      stream_state: stream_state,
+      bytes_received: 0,
+      first_byte_latency_ms: nil,
+      completed_at: nil,
+      first_send_accepted_at: nil,
+      last_send_accepted_at: nil,
+      first_echo_received_at: nil,
+      last_echo_received_at: nil,
+      payloads_scheduled: 0,
+      payloads_completed: 0,
+      send_inflight: 0,
+      send_completed: 0,
+      send_cancelled: 0,
+      send_call_durations_us: [],
+      peer_finished?: false,
+      failure: nil
+    }
+  end
+
+  defp start_stream_owner_workers(streams, payload, config, deadline_us) do
+    parent = self()
+
+    Map.new(streams, fn stream_state ->
+      result_ref = make_ref()
+
+      {pid, monitor_ref} =
+        spawn_monitor(fn ->
+          state = run_stream_owner_sender(stream_state, payload, config, deadline_us)
+          send(parent, {:stream_owner_sender_done, result_ref, stream_state.stream, state})
+        end)
+
+      {result_ref, %{pid: pid, monitor_ref: monitor_ref, stream: stream_state.stream}}
+    end)
+  end
+
+  defp collect_stream_owner_workers(workers, states, _config, _deadline_us)
+       when map_size(workers) == 0 do
+    states
+  end
+
+  defp collect_stream_owner_workers(workers, states, config, deadline_us) do
+    timeout_ms = max(div(deadline_us - monotonic_us(), 1000), 0)
+
+    receive do
+      {:stream_owner_sender_done, result_ref, stream, state} ->
+        {worker, workers} = Map.pop(workers, result_ref)
+        demonitor_stream_owner_worker(worker)
+
+        collect_stream_owner_workers(
+          workers,
+          Map.put(states, stream, state),
+          config,
+          deadline_us
+        )
+
+      {:DOWN, monitor_ref, :process, _pid, _reason} ->
+        case pop_stream_owner_worker_by_monitor(workers, monitor_ref) do
+          {nil, workers} ->
+            collect_stream_owner_workers(workers, states, config, deadline_us)
+
+          {%{stream: stream}, workers} ->
+            states =
+              Map.update!(states, stream, fn state ->
+                fail_send_only_stream(state, config, "stream_owner_exit")
+              end)
+
+            collect_stream_owner_workers(workers, states, config, deadline_us)
+        end
+    after
+      timeout_ms ->
+        stop_stream_owner_workers(workers)
+        fail_unfinished_stream_owner_workers(states, workers, config, "send_completion_timeout")
+    end
+  end
+
+  defp pop_stream_owner_worker_by_monitor(workers, monitor_ref) do
+    case Enum.find(workers, fn {_result_ref, worker} -> worker.monitor_ref == monitor_ref end) do
+      nil -> {nil, workers}
+      {result_ref, worker} -> {worker, Map.delete(workers, result_ref)}
+    end
+  end
+
+  defp demonitor_stream_owner_worker(nil), do: :ok
+
+  defp demonitor_stream_owner_worker(%{monitor_ref: monitor_ref}) do
+    Process.demonitor(monitor_ref, [:flush])
+    :ok
+  end
+
+  defp stop_stream_owner_workers(workers) do
+    Enum.each(workers, fn {_result_ref, worker} ->
+      demonitor_stream_owner_worker(worker)
+
+      if Process.alive?(worker.pid) do
+        Process.exit(worker.pid, :kill)
+      end
+    end)
+  end
+
+  defp fail_unfinished_stream_owner_workers(states, workers, config, reason) do
+    Enum.reduce(workers, states, fn {_result_ref, %{stream: stream}}, states ->
+      Map.update!(states, stream, &fail_unfinished_stream_owner(&1, config, reason))
+    end)
+  end
+
+  defp fail_unfinished_stream_owner(state, config, reason) do
+    if state.failure || stream_send_complete?(state, config) do
+      state
+    else
+      fail_send_only_stream(state, config, reason)
+    end
+  end
+
+  defp run_stream_owner_sender(stream_state, payload, config, deadline_us) do
+    state = initial_stream_pressure_state(stream_state)
+
+    case Stream.sender(stream_state.stream) do
+      {:ok, sender} ->
+        stream_owner_sender_loop(sender, state, payload, config, deadline_us)
+
+      {:error, reason} ->
+        fail_send_only_stream(state, config, reason_name(reason))
+    end
+  end
+
+  defp stream_owner_sender_loop(sender, state, payload, config, deadline_us) do
+    cond do
+      state.failure ->
+        state
+
+      stream_send_complete?(state, config) ->
+        state
+
+      monotonic_us() >= deadline_us ->
+        fail_send_only_stream(state, config, "send_completion_timeout")
+
+      stream_owner_can_send?(state, config) ->
+        {sender, state} = stream_owner_schedule_available(sender, state, payload, config)
+        stream_owner_sender_loop(sender, state, payload, config, deadline_us)
+
+      true ->
+        {sender, state} = stream_owner_receive_completion(sender, state, config, deadline_us)
+        stream_owner_sender_loop(sender, state, payload, config, deadline_us)
+    end
+  end
+
+  defp stream_owner_schedule_available(sender, state, payload, config) do
+    cond do
+      state.failure ->
+        {sender, state}
+
+      stream_owner_can_send?(state, config) ->
+        {sender, state} = stream_owner_schedule_one(sender, state, payload, config)
+        stream_owner_schedule_available(sender, state, payload, config)
+
+      true ->
+        {sender, state}
+    end
+  end
+
+  defp stream_owner_can_send?(state, config) do
+    state.payloads_scheduled < config.payload_count and
+      state.send_inflight < config.stream_send_window
+  end
+
+  defp stream_owner_schedule_one(sender, state, payload, config) do
+    payload_index = state.payloads_scheduled + 1
+
+    event = %{
+      stream: state.stream_state.stream,
+      payload: payload,
+      payload_index: payload_index,
+      finish?: payload_index == config.payload_count
+    }
+
+    opts = if event.finish?, do: [finish: true], else: []
+    send_started_at = monotonic_us()
+    send_result = Stream.Sender.send(sender, payload, opts)
+    accepted_at = monotonic_us()
+    send_call_duration_us = accepted_at - send_started_at
+
+    case send_result do
+      {:ok, _send, sender} ->
+        state =
+          record_stream_pressure_send_accepted(
+            state,
+            event,
+            byte_size(payload),
+            accepted_at,
+            send_call_duration_us
+          )
+
+        {sender, state}
+
+      {:error, reason, sender} ->
+        state = %{
+          state
+          | send_call_durations_us: [send_call_duration_us | state.send_call_durations_us]
+        }
+
+        {sender, fail_send_only_stream(state, config, reason_name(reason))}
+    end
+  end
+
+  defp stream_owner_receive_completion(sender, state, config, deadline_us) do
+    timeout_ms = max(div(deadline_us - monotonic_us(), 1000), 0)
+
+    case Stream.Sender.receive_event(sender, timeout_ms) do
+      {:ok, {:stream_event, stream, :send_completed, _metadata}, sender}
+      when stream == state.stream_state.stream ->
+        {sender, complete_stream_owner_send(state, config)}
+
+      {:ok, {:stream_event, stream, :send_cancelled, _metadata}, sender}
+      when stream == state.stream_state.stream ->
+        state = update_in(state, [:send_cancelled], &((&1 || 0) + 1))
+        {sender, fail_send_only_stream(state, config, "send_cancelled")}
+
+      {:ok, _event, sender} ->
+        {sender, state}
+
+      {:unknown, _message, sender} ->
+        {sender, state}
+
+      {:error, reason, sender} ->
+        {sender, fail_send_only_stream(state, config, reason_name(reason))}
+
+      {:timeout, sender} ->
+        {sender, fail_send_only_stream(state, config, "send_completion_timeout")}
+    end
+  end
+
+  defp complete_stream_owner_send(state, config) do
+    payloads_completed = state.payloads_completed + 1
+    send_inflight = max(state.send_inflight - 1, 0)
+
+    completed_at =
+      if payloads_completed >= config.payload_count and send_inflight == 0, do: monotonic_us()
+
+    %{
+      state
+      | send_completed: state.send_completed + 1,
+        payloads_completed: payloads_completed,
+        send_inflight: send_inflight,
+        completed_at: completed_at || state.completed_at
+    }
   end
 
   defp start_stream_pressure_sender(
@@ -4233,8 +4512,12 @@ defmodule MOQXProbe.Measure do
 
   defp all_stream_sends_complete?(states, config) do
     Enum.all?(states, fn {_stream, state} ->
-      state.payloads_completed >= config.payload_count and state.send_inflight == 0
+      stream_send_complete?(state, config)
     end)
+  end
+
+  defp stream_send_complete?(state, config) do
+    state.payloads_completed >= config.payload_count and state.send_inflight == 0
   end
 
   defp first_stream_failure(states) do
@@ -4450,7 +4733,7 @@ defmodule MOQXProbe.Measure do
         "stream_send_window" => config.stream_send_window,
         "stream_event_batch_size" => config.stream_event_batch_size,
         "stream_diagnostics_sampling" => config.stream_diagnostics_sampling,
-        "stream_sender_topology" => "context_owner",
+        "stream_sender_topology" => config.stream_sender_topology,
         "payloads_accepted" =>
           stream_diagnostics |> Enum.map(&(&1["payloads_accepted"] || 0)) |> Enum.sum(),
         "payloads_completed" =>
@@ -5795,6 +6078,7 @@ defmodule MOQXProbe.Measure do
       --stream-event-batch-size N    ready events to drain after each blocking receive (default: #{@default_stream_event_batch_size})
       --stream-diagnostics-sampling VALUE
                                      event sampler or final diagnostics snapshot for MOQX streams (default: event)
+      --stream-sender-topology VALUE context_owner or stream_owner (default: #{@default_stream_sender_topology})
       --payload-size BYTES           bytes per payload write (default: 1200)
       --payload-count N              payload writes per stream (default: 1)
       --datagram-size BYTES          bytes per datagram for datagram_pressure (default: 1200)

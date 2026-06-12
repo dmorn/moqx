@@ -825,3 +825,10 @@ seams without `Application` env.
   `stream_sender_topology=context_owner` for the current harness shape. Local
   loopback self-pair calibration passed, but #45/#46 still need fresh remote
   baselines from a current artifact before making performance closure calls.
+- 2026-06-12: #48 adapts `moqxprobe` to the new stream-local ownership model
+  for the pure object-stream lane. The new opt-in
+  `stream_sender_topology=stream_owner` path runs one
+  `Conn.Stream.Sender` owner per unidirectional stream and keeps
+  `transport-bench-v1` stable. This is the next comparison point for #46; mixed
+  pressure remains on `context_owner` until object-stream-only evidence is
+  refreshed.

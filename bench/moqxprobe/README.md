@@ -297,9 +297,10 @@ snapshots, and backend connection statistics when the transport exposes them
 through `statistics_v2`. Use those diagnostics to compare slow and fast mixed
 runs before changing stream windows, priorities, or quicer/MsQuic settings.
 
-MOQX-client stream pressure uses `MOQXProbe.Traffic.StreamSender`. The sender
-currently composes a bounded Flow payload producer with a single GenStage
-context-owner stream sink:
+MOQX-client stream pressure has two sender topologies. The default
+`context_owner` topology uses `MOQXProbe.Traffic.StreamSender`, which composes
+a bounded Flow payload producer with a single GenStage context-owner stream
+sink:
 
 ```text
 payload descriptors -> bounded context-owner sink -> MOQX.Transport.send_stream/4
@@ -311,9 +312,21 @@ stream pressure. Records expose this as
 `stream_sender_topology=context_owner`. It owns per-stream admission windows,
 FIN placement on the final payload for each stream, bounded producer demand,
 and stream-sender telemetry under `[:moqx, :transport_bench, :stream_sender, ...]`.
-The transport layer now also exposes `MOQX.Transport.Conn.Stream.Sender` for
-future per-stream sender-owner runs where completion tokens are correlated
-inside stream-local sender state.
+
+The opt-in `stream_owner` topology is currently supported for unidirectional
+`stream_pressure`:
+
+```text
+stream worker -> MOQX.Transport.Conn.Stream.Sender.send/3
+             <- sender-local send-completion feedback
+```
+
+Each worker owns one `MOQX.Transport.Conn.Stream.Sender`, schedules sends up
+to that stream's send window, and treats sender-local `send_completed` events
+as backend-credit demand. This takes the parent connection event loop out of
+send-only completion accounting while keeping the same `transport-bench-v1`
+summary fields. Use `--stream-sender-topology stream_owner` to compare it
+against the context-owner baseline.
 Bidirectional pressure keeps echo validation, timeout/failure classification,
 and report assembly in the existing receive-event loop; send-completion events
 feed back into the sink to reopen per-stream windows.
@@ -516,9 +529,9 @@ streams, schedules payload rounds across those streams, and records
 `stream_scheduling=mixed_control_bidi_object_uni` for mixed pressure. Stream
 sends are accepted asynchronously by `MOQX.Transport.send_stream/4`; send
 completion is reported later as a transport event and is not peer-delivery
-proof. Stream and mixed diagnostics include `stream_sender_topology` so future
-per-stream `MOQX.Transport.Conn.Stream.Sender` runs can be compared against
-the current context-owner baseline. Mixed-pressure diagnostics include object
+proof. Stream and mixed diagnostics include `stream_sender_topology`; pure
+unidirectional stream pressure can opt into `stream_owner` while mixed pressure
+currently remains `context_owner`. Mixed-pressure diagnostics include object
 send-completion counts, pending completion counts, drained event counts,
 current sender mailbox depth, peak observed sender mailbox depth, and
 zero-wait completion-drain events observed after the workload success condition
