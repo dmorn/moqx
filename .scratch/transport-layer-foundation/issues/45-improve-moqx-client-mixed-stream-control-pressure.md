@@ -323,3 +323,48 @@ evidence for performance claims.
   and then 252.58 Mbps. That commit was reverted as `8ef045c`. Keep #45 open:
   deeper in-flight windows are a useful diagnostic/tuning knob, but they do
   not remove the underlying bimodal completion cadence.
+- 2026-06-12: Next plan before more remote tuning: stop trying isolated
+  quicer/window knobs unless they test a concrete hypothesis. The next
+  implementation slice is to make the mixed object sender match the object
+  stream lane that #46 already validated: batch ready events, aggregate object
+  send completions per stream before re-entering the object-send pump, preserve
+  control-first scheduling, and keep async send/completion accounting explicit.
+  Start with a focused local regression that proves due control traffic is sent
+  first and object completions are grouped accurately in the mixed scheduler;
+  local loopback or fake-transport checks remain calibration only. Before
+  changing transport policy or defaults such as `pacing_enabled`, inspect
+  quicer/MsQuic `send_complete` semantics so the project does not hide a
+  completion-cadence problem behind a setting. Remote validation must redeploy
+  current `main` first if the lab still has an older artifact, then run at
+  least two clean `reference_mixed,moqx_mixed` repetitions with the canonical
+  32 x 1000 x 1180-byte object shape, 100 x 64-byte control messages at
+  100/sec, `CONTROL_STREAM_PRIORITY=65535`, `OBJECT_STREAM_PRIORITY=1`, and
+  initial `STREAM_SEND_WINDOW=16`. #45 can close only when two same-shape runs
+  satisfy the recorded stop rule: MOQX goodput at least 80% of same-run
+  reference, control p99 no worse than 2x reference, zero pending
+  object/control completions, bounded mailbox depth, full server stream
+  ingress, no break symptom, and no repeat of the current 3.6x bimodality.
+- 2026-06-12: Implemented the local mixed-scheduler slice. Mixed object
+  payloads now use the same `StreamSender`/`StreamSink` shape that made #46's
+  object-stream-only lane credible: object events are generated in the shared
+  sender, object sends are pumped in bounded bursts, and ready
+  `send_completed` events are aggregated per stream before updating object
+  in-flight/completion state. The mixed loop applies grouped completion
+  feedback with `drain?: false`, then re-enters the loop so due control traffic
+  is scheduled before the next object pump. A focused regression now asserts
+  exactly that ordering after completion feedback, while the existing
+  control-first and mixed accounting tests still pass. Local verification:
+  `cd bench/moqxprobe && mix test test/moqxprobe/measure_test.exs`,
+  `cd bench/moqxprobe && mix test`, `cd bench/moqxprobe && mix credo
+  --strict`, root `mix format --check-formatted`, root `mix test`, and root
+  `mix credo --strict`.
+- 2026-06-12: quicer inspection before transport-default changes: local quicer
+  docs describe `send_complete` as the stack having handled the send and the
+  caller being allowed to release the send buffer; local quicer C code emits
+  the event only for send contexts marked sync and reports the MsQuic
+  `SEND_COMPLETE.Canceled` flag. In MOQX, `send_stream/4` still uses
+  `:quicer.async_send/3` with the sync flag so the caller receives explicit
+  completion events. Treat these events as buffer-release/admission feedback,
+  not peer delivery or ACK confirmation. This keeps the async model valid but
+  explains why #45 should focus on completion release cadence rather than
+  changing delivery semantics or defaulting quicer pacing settings.

@@ -1215,9 +1215,21 @@ defmodule MOQXProbe.Measure do
     {state, _ctx} =
       case Transport.open_stream(ctx, connection, mixed_control_stream_opts(config)) do
         {:ok, control_stream, ctx} ->
-          object_streams
-          |> initial_mixed_pressure_state(control_stream)
-          |> run_mixed_event_pump(
+          state = initial_mixed_pressure_state(object_streams, control_stream)
+
+          {:ok, object_sender} =
+            start_mixed_object_sender(
+              ctx,
+              object_streams,
+              state.object_streams,
+              object_payload,
+              object_config,
+              application_started_at
+            )
+
+          run_mixed_event_pump(
+            state,
+            object_sender,
             ctx,
             object_payload,
             object_config,
@@ -1338,6 +1350,7 @@ defmodule MOQXProbe.Measure do
 
   defp run_mixed_event_pump(
          state,
+         object_sender,
          ctx,
          object_payload,
          object_config,
@@ -1347,150 +1360,93 @@ defmodule MOQXProbe.Measure do
        ) do
     deadline_us = application_started_at + client_timeout_ms(config) * 1000
 
-    collect_mixed_events(
-      state,
-      ctx,
-      object_payload,
-      object_config,
-      control_payload,
-      config,
-      application_started_at,
-      deadline_us
-    )
+    runtime = %{
+      object_payload: object_payload,
+      object_config: object_config,
+      control_payload: control_payload,
+      config: config,
+      application_started_at: application_started_at,
+      deadline_us: deadline_us
+    }
+
+    collect_mixed_events(state, object_sender, ctx, runtime)
   end
 
-  defp collect_mixed_events(
-         state,
-         ctx,
-         object_payload,
-         object_config,
-         control_payload,
-         config,
-         application_started_at,
-         deadline_us
-       ) do
+  defp collect_mixed_events(state, object_sender, ctx, runtime) do
     {state, ctx} =
-      maybe_schedule_mixed_control(state, ctx, control_payload, config, application_started_at)
+      maybe_schedule_mixed_control(
+        state,
+        ctx,
+        runtime.control_payload,
+        runtime.config,
+        runtime.application_started_at
+      )
 
-    {state, ctx} = schedule_mixed_object_sends(state, ctx, object_payload, object_config)
+    {state, ctx, object_sender} = drain_mixed_object_sender(state, ctx, object_sender)
 
     cond do
-      mixed_complete?(state, config) ->
-        state
-        |> drain_mixed_residual_events(
-          ctx,
-          object_payload,
-          object_config,
-          control_payload,
-          config,
-          application_started_at,
-          @mixed_completion_drain_limit
-        )
+      mixed_complete?(state, runtime.config) ->
+        {state, ctx, object_sender} =
+          drain_mixed_residual_events(
+            state,
+            object_sender,
+            ctx,
+            runtime,
+            @mixed_completion_drain_limit
+          )
+
+        finish_mixed_object_sender(state, object_sender, ctx)
 
       failure = first_mixed_failure(state) ->
-        {put_mixed_failure(state, failure), ctx}
+        state = put_mixed_failure(state, failure)
+        stop_mixed_object_sender(state, object_sender, ctx)
 
-      monotonic_us() >= deadline_us ->
-        failure = mixed_timeout_failure(state, config)
-        {put_mixed_failure(state, failure), ctx}
+      monotonic_us() >= runtime.deadline_us ->
+        failure = mixed_timeout_failure(state, runtime.config)
+        state = put_mixed_failure(state, failure)
+        stop_mixed_object_sender(state, object_sender, ctx)
 
       true ->
-        timeout_ms = mixed_event_timeout_ms(state, config, application_started_at, deadline_us)
+        timeout_ms =
+          mixed_event_timeout_ms(
+            state,
+            runtime.config,
+            runtime.application_started_at,
+            runtime.deadline_us
+          )
 
         case Transport.receive_event(ctx, timeout_ms) do
           {:ok, event, ctx} ->
-            {state, ctx} =
-              handle_ready_mixed_events(
-                state,
-                ctx,
-                event,
-                object_payload,
-                object_config,
-                control_payload,
-                config,
-                application_started_at
-              )
+            {state, ctx, object_sender} =
+              handle_ready_mixed_events(state, object_sender, ctx, event, runtime)
 
-            collect_mixed_events(
-              state,
-              ctx,
-              object_payload,
-              object_config,
-              control_payload,
-              config,
-              application_started_at,
-              deadline_us
-            )
+            collect_mixed_events(state, object_sender, ctx, runtime)
 
           {:unknown, _message, ctx} ->
-            collect_mixed_events(
-              state,
-              ctx,
-              object_payload,
-              object_config,
-              control_payload,
-              config,
-              application_started_at,
-              deadline_us
-            )
+            collect_mixed_events(state, object_sender, ctx, runtime)
 
           {:error, _reason, ctx} ->
-            collect_mixed_events(
-              state,
-              ctx,
-              object_payload,
-              object_config,
-              control_payload,
-              config,
-              application_started_at,
-              deadline_us
-            )
+            collect_mixed_events(state, object_sender, ctx, runtime)
 
           {:timeout, ctx} ->
-            collect_mixed_events(
-              state,
-              ctx,
-              object_payload,
-              object_config,
-              control_payload,
-              config,
-              application_started_at,
-              deadline_us
-            )
+            collect_mixed_events(state, object_sender, ctx, runtime)
         end
     end
   end
 
-  defp handle_ready_mixed_events(
-         state,
-         ctx,
-         event,
-         object_payload,
-         object_config,
-         control_payload,
-         config,
-         application_started_at
-       ) do
+  defp handle_ready_mixed_events(state, object_sender, ctx, event, runtime) do
     {ctx, events, drained_count} =
       drain_ready_mixed_events(ctx, [event], 0, @mixed_completion_drain_limit - 1)
 
+    {state, ctx, object_sender} =
+      handle_mixed_events(state, object_sender, ctx, events, runtime)
+
     state =
-      events
-      |> Enum.reduce(state, fn event, state ->
-        handle_mixed_event(
-          state,
-          event,
-          object_payload,
-          object_config,
-          control_payload,
-          config,
-          application_started_at
-        )
-      end)
+      state
       |> record_mixed_ready_batch(events)
       |> Map.update!(:completion_drain_events, &(&1 + drained_count))
 
-    {state, ctx}
+    {state, ctx, object_sender}
   end
 
   defp record_mixed_ready_batch(state, []), do: state
@@ -1533,61 +1489,42 @@ defmodule MOQXProbe.Measure do
 
   defp drain_mixed_residual_events(
          state,
+         object_sender,
          ctx,
-         object_payload,
-         object_config,
-         control_payload,
-         config,
-         application_started_at,
+         runtime,
          limit
        )
 
   defp drain_mixed_residual_events(
          state,
+         object_sender,
          ctx,
-         _object_payload,
-         _object_config,
-         _control_payload,
-         _config,
-         _application_started_at,
+         _runtime,
          limit
        )
        when limit <= 0 do
-    {state, ctx}
+    {state, ctx, object_sender}
   end
 
   defp drain_mixed_residual_events(
          state,
+         object_sender,
          ctx,
-         object_payload,
-         object_config,
-         control_payload,
-         config,
-         application_started_at,
+         runtime,
          limit
        ) do
     case Transport.receive_event(ctx, 0) do
       {:ok, event, ctx} ->
-        state =
-          handle_mixed_event(
-            state,
-            event,
-            object_payload,
-            object_config,
-            control_payload,
-            config,
-            application_started_at
-          )
-          |> Map.update!(:completion_drain_events, &(&1 + 1))
+        {state, ctx, object_sender} =
+          handle_mixed_events(state, object_sender, ctx, [event], runtime)
+
+        state = Map.update!(state, :completion_drain_events, &(&1 + 1))
 
         drain_mixed_residual_events(
           state,
+          object_sender,
           ctx,
-          object_payload,
-          object_config,
-          control_payload,
-          config,
-          application_started_at,
+          runtime,
           limit - 1
         )
 
@@ -1596,12 +1533,9 @@ defmodule MOQXProbe.Measure do
 
         drain_mixed_residual_events(
           state,
+          object_sender,
           ctx,
-          object_payload,
-          object_config,
-          control_payload,
-          config,
-          application_started_at,
+          runtime,
           limit - 1
         )
 
@@ -1610,64 +1544,189 @@ defmodule MOQXProbe.Measure do
 
         drain_mixed_residual_events(
           state,
+          object_sender,
           ctx,
-          object_payload,
-          object_config,
-          control_payload,
-          config,
-          application_started_at,
+          runtime,
           limit - 1
         )
 
       {:timeout, ctx} ->
-        {state, ctx}
+        {state, ctx, object_sender}
     end
   end
 
-  defp schedule_mixed_object_sends(state, ctx, payload, config) do
-    Enum.reduce(state.object_streams, {state, ctx}, fn {stream, object}, {state, ctx} ->
-      {object, ctx} = schedule_mixed_object_stream_sends(object, ctx, payload, config)
-      {%{state | object_streams: Map.put(state.object_streams, stream, object)}, ctx}
+  defp start_mixed_object_sender(ctx, streams, object_streams, payload, config, started_at) do
+    count = length(streams) * config.payload_count
+    max_burst = StreamSender.default_max_burst(count)
+
+    StreamSender.start(
+      count: count,
+      started_at_us: started_at,
+      streams: streams,
+      payload: payload,
+      payload_count: config.payload_count,
+      stream_send_window: config.stream_send_window,
+      max_burst: max_burst,
+      min_demand: StreamSender.default_min_demand(max_burst),
+      max_demand: max_burst,
+      max_queue_depth: StreamSender.default_max_queue_depth(max_burst),
+      idle_retries: 1_000,
+      send_fun: mixed_object_sender_send_fun(config),
+      complete_fun: mixed_object_sender_complete_fun(config),
+      transport_state: %{ctx: ctx, object_streams: object_streams},
+      event_forward_pid: self()
+    )
+  end
+
+  defp mixed_object_sender_send_fun(config) do
+    fn event, %{ctx: ctx} = transport_state ->
+      opts = if event.finish?, do: [finish: true], else: []
+
+      case Transport.send_stream(ctx, event.stream, event.payload, opts) do
+        {:ok, send, ctx} ->
+          transport_state =
+            accept_mixed_object_sender_event(
+              transport_state,
+              event,
+              ctx,
+              byte_size(event.payload)
+            )
+
+          {:ok, send, transport_state}
+
+        {:error, reason, ctx} ->
+          transport_state =
+            fail_mixed_object_sender_event(transport_state, event, config, reason, ctx)
+
+          {:error, reason, transport_state}
+      end
+    end
+  end
+
+  defp accept_mixed_object_sender_event(transport_state, event, ctx, byte_size) do
+    %{object_streams: object_streams} = transport_state
+
+    object_streams =
+      Map.update!(object_streams, event.stream, fn object ->
+        record_mixed_object_send_accepted(object, event, byte_size)
+      end)
+
+    %{transport_state | ctx: ctx, object_streams: object_streams}
+  end
+
+  defp fail_mixed_object_sender_event(transport_state, event, config, reason, ctx) do
+    %{object_streams: object_streams} = transport_state
+
+    object_streams =
+      Map.update!(object_streams, event.stream, fn object ->
+        %{object | failure: mixed_object_failure(object, config, reason_name(reason))}
+      end)
+
+    %{transport_state | ctx: ctx, object_streams: object_streams}
+  end
+
+  defp record_mixed_object_send_accepted(object, event, byte_size) do
+    stream_state = %{
+      object.stream_state
+      | bytes_sent: object.stream_state.bytes_sent + byte_size,
+        payloads_accepted: object.stream_state.payloads_accepted + 1
+    }
+
+    %{
+      object
+      | stream_state: stream_state,
+        payloads_scheduled: event.payload_index,
+        send_inflight: object.send_inflight + 1
+    }
+  end
+
+  defp mixed_object_sender_complete_fun(config) do
+    fn stream, count, %{object_streams: object_streams} = transport_state ->
+      object_streams =
+        Map.update!(object_streams, stream, fn object ->
+          complete_mixed_object_send(object, config, count)
+        end)
+
+      %{transport_state | object_streams: object_streams}
+    end
+  end
+
+  defp drain_mixed_object_sender(state, ctx, object_sender) do
+    object_sender = put_mixed_object_sender_context(object_sender, ctx, state.object_streams)
+    {:ok, snapshot} = StreamSender.drain(object_sender)
+    {ctx, object_streams} = mixed_object_sender_context(snapshot)
+    {%{state | object_streams: object_streams}, ctx, object_sender}
+  end
+
+  defp put_mixed_object_sender_context(sender, ctx, object_streams) do
+    StreamSender.update_transport_state(sender, fn
+      %{object_streams: _object_streams} = transport_state ->
+        %{transport_state | ctx: ctx, object_streams: object_streams}
+
+      transport_state ->
+        transport_state
     end)
   end
 
-  defp schedule_mixed_object_stream_sends(object, ctx, payload, config) do
-    cond do
-      object.failure ->
-        {object, ctx}
+  defp mixed_object_sender_context(%{
+         transport_state: %{ctx: ctx, object_streams: object_streams}
+       }) do
+    {ctx, object_streams}
+  end
 
-      object.payloads_scheduled >= config.payload_count ->
-        {object, ctx}
+  defp finish_mixed_object_sender(state, object_sender, ctx) do
+    object_sender = put_mixed_object_sender_context(object_sender, ctx, state.object_streams)
 
-      object.send_inflight >= config.stream_send_window ->
-        {object, ctx}
+    case StreamSender.finish(object_sender) do
+      {:ok, snapshot} ->
+        {ctx, object_streams} = mixed_object_sender_context(snapshot)
+        {%{state | object_streams: object_streams}, ctx}
 
-      true ->
-        payload_index = object.payloads_scheduled + 1
-        finish? = payload_index == config.payload_count
-        opts = if finish?, do: [finish: true], else: []
-
-        case Transport.send_stream(ctx, object.stream_state.stream, payload, opts) do
-          {:ok, _send, ctx} ->
-            stream_state = %{
-              object.stream_state
-              | bytes_sent: object.stream_state.bytes_sent + byte_size(payload),
-                payloads_accepted: object.stream_state.payloads_accepted + 1
-            }
-
-            object = %{
-              object
-              | stream_state: stream_state,
-                payloads_scheduled: payload_index,
-                send_inflight: object.send_inflight + 1
-            }
-
-            schedule_mixed_object_stream_sends(object, ctx, payload, config)
-
-          {:error, reason, ctx} ->
-            {%{object | failure: mixed_object_failure(object, config, reason_name(reason))}, ctx}
-        end
+      {:error, _reason, snapshot} ->
+        {ctx, object_streams} = mixed_object_sender_context(snapshot)
+        {%{state | object_streams: object_streams}, ctx}
     end
+  end
+
+  defp stop_mixed_object_sender(state, object_sender, ctx) do
+    object_sender = put_mixed_object_sender_context(object_sender, ctx, state.object_streams)
+    {:ok, snapshot} = StreamSender.stop(object_sender)
+    {ctx, object_streams} = mixed_object_sender_context(snapshot)
+    {%{state | object_streams: object_streams}, ctx}
+  end
+
+  defp handle_mixed_events(state, object_sender, ctx, events, runtime) do
+    {state, completions} =
+      Enum.reduce(events, {state, %{}}, fn event, {state, completions} ->
+        handle_mixed_event(
+          state,
+          completions,
+          event,
+          runtime
+        )
+      end)
+
+    complete_mixed_object_sender_batch(state, ctx, object_sender, completions)
+  end
+
+  defp complete_mixed_object_sender_batch(state, ctx, object_sender, completions)
+       when map_size(completions) == 0 do
+    {state, ctx, object_sender}
+  end
+
+  defp complete_mixed_object_sender_batch(state, ctx, object_sender, completions) do
+    object_sender = put_mixed_object_sender_context(object_sender, ctx, state.object_streams)
+    completion_list = Enum.map(completions, fn {stream, count} -> {stream, count} end)
+    total = completions |> Map.values() |> Enum.sum()
+    {:ok, snapshot} = StreamSender.complete_many(object_sender, completion_list, drain?: false)
+    {ctx, object_streams} = mixed_object_sender_context(snapshot)
+
+    state =
+      state
+      |> Map.put(:object_streams, object_streams)
+      |> Map.update!(:object_send_events, &(&1 + total))
+
+    {state, ctx, object_sender}
   end
 
   defp maybe_schedule_mixed_control(state, ctx, payload, config, application_started_at) do
@@ -1769,74 +1828,82 @@ defmodule MOQXProbe.Measure do
 
   defp handle_mixed_event(
          state,
+         completions,
          event,
-         object_payload,
-         object_config,
-         control_payload,
-         config,
-         started_at
+         runtime
        ) do
     case event do
       {:stream_event, stream, :send_completed, _metadata} ->
-        handle_mixed_send_completion(state, stream, object_config)
+        handle_mixed_send_completion(state, completions, stream)
 
       {:stream_event, stream, :send_cancelled, _metadata} ->
-        handle_mixed_send_cancelled(state, stream, object_config, config)
+        {
+          handle_mixed_send_cancelled(state, stream, runtime.object_config, runtime.config),
+          completions
+        }
 
       {:stream_data, stream, data, _metadata} ->
-        handle_mixed_stream_data(
-          state,
-          stream,
-          data,
-          object_payload,
-          control_payload,
-          config,
-          started_at
-        )
+        {
+          handle_mixed_stream_data(
+            state,
+            stream,
+            data,
+            runtime.object_payload,
+            runtime.control_payload,
+            runtime.config,
+            runtime.application_started_at
+          ),
+          completions
+        }
 
       {:stream_event, stream, :peer_finished_sending, _metadata} ->
-        handle_mixed_peer_finished(state, stream, config)
+        {handle_mixed_peer_finished(state, stream, runtime.config), completions}
 
       {:stream_event, stream, :closed, _metadata} ->
-        handle_mixed_peer_finished(state, stream, config)
+        {handle_mixed_peer_finished(state, stream, runtime.config), completions}
 
       _event ->
-        state
+        {state, completions}
     end
   end
 
-  defp handle_mixed_send_completion(state, stream, object_config) do
+  defp handle_mixed_send_completion(state, completions, stream) do
     cond do
       Map.has_key?(state.object_streams, stream) ->
-        state
-        |> update_in([:object_streams, stream], &complete_mixed_object_send(&1, object_config))
-        |> Map.update!(:object_send_events, &(&1 + 1))
+        {state, increment_completion(completions, stream)}
 
       state.control.stream == stream ->
-        state
-        |> update_in([:control], fn control ->
-          %{
-            control
-            | send_completed: control.send_completed + 1,
-              send_inflight: max(control.send_inflight - 1, 0)
-          }
-        end)
-        |> Map.update!(:control_send_events, &(&1 + 1))
+        state =
+          state
+          |> update_in([:control], fn control ->
+            %{
+              control
+              | send_completed: control.send_completed + 1,
+                send_inflight: max(control.send_inflight - 1, 0)
+            }
+          end)
+          |> Map.update!(:control_send_events, &(&1 + 1))
+
+        {state, completions}
 
       true ->
-        state
+        {state, completions}
     end
   end
 
-  defp complete_mixed_object_send(object, config) do
-    payloads_completed = object.payloads_completed + 1
-    completed_at = if payloads_completed >= config.payload_count, do: monotonic_us()
+  defp complete_mixed_object_send(object, config, count) do
+    payloads_completed = object.payloads_completed + count
+
+    completed_at =
+      if is_nil(object.completed_at) and payloads_completed >= config.payload_count do
+        monotonic_us()
+      end
 
     object = %{
       object
       | payloads_completed: payloads_completed,
-        send_completed: object.send_completed + 1,
-        send_inflight: max(object.send_inflight - 1, 0),
+        send_completed: object.send_completed + count,
+        send_inflight: max(object.send_inflight - count, 0),
         completed_at: completed_at || object.completed_at
     }
 

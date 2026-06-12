@@ -72,8 +72,17 @@ defmodule MOQXProbe.Traffic.StreamSender do
   end
 
   def complete_many(%__MODULE__{} = sender, completions) when is_list(completions) do
+    complete_many(sender, completions, drain?: true)
+  end
+
+  def complete_many(%__MODULE__{} = sender, completions, opts) when is_list(completions) do
     :ok = StreamSink.complete_many(sender.sink, completions)
-    drain(sender)
+
+    if Keyword.get(opts, :drain?, true) do
+      drain(sender)
+    else
+      {:ok, snapshot(sender)}
+    end
   end
 
   def snapshot(%__MODULE__{} = sender) do

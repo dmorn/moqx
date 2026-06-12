@@ -762,3 +762,21 @@ seams without `Application` env.
   stream send-completion release cadence directly or change the benchmark
   object sender so media/object pressure is not paced by per-payload
   completion feedback in this way.
+- 2026-06-12: #45's next slice is now framed as benchmark-scheduler hardening
+  first, not more blind transport knob tuning. The mixed object sender should
+  adopt the same shape that made #46's object-stream-only lane credible:
+  batched ready-event drains, grouped per-stream completion feedback, and a
+  controlled object-send pump while preserving control-first scheduling and
+  explicit async completion accounting. After a focused local regression, run
+  the canonical mixed comparison remotely from a current `main` artifact and
+  close #45 only if two clean repetitions meet the 80% goodput / 2x control
+  p99 stop rule with full server ingress and no bimodal run-to-run spread.
+- 2026-06-12: The local #45 scheduler slice is implemented and verified. Mixed
+  object sends now run through `StreamSender`/`StreamSink`, use grouped
+  per-stream completion feedback, and defer object repumping until after the
+  mixed loop has a chance to schedule due control traffic. quicer inspection
+  confirms `send_complete` should be interpreted as stack/buffer-release
+  feedback rather than peer delivery. The remaining required evidence is
+  remote: redeploy a current artifact and rerun the canonical
+  `reference_mixed,moqx_mixed` comparison twice before making the #45 closure
+  call.

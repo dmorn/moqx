@@ -1018,6 +1018,72 @@ defmodule MOQXProbe.MeasureTest do
     assert {:mixed_send, {:stream, _ref, :bidirectional}, 16, _opts} = first_send
   end
 
+  test "mixed MOQX client schedules due control before object pump after completion feedback" do
+    dir = tmp_dir()
+    output_path = Path.join(dir, "moqx-mixed-control-before-object-repump.jsonl")
+
+    Process.register(self(), __MODULE__.MixedSendOrderObserver)
+
+    on_exit(fn ->
+      if Process.whereis(__MODULE__.MixedSendOrderObserver) == self() do
+        Process.unregister(__MODULE__.MixedSendOrderObserver)
+      end
+    end)
+
+    Measure.main(
+      [
+        "--topology",
+        "moqx-client-to-reference-server",
+        "--workload",
+        "mixed_moqt_shaped",
+        "--server",
+        "127.0.0.1",
+        "--port",
+        "4433",
+        "--ca",
+        "/tmp/ca.pem",
+        "--servername",
+        "localhost",
+        "--stream-count",
+        "1",
+        "--payload-size",
+        "64",
+        "--payload-count",
+        "2",
+        "--control-payload-size",
+        "16",
+        "--control-message-count",
+        "2",
+        "--control-rate",
+        "1000000",
+        "--control-echo-window",
+        "2",
+        "--stream-send-window",
+        "1",
+        "--output",
+        output_path,
+        "--run-id",
+        "moqx-mixed-control-before-object-repump-test"
+      ],
+      script: "test measure",
+      transport_backend: __MODULE__.MixedEchoTransport
+    )
+
+    assert [
+             {:mixed_send, {:stream, _control_ref_1, :bidirectional}, 16, _control_opts_1},
+             {:mixed_send, {:stream, _object_ref_1, :unidirectional}, 64, _object_opts_1},
+             {:mixed_send, {:stream, _control_ref_2, :bidirectional}, 16, _control_opts_2},
+             {:mixed_send, {:stream, _object_ref_2, :unidirectional}, 64, _object_opts_2}
+           ] = receive_mixed_sends(4)
+
+    assert {:ok, [record]} = output_path |> File.read!() |> JSONL.parse()
+    assert Contract.validate_records([record]).valid?
+    assert record["limits"]["first_break_symptom"] == :null
+    assert record["diagnostics"]["summary"]["object_payloads_accepted"] == 2
+    assert record["diagnostics"]["summary"]["object_send_completions"] == 2
+    assert record["diagnostics"]["summary"]["object_send_completions_pending"] == 0
+  end
+
   test "mixed MOQX client schedules due control traffic without waiting for echo" do
     dir = tmp_dir()
     output_path = Path.join(dir, "moqx-mixed-control-trickle.jsonl")
@@ -1409,6 +1475,19 @@ defmodule MOQXProbe.MeasureTest do
         receive_mixed_open_stream_opts([stream_opts | opts])
     after
       0 -> Enum.reverse(opts)
+    end
+  end
+
+  defp receive_mixed_sends(count), do: receive_mixed_sends(count, [])
+
+  defp receive_mixed_sends(0, sends), do: Enum.reverse(sends)
+
+  defp receive_mixed_sends(count, sends) do
+    receive do
+      {:mixed_send, _stream, _byte_size, _opts} = send ->
+        receive_mixed_sends(count - 1, [send | sends])
+    after
+      100 -> flunk("expected #{count} more mixed stream sends")
     end
   end
 
