@@ -205,3 +205,16 @@ with object publishing.
   `context_owner` topology, and `moqx_object_stream` with `stream_owner`.
   Closure evidence should be based on that post-#47 comparison, not the older
   context-owner-only results.
+- 2026-06-12: Remote x86-control comparison from artifact `666db4c` and then
+  ready-drain artifact `2721984` shows the first `stream_owner` topology is
+  correct but still throughput-limited. Across post-fix runs `...-142043` and
+  `...-142211`, `stream_owner` stayed at about 49.1-49.5 Mbps with 32,000
+  completions, zero pending completions, and full clean MOQX server ingress.
+  The ready-drain fix reduced blocking stream-owner receive calls from 32,000
+  to about 5.3k-5.4k and added 32,000 zero-time drains, but did not move
+  goodput. `context_owner` also remained slow in those two post-fix runs
+  around 48.6-49.0 Mbps, while earlier same-artifact evidence still shows it
+  can jump to 159 Mbps. The next #46 slice should therefore focus on why the
+  BEAM-side stream sender remains paced around a ~6s active send span despite
+  cheap send calls and full server ingress, rather than treating per-stream
+  ownership alone as the fix.

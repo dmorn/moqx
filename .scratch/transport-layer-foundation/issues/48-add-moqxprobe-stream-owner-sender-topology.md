@@ -95,6 +95,14 @@ None. #47 is done locally and provides the transport primitive.
   is followed by zero-time ready drains up to `stream_event_batch_size` before
   the worker refills that stream's send window. The focused regression now
   proves drain calls are observed for immediately queued completion batches.
+- 2026-06-12: Rebuilt artifact `2721984` with the ready-drain fix and reran
+  two x86-control suites: `...-142043` and `...-142211`. The fix changed the
+  diagnostics as expected: stream-owner blocking receive calls dropped from
+  32,000 to about 5.3k-5.4k, and ready-drain calls rose to 32,000. Throughput
+  did not materially change: stream-owner stayed around 49.1-49.5 Mbps, with
+  32,000 completions, zero pending completions, and clean MOQX server ingress.
+  This rejects "one blocking receive per completion" as the only explanation
+  for the stream-owner ceiling.
 
 ## Verification
 
@@ -127,5 +135,6 @@ None. #47 is done locally and provides the transport primitive.
 
 ## Follow-up
 
-Rebuild and rerun the same x86-control three-way comparison with the ready-drain
-fix.
+Next #46 work should inspect the remaining stream-owner/process-model cost and
+quicer/MsQuic completion-release cadence. The first stream-owner topology is
+correct and instrumented, but it is not a performance win yet.
