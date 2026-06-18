@@ -486,7 +486,7 @@ bench-transport-build-quicprobe quicprobe_target="linux_arm64":
       mise exec go@"{{ quicprobe_go_version }}" -- \
       go build -trimpath -ldflags "-s -w" -o "$staging/bin/quicprobe" .
 
-    tar -C "$staging" -czf "$artifact_path" .
+    COPYFILE_DISABLE=1 tar -C "$staging" -czf "$artifact_path" bin
     printf 'Built %s\n' "{{ bench_dir }}/$artifact_rel"
 
 # Build the quicprobe reference peer artifact with Docker.

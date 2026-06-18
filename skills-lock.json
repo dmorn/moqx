@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "exe-dev-vm-ops": {
+      "source": "/Users/dmorn/projects/moqx/agent-skills",
+      "sourceType": "local",
+      "computedHash": "5ccdc13cb6f22884f129997b8912896717a0893155adcbcca1e53d1fb5cdf755"
+    }
+  }
+}

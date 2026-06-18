@@ -69,6 +69,67 @@ func TestClientServerBidiEcho(t *testing.T) {
 	}
 }
 
+func TestResolveRemoteUDPAddrAutoUsesUDP4ForIPv4(t *testing.T) {
+	t.Parallel()
+
+	network, udpAddr, err := resolveRemoteUDPAddr("192.0.2.10:55433", udpNetworkAuto)
+	if err != nil {
+		t.Fatalf("resolveRemoteUDPAddr() error = %v", err)
+	}
+
+	if network != "udp4" {
+		t.Fatalf("network = %q, want udp4", network)
+	}
+	if got, want := udpAddr.String(), "192.0.2.10:55433"; got != want {
+		t.Fatalf("resolved address = %q, want %q", got, want)
+	}
+}
+
+func TestResolveListenUDPAddrAutoKeepsWildcardNetwork(t *testing.T) {
+	t.Parallel()
+
+	network, _, err := resolveListenUDPAddr(":55433", udpNetworkAuto)
+	if err != nil {
+		t.Fatalf("resolveListenUDPAddr() error = %v", err)
+	}
+
+	if network != "udp" {
+		t.Fatalf("network = %q, want udp", network)
+	}
+}
+
+func TestResolveListenUDPAddrAutoUsesUDP4ForIPv4Bind(t *testing.T) {
+	t.Parallel()
+
+	network, udpAddr, err := resolveListenUDPAddr("127.0.0.1:0", udpNetworkAuto)
+	if err != nil {
+		t.Fatalf("resolveListenUDPAddr() error = %v", err)
+	}
+
+	if network != "udp4" {
+		t.Fatalf("network = %q, want udp4", network)
+	}
+	if got := udpAddr.IP.String(); got != "127.0.0.1" {
+		t.Fatalf("resolved IP = %q, want 127.0.0.1", got)
+	}
+}
+
+func TestValidateInitialPacketSize(t *testing.T) {
+	t.Parallel()
+
+	for _, size := range []int{0, 1200, 1452} {
+		if err := validateInitialPacketSize(size); err != nil {
+			t.Fatalf("validateInitialPacketSize(%d) error = %v", size, err)
+		}
+	}
+
+	for _, size := range []int{1199, 1453} {
+		if err := validateInitialPacketSize(size); err == nil {
+			t.Fatalf("validateInitialPacketSize(%d) error = nil, want error", size)
+		}
+	}
+}
+
 func TestClientServerJSONStreamPressure(t *testing.T) {
 	t.Parallel()
 

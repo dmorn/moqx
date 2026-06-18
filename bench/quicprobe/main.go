@@ -31,6 +31,7 @@ const mixedMOQTShapedWorkload = "mixed_moqt_shaped"
 const datagramHeaderSize = 16
 const datagramEchoQueueLen = 131_072
 const pacedSpinThreshold = 200 * time.Microsecond
+const udpNetworkAuto = "auto"
 
 type serverConfig struct {
 	addr        string
@@ -38,15 +39,19 @@ type serverConfig struct {
 	keyFile     string
 	alpn        string
 	statsOutput string
+	udpNetwork  string
+	initialSize int
 }
 
 type clientConfig struct {
-	addr       string
-	caFile     string
-	alpn       string
-	serverName string
-	bidiEcho   string
-	jsonOutput bool
+	addr        string
+	caFile      string
+	alpn        string
+	serverName  string
+	bidiEcho    string
+	jsonOutput  bool
+	udpNetwork  string
+	initialSize int
 
 	workload        string
 	streamDirection string
@@ -289,6 +294,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&cfg.keyFile, "key", "", "TLS private key PEM file")
 	flags.StringVar(&cfg.alpn, "alpn", envOrDefault("QUICPROBE_ALPN", defaultALPN), "QUIC ALPN")
 	flags.StringVar(&cfg.statsOutput, "stats-output", "", "optional JSONL path for per-connection server ingress summaries")
+	flags.StringVar(&cfg.udpNetwork, "udp-network", udpNetworkAuto, "UDP socket network: auto, udp, udp4, or udp6")
+	flags.IntVar(&cfg.initialSize, "initial-packet-size", 0, "QUIC Initial packet size in bytes; 0 uses the quic-go default")
 
 	if err := flags.Parse(args); err != nil {
 		return serverConfig{}, err
@@ -299,6 +306,12 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	}
 	if cfg.alpn == "" {
 		return serverConfig{}, errors.New("server requires --alpn")
+	}
+	if err := validateUDPNetwork(cfg.udpNetwork); err != nil {
+		return serverConfig{}, err
+	}
+	if err := validateInitialPacketSize(cfg.initialSize); err != nil {
+		return serverConfig{}, err
 	}
 
 	return cfg, nil
@@ -316,6 +329,8 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	flags.StringVar(&cfg.serverName, "servername", "", "TLS server name override")
 	flags.StringVar(&cfg.bidiEcho, "bidi-echo", "", "payload to send on a bidirectional stream and expect as echo")
 	flags.BoolVar(&cfg.jsonOutput, "json", false, "emit structured JSON for a measured run")
+	flags.StringVar(&cfg.udpNetwork, "udp-network", udpNetworkAuto, "UDP socket network: auto, udp, udp4, or udp6")
+	flags.IntVar(&cfg.initialSize, "initial-packet-size", 0, "QUIC Initial packet size in bytes; 0 uses the quic-go default")
 	flags.StringVar(&cfg.workload, "workload", streamPressureWorkload, "workload for --json runs: stream_pressure or datagram_pressure")
 	flags.StringVar(&cfg.streamDirection, "stream-direction", "bidirectional", "stream direction for --json runs: bidirectional or unidirectional")
 	flags.IntVar(&cfg.streamCount, "stream-count", 1, "number of concurrent streams for --json runs")
@@ -340,6 +355,12 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	}
 	if cfg.alpn == "" {
 		return clientConfig{}, 0, errors.New("client requires --alpn")
+	}
+	if err := validateUDPNetwork(cfg.udpNetwork); err != nil {
+		return clientConfig{}, 0, err
+	}
+	if err := validateInitialPacketSize(cfg.initialSize); err != nil {
+		return clientConfig{}, 0, err
 	}
 	if timeout <= 0 {
 		return clientConfig{}, 0, errors.New("client --timeout must be positive")
@@ -401,11 +422,21 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string) error
 		return fmt.Errorf("load server certificate: %w", err)
 	}
 
-	listener, err := quic.ListenAddr(cfg.addr, &tls.Config{
+	udpNetwork, udpAddr, err := resolveListenUDPAddr(cfg.addr, cfg.udpNetwork)
+	if err != nil {
+		return err
+	}
+	udpConn, err := net.ListenUDP(udpNetwork, udpAddr)
+	if err != nil {
+		return fmt.Errorf("listen udp: %w", err)
+	}
+	defer udpConn.Close()
+
+	listener, err := quic.Listen(udpConn, &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		Certificates: []tls.Certificate{cert},
 		NextProtos:   []string{cfg.alpn},
-	}, &quic.Config{EnableDatagrams: true})
+	}, newQUICConfig(cfg.initialSize))
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -793,12 +824,22 @@ func runClient(ctx context.Context, cfg clientConfig, stdout io.Writer) error {
 
 	startedAt := time.Now()
 
-	conn, err := quic.DialAddr(ctx, cfg.addr, &tls.Config{
+	udpNetwork, udpAddr, err := resolveRemoteUDPAddr(cfg.addr, cfg.udpNetwork)
+	if err != nil {
+		return err
+	}
+	udpConn, err := net.ListenUDP(udpNetwork, clientLocalUDPAddr(udpNetwork))
+	if err != nil {
+		return fmt.Errorf("listen udp: %w", err)
+	}
+	defer udpConn.Close()
+
+	conn, err := quic.Dial(ctx, udpConn, udpAddr, &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		RootCAs:    roots,
 		ServerName: serverName,
 		NextProtos: []string{cfg.alpn},
-	}, &quic.Config{EnableDatagrams: true})
+	}, newQUICConfig(cfg.initialSize))
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -1769,6 +1810,111 @@ func serverNameFor(addr string, override string) (string, error) {
 	}
 
 	return host, nil
+}
+
+func validateUDPNetwork(network string) error {
+	switch normalizeUDPNetwork(network) {
+	case udpNetworkAuto, "udp", "udp4", "udp6":
+		return nil
+	default:
+		return fmt.Errorf("invalid UDP network %q; expected auto, udp, udp4, or udp6", network)
+	}
+}
+
+func validateInitialPacketSize(size int) error {
+	if size == 0 {
+		return nil
+	}
+	if size < 1200 || size > 1452 {
+		return fmt.Errorf("invalid initial packet size %d; expected 0 or a value from 1200 through 1452", size)
+	}
+
+	return nil
+}
+
+func newQUICConfig(initialPacketSize int) *quic.Config {
+	cfg := &quic.Config{EnableDatagrams: true}
+	if initialPacketSize > 0 {
+		cfg.InitialPacketSize = uint16(initialPacketSize)
+	}
+
+	return cfg
+}
+
+func resolveListenUDPAddr(addr string, requestedNetwork string) (string, *net.UDPAddr, error) {
+	network := normalizeUDPNetwork(requestedNetwork)
+	if network == udpNetworkAuto {
+		network = "udp"
+		host, _, err := net.SplitHostPort(addr)
+		if err == nil && host != "" {
+			if ip := net.ParseIP(host); ip != nil {
+				if ip.To4() != nil {
+					network = "udp4"
+				} else {
+					network = "udp6"
+				}
+			}
+		}
+	}
+
+	udpAddr, err := net.ResolveUDPAddr(network, addr)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve UDP listen address: %w", err)
+	}
+
+	return network, udpAddr, nil
+}
+
+func resolveRemoteUDPAddr(addr string, requestedNetwork string) (string, *net.UDPAddr, error) {
+	requestedNetwork = normalizeUDPNetwork(requestedNetwork)
+	if requestedNetwork != udpNetworkAuto {
+		udpAddr, err := net.ResolveUDPAddr(requestedNetwork, addr)
+		if err != nil {
+			return "", nil, fmt.Errorf("resolve UDP remote address: %w", err)
+		}
+
+		return requestedNetwork, udpAddr, nil
+	}
+
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve UDP remote address: %w", err)
+	}
+
+	network := "udp"
+	if udpAddr.IP.To4() != nil {
+		network = "udp4"
+	} else if udpAddr.IP.To16() != nil {
+		network = "udp6"
+	}
+
+	if network != "udp" {
+		udpAddr, err = net.ResolveUDPAddr(network, addr)
+		if err != nil {
+			return "", nil, fmt.Errorf("resolve UDP remote address: %w", err)
+		}
+	}
+
+	return network, udpAddr, nil
+}
+
+func normalizeUDPNetwork(network string) string {
+	if network == "" {
+		return udpNetworkAuto
+	}
+
+	return network
+}
+
+func clientLocalUDPAddr(network string) *net.UDPAddr {
+	switch network {
+	case "udp4":
+		return &net.UDPAddr{IP: net.IPv4zero, Port: 0}
+	case "udp6":
+		return &net.UDPAddr{IP: net.IPv6zero, Port: 0}
+	default:
+		return &net.UDPAddr{Port: 0}
+	}
 }
 
 func moduleVersion(path string) string {
