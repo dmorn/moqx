@@ -106,6 +106,9 @@ The architectural baseline is recorded in:
 - Performance research uses a standalone `bench/moqxprobe` Mix project with
   Benchee scripts, caller-side client implementations, and explicit target
   flags for fake, local `quicprobe`, and remote `quicprobe` paths.
+- Delivery-aware benchmark scripts keep timing and receiver evidence separate:
+  timed Benchee functions return run receipts, and unmeasured post-run hooks
+  collect target evidence through adapters.
 - The benchmark harness is not part of normal unit tests and is not represented as `mix test.integration`.
 - Local loopback, fake-target, and same-host runs are calibration only; real
   server paths provide the evidence for network saturation and degradation
@@ -115,7 +118,14 @@ The architectural baseline is recorded in:
 - `iperf3` is a target preflight and sidecar metadata source, not a QUIC
   benchmark job.
 - `bench/quicprobe` remains the repo-owned reference QUIC peer. It can be run
-  locally or kept as a persistent service on a simple VM.
+  locally or kept as a persistent service on a simple VM. Its evidence HTTP API
+  exposes receiver-side run records and an exclusive experiment lease.
+- Parallel benchmark suites must not share one `quicprobe` target. `moqxprobe`
+  must acquire the target lease before a `quicprobe` suite and match receiver
+  evidence by lease token as well as run sequence.
+- `quicprobe` DATAGRAM server behavior is explicit: drain mode is used for
+  publish-only MOQX DATAGRAM object benchmarks, while echo mode is reserved for
+  round-trip/reference-client checks.
 - The historical Terraform, `probed`, release-deploy, shared ledger, and
   `transport-bench-v1` JSONL paths are legacy and should not receive new active
   benchmark work.

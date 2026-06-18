@@ -9,6 +9,17 @@ The root transport telemetry decisions remain valid. The benchmark-side
 collector, shared ledger, and `transport-bench-v1` canonical JSONL output are
 legacy history for the removed remote lab workflow.
 
+Current benchmark measurement lives in `bench/moqxprobe` Benchee scripts.
+Timed functions return run receipts; unmeasured hooks collect target evidence
+through adapters and write `moqxprobe-benchee-evidence-v1` sidecars when
+requested. Real `quicprobe` targets expose receiver evidence and an exclusive
+experiment lease through their HTTP API; parallel benchmark suites against one
+target are invalid and must fail fast.
+
+The original decision body below is retained as historical context for why the
+telemetry and `transport-bench-v1` approach existed; it is not current
+benchmark policy.
+
 ## Context
 
 The transport benchmark harness exists to answer how far a real QUIC path can

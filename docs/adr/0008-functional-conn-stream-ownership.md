@@ -120,6 +120,12 @@ legacy for the removed remote lab workflow; current follow-up measurements use
 the Benchee-based `bench/moqxprobe` loop and should still identify sender
 topology, such as single-pump versus per-stream sender ownership.
 
+Fresh stream benchmarks should use the delivery-aware `moqxprobe` scripts when
+making real-target claims. Local/fake runs remain process-model calibration.
+`quicprobe` target runs must acquire the target experiment lease and match
+receiver evidence by lease token, so stream-owner performance is not inferred
+from another suite's target-local sequence record.
+
 ## Consequences
 
 Positive:

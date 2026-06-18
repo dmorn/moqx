@@ -12,7 +12,7 @@ Use this for transport benchmark work in `/Users/dmorn/projects/moqx`.
 - `bench/README.md` for the active bench layout.
 - `bench/moqxprobe/README.md` for the current Benchee loop and target flags.
 - `bench/quicprobe/` for the Go reference peer.
-- `agent-skills/exe-dev-vm-ops/OPS.md` when operating a persistent VM target.
+- `.agents/skills/exe-dev-vm-ops/OPS.md` when operating a persistent VM target.
 - `.scratch/transport-layer-foundation/issues/49-simplify-transport-bench-loop-around-benchee-targets.md`
   for the current cleanup/refactor plan.
 - `docs/adr/` and `.scratch/transport-layer-foundation/PRD.md` for decisions.
@@ -31,6 +31,13 @@ Use this for transport benchmark work in `/Users/dmorn/projects/moqx`.
   `transport-bench-v1` for new benchmark work unless the user explicitly
   reopens that design.
 - Use `bench/quicprobe` as the reference peer. It can be local or remote.
+- Do not run parallel benchmark suites against one `quicprobe` target. The
+  target evidence stream is connection-sequence based. `moqxprobe` acquires an
+  experiment lease through the quicprobe HTTP API and must fail fast when the
+  target is busy.
+- Treat delivery evidence as a post-run target-adapter concern. The timed
+  Benchee function returns a receipt; the unmeasured hook closes/drains as
+  needed and collects receiver evidence.
 - Listener/relay pressure is future work. Current v1 focus is caller-side
   publishing/subscribing process architecture.
 - For code changes, run the AGENTS gate. For docs-only or issue-only changes,
@@ -64,9 +71,12 @@ Use this for transport benchmark work in `/Users/dmorn/projects/moqx`.
      --quic-port <quic-port> \
      --ca <ca.pem> \
      --servername <server-name> \
+     --evidence-output results/quicprobe-stream-evidence.jsonl \
      --benchee-time 3
    ```
-6. Record what was measured, target/path, command flags, and artifacts in the
+6. For DATAGRAM object pressure, use `bench/datagram_clients.exs` against a
+   `quicprobe` server running `--datagram-semantics drain`.
+7. Record what was measured, target/path, command flags, and artifacts in the
    relevant `.scratch/transport-layer-foundation/issues/*.md` issue.
 
 ## Validation

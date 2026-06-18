@@ -220,3 +220,9 @@ performance remains future work.
   evidence, not peer-delivery evidence. Follow-up work should build
   delivery-aware caller benchmarks before using remote `moqxprobe` numbers as
   performance claims.
+- 2026-06-18 follow-up: Delivery-aware stream and DATAGRAM scripts now exist.
+  For `quicprobe` targets, `moqxprobe` acquires an exclusive experiment lease,
+  records the lease in sidecar metadata, and matches receiver evidence by
+  lease token plus target-local sequence. The earlier warning above describes
+  the first non-delivery-aware stream smoke only, not the current benchmark
+  contract.

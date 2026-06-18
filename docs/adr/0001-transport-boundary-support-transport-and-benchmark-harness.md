@@ -182,6 +182,20 @@ ports, TLS material, workload shape, selected client implementation, and timing.
 Reference tools live under `bench/quicprobe/`. Operators may keep simple target
 machines running `iperf3` and `quicprobe`, but benchmark scripts accept those
 endpoints as data and do not provision, deploy to, or tear down machines.
+`quicprobe` also provides the receiver-side evidence surface for delivery-aware
+caller benchmarks.
+
+Delivery evidence is collected outside timed Benchee functions. A benchmark
+function sends the workload and returns a run receipt. An unmeasured hook then
+closes/drains as required and asks the target adapter for receiver evidence.
+For `quicprobe`, the adapter reads the HTTP evidence API and matches records by
+target-local run sequence plus experiment lease token.
+
+Do not run parallel benchmark suites against a single `quicprobe` target.
+`quicprobe` exposes an exclusive experiment lease on its HTTP API; `moqxprobe`
+acquires that lease before a real-target suite and releases it afterward. A
+second suite must fail before opening QUIC traffic because shared target
+evidence would corrupt attribution.
 
 The harness should eventually compare:
 
@@ -224,6 +238,11 @@ client benchmark project and `bench/quicprobe` as the reference peer. `iperf3`
 baselines, quicprobe server stats, packet captures, and telemetry summaries are
 sidecar evidence around Benchee runs, not a repository-owned remote lab
 contract.
+
+2026-06-18 amendment: `quicprobe` DATAGRAM server behavior is explicit.
+`--datagram-semantics drain` is the publish-only receiver-evidence mode used
+by MOQX DATAGRAM object benchmarks. `--datagram-semantics echo` is reserved for
+round-trip/reference-client checks where echoed DATAGRAMs are the workload.
 
 ## Consequences
 
