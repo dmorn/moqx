@@ -27,8 +27,11 @@ Establish a protocol-neutral QUIC transport foundation around `MOQX.Transport`:
 - stream FIN, RESET_STREAM, and STOP_SENDING semantics are first-class;
 - a deterministic in-memory support transport provides QUIC-like semantics for future protocol tests;
 - shared contract tests verify the support transport and `quicer` adapter against the same behavior;
-- transport performance and limits research lives under a separate benchmark harness focused on real server paths, with local runs used only for calibration;
-- short-lived Terraform profiles may provision controlled benchmark server pairs when the caller explicitly starts and destroys them.
+- transport performance and limits research lives under a separate benchmark
+  harness focused on explicit targets, with local/fake runs used only for
+  calibration;
+- controlled server paths are provided as target endpoints rather than created
+  implicitly by benchmark scripts.
 
 The architectural baseline is recorded in:
 
@@ -62,7 +65,9 @@ The architectural baseline is recorded in:
 21. As a performance researcher, I want a `MOQX.Transport.Quicer` client/server self-pair calibration benchmark, so that wrapper and BEAM overhead can be measured without mistaking loopback behavior for network behavior.
 22. As a performance researcher, I want reference QUIC client/server comparisons across real server paths, so that client-side and listener-side behavior can be evaluated independently under actual RTT, loss, buffering, and congestion-control conditions.
 23. As a maintainer, I want benchmark tooling isolated in dedicated bench subprojects, so that research dependencies and release packaging do not leak into the library dependency graph.
-24. As an operator, I want a Docker-built benchmark CLI release that can be copied to controlled servers, so that real-path experiments do not require cloning the repository on disposable hosts.
+24. As an operator, I want simple target endpoints for `iperf3` and
+    `quicprobe`, so that caller-side performance work can iterate without
+    rebuilding and redeploying a large benchmark stack.
 25. As a future implementer of MOQT draft-14 or MOQ Lite, I want transport semantics to be documented and tested, so that protocol-specific work starts from solid ground.
 26. As a high-throughput caller implementer, I want connection-scoped and
     stream-scoped transport state to be separable, so that object stream
@@ -98,20 +103,22 @@ The architectural baseline is recorded in:
   one sender process per stream is possible.
 - A deterministic support transport will implement the transport behaviour for tests.
 - Shared contract tests will verify handshake, stream, datagram, active/passive, close/reset, capabilities, and ownership semantics across transport implementations.
-- Shared benchmark artifact specs live in a slim `bench/ledger` Mix project
-  that does not depend on `moqx`, quicer, HTTP tooling, or infrastructure.
 - Performance research uses a standalone `bench/moqxprobe` Mix project with
-  caller-provided endpoints for same-region, cross-region, and edge-to-server
-  paths. Legacy `.exs` entrypoints may remain as compatibility delegates, but
-  the canonical operator surface is the `moqxprobe` runtime CLI.
-- Future remote orchestration lives in a separate `bench/probed` Mix
-  project so daemon/control-plane concerns do not become CLI internals.
+  Benchee scripts, caller-side client implementations, and explicit target
+  flags for fake, local `quicprobe`, and remote `quicprobe` paths.
 - The benchmark harness is not part of normal unit tests and is not represented as `mix test.integration`.
-- Local loopback and same-host self-pair benchmark runs are calibration only; real server paths provide the evidence for network saturation and degradation claims.
-- Ephemeral benchmark infrastructure lives under `bench/infra/` when it is explicit, caller-operated, and separated from benchmark scripts. Scripts must still accept endpoints and must not start or destroy infrastructure implicitly.
-- Remote benchmark hosts should receive Docker-built release artifacts for the
-  target OS/architecture. Deploy tooling must accept explicit SSH targets and
-  must not call Terraform or start benchmark traffic implicitly.
+- Local loopback, fake-target, and same-host runs are calibration only; real
+  server paths provide the evidence for network saturation and degradation
+  claims.
+- Benchmark scripts must accept endpoints and must not start, destroy, or infer
+  infrastructure state implicitly.
+- `iperf3` is a target preflight and sidecar metadata source, not a QUIC
+  benchmark job.
+- `bench/quicprobe` remains the repo-owned reference QUIC peer. It can be run
+  locally or kept as a persistent service on a simple VM.
+- The historical Terraform, `probed`, release-deploy, shared ledger, and
+  `transport-bench-v1` JSONL paths are legacy and should not receive new active
+  benchmark work.
 - The `Conn`/`Conn.Stream` ownership refactor is expected to affect stream and
   mixed benchmark results. Existing #45/#46 evidence remains valid for the old
   single-pump/global-context transport shape, but fresh stream and mixed
@@ -160,7 +167,8 @@ Initial test coverage should include:
 - WebTransport-over-HTTP/3 support
 - Final benchmark thresholds or pass/fail criteria
 - Selecting a permanent reference QUIC implementation
-- Production deployment automation or long-lived benchmark environments
+- Production deployment automation or a repository-owned remote control plane
+- Disposable cloud lab provisioning
 - Treating public relays as controlled benchmark baselines
 - Adding a `mix test.integration` task
 - Replacing the helper-based event API with a dedicated router process
@@ -174,7 +182,10 @@ Real QUIC verification belongs in an explicit Docker Compose driven integration 
 
 The integration harness should cover both directions: `MOQX.Transport.Quicer` client to a reference QUIC server, and a reference QUIC client to a `MOQX.Transport.Quicer` listener. Static endpoint and certificate paths belong in `config/test.exs`; tests must not mutate `Application` env.
 
-The benchmark harness should eventually compare raw network/host baselines, self-pair `MOQX.Transport.Quicer` calibration, our client against a reference QUIC server, a reference QUIC client against our listener, and reference-to-reference behavior across real server paths.
+The benchmark harness should compare raw network/host baselines, fake-transport
+process-model calibration, our caller-side clients against a reference QUIC
+server, and reference client/server behavior when useful across the same target
+path.
 
 `iperf3` is a baseline tool for host/network capacity, not a QUIC benchmark. QUIC performance measurements should be interpreted relative to that baseline.
 

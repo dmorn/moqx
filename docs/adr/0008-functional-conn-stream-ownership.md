@@ -114,10 +114,11 @@ workloads because these changes can alter:
 - the ability to run one sender process per stream;
 - same-run reference-relative goodput and control latency.
 
-`transport-bench-v1` should remain the durable output format. The measurement
-contract may add diagnostics that identify sender topology, such as
-single-pump versus per-stream sender ownership, but existing summary semantics
-should not be replaced as part of the transport refactor.
+At the time of this refactor, the active remote harness used
+`transport-bench-v1` as its durable output format. That output contract is now
+legacy for the removed remote lab workflow; current follow-up measurements use
+the Benchee-based `bench/moqxprobe` loop and should still identify sender
+topology, such as single-pump versus per-stream sender ownership.
 
 ## Consequences
 

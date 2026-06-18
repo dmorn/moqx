@@ -11,23 +11,13 @@
 !lib/**
 
 !bench
-!bench/ledger
-!bench/ledger/mix.exs
-!bench/ledger/mix.lock
-!bench/ledger/lib
-!bench/ledger/lib/**
-
 !bench/moqxprobe
 !bench/moqxprobe/mix.exs
 !bench/moqxprobe/mix.lock
+!bench/moqxprobe/bench
+!bench/moqxprobe/bench/**
 !bench/moqxprobe/lib
 !bench/moqxprobe/lib/**
-!bench/moqxprobe/rel
-!bench/moqxprobe/rel/**
-!bench/moqxprobe/docker
-!bench/moqxprobe/docker/Dockerfile.burrito
-!bench/moqxprobe/docker/Dockerfile.quicprobe
-!bench/moqxprobe/docker/Dockerfile.release
 
 !bench/quicprobe
 !bench/quicprobe/**

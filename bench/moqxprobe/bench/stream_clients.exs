@@ -8,12 +8,22 @@ defmodule MOQXProbe.Bench.StreamClients do
   alias MOQX.Transport
   alias MOQX.Transport.Conn.Stream
   alias MOQX.Transport.Conn.Stream.Info
+  alias MOQX.Transport.Quicer
   alias MOQXProbe.Traffic.StreamSender
 
   @input_names ["flow-generated", "flow-prebuilt-list"]
   @implementation_names ["context_owner", "stream_owner"]
+  @target_names ["fake", "quicprobe"]
   @switches [
     help: :boolean,
+    target: :string,
+    host: :string,
+    quic_port: :integer,
+    iperf_port: :integer,
+    ca: :string,
+    servername: :string,
+    alpn: :string,
+    connect_timeout_ms: :integer,
     stream_count: :integer,
     payload_count: :integer,
     payload_size: :integer,
@@ -127,7 +137,7 @@ defmodule MOQXProbe.Bench.StreamClients do
   end
 
   def run_context_owner(input) do
-    {ctx, streams} = setup_streams(input)
+    {ctx, streams, connection} = setup_streams(input)
     payload = payload(input)
     count = input.stream_count * input.payload_count
 
@@ -154,28 +164,34 @@ defmodule MOQXProbe.Bench.StreamClients do
       drive_context_owner(sender, ctx, count, input)
     after
       _snapshot = StreamSender.stop(sender)
+      close_connection(ctx, connection)
       flush_mailbox()
     end
   end
 
   def run_stream_owner(input) do
-    {_ctx, streams} = setup_streams(input)
+    {ctx, streams, connection} = setup_streams(input)
     payload = payload(input)
     deadline_us = monotonic_us() + input.timeout_ms * 1_000
 
-    streams
-    |> Enum.map(fn stream_state ->
-      Task.async(fn ->
-        run_stream_owner_worker(stream_state.stream, payload, input, deadline_us)
+    try do
+      streams
+      |> Enum.map(fn stream_state ->
+        Task.async(fn ->
+          run_stream_owner_worker(stream_state.stream, payload, input, deadline_us)
+        end)
       end)
-    end)
-    |> Task.await_many(input.timeout_ms + 1_000)
-    |> Enum.reduce(%{accepted: 0, completed: 0}, fn result, acc ->
-      %{
-        accepted: acc.accepted + result.accepted,
-        completed: acc.completed + result.completed
-      }
-    end)
+      |> Task.await_many(input.timeout_ms + 1_000)
+      |> Enum.reduce(%{accepted: 0, completed: 0}, fn result, acc ->
+        %{
+          accepted: acc.accepted + result.accepted,
+          completed: acc.completed + result.completed
+        }
+      end)
+    after
+      close_connection(ctx, connection)
+      flush_mailbox()
+    end
   end
 
   def jobs(options) do
@@ -241,6 +257,14 @@ defmodule MOQXProbe.Bench.StreamClients do
     max_burst = positive_integer(opts, :max_burst, 64)
 
     base = %{
+      target: target(opts),
+      host: Keyword.get(opts, :host, "127.0.0.1"),
+      quic_port: positive_integer(opts, :quic_port, 4433),
+      iperf_port: positive_integer(opts, :iperf_port, 5201),
+      ca: Keyword.get(opts, :ca),
+      servername: Keyword.get(opts, :servername, "localhost"),
+      alpn: Keyword.get(opts, :alpn, "moqx-test"),
+      connect_timeout_ms: positive_integer(opts, :connect_timeout_ms, 5_000),
       stream_count: positive_integer(opts, :stream_count, 32),
       payload_count: positive_integer(opts, :payload_count, 1_000),
       payload_size: positive_integer(opts, :payload_size, 1_180),
@@ -256,6 +280,7 @@ defmodule MOQXProbe.Bench.StreamClients do
     |> Map.put(:min_demand, non_negative_integer(opts, :min_demand, max(base.max_burst - 1, 0)))
     |> Map.put(:max_demand, positive_integer(opts, :max_demand, base.max_burst))
     |> validate_flow_demand!()
+    |> validate_target!()
   end
 
   defp benchee_options(opts) do
@@ -319,6 +344,19 @@ defmodule MOQXProbe.Bench.StreamClients do
 
   defp cli_key(key), do: key |> Atom.to_string() |> String.replace("_", "-")
 
+  defp target(opts) do
+    case Keyword.get(opts, :target, "fake") do
+      name when name in @target_names -> String.to_atom(name)
+      name -> Mix.raise("--target must be one of #{Enum.join(@target_names, ", ")}; got #{name}")
+    end
+  end
+
+  defp validate_target!(%{target: :quicprobe, ca: nil}) do
+    Mix.raise("--ca is required when --target quicprobe")
+  end
+
+  defp validate_target!(options), do: options
+
   defp selected_values(opts, key, allowed) do
     values = Keyword.get_values(opts, key)
     values = if values == [], do: allowed, else: values
@@ -337,15 +375,51 @@ defmodule MOQXProbe.Bench.StreamClients do
 
   defp input_for("flow-prebuilt-list", base), do: Map.put(base, :producer, :flow_prebuilt_list)
 
-  defp setup_streams(input) do
+  defp setup_streams(%{target: :fake} = input) do
     {:ok, ctx} = Transport.new(FakeTransport, [])
     {:ok, connection, ctx} = Transport.connect(ctx, "localhost", 4433, [], 1_000)
+    open_streams(ctx, connection, input)
+  end
 
+  defp setup_streams(%{target: :quicprobe} = input) do
+    {:ok, ctx} = Transport.new(Quicer, [])
+
+    {:ok, connection, ctx} =
+      Transport.connect(
+        ctx,
+        input.host,
+        input.quic_port,
+        quicprobe_connect_opts(input),
+        input.connect_timeout_ms
+      )
+
+    open_streams(ctx, connection, input)
+  end
+
+  defp open_streams(ctx, connection, input) do
     Enum.reduce(1..input.stream_count, {[], ctx}, fn index, {streams, ctx} ->
       {:ok, stream, ctx} = Transport.open_stream(ctx, connection, direction: :unidirectional)
       {[%{stream: stream, index: index} | streams], ctx}
     end)
-    |> then(fn {streams, ctx} -> {ctx, Enum.reverse(streams)} end)
+    |> then(fn {streams, ctx} -> {ctx, Enum.reverse(streams), connection} end)
+  end
+
+  defp quicprobe_connect_opts(input) do
+    [
+      alpn: input.alpn,
+      cacertfile: input.ca,
+      verify: :verify_peer,
+      server_name: input.servername,
+      peer_bidi_stream_count: max(input.stream_count + 2, 10),
+      peer_unidi_stream_count: max(input.stream_count + 2, 10)
+    ]
+  end
+
+  defp close_connection(ctx, connection) do
+    case Transport.close_connection(ctx, connection, 0) do
+      {:ok, _ctx} -> :ok
+      {:error, _reason, _ctx} -> :ok
+    end
   end
 
   defp context_owner_send_fun do
@@ -549,6 +623,16 @@ defmodule MOQXProbe.Bench.StreamClients do
     """
     Usage:
       mix run bench/stream_clients.exs -- [options]
+
+    Target:
+      --target NAME                fake or quicprobe (default: fake)
+      --host HOST                  quicprobe host for --target quicprobe (default: 127.0.0.1)
+      --quic-port PORT             quicprobe UDP port (default: 4433)
+      --iperf-port PORT            iperf3 TCP/UDP baseline port metadata (default: 5201)
+      --ca PATH                    trusted CA PEM for --target quicprobe
+      --servername NAME            TLS server name (default: localhost)
+      --alpn VALUE                 QUIC ALPN (default: moqx-test)
+      --connect-timeout-ms N       QUIC connect timeout (default: 5000)
 
     Workload:
       --stream-count N             number of unidirectional streams (default: 32)

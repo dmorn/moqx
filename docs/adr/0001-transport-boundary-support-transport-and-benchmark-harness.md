@@ -170,35 +170,28 @@ Transport performance and limit analysis belongs in a separate benchmark/researc
 Use:
 
 ```text
-bench/infra/
-bench/ledger/
 bench/quicprobe/
 bench/moqxprobe/
-bench/probed/
 ```
 
-Benchmark artifact specs should live in a slim `bench/ledger` Mix project
-with no dependency on `moqx`, quicer, HTTP servers, or infrastructure tooling.
 Benchmark execution tooling should live in a standalone `bench/moqxprobe`
-Mix project with root `moqx` consumed as a path dependency. The canonical
-operator surface is the `moqxprobe` runtime CLI; legacy `.exs` paths
-may remain as compatibility delegates. Tools should accept caller-provided
-endpoints so the same harness can run against same-region server pairs,
-cross-region server pairs, and asymmetric edge-to-server paths.
+Mix project with root `moqx` consumed as a path dependency. The active operator
+surface is a small set of Benchee scripts with explicit flags for target host,
+ports, TLS material, workload shape, selected client implementation, and timing.
 
-Infrastructure provisioning belongs in `bench/infra/` rather than inside the
-CLI project. Reference tools live under `bench/quicprobe/`. A future remote
-control-plane daemon belongs in `bench/probed/` so orchestration and API
-concerns stay separate from the benchmark CLI.
+Reference tools live under `bench/quicprobe/`. Operators may keep simple target
+machines running `iperf3` and `quicprobe`, but benchmark scripts accept those
+endpoints as data and do not provision, deploy to, or tear down machines.
 
 The harness should eventually compare:
 
 - raw host/network baseline via `iperf3` TCP/UDP on the exact path under test;
-- `MOQX.Transport.Quicer` client to `MOQX.Transport.Quicer` server as local/self-pair calibration;
-- `MOQX.Transport` client to a remote reference QUIC server;
-- remote reference QUIC client to a `MOQX.Transport` listener;
-- reference client to reference server across the same path;
-- datagram pressure, stream pressure, and mixed control-plus-object traffic patterns.
+- fake-transport client implementations as process-model calibration;
+- `MOQX.Transport` caller-side clients to a local or remote reference QUIC
+  server;
+- reference client to reference server across the same path when useful;
+- DATAGRAM pressure, stream pressure, and mixed control-plus-object traffic
+  patterns.
 
 The benchmark harness should measure raw transport characteristics and
 MOQT-shaped pressure patterns, not full MOQT protocol behavior initially.
@@ -222,6 +215,15 @@ cloud-init, and strict benchmark firewalls.
 OS/architecture. Deployment tooling may copy and smoke-test that release over
 SSH, but must receive explicit targets and must not call Terraform or start
 benchmark traffic implicitly.
+
+2026-06-18 amendment: the active benchmark loop supersedes the Terraform,
+`probed`, release-deploy, shared ledger, and `transport-bench-v1` JSONL stack.
+Those components served the discovery phase but made caller-side performance
+iteration too slow. Current work keeps `bench/moqxprobe` as a Benchee-based
+client benchmark project and `bench/quicprobe` as the reference peer. `iperf3`
+baselines, quicprobe server stats, packet captures, and telemetry summaries are
+sidecar evidence around Benchee runs, not a repository-owned remote lab
+contract.
 
 ## Consequences
 

@@ -1,7 +1,13 @@
 # ADR-0005: Telemetry-backed transport benchmark measurement
 
-- Status: Accepted
+- Status: Superseded
 - Date: 2026-05-28
+
+Superseded on 2026-06-18 by the simplified target-based benchmark loop tracked
+in `.scratch/transport-layer-foundation/issues/49-simplify-transport-bench-loop-around-benchee-targets.md`.
+The root transport telemetry decisions remain valid. The benchmark-side
+collector, shared ledger, and `transport-bench-v1` canonical JSONL output are
+legacy history for the removed remote lab workflow.
 
 ## Context
 

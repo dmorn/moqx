@@ -5,6 +5,16 @@
       "source": "/Users/dmorn/projects/moqx/agent-skills",
       "sourceType": "local",
       "computedHash": "5ccdc13cb6f22884f129997b8912896717a0893155adcbcca1e53d1fb5cdf755"
+    },
+    "moqx-release": {
+      "source": "/Users/dmorn/projects/moqx/agent-skills",
+      "sourceType": "local",
+      "computedHash": "8c4001c5af0e9ed80e86bd3ad9afdc4120e4a1f1404a6534f315bec899cd00cb"
+    },
+    "moqx-transport-bench": {
+      "source": "/Users/dmorn/projects/moqx/agent-skills",
+      "sourceType": "local",
+      "computedHash": "ffe426aac1540e346b14edb2e291f12a285d9454303ca0c756d8efa1c957ce5e"
     }
   }
 }

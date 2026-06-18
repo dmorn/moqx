@@ -8,15 +8,13 @@ defmodule MOQXProbe.MixProject do
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
-      releases: releases(),
       deps: deps()
     ]
   end
 
   def application do
     [
-      extra_applications: [:logger, :telemetry],
-      mod: {MOQXProbe.Application, []}
+      extra_applications: [:logger, :telemetry]
     ]
   end
 
@@ -28,25 +26,12 @@ defmodule MOQXProbe.MixProject do
 
   defp deps do
     [
-      {:probe_ledger, path: "../ledger"},
       {:moqx, path: "../.."},
       {:flow, "~> 1.2"},
       {:gen_stage, "~> 1.3"},
       {:telemetry_metrics, "~> 1.1"},
       {:benchee, "~> 1.5", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
-    ]
-  end
-
-  defp releases do
-    [
-      moqxprobe_runtime: [
-        include_erts: true,
-        include_executables_for: [:unix],
-        applications: [
-          moqxprobe: :permanent
-        ]
-      ]
     ]
   end
 end

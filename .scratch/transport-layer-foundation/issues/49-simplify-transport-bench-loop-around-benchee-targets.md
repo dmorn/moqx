@@ -2,7 +2,7 @@
 
 # Simplify transport benchmark loop around Benchee targets
 
-Status: open
+Status: in-progress
 Type: HITL
 Category: performance
 
@@ -132,28 +132,28 @@ loop obvious to a new contributor.
 
 ## Acceptance criteria
 
-- [ ] `bench/moqxprobe` has a documented Benchee-based benchmark loop for
+- [x] `bench/moqxprobe` has a documented Benchee-based benchmark loop for
       caller-side client implementations.
-- [ ] Benchmark setup is controlled by explicit flags for target host, QUIC
+- [x] Benchmark setup is controlled by explicit flags for target host, QUIC
       port, optional `iperf3` port, workload shape, implementation selection,
       and measurement duration.
-- [ ] Fake-transport benchmarks remain available for process-model
+- [x] Fake-transport benchmarks remain available for process-model
       calibration without claiming real-network evidence.
-- [ ] Real-transport benchmarks can target either local or remote `quicprobe`
+- [x] Real-transport benchmarks can target either local or remote `quicprobe`
       using the same client implementation matrix.
-- [ ] `iperf3` can be run as a target baseline/preflight and recorded as
+- [x] `iperf3` can be run as a target baseline/preflight and recorded as
       metadata, but it is not mixed into Benchee job timing.
-- [ ] The active docs no longer point operators to Terraform/probed/release
+- [x] The active docs no longer point operators to Terraform/probed/release
       deployment as the default benchmark loop.
-- [ ] Old infrastructure, remote-control, and deploy orchestration code is
+- [x] Old infrastructure, remote-control, and deploy orchestration code is
       removed or archived so it cannot be mistaken for the current path.
-- [ ] Previous metrics collection and `transport-bench-v1` formatting are
+- [x] Previous metrics collection and `transport-bench-v1` formatting are
       explicitly marked legacy/archived unless a current Benchee-side artifact
       still depends on them.
-- [ ] The remaining benchmark artifact story is intentionally small: Benchee
+- [x] The remaining benchmark artifact story is intentionally small: Benchee
       results plus optional sidecar metadata for target, git SHA, `iperf3`
       baseline, telemetry summaries, and capture paths.
-- [ ] The project benchmark skill and `.scratch/transport-layer-foundation/PRD.md`
+- [x] The project benchmark skill and `.scratch/transport-layer-foundation/PRD.md`
       reflect the new direction after the cleanup lands.
 
 ## Blocked by
@@ -177,3 +177,19 @@ performance remains future work.
   loop with a target-driven local Benchee runner. The desired benchmark fixture
   is now a simple always-running machine with `iperf3` and `quicprobe`, while
   `bench/moqxprobe` owns client implementations and local measurement scripts.
+- 2026-06-18: Added the first `bench/moqxprobe/bench/stream_clients.exs`
+  Benchee script with fake and `quicprobe` targets, explicit CLI flags,
+  implementation/input filters, and Benchee timing controls.
+- 2026-06-18: Removed tracked `bench/infra`, `bench/probed`, `bench/ledger`,
+  old release/deploy scripts, legacy Mix tasks, and JSONL report/measure
+  modules from the active tree. Cleaned ignored local leftovers so only
+  `bench/moqxprobe` and `bench/quicprobe` remain under `bench/`.
+- 2026-06-18: Updated `bench/README.md`, `bench/moqxprobe/README.md`, the
+  transport foundation PRD, ADR-0001, ADR-0005, ADR-0008, `.gitignore`, and the
+  repo benchmark skill source to describe the new target-based loop and mark
+  `transport-bench-v1`/remote lab paths as legacy.
+- 2026-06-18: Remote smoke against `100.124.193.59` remains pending because
+  SSH authentication from this workspace failed. Direct SSH hit too many
+  offered keys, `IdentitiesOnly=yes` failed with `Permission denied
+  (publickey)`, and `ssh-add -L` was not available in the sandbox. This is an
+  access/identity gap, not evidence about the benchmark target.
