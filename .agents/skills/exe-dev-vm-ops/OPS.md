@@ -42,11 +42,11 @@ Use the repo-built `quicprobe` binary at
 installed, which is useful for emergency remote builds when source is present,
 but the normal path is to deploy a built artifact from the repo.
 
-The server needs a cert/key and should write stats JSONL:
+The server needs a cert/key and should write receiver-evidence JSONL:
 
 ```ini
 [Service]
-ExecStart=/opt/moqx-bench/quicprobe/current/bin/quicprobe server --addr :<quic-port> --cert /opt/moqx-bench/quicprobe/tls/server.pem --key /opt/moqx-bench/quicprobe/tls/server-key.pem --stats-output /var/lib/moqx-quicprobe/quicprobe-stats.jsonl --initial-packet-size 1200
+ExecStart=/opt/moqx-bench/quicprobe/current/bin/quicprobe server --addr :<quic-port> --cert /opt/moqx-bench/quicprobe/tls/server.pem --key /opt/moqx-bench/quicprobe/tls/server-key.pem --stats-output /var/lib/moqx-quicprobe/quicprobe-evidence.jsonl --initial-packet-size 1200
 Restart=always
 ReadWritePaths=/var/lib/moqx-quicprobe
 ```
@@ -101,6 +101,7 @@ Verify the remote service:
 ssh <vm>.exe.xyz 'systemctl is-enabled moqx-quicprobe.service; systemctl is-active moqx-quicprobe.service; ss -lunp | grep <quic-port>'
 ssh <vm>.exe.xyz '/opt/moqx-bench/quicprobe/current/bin/quicprobe client --addr 127.0.0.1:<quic-port> --ca /opt/moqx-bench/quicprobe/tls/ca.pem --servername <server-name> --initial-packet-size 1200 --bidi-echo smoke --timeout 5s'
 ssh <vm>.exe.xyz 'TS_IP=$(tailscale ip -4 | head -1); /opt/moqx-bench/quicprobe/current/bin/quicprobe client --addr ${TS_IP}:<quic-port> --ca /opt/moqx-bench/quicprobe/tls/ca.pem --servername <server-name> --initial-packet-size 1200 --bidi-echo tailnet-self --timeout 5s'
+ssh <vm>.exe.xyz 'sudo tail -n 3 /var/lib/moqx-quicprobe/quicprobe-evidence.jsonl'
 ```
 
 For local-to-remote client verification:
@@ -114,4 +115,5 @@ scp <vm>.exe.xyz:/opt/moqx-bench/quicprobe/tls/ca.pem /private/tmp/quicprobe-ca.
 If local-to-remote quicprobe times out while `iperf3 --udp` works over
 Tailscale, first verify both sides are using `--initial-packet-size 1200` and
 that the local client is a build with that flag. Then check route MTU, local
-Tailscale status, service logs, and server stats before blaming firewall rules.
+Tailscale status, service logs, and server run evidence before blaming firewall
+rules.

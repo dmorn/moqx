@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -18,6 +19,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	quic "github.com/quic-go/quic-go"
 )
 
 func TestClientServerBidiEcho(t *testing.T) {
@@ -35,7 +38,7 @@ func TestClientServerBidiEcho(t *testing.T) {
 			certFile: certs.serverCert,
 			keyFile:  certs.serverKey,
 			alpn:     "moqx-test",
-		}, ready)
+		}, ready, nil)
 	}()
 
 	addr := awaitServerReady(t, ready, errc)
@@ -145,7 +148,7 @@ func TestClientServerJSONStreamPressure(t *testing.T) {
 			certFile: certs.serverCert,
 			keyFile:  certs.serverKey,
 			alpn:     "moqx-test",
-		}, ready)
+		}, ready, nil)
 	}()
 
 	addr := awaitServerReady(t, ready, errc)
@@ -202,7 +205,7 @@ func TestClientServerJSONUnidirectionalStreamPressure(t *testing.T) {
 			certFile: certs.serverCert,
 			keyFile:  certs.serverKey,
 			alpn:     "moqx-test",
-		}, ready)
+		}, ready, nil)
 	}()
 
 	addr := awaitServerReady(t, ready, errc)
@@ -261,7 +264,7 @@ func TestClientServerJSONMixedMOQTShapedPressure(t *testing.T) {
 			keyFile:     certs.serverKey,
 			alpn:        "moqx-test",
 			statsOutput: statsOutput,
-		}, ready)
+		}, ready, nil)
 	}()
 
 	addr := awaitServerReady(t, ready, errc)
@@ -337,7 +340,7 @@ func TestClientServerJSONMixedMOQTShapedPressure(t *testing.T) {
 		t.Fatalf("control_latency_ms = %#v, want p99 > 0", result.ControlLatencyMS)
 	}
 
-	serverStats := awaitServerDatagramSummary(t, statsOutput)
+	serverStats := awaitServerRunEvidence(t, statsOutput)
 	if serverStats.BidiStreamsAccepted != 1 {
 		t.Fatalf("server bidi_streams_accepted = %d, want 1", serverStats.BidiStreamsAccepted)
 	}
@@ -391,7 +394,7 @@ func TestClientServerJSONDatagramPressure(t *testing.T) {
 			keyFile:     certs.serverKey,
 			alpn:        "moqx-test",
 			statsOutput: statsOutput,
-		}, ready)
+		}, ready, nil)
 	}()
 
 	addr := awaitServerReady(t, ready, errc)
@@ -420,18 +423,18 @@ func TestClientServerJSONDatagramPressure(t *testing.T) {
 	}
 
 	assertDatagramRunResult(t, result, 64, 4)
-	serverStats := awaitServerDatagramSummary(t, statsOutput)
+	serverStats := awaitServerRunEvidence(t, statsOutput)
 	if serverStats.DatagramsReceived != 4 {
 		t.Fatalf("server datagrams_received = %d, want 4", serverStats.DatagramsReceived)
 	}
 	if serverStats.DatagramsEchoAccepted != 4 {
 		t.Fatalf("server datagrams_echo_accepted = %d, want 4", serverStats.DatagramsEchoAccepted)
 	}
-	if serverStats.BytesReceived != 4*64 {
-		t.Fatalf("server bytes_received = %d, want %d", serverStats.BytesReceived, 4*64)
+	if serverStats.DatagramBytesReceived != 4*64 {
+		t.Fatalf("server datagram_bytes_received = %d, want %d", serverStats.DatagramBytesReceived, 4*64)
 	}
-	if serverStats.BytesEchoAccepted != 4*64 {
-		t.Fatalf("server bytes_echo_accepted = %d, want %d", serverStats.BytesEchoAccepted, 4*64)
+	if serverStats.DatagramBytesEchoAccepted != 4*64 {
+		t.Fatalf("server datagram_bytes_echo_accepted = %d, want %d", serverStats.DatagramBytesEchoAccepted, 4*64)
 	}
 	if serverStats.BidiStreamsAccepted != 0 {
 		t.Fatalf("server bidi_streams_accepted = %d, want 0", serverStats.BidiStreamsAccepted)
@@ -504,6 +507,79 @@ func TestEchoDatagramsDrainsReceivesWhileEchoSendIsBlocked(t *testing.T) {
 	}
 }
 
+func TestServerRunEvidenceRecorderWritesStdoutAndStatsOutput(t *testing.T) {
+	t.Parallel()
+
+	statsOutput := filepath.Join(t.TempDir(), "server-evidence.jsonl")
+	var stdout bytes.Buffer
+	recorder := newServerRunEvidenceRecorder(&stdout, statsOutput)
+
+	startedAt := time.Unix(1_700_000_000, 123_000_000)
+	finishedAt := startedAt.Add(1250 * time.Millisecond)
+	snapshot := serverConnectionStatsSnapshot{
+		startedAt:                 startedAt,
+		finishedAt:                finishedAt,
+		localAddr:                 "127.0.0.1:4433",
+		remoteAddr:                "127.0.0.1:55555",
+		alpn:                      "moqx-test",
+		datagramsReceived:         4,
+		datagramsEchoAccepted:     3,
+		datagramBytesReceived:     256,
+		datagramBytesEchoAccepted: 192,
+		echoQueueCapacity:         128,
+		echoQueueMaxDepth:         2,
+		bidiStreamsAccepted:       1,
+		uniStreamsAccepted:        2,
+		streamsCompleted:          3,
+		streamBytesReceived:       512,
+		streamBytesEchoed:         64,
+		firstDatagramLatency:      10 * time.Millisecond,
+		firstStreamByteLatency:    20 * time.Millisecond,
+	}
+
+	if err := recorder.Record(snapshot); err != nil {
+		t.Fatalf("Record() error = %v", err)
+	}
+
+	stdoutEvidence := decodeServerRunEvidence(t, stdout.String())
+	fileEvidence := awaitServerRunEvidence(t, statsOutput)
+
+	assertServerRunEvidence(t, stdoutEvidence, 1)
+	assertServerRunEvidence(t, fileEvidence, 1)
+
+	if err := recorder.Record(snapshot); err != nil {
+		t.Fatalf("second Record() error = %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("stdout evidence line count = %d, want 2\n%s", len(lines), stdout.String())
+	}
+
+	secondEvidence := decodeServerRunEvidence(t, lines[1])
+	if secondEvidence.RunSequence != 2 {
+		t.Fatalf("second run_sequence = %d, want 2", secondEvidence.RunSequence)
+	}
+}
+
+func TestServerRunEvidenceIgnoresNormalRemoteApplicationClose(t *testing.T) {
+	t.Parallel()
+
+	evidence := serverRunEvidenceFromSnapshot(1, serverConnectionStatsSnapshot{
+		startedAt:          time.Unix(1_700_000_000, 0),
+		finishedAt:         time.Unix(1_700_000_001, 0),
+		alpn:               "moqx-test",
+		datagramReceiveErr: &quic.ApplicationError{Remote: true, ErrorCode: 0, ErrorMessage: "done"},
+	})
+
+	if !evidence.ReceiverEvidenceComplete {
+		t.Fatalf("receiver_evidence_complete = false, cause=%q", evidence.ReceiverEvidenceFailureCause)
+	}
+	if evidence.DatagramReceiveError != "" {
+		t.Fatalf("datagram_receive_error = %q, want empty", evidence.DatagramReceiveError)
+	}
+}
+
 func TestClientServerJSONPacedDatagramPressure(t *testing.T) {
 	t.Parallel()
 
@@ -519,7 +595,7 @@ func TestClientServerJSONPacedDatagramPressure(t *testing.T) {
 			certFile: certs.serverCert,
 			keyFile:  certs.serverKey,
 			alpn:     "moqx-test",
-		}, ready)
+		}, ready, nil)
 	}()
 
 	addr := awaitServerReady(t, ready, errc)
@@ -772,29 +848,101 @@ func awaitServerReady(t *testing.T, ready <-chan string, errc <-chan error) stri
 	return ""
 }
 
-func awaitServerDatagramSummary(t *testing.T, path string) serverDatagramSummary {
+func awaitServerRunEvidence(t *testing.T, path string) serverRunEvidence {
 	t.Helper()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		raw, err := os.ReadFile(path)
 		if err == nil && len(strings.TrimSpace(string(raw))) > 0 {
-			var summary serverDatagramSummary
-			if err := json.Unmarshal(raw, &summary); err != nil {
-				t.Fatalf("server stats JSON did not decode: %v\n%s", err, string(raw))
-			}
-
-			return summary
+			return decodeServerRunEvidence(t, firstNonEmptyLine(string(raw)))
 		}
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("read server stats: %v", err)
+			t.Fatalf("read server evidence: %v", err)
 		}
 
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	t.Fatalf("server stats were not written to %s", path)
-	return serverDatagramSummary{}
+	t.Fatalf("server evidence was not written to %s", path)
+	return serverRunEvidence{}
+}
+
+func decodeServerRunEvidence(t *testing.T, raw string) serverRunEvidence {
+	t.Helper()
+
+	var evidence serverRunEvidence
+	if err := json.Unmarshal([]byte(raw), &evidence); err != nil {
+		t.Fatalf("server evidence JSON did not decode: %v\n%s", err, raw)
+	}
+
+	return evidence
+}
+
+func firstNonEmptyLine(raw string) string {
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.TrimSpace(line) != "" {
+			return line
+		}
+	}
+
+	return ""
+}
+
+func assertServerRunEvidence(t *testing.T, evidence serverRunEvidence, sequence uint64) {
+	t.Helper()
+
+	if evidence.SchemaVersion != serverRunEvidenceSchema {
+		t.Fatalf("schema_version = %q, want %s", evidence.SchemaVersion, serverRunEvidenceSchema)
+	}
+	if evidence.RecordType != serverRunEvidenceRecordType {
+		t.Fatalf("record_type = %q, want %s", evidence.RecordType, serverRunEvidenceRecordType)
+	}
+	if evidence.RunSequence != sequence {
+		t.Fatalf("run_sequence = %d, want %d", evidence.RunSequence, sequence)
+	}
+	if evidence.ALPN != "moqx-test" {
+		t.Fatalf("alpn = %q, want moqx-test", evidence.ALPN)
+	}
+	if evidence.BidiStreamSemantics != "echo" {
+		t.Fatalf("bidi_stream_semantics = %q, want echo", evidence.BidiStreamSemantics)
+	}
+	if evidence.UniStreamSemantics != "drain" {
+		t.Fatalf("uni_stream_semantics = %q, want drain", evidence.UniStreamSemantics)
+	}
+	if evidence.DatagramSemantics != "echo" {
+		t.Fatalf("datagram_semantics = %q, want echo", evidence.DatagramSemantics)
+	}
+	if !evidence.ReceiverEvidenceComplete {
+		t.Fatalf("receiver_evidence_complete = false, cause=%q", evidence.ReceiverEvidenceFailureCause)
+	}
+	if evidence.DatagramsReceived != 4 {
+		t.Fatalf("datagrams_received = %d, want 4", evidence.DatagramsReceived)
+	}
+	if evidence.DatagramsEchoAccepted != 3 {
+		t.Fatalf("datagrams_echo_accepted = %d, want 3", evidence.DatagramsEchoAccepted)
+	}
+	if evidence.DatagramBytesReceived != 256 {
+		t.Fatalf("datagram_bytes_received = %d, want 256", evidence.DatagramBytesReceived)
+	}
+	if evidence.DatagramBytesEchoAccepted != 192 {
+		t.Fatalf("datagram_bytes_echo_accepted = %d, want 192", evidence.DatagramBytesEchoAccepted)
+	}
+	if evidence.BidiStreamsAccepted != 1 {
+		t.Fatalf("bidi_streams_accepted = %d, want 1", evidence.BidiStreamsAccepted)
+	}
+	if evidence.UniStreamsAccepted != 2 {
+		t.Fatalf("uni_streams_accepted = %d, want 2", evidence.UniStreamsAccepted)
+	}
+	if evidence.StreamsCompleted != 3 {
+		t.Fatalf("streams_completed = %d, want 3", evidence.StreamsCompleted)
+	}
+	if evidence.StreamBytesReceived != 512 {
+		t.Fatalf("stream_bytes_received = %d, want 512", evidence.StreamBytesReceived)
+	}
+	if evidence.StreamBytesEchoAccepted != 64 {
+		t.Fatalf("stream_bytes_echo_accepted = %d, want 64", evidence.StreamBytesEchoAccepted)
+	}
 }
 
 type blockingEchoConn struct {

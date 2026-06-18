@@ -28,6 +28,8 @@ const quicGoModulePath = "github.com/quic-go/quic-go"
 const streamPressureWorkload = "stream_pressure"
 const datagramPressureWorkload = "datagram_pressure"
 const mixedMOQTShapedWorkload = "mixed_moqt_shaped"
+const serverRunEvidenceSchema = "quicprobe-server-run-evidence-v1"
+const serverRunEvidenceRecordType = "server_run_evidence"
 const datagramHeaderSize = 16
 const datagramEchoQueueLen = 131_072
 const pacedSpinThreshold = 200 * time.Microsecond
@@ -125,36 +127,50 @@ type clientRunResult struct {
 	ControlLatencyMS                map[string]float64 `json:"control_latency_ms,omitempty"`
 }
 
-type serverDatagramSummary struct {
-	SchemaVersion            string  `json:"schema_version"`
-	RecordType               string  `json:"record_type"`
-	Tool                     string  `json:"tool"`
-	ReferenceImpl            string  `json:"reference_implementation"`
-	ReferenceVersion         string  `json:"reference_version"`
-	StartedAt                string  `json:"started_at"`
-	FinishedAt               string  `json:"finished_at"`
-	LocalAddr                string  `json:"local_addr"`
-	RemoteAddr               string  `json:"remote_addr"`
-	DurationMS               float64 `json:"duration_ms"`
-	DatagramsReceived        int     `json:"datagrams_received"`
-	DatagramsEchoAccepted    int     `json:"datagrams_echo_accepted"`
-	BytesReceived            int64   `json:"bytes_received"`
-	BytesEchoAccepted        int64   `json:"bytes_echo_accepted"`
-	BidiStreamsAccepted      int     `json:"bidi_streams_accepted"`
-	UniStreamsAccepted       int     `json:"uni_streams_accepted"`
-	StreamsCompleted         int     `json:"streams_completed"`
-	StreamBytesReceived      int64   `json:"stream_bytes_received"`
-	StreamBytesEchoAccepted  int64   `json:"stream_bytes_echo_accepted"`
-	StreamReceiveErrorCount  int     `json:"stream_receive_error_count"`
-	StreamSendErrorCount     int     `json:"stream_send_error_count"`
-	EchoQueueCapacity        int     `json:"echo_queue_capacity,omitempty"`
-	EchoQueueMaxDepth        int     `json:"echo_queue_max_depth,omitempty"`
-	ReceiveError             string  `json:"receive_error,omitempty"`
-	SendError                string  `json:"send_error,omitempty"`
-	StreamReceiveError       string  `json:"stream_receive_error,omitempty"`
-	StreamSendError          string  `json:"stream_send_error,omitempty"`
-	FirstDatagramLatencyMS   float64 `json:"first_datagram_latency_ms,omitempty"`
-	FirstStreamByteLatencyMS float64 `json:"first_stream_byte_latency_ms,omitempty"`
+type serverRunEvidence struct {
+	SchemaVersion                string  `json:"schema_version"`
+	RecordType                   string  `json:"record_type"`
+	Tool                         string  `json:"tool"`
+	ReferenceImpl                string  `json:"reference_implementation"`
+	ReferenceVersion             string  `json:"reference_version"`
+	RunSequence                  uint64  `json:"run_sequence"`
+	StartedAt                    string  `json:"started_at"`
+	FinishedAt                   string  `json:"finished_at"`
+	LocalAddr                    string  `json:"local_addr"`
+	RemoteAddr                   string  `json:"remote_addr"`
+	ALPN                         string  `json:"alpn"`
+	DurationMS                   float64 `json:"duration_ms"`
+	BidiStreamSemantics          string  `json:"bidi_stream_semantics"`
+	UniStreamSemantics           string  `json:"uni_stream_semantics"`
+	DatagramSemantics            string  `json:"datagram_semantics"`
+	DatagramsReceived            int     `json:"datagrams_received"`
+	DatagramsEchoAccepted        int     `json:"datagrams_echo_accepted"`
+	DatagramBytesReceived        int64   `json:"datagram_bytes_received"`
+	DatagramBytesEchoAccepted    int64   `json:"datagram_bytes_echo_accepted"`
+	BidiStreamsAccepted          int     `json:"bidi_streams_accepted"`
+	UniStreamsAccepted           int     `json:"uni_streams_accepted"`
+	StreamsCompleted             int     `json:"streams_completed"`
+	StreamBytesReceived          int64   `json:"stream_bytes_received"`
+	StreamBytesEchoAccepted      int64   `json:"stream_bytes_echo_accepted"`
+	StreamReceiveErrorCount      int     `json:"stream_receive_error_count"`
+	StreamSendErrorCount         int     `json:"stream_send_error_count"`
+	EchoQueueCapacity            int     `json:"echo_queue_capacity,omitempty"`
+	EchoQueueMaxDepth            int     `json:"echo_queue_max_depth,omitempty"`
+	DatagramReceiveError         string  `json:"datagram_receive_error,omitempty"`
+	DatagramSendError            string  `json:"datagram_send_error,omitempty"`
+	StreamReceiveError           string  `json:"stream_receive_error,omitempty"`
+	StreamSendError              string  `json:"stream_send_error,omitempty"`
+	FirstDatagramLatencyMS       float64 `json:"first_datagram_latency_ms,omitempty"`
+	FirstStreamByteLatencyMS     float64 `json:"first_stream_byte_latency_ms,omitempty"`
+	ReceiverEvidenceComplete     bool    `json:"receiver_evidence_complete"`
+	ReceiverEvidenceFailureCause string  `json:"receiver_evidence_failure_cause,omitempty"`
+}
+
+type serverRunEvidenceRecorder struct {
+	mu          sync.Mutex
+	sequence    atomic.Uint64
+	stdout      io.Writer
+	statsOutput string
 }
 
 type datagramEchoStats struct {
@@ -179,6 +195,7 @@ type serverConnectionStats struct {
 	finishedAt             time.Time
 	localAddr              string
 	remoteAddr             string
+	alpn                   string
 	datagrams              datagramEchoStats
 	bidiStreamsAccepted    int
 	uniStreamsAccepted     int
@@ -197,6 +214,7 @@ type serverConnectionStatsSnapshot struct {
 	finishedAt                time.Time
 	localAddr                 string
 	remoteAddr                string
+	alpn                      string
 	datagramsReceived         int
 	datagramsEchoAccepted     int
 	datagramBytesReceived     int64
@@ -266,7 +284,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			return err
 		}
 
-		return runServer(ctx, cfg, nil)
+		return runServer(ctx, cfg, nil, stdout)
 
 	case "client":
 		cfg, timeout, err := parseClientConfig(args[1:])
@@ -416,7 +434,7 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 	return cfg, timeout, nil
 }
 
-func runServer(ctx context.Context, cfg serverConfig, ready chan<- string) error {
+func runServer(ctx context.Context, cfg serverConfig, ready chan<- string, evidenceOut io.Writer) error {
 	cert, err := tls.LoadX509KeyPair(cfg.certFile, cfg.keyFile)
 	if err != nil {
 		return fmt.Errorf("load server certificate: %w", err)
@@ -446,6 +464,8 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string) error
 		ready <- listener.Addr().String()
 	}
 
+	recorder := newServerRunEvidenceRecorder(evidenceOut, cfg.statsOutput)
+
 	for {
 		conn, err := listener.Accept(ctx)
 		if err != nil {
@@ -456,7 +476,7 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string) error
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
-		go handleConnection(ctx, conn, cfg.statsOutput)
+		go handleConnection(ctx, conn, recorder)
 	}
 }
 
@@ -465,10 +485,11 @@ func newServerConnectionStats(conn quic.Connection) *serverConnectionStats {
 		startedAt:  time.Now(),
 		localAddr:  conn.LocalAddr().String(),
 		remoteAddr: conn.RemoteAddr().String(),
+		alpn:       conn.ConnectionState().TLS.NegotiatedProtocol,
 	}
 }
 
-func handleConnection(ctx context.Context, conn quic.Connection, statsOutput string) {
+func handleConnection(ctx context.Context, conn quic.Connection, recorder *serverRunEvidenceRecorder) {
 	stats := newServerConnectionStats(conn)
 	var wg sync.WaitGroup
 	var streamHandlers sync.WaitGroup
@@ -497,8 +518,10 @@ func handleConnection(ctx context.Context, conn quic.Connection, statsOutput str
 	stats.setDatagrams(datagramStats)
 	stats.finish()
 
-	if statsOutput != "" {
-		_ = appendServerDatagramSummary(statsOutput, stats.snapshot())
+	if recorder != nil {
+		if err := recorder.Record(stats.snapshot()); err != nil {
+			fmt.Fprintf(os.Stderr, "record server run evidence: %v\n", err)
+		}
 	}
 }
 
@@ -583,6 +606,7 @@ func (s *serverConnectionStats) snapshot() serverConnectionStatsSnapshot {
 		finishedAt:                s.finishedAt,
 		localAddr:                 s.localAddr,
 		remoteAddr:                s.remoteAddr,
+		alpn:                      s.alpn,
 		datagramsReceived:         s.datagrams.datagramsReceived,
 		datagramsEchoAccepted:     s.datagrams.datagramsEchoAccepted,
 		datagramBytesReceived:     s.datagrams.bytesReceived,
@@ -755,55 +779,127 @@ func sendDatagramEchoes(conn datagramConn, echoQueue <-chan []byte) (stats datag
 	return stats
 }
 
-func appendServerDatagramSummary(path string, stats serverConnectionStatsSnapshot) error {
+func newServerRunEvidenceRecorder(stdout io.Writer, statsOutput string) *serverRunEvidenceRecorder {
+	if stdout == nil && statsOutput == "" {
+		return nil
+	}
+
+	return &serverRunEvidenceRecorder{
+		stdout:      stdout,
+		statsOutput: statsOutput,
+	}
+}
+
+func (r *serverRunEvidenceRecorder) Record(stats serverConnectionStatsSnapshot) error {
+	evidence := serverRunEvidenceFromSnapshot(r.sequence.Add(1), stats)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.stdout != nil {
+		if err := json.NewEncoder(r.stdout).Encode(evidence); err != nil {
+			return fmt.Errorf("write server run evidence stdout: %w", err)
+		}
+	}
+
+	if r.statsOutput != "" {
+		if err := appendServerRunEvidence(r.statsOutput, evidence); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func serverRunEvidenceFromSnapshot(sequence uint64, stats serverConnectionStatsSnapshot) serverRunEvidence {
+	evidence := serverRunEvidence{
+		SchemaVersion:             serverRunEvidenceSchema,
+		RecordType:                serverRunEvidenceRecordType,
+		Tool:                      "quicprobe",
+		ReferenceImpl:             "quic-go",
+		ReferenceVersion:          moduleVersion(quicGoModulePath),
+		RunSequence:               sequence,
+		StartedAt:                 stats.startedAt.UTC().Format(time.RFC3339Nano),
+		FinishedAt:                stats.finishedAt.UTC().Format(time.RFC3339Nano),
+		LocalAddr:                 stats.localAddr,
+		RemoteAddr:                stats.remoteAddr,
+		ALPN:                      stats.alpn,
+		DurationMS:                durationMillis(stats.finishedAt.Sub(stats.startedAt)),
+		BidiStreamSemantics:       "echo",
+		UniStreamSemantics:        "drain",
+		DatagramSemantics:         "echo",
+		DatagramsReceived:         stats.datagramsReceived,
+		DatagramsEchoAccepted:     stats.datagramsEchoAccepted,
+		DatagramBytesReceived:     stats.datagramBytesReceived,
+		DatagramBytesEchoAccepted: stats.datagramBytesEchoAccepted,
+		BidiStreamsAccepted:       stats.bidiStreamsAccepted,
+		UniStreamsAccepted:        stats.uniStreamsAccepted,
+		StreamsCompleted:          stats.streamsCompleted,
+		StreamBytesReceived:       stats.streamBytesReceived,
+		StreamBytesEchoAccepted:   stats.streamBytesEchoed,
+		StreamReceiveErrorCount:   stats.streamReceiveErrCount,
+		StreamSendErrorCount:      stats.streamSendErrCount,
+		EchoQueueCapacity:         stats.echoQueueCapacity,
+		EchoQueueMaxDepth:         stats.echoQueueMaxDepth,
+		FirstDatagramLatencyMS:    durationMillis(stats.firstDatagramLatency),
+		FirstStreamByteLatencyMS:  durationMillis(stats.firstStreamByteLatency),
+		ReceiverEvidenceComplete:  true,
+	}
+
+	if isUnexpectedEvidenceError(stats.datagramReceiveErr) {
+		evidence.DatagramReceiveError = stats.datagramReceiveErr.Error()
+	}
+	if isUnexpectedEvidenceError(stats.datagramSendErr) {
+		evidence.DatagramSendError = stats.datagramSendErr.Error()
+	}
+	if isUnexpectedEvidenceError(stats.streamReceiveErr) {
+		evidence.StreamReceiveError = stats.streamReceiveErr.Error()
+	}
+	if isUnexpectedEvidenceError(stats.streamSendErr) {
+		evidence.StreamSendError = stats.streamSendErr.Error()
+	}
+
+	evidence.ReceiverEvidenceComplete, evidence.ReceiverEvidenceFailureCause = receiverEvidenceStatus(stats)
+
+	return evidence
+}
+
+func receiverEvidenceStatus(stats serverConnectionStatsSnapshot) (bool, string) {
+	switch {
+	case isUnexpectedEvidenceError(stats.datagramReceiveErr):
+		return false, "datagram_receive_error"
+	case isUnexpectedEvidenceError(stats.datagramSendErr):
+		return false, "datagram_send_error"
+	case isUnexpectedEvidenceError(stats.streamReceiveErr):
+		return false, "stream_receive_error"
+	case isUnexpectedEvidenceError(stats.streamSendErr):
+		return false, "stream_send_error"
+	default:
+		return true, ""
+	}
+}
+
+func isUnexpectedEvidenceError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var appErr *quic.ApplicationError
+	if errors.As(err, &appErr) && appErr.Remote && appErr.ErrorCode == 0 {
+		return false
+	}
+
+	return true
+}
+
+func appendServerRunEvidence(path string, evidence serverRunEvidence) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return fmt.Errorf("open server stats output: %w", err)
+		return fmt.Errorf("open server evidence output: %w", err)
 	}
 	defer file.Close()
 
-	summary := serverDatagramSummary{
-		SchemaVersion:            "quicprobe-server-stats-v1",
-		RecordType:               "server_datagram_summary",
-		Tool:                     "quicprobe",
-		ReferenceImpl:            "quic-go",
-		ReferenceVersion:         moduleVersion(quicGoModulePath),
-		StartedAt:                stats.startedAt.UTC().Format(time.RFC3339Nano),
-		FinishedAt:               stats.finishedAt.UTC().Format(time.RFC3339Nano),
-		LocalAddr:                stats.localAddr,
-		RemoteAddr:               stats.remoteAddr,
-		DurationMS:               durationMillis(stats.finishedAt.Sub(stats.startedAt)),
-		DatagramsReceived:        stats.datagramsReceived,
-		DatagramsEchoAccepted:    stats.datagramsEchoAccepted,
-		BytesReceived:            stats.datagramBytesReceived,
-		BytesEchoAccepted:        stats.datagramBytesEchoAccepted,
-		BidiStreamsAccepted:      stats.bidiStreamsAccepted,
-		UniStreamsAccepted:       stats.uniStreamsAccepted,
-		StreamsCompleted:         stats.streamsCompleted,
-		StreamBytesReceived:      stats.streamBytesReceived,
-		StreamBytesEchoAccepted:  stats.streamBytesEchoed,
-		StreamReceiveErrorCount:  stats.streamReceiveErrCount,
-		StreamSendErrorCount:     stats.streamSendErrCount,
-		EchoQueueCapacity:        stats.echoQueueCapacity,
-		EchoQueueMaxDepth:        stats.echoQueueMaxDepth,
-		FirstDatagramLatencyMS:   durationMillis(stats.firstDatagramLatency),
-		FirstStreamByteLatencyMS: durationMillis(stats.firstStreamByteLatency),
-	}
-
-	if stats.datagramReceiveErr != nil {
-		summary.ReceiveError = stats.datagramReceiveErr.Error()
-	}
-	if stats.datagramSendErr != nil {
-		summary.SendError = stats.datagramSendErr.Error()
-	}
-	if stats.streamReceiveErr != nil {
-		summary.StreamReceiveError = stats.streamReceiveErr.Error()
-	}
-	if stats.streamSendErr != nil {
-		summary.StreamSendError = stats.streamSendErr.Error()
-	}
-
-	return json.NewEncoder(file).Encode(summary)
+	return json.NewEncoder(file).Encode(evidence)
 }
 
 func runClient(ctx context.Context, cfg clientConfig, stdout io.Writer) error {

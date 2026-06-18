@@ -13,6 +13,7 @@ Category: performance
 ## Related
 
 - `.scratch/transport-layer-foundation/issues/49-simplify-transport-bench-loop-around-benchee-targets.md`
+- `.scratch/transport-layer-foundation/issues/51-add-quicprobe-run-evidence-surface.md`
 - `.scratch/transport-layer-foundation/issues/43-build-stream-benchmark-sender-client.md`
 - `.scratch/transport-layer-foundation/issues/48-add-moqxprobe-stream-owner-sender-topology.md`
 - `.scratch/transport-layer-foundation/issues/46-improve-moqx-client-stream-throughput.md`
@@ -46,6 +47,51 @@ That last point is the design boundary: the current Benchee stream script is
 useful for local process-model and send-completion admission comparisons, but
 it is not yet a delivery-aware caller benchmark.
 
+## Design contract
+
+`moqxprobe` should stay a caller-side benchmark project: client
+implementations, benchmark drivers, and experiment results. It should not own
+the receiver-side truth by inference.
+
+Delivery verification must be target-specific and explicit:
+
+- fake target: the fake transport process records bytes, DATAGRAMs, stream
+  completions, and any echo/completion counters directly; the driver reads
+  those counters after the timed workload;
+- `quicprobe` target: the long-running server emits per-connection or per-run
+  evidence records, similar in spirit to `iperf3` server reports; the driver
+  reads those records after the timed workload, preferably through a small
+  read-only API once available;
+- future targets: add a target adapter that can produce the same delivery
+  evidence shape without changing the client implementation under test.
+
+Timed benchmark code should measure the client implementation. Evidence
+collection and validation should happen around the timed workload, not by
+smuggling remote stats reads into the hot path.
+
+## MOQT-shaped profiles
+
+Delivery-aware benchmarks should be shaped like plausible MOQT transport
+profiles, not only generic maximum-throughput loops:
+
+- draft-14 control profile: one client-initiated bidirectional stream, low-rate
+  request/response or echo messages, control latency and bytes verified by
+  echo evidence;
+- draft-14 object stream profile: object bytes sent on unidirectional streams,
+  delivery verified by target-side stream bytes and completed stream counts;
+- draft-14 object DATAGRAM profile: object payloads sent as QUIC DATAGRAMs,
+  delivery verified by target-side receive counts and, where useful, echoed
+  DATAGRAM counts;
+- draft-14 mixed profile: a bidirectional control stream remains active while
+  object traffic fills the data plane, so control latency can be observed under
+  object pressure;
+- MOQ Lite-shaped profile later: many bidirectional transaction streams and
+  unidirectional group streams, without DATAGRAMs.
+
+Local send completion and sender-side admission remain useful, but they answer
+a different question: whether the caller architecture can feed the transport
+without scheduler or process-model collapse. They do not prove peer delivery.
+
 ## What to build
 
 Build the first delivery-aware `moqxprobe` caller benchmarks on top of the
@@ -68,6 +114,10 @@ starts.
 
 - [ ] `bench/moqxprobe` documents the difference between admission benchmarks
       and delivery-aware benchmarks.
+- [ ] `bench/moqxprobe` represents delivery verification through target
+      adapters, not through implementation-specific client shortcuts.
+- [ ] Timed Benchee functions exclude remote evidence collection; evidence is
+      captured before or after the timed workload.
 - [ ] Stream caller benchmarks do not report remote success solely because
       local send completions were observed.
 - [ ] Stream delivery-aware runs wait for or collect a receiver-side signal:
@@ -82,6 +132,8 @@ starts.
 - [ ] Remote runs record sidecar metadata: target host, ports, CA/server name,
       git SHA, `iperf3` preflight summary, Tailscale path mode when available,
       and any server stats path used.
+- [ ] Profile names and result fields make clear whether the run is control
+      bidi, object uni, object DATAGRAM, or mixed control-plus-object pressure.
 - [ ] A small local or remote smoke proves the first delivery-aware client
       rejects or reports missing receiver-side evidence instead of silently
       passing.
@@ -93,3 +145,25 @@ This issue should happen before drawing performance conclusions from
 smoke is valuable as a connectivity and local admission check, but it is not
 the benchmark that tells us whether a caller-side MOQX client successfully
 fills the target link.
+
+## Comments
+
+### 2026-06-18 delivery evidence direction
+
+Treat delivery verification as an explicit target evidence problem. The
+`quicprobe` server should behave more like an `iperf3` server: a long-running
+process emits a record for each completed connection/run, and automation can
+fetch those records instead of inferring delivery from the sender side. The
+fake target can expose the same idea through local process counters. This keeps
+`moqxprobe` focused on client implementations, benchmark drivers, and
+experiment results.
+
+### 2026-06-18 pure unidirectional smoke observation
+
+While adding the `quicprobe` evidence surface, a test that tried to assert
+receiver evidence for the current pure-unidirectional reference client exposed
+the existing blind spot again: the client can complete local uni-stream sends
+and close the connection before the server records all accepted/drained streams.
+That belongs in this issue, not in the evidence-surface issue. The next
+delivery-aware client work must make pure object-stream runs wait for explicit
+receiver evidence instead of treating local close/send completion as delivery.

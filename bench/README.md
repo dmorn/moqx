@@ -21,7 +21,14 @@ The current performance loop is intentionally small:
 3. Run `bench/moqxprobe` Benchee scripts against either a fake transport target
    for process-model isolation or a real `quicprobe` target for QUIC behavior.
 4. Save Benchee output plus optional sidecar notes for target metadata,
-   `iperf3` baselines, telemetry summaries, and packet captures.
+   `iperf3` baselines, `quicprobe` receiver evidence, telemetry summaries, and
+   packet captures.
+
+`quicprobe server` emits one `quicprobe-server-run-evidence-v1`
+`server_run_evidence` JSON record for each completed connection. The record is
+written to server stdout and, when configured, to `--stats-output` as JSONL.
+Those records are the receiver-side truth for stream bytes, stream echo bytes,
+DATAGRAM receive/echo counts, and error counters.
 
 Historical Terraform, `probed`, release-deploy, ledger, and
 `transport-bench-v1` JSONL tooling has been removed from the active benchmark

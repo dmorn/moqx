@@ -97,8 +97,14 @@ go run ../quicprobe server \
   --cert <server.pem> \
   --key <server-key.pem> \
   --alpn moqx-test \
-  --stats-output <stats.jsonl>
+  --stats-output <run-evidence.jsonl>
 ```
+
+The server emits one compact `server_run_evidence` JSON record per completed
+connection to stdout and to `--stats-output` when configured. The record is
+receiver-side evidence, not a client benchmark result: bidirectional streams
+are echoed, unidirectional streams are drained and counted, and DATAGRAMs are
+echoed and counted.
 
 For remote VMs, keep `iperf3` and `quicprobe` running under systemd and deploy
 new `quicprobe` artifacts with the root `just` recipes. VM setup and service
@@ -111,7 +117,7 @@ The active artifact story is intentionally small:
 - Benchee saved suites or console output.
 - Optional sidecar metadata for target, git SHA, command flags, `iperf3`
   baseline, telemetry summaries, packet captures, and flamegraphs.
-- Optional `quicprobe` server stats when the target writes them.
+- Optional `quicprobe` server run evidence when the target writes it.
 
 The previous `transport-bench-v1` JSONL report pipeline, shared ledger project,
 remote `probed` daemon, release-deploy scripts, and Terraform lab are legacy
