@@ -31,12 +31,22 @@ reads target evidence, stores it through a reusable
 Polling `quicprobe` or any other target for final evidence must not happen
 inside the measured function.
 
+Delivery profiles are MOQT-shaped:
+
+- `draft14_object_stream` sends object bytes on unidirectional streams and
+  requires completed receiver evidence.
+- `draft14_object_datagram` sends object payloads as QUIC DATAGRAMs and
+  validates server receive counts from a `quicprobe` target running
+  `--datagram-semantics drain`.
+
 The evidence collector uses target adapters:
 
 - `MOQXProbe.Benchee.Adapters.FakeTransport` reads explicit fake transport
   state/counters after timing.
 - `MOQXProbe.Benchee.Adapters.Quicprobe` reads the always-on quicprobe
   evidence HTTP API after timing, with local JSONL as a fallback artifact path.
+  For real `quicprobe` targets, it also acquires an exclusive experiment lease
+  before the suite starts.
 
 ## Install
 
@@ -115,8 +125,47 @@ The quicprobe evidence API defaults to `http://<host>:55434`; override it with
 `--quicprobe-evidence-url` or use `--quicprobe-evidence-path` for a local JSONL
 fallback.
 
+Do not run parallel benchmark suites against the same `quicprobe`. The
+receiver evidence stream is ordered by target-local connection sequence, so two
+clients sharing one target would corrupt attribution. `moqxprobe` enforces this
+by acquiring an exclusive experiment lease from the quicprobe HTTP API before
+the Benchee suite starts. If the target is already leased, the run fails before
+opening QUIC connections.
+
 The script exposes setup through flags, not environment variables or
 `Application` configuration. Use `--help` for the full option list.
+
+## DATAGRAM Clients
+
+Run the Flow-produced, GenStage-paced DATAGRAM client against the fake target:
+
+```bash
+mix run bench/datagram_clients.exs -- \
+  --target fake \
+  --datagram-count 10000 \
+  --datagram-rate 30000 \
+  --datagram-size 1180 \
+  --benchee-time 3
+```
+
+Run it against a `quicprobe` target with receiver evidence:
+
+```bash
+mix run bench/datagram_clients.exs -- \
+  --target quicprobe \
+  --host <target-host-or-ip> \
+  --quic-port <quic-port> \
+  --ca <ca.pem> \
+  --servername <cert-name> \
+  --datagram-count 1000 \
+  --datagram-rate 30000 \
+  --evidence-output results/quicprobe-datagram-evidence.jsonl
+```
+
+The DATAGRAM script uses the same evidence output format as the stream script.
+Remote sidecars include target host, QUIC/iperf ports, CA/server name, git SHA,
+optional iperf3 summary files, optional Tailscale path mode, optional server
+stats path, the selected profile, and a compact local sender summary.
 
 ## Target Preflight
 
@@ -142,6 +191,7 @@ go run ../quicprobe server \
   --cert <server.pem> \
   --key <server-key.pem> \
   --alpn moqx-test \
+  --datagram-semantics drain \
   --stats-output <run-evidence.jsonl>
 ```
 
@@ -149,13 +199,24 @@ The server emits one compact `server_run_evidence` JSON record per completed
 connection to stdout and to `--stats-output` when configured. The record is
 receiver-side evidence, not a client benchmark result: bidirectional streams
 are echoed, unidirectional streams are drained and counted, and DATAGRAMs are
-echoed and counted.
-The server also always exposes a read-only evidence HTTP API on
+handled according to `--datagram-semantics`.
+Use `drain` for publish-only `moqxprobe` DATAGRAM benchmarks. Use `echo` only
+for round-trip/reference-client DATAGRAM checks where the client expects echoed
+DATAGRAMs back.
+The server also always exposes an evidence and experiment-lease HTTP API on
 `--evidence-http-addr`, defaulting to `:55434`:
 
 - `GET /healthz`
 - `GET /evidence/latest`
 - `GET /evidence/runs?after_sequence=N`
+- `GET /experiment/lease`
+- `POST /experiment/lease/acquire`
+- `POST /experiment/lease/release`
+
+Every `server_run_evidence` record emitted while a lease is active includes
+`experiment_lease_owner` and `experiment_lease_token`. `moqxprobe` includes
+the token in the receiver-evidence match criteria, so a run does not accept a
+record from another owned suite.
 
 For remote VMs, keep `iperf3` and `quicprobe` running under systemd and deploy
 new `quicprobe` artifacts with the root `just` recipes. VM setup and service

@@ -46,7 +46,7 @@ The server needs a cert/key and should write receiver-evidence JSONL:
 
 ```ini
 [Service]
-ExecStart=/opt/moqx-bench/quicprobe/current/bin/quicprobe server --addr :<quic-port> --cert /opt/moqx-bench/quicprobe/tls/server.pem --key /opt/moqx-bench/quicprobe/tls/server-key.pem --stats-output /var/lib/moqx-quicprobe/quicprobe-evidence.jsonl --initial-packet-size 1200
+ExecStart=/opt/moqx-bench/quicprobe/current/bin/quicprobe server --addr :<quic-port> --cert /opt/moqx-bench/quicprobe/tls/server.pem --key /opt/moqx-bench/quicprobe/tls/server-key.pem --stats-output /var/lib/moqx-quicprobe/quicprobe-evidence.jsonl --datagram-semantics drain --initial-packet-size 1200 --evidence-http-addr :55434
 Restart=always
 ReadWritePaths=/var/lib/moqx-quicprobe
 ```
@@ -55,6 +55,13 @@ Use `--initial-packet-size 1200` for quicprobe over Tailscale or another path
 with a 1280 MTU. quic-go's default 1280-byte Initial becomes too large once
 IPv4/UDP headers are added, and normal UDP sockets set DF. The matching client
 commands below must also include `--initial-packet-size 1200`.
+Use `--datagram-semantics drain` for the persistent publish-only target used by
+`moqxprobe`; switch to `echo` only for explicit round-trip DATAGRAM checks.
+Do not run parallel benchmark suites against the same persistent quicprobe.
+`moqxprobe` acquires an exclusive experiment lease from `:55434` before a
+suite starts and releases it after the suite. A second suite must fail fast
+instead of sharing the target, because shared target evidence would contaminate
+both timing and receiver-evidence attribution.
 
 If the tailnet IP or DNS names change, rotate the cert so its SANs match the
 current endpoint used by clients. Keep `ca.pem` available for clients.
@@ -109,8 +116,14 @@ For local-to-remote client verification:
 ```bash
 scp <vm>.exe.xyz:/opt/moqx-bench/quicprobe/tls/ca.pem /private/tmp/quicprobe-ca.pem
 /path/to/quicprobe client --addr <tailnet-ip>:<quic-port> --ca /private/tmp/quicprobe-ca.pem --servername <server-name> --initial-packet-size 1200 --bidi-echo smoke --timeout 10s
-/path/to/quicprobe client --addr <tailnet-ip>:<quic-port> --ca /private/tmp/quicprobe-ca.pem --servername <server-name> --initial-packet-size 1200 --json --workload datagram_pressure --datagram-size 64 --datagram-count 5 --timeout 10s
+curl -sS "http://<tailnet-ip>:55434/evidence/latest"
+curl -sS "http://<tailnet-ip>:55434/experiment/lease"
 ```
+
+The persistent service runs DATAGRAM drain mode. Do not use
+`quicprobe client --workload datagram_pressure` against it unless the service
+has been deliberately switched to `--datagram-semantics echo` for a round-trip
+DATAGRAM check.
 
 If local-to-remote quicprobe times out while `iperf3 --udp` works over
 Tailscale, first verify both sides are using `--initial-packet-size 1200` and

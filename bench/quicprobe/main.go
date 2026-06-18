@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -39,16 +41,21 @@ const serverRunEvidenceBufferLimit = 4096
 const pacedSpinThreshold = 200 * time.Microsecond
 const udpNetworkAuto = "auto"
 const defaultEvidenceHTTPAddr = ":55434"
+const datagramSemanticsDrain = "drain"
+const datagramSemanticsEcho = "echo"
+const experimentLeaseDefaultTTL = 30 * time.Minute
+const experimentLeaseMaxTTL = 24 * time.Hour
 
 type serverConfig struct {
-	addr             string
-	certFile         string
-	keyFile          string
-	alpn             string
-	statsOutput      string
-	evidenceHTTPAddr string
-	udpNetwork       string
-	initialSize      int
+	addr              string
+	certFile          string
+	keyFile           string
+	alpn              string
+	statsOutput       string
+	evidenceHTTPAddr  string
+	datagramSemantics string
+	udpNetwork        string
+	initialSize       int
 }
 
 type clientConfig struct {
@@ -170,6 +177,8 @@ type serverRunEvidence struct {
 	FirstStreamByteLatencyMS     float64 `json:"first_stream_byte_latency_ms,omitempty"`
 	ReceiverEvidenceComplete     bool    `json:"receiver_evidence_complete"`
 	ReceiverEvidenceFailureCause string  `json:"receiver_evidence_failure_cause,omitempty"`
+	ExperimentLeaseOwner         string  `json:"experiment_lease_owner,omitempty"`
+	ExperimentLeaseToken         string  `json:"experiment_lease_token,omitempty"`
 }
 
 type evidenceLatestResponse struct {
@@ -185,6 +194,38 @@ type evidenceRunsResponse struct {
 	Runs              []serverRunEvidence `json:"runs"`
 }
 
+type experimentLease struct {
+	token      string
+	owner      string
+	acquiredAt time.Time
+	expiresAt  time.Time
+	metadata   map[string]string
+}
+
+type experimentLeaseInfo struct {
+	Token      string            `json:"token"`
+	Owner      string            `json:"owner"`
+	AcquiredAt string            `json:"acquired_at"`
+	ExpiresAt  string            `json:"expires_at"`
+	TTLMS      int64             `json:"ttl_ms"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+}
+
+type experimentLeaseRequest struct {
+	Owner    string            `json:"owner"`
+	Token    string            `json:"token,omitempty"`
+	TTLMS    int64             `json:"ttl_ms,omitempty"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+type experimentLeaseResponse struct {
+	SchemaVersion string               `json:"schema_version"`
+	RecordType    string               `json:"record_type"`
+	Status        string               `json:"status"`
+	Error         string               `json:"error,omitempty"`
+	Lease         *experimentLeaseInfo `json:"lease,omitempty"`
+}
+
 type serverRunEvidenceRecorder struct {
 	mu              sync.Mutex
 	sequence        atomic.Uint64
@@ -193,6 +234,7 @@ type serverRunEvidenceRecorder struct {
 	evidence        []serverRunEvidence
 	evidenceCap     int
 	evidenceDropped uint64
+	lease           *experimentLease
 }
 
 type datagramEchoStats struct {
@@ -218,6 +260,7 @@ type serverConnectionStats struct {
 	localAddr              string
 	remoteAddr             string
 	alpn                   string
+	datagramSemantics      string
 	datagrams              datagramEchoStats
 	bidiStreamsAccepted    int
 	uniStreamsAccepted     int
@@ -229,6 +272,8 @@ type serverConnectionStats struct {
 	streamReceiveErr       error
 	streamSendErr          error
 	firstStreamByteLatency time.Duration
+	experimentLeaseOwner   string
+	experimentLeaseToken   string
 }
 
 type serverConnectionStatsSnapshot struct {
@@ -237,6 +282,7 @@ type serverConnectionStatsSnapshot struct {
 	localAddr                 string
 	remoteAddr                string
 	alpn                      string
+	datagramSemantics         string
 	datagramsReceived         int
 	datagramsEchoAccepted     int
 	datagramBytesReceived     int64
@@ -256,6 +302,8 @@ type serverConnectionStatsSnapshot struct {
 	streamReceiveErr          error
 	streamSendErr             error
 	firstStreamByteLatency    time.Duration
+	experimentLeaseOwner      string
+	experimentLeaseToken      string
 }
 
 type datagramConn interface {
@@ -334,7 +382,8 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&cfg.keyFile, "key", "", "TLS private key PEM file")
 	flags.StringVar(&cfg.alpn, "alpn", envOrDefault("QUICPROBE_ALPN", defaultALPN), "QUIC ALPN")
 	flags.StringVar(&cfg.statsOutput, "stats-output", "", "optional JSONL path for per-connection server ingress summaries")
-	flags.StringVar(&cfg.evidenceHTTPAddr, "evidence-http-addr", defaultEvidenceHTTPAddr, "TCP address for the always-on read-only evidence HTTP API")
+	flags.StringVar(&cfg.evidenceHTTPAddr, "evidence-http-addr", defaultEvidenceHTTPAddr, "TCP address for the always-on evidence and experiment lease HTTP API")
+	flags.StringVar(&cfg.datagramSemantics, "datagram-semantics", datagramSemanticsDrain, "server DATAGRAM behavior: drain or echo")
 	flags.StringVar(&cfg.udpNetwork, "udp-network", udpNetworkAuto, "UDP socket network: auto, udp, udp4, or udp6")
 	flags.IntVar(&cfg.initialSize, "initial-packet-size", 0, "QUIC Initial packet size in bytes; 0 uses the quic-go default")
 
@@ -350,6 +399,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	}
 	if cfg.evidenceHTTPAddr == "" {
 		return serverConfig{}, errors.New("server requires --evidence-http-addr")
+	}
+	if err := validateDatagramSemantics(cfg.datagramSemantics); err != nil {
+		return serverConfig{}, err
 	}
 	if err := validateUDPNetwork(cfg.udpNetwork); err != nil {
 		return serverConfig{}, err
@@ -461,6 +513,7 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 }
 
 func runServer(ctx context.Context, cfg serverConfig, ready chan<- string, evidenceOut io.Writer) error {
+	datagramSemantics := normalizedDatagramSemantics(cfg.datagramSemantics)
 	cert, err := tls.LoadX509KeyPair(cfg.certFile, cfg.keyFile)
 	if err != nil {
 		return fmt.Errorf("load server certificate: %w", err)
@@ -511,21 +564,30 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string, evide
 			return fmt.Errorf("accept connection: %w", err)
 		}
 
-		go handleConnection(ctx, conn, recorder)
+		lease := recorder.activeExperimentLease()
+		go handleConnection(ctx, conn, recorder, datagramSemantics, lease)
 	}
 }
 
-func newServerConnectionStats(conn quic.Connection) *serverConnectionStats {
-	return &serverConnectionStats{
-		startedAt:  time.Now(),
-		localAddr:  conn.LocalAddr().String(),
-		remoteAddr: conn.RemoteAddr().String(),
-		alpn:       conn.ConnectionState().TLS.NegotiatedProtocol,
+func newServerConnectionStats(conn quic.Connection, datagramSemantics string, lease *experimentLeaseInfo) *serverConnectionStats {
+	stats := &serverConnectionStats{
+		startedAt:         time.Now(),
+		localAddr:         conn.LocalAddr().String(),
+		remoteAddr:        conn.RemoteAddr().String(),
+		alpn:              conn.ConnectionState().TLS.NegotiatedProtocol,
+		datagramSemantics: datagramSemantics,
 	}
+
+	if lease != nil {
+		stats.experimentLeaseOwner = lease.Owner
+		stats.experimentLeaseToken = lease.Token
+	}
+
+	return stats
 }
 
-func handleConnection(ctx context.Context, conn quic.Connection, recorder *serverRunEvidenceRecorder) {
-	stats := newServerConnectionStats(conn)
+func handleConnection(ctx context.Context, conn quic.Connection, recorder *serverRunEvidenceRecorder, datagramSemantics string, lease *experimentLeaseInfo) {
+	stats := newServerConnectionStats(conn, datagramSemantics, lease)
 	var wg sync.WaitGroup
 	var streamHandlers sync.WaitGroup
 	var datagramStats datagramEchoStats
@@ -544,7 +606,7 @@ func handleConnection(ctx context.Context, conn quic.Connection, recorder *serve
 
 	go func() {
 		defer wg.Done()
-		datagramStats = echoDatagrams(ctx, conn)
+		datagramStats = handleDatagrams(ctx, conn, datagramSemantics)
 	}()
 
 	wg.Wait()
@@ -642,6 +704,7 @@ func (s *serverConnectionStats) snapshot() serverConnectionStatsSnapshot {
 		localAddr:                 s.localAddr,
 		remoteAddr:                s.remoteAddr,
 		alpn:                      s.alpn,
+		datagramSemantics:         s.datagramSemantics,
 		datagramsReceived:         s.datagrams.datagramsReceived,
 		datagramsEchoAccepted:     s.datagrams.datagramsEchoAccepted,
 		datagramBytesReceived:     s.datagrams.bytesReceived,
@@ -661,6 +724,45 @@ func (s *serverConnectionStats) snapshot() serverConnectionStatsSnapshot {
 		streamReceiveErr:          s.streamReceiveErr,
 		streamSendErr:             s.streamSendErr,
 		firstStreamByteLatency:    s.firstStreamByteLatency,
+		experimentLeaseOwner:      s.experimentLeaseOwner,
+		experimentLeaseToken:      s.experimentLeaseToken,
+	}
+}
+
+func handleDatagrams(ctx context.Context, conn datagramConn, semantics string) datagramEchoStats {
+	switch semantics {
+	case datagramSemanticsDrain:
+		return drainDatagrams(ctx, conn)
+	case datagramSemanticsEcho:
+		return echoDatagrams(ctx, conn)
+	default:
+		stats := drainDatagrams(ctx, conn)
+		stats.sendErr = fmt.Errorf("unsupported datagram semantics %q", semantics)
+		return stats
+	}
+}
+
+func drainDatagrams(ctx context.Context, conn datagramConn) (stats datagramEchoStats) {
+	stats = datagramEchoStats{
+		startedAt:  time.Now(),
+		localAddr:  conn.LocalAddr().String(),
+		remoteAddr: conn.RemoteAddr().String(),
+	}
+	defer func() {
+		stats.finishedAt = time.Now()
+	}()
+
+	for {
+		datagram, err := conn.ReceiveDatagram(ctx)
+		if err != nil {
+			stats.receiveErr = err
+			return
+		}
+		if stats.datagramsReceived == 0 {
+			stats.firstDatagramLatency = time.Since(stats.startedAt)
+		}
+		stats.datagramsReceived++
+		stats.bytesReceived += int64(len(datagram))
 	}
 }
 
@@ -880,6 +982,12 @@ func (r *serverRunEvidenceRecorder) ServeHTTP(w http.ResponseWriter, req *http.R
 		r.handleEvidenceLatest(w, req)
 	case "/evidence/runs":
 		r.handleEvidenceRuns(w, req)
+	case "/experiment/lease":
+		r.handleExperimentLease(w, req)
+	case "/experiment/lease/acquire":
+		r.handleExperimentLeaseAcquire(w, req)
+	case "/experiment/lease/release":
+		r.handleExperimentLeaseRelease(w, req)
 	default:
 		http.NotFound(w, req)
 	}
@@ -894,6 +1002,7 @@ func (r *serverRunEvidenceRecorder) handleEvidenceHealth(w http.ResponseWriter, 
 	writeJSON(w, map[string]any{
 		"status":              "ok",
 		"latest_run_sequence": r.latestRunSequence(),
+		"experiment_lease":    r.activeExperimentLease(),
 	})
 }
 
@@ -934,6 +1043,199 @@ func (r *serverRunEvidenceRecorder) handleEvidenceRuns(w http.ResponseWriter, re
 		LatestRunSequence: r.latestRunSequence(),
 		Runs:              r.evidenceAfter(afterSequence, limit),
 	})
+}
+
+func (r *serverRunEvidenceRecorder) handleExperimentLease(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	lease := r.activeExperimentLease()
+	status := "available"
+	if lease != nil {
+		status = "leased"
+	}
+
+	writeJSON(w, experimentLeaseResponse{
+		SchemaVersion: evidenceAPISchema,
+		RecordType:    "experiment_lease",
+		Status:        status,
+		Lease:         lease,
+	})
+}
+
+func (r *serverRunEvidenceRecorder) handleExperimentLeaseAcquire(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	request, err := readExperimentLeaseRequest(req)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+
+	lease, busy := r.acquireExperimentLease(request)
+	if busy {
+		writeJSONStatus(w, http.StatusConflict, experimentLeaseResponse{
+			SchemaVersion: evidenceAPISchema,
+			RecordType:    "experiment_lease",
+			Status:        "busy",
+			Error:         "quicprobe target already has an active experiment lease",
+			Lease:         lease,
+		})
+		return
+	}
+
+	writeJSON(w, experimentLeaseResponse{
+		SchemaVersion: evidenceAPISchema,
+		RecordType:    "experiment_lease",
+		Status:        "acquired",
+		Lease:         lease,
+	})
+}
+
+func (r *serverRunEvidenceRecorder) handleExperimentLeaseRelease(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	request, err := readExperimentLeaseRequest(req)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if request.Token == "" {
+		writeBadRequest(w, errors.New("token is required"))
+		return
+	}
+
+	if !r.releaseExperimentLease(request.Token) {
+		writeJSONStatus(w, http.StatusConflict, experimentLeaseResponse{
+			SchemaVersion: evidenceAPISchema,
+			RecordType:    "experiment_lease",
+			Status:        "not_released",
+			Error:         "experiment lease token does not match the active lease",
+			Lease:         r.activeExperimentLease(),
+		})
+		return
+	}
+
+	writeJSON(w, experimentLeaseResponse{
+		SchemaVersion: evidenceAPISchema,
+		RecordType:    "experiment_lease",
+		Status:        "released",
+	})
+}
+
+func (r *serverRunEvidenceRecorder) activeExperimentLease() *experimentLeaseInfo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.expireExperimentLeaseLocked(time.Now())
+	return experimentLeaseInfoFromLease(r.lease)
+}
+
+func (r *serverRunEvidenceRecorder) acquireExperimentLease(request experimentLeaseRequest) (*experimentLeaseInfo, bool) {
+	now := time.Now()
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.expireExperimentLeaseLocked(now)
+	if r.lease != nil {
+		return experimentLeaseInfoFromLease(r.lease), true
+	}
+
+	ttl := experimentLeaseTTL(request.TTLMS)
+	owner := request.Owner
+	if owner == "" {
+		owner = "unknown"
+	}
+
+	r.lease = &experimentLease{
+		token:      newExperimentLeaseToken(),
+		owner:      owner,
+		acquiredAt: now,
+		expiresAt:  now.Add(ttl),
+		metadata:   request.Metadata,
+	}
+
+	return experimentLeaseInfoFromLease(r.lease), false
+}
+
+func (r *serverRunEvidenceRecorder) releaseExperimentLease(token string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.expireExperimentLeaseLocked(time.Now())
+	if r.lease == nil {
+		return false
+	}
+	if r.lease.token != token {
+		return false
+	}
+
+	r.lease = nil
+	return true
+}
+
+func (r *serverRunEvidenceRecorder) expireExperimentLeaseLocked(now time.Time) {
+	if r.lease != nil && !r.lease.expiresAt.After(now) {
+		r.lease = nil
+	}
+}
+
+func experimentLeaseTTL(ttlMS int64) time.Duration {
+	if ttlMS <= 0 {
+		return experimentLeaseDefaultTTL
+	}
+
+	ttl := time.Duration(ttlMS) * time.Millisecond
+	if ttl > experimentLeaseMaxTTL {
+		return experimentLeaseMaxTTL
+	}
+
+	return ttl
+}
+
+func experimentLeaseInfoFromLease(lease *experimentLease) *experimentLeaseInfo {
+	if lease == nil {
+		return nil
+	}
+
+	return &experimentLeaseInfo{
+		Token:      lease.token,
+		Owner:      lease.owner,
+		AcquiredAt: lease.acquiredAt.UTC().Format(time.RFC3339Nano),
+		ExpiresAt:  lease.expiresAt.UTC().Format(time.RFC3339Nano),
+		TTLMS:      lease.expiresAt.Sub(lease.acquiredAt).Milliseconds(),
+		Metadata:   lease.metadata,
+	}
+}
+
+func newExperimentLeaseToken() string {
+	token := make([]byte, 16)
+	if _, err := rand.Read(token); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+
+	return hex.EncodeToString(token)
+}
+
+func readExperimentLeaseRequest(req *http.Request) (experimentLeaseRequest, error) {
+	defer req.Body.Close()
+
+	var request experimentLeaseRequest
+	decoder := json.NewDecoder(io.LimitReader(req.Body, 64*1024))
+	if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		return experimentLeaseRequest{}, fmt.Errorf("decode experiment lease request: %w", err)
+	}
+
+	return request, nil
 }
 
 func (r *serverRunEvidenceRecorder) latestRunSequence() uint64 {
@@ -1009,6 +1311,14 @@ func writeJSON(w http.ResponseWriter, value any) {
 	}
 }
 
+func writeJSONStatus(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		fmt.Fprintf(os.Stderr, "write evidence http response: %v\n", err)
+	}
+}
+
 func writeMethodNotAllowed(w http.ResponseWriter) {
 	w.Header().Set("Allow", http.MethodGet)
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1034,7 +1344,7 @@ func serverRunEvidenceFromSnapshot(sequence uint64, stats serverConnectionStatsS
 		DurationMS:                durationMillis(stats.finishedAt.Sub(stats.startedAt)),
 		BidiStreamSemantics:       "echo",
 		UniStreamSemantics:        "drain",
-		DatagramSemantics:         "echo",
+		DatagramSemantics:         normalizedDatagramSemantics(stats.datagramSemantics),
 		DatagramsReceived:         stats.datagramsReceived,
 		DatagramsEchoAccepted:     stats.datagramsEchoAccepted,
 		DatagramBytesReceived:     stats.datagramBytesReceived,
@@ -1051,6 +1361,8 @@ func serverRunEvidenceFromSnapshot(sequence uint64, stats serverConnectionStatsS
 		FirstDatagramLatencyMS:    durationMillis(stats.firstDatagramLatency),
 		FirstStreamByteLatencyMS:  durationMillis(stats.firstStreamByteLatency),
 		ReceiverEvidenceComplete:  true,
+		ExperimentLeaseOwner:      stats.experimentLeaseOwner,
+		ExperimentLeaseToken:      stats.experimentLeaseToken,
 	}
 
 	if isUnexpectedEvidenceError(stats.datagramReceiveErr) {
@@ -2122,6 +2434,23 @@ func validateUDPNetwork(network string) error {
 	default:
 		return fmt.Errorf("invalid UDP network %q; expected auto, udp, udp4, or udp6", network)
 	}
+}
+
+func validateDatagramSemantics(semantics string) error {
+	switch normalizedDatagramSemantics(semantics) {
+	case datagramSemanticsDrain, datagramSemanticsEcho:
+		return nil
+	default:
+		return fmt.Errorf("invalid datagram semantics %q; expected drain or echo", semantics)
+	}
+}
+
+func normalizedDatagramSemantics(semantics string) string {
+	if semantics == "" {
+		return datagramSemanticsDrain
+	}
+
+	return semantics
 }
 
 func validateInitialPacketSize(size int) error {

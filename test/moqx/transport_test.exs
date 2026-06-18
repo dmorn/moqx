@@ -178,22 +178,21 @@ defmodule MOQX.TransportTest do
 
       assert {:ok, ctx} = MOQX.Transport.set_active(ctx, server_stream, true)
 
-      parent = self()
+      task =
+        Task.async(fn ->
+          assert {:ok, sender} = Stream.sender(client_stream)
+          assert {:ok, send, sender} = Sender.send(sender, "hello", [])
 
-      spawn(fn ->
-        assert {:ok, sender} = Stream.sender(client_stream)
-        assert {:ok, send, sender} = Sender.send(sender, "hello", [])
+          assert {:ok, {:stream_event, ^client_stream, :send_completed, metadata}, _sender} =
+                   Sender.receive_event(sender, 1_000)
 
-        assert {:ok, {:stream_event, ^client_stream, :send_completed, metadata}, _sender} =
-                 Sender.receive_event(sender, 100)
-
-        send(parent, {:stream_sender_done, send, metadata})
-      end)
+          {send, metadata}
+        end)
 
       assert {:ok, {:stream_data, ^server_stream, "hello", %{}}, ctx} =
                receive_context_stream_data(ctx, server_stream, "hello", 100)
 
-      assert_receive {:stream_sender_done, send, metadata}, 1_000
+      {send, metadata} = Task.await(task, 1_000)
 
       assert metadata.send == send
       assert metadata.byte_size == 5

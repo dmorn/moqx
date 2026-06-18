@@ -11,6 +11,7 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
     "datagrams_echo_accepted",
     "datagram_bytes_received",
     "datagram_bytes_echo_accepted",
+    "datagram_semantics",
     "bidi_streams_accepted",
     "uni_streams_accepted",
     "streams_completed",
@@ -33,6 +34,58 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  @spec acquire_experiment_lease(keyword()) :: {:ok, map()} | {:error, term()}
+  def acquire_experiment_lease(opts) when is_list(opts) do
+    timeout_ms = Keyword.get(opts, :timeout_ms, 5_000)
+
+    with {:ok, url} <- lease_url(opts) do
+      payload =
+        %{
+          owner: Keyword.fetch!(opts, :owner),
+          ttl_ms: Keyword.get(opts, :ttl_ms),
+          metadata: Keyword.get(opts, :metadata)
+        }
+        |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+        |> Map.new()
+
+      case post_api_json(url, "/experiment/lease/acquire", payload, timeout_ms) do
+        {:ok, %{"status" => "acquired", "lease" => lease}} ->
+          {:ok, lease}
+
+        {:error, {:http_error, 409, _reason, body}} ->
+          {:error, {:quicprobe_experiment_lease_busy, decode_error_body(body)}}
+
+        {:ok, response} ->
+          {:error, {:unexpected_quicprobe_experiment_lease_response, response}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  @spec release_experiment_lease(keyword(), map()) :: :ok | {:error, term()}
+  def release_experiment_lease(opts, lease) when is_list(opts) and is_map(lease) do
+    timeout_ms = Keyword.get(opts, :timeout_ms, 5_000)
+
+    with {:ok, url} <- lease_url(opts),
+         {:ok, token} <- lease_token(lease) do
+      case post_api_json(url, "/experiment/lease/release", %{token: token}, timeout_ms) do
+        {:ok, %{"status" => "released"}} ->
+          :ok
+
+        {:error, {:http_error, 409, _reason, body}} ->
+          {:error, {:quicprobe_experiment_lease_release_failed, decode_error_body(body)}}
+
+        {:ok, response} ->
+          {:error, {:unexpected_quicprobe_experiment_lease_response, response}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -65,6 +118,17 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
       {:error, :error} -> {:error, :missing_quicprobe_evidence_source}
     end
   end
+
+  defp lease_url(opts) do
+    case Keyword.fetch(opts, :url) do
+      {:ok, url} when is_binary(url) -> {:ok, url}
+      _missing -> {:error, :missing_quicprobe_evidence_url}
+    end
+  end
+
+  defp lease_token(%{"token" => token}) when is_binary(token), do: {:ok, token}
+  defp lease_token(%{token: token}) when is_binary(token), do: {:ok, token}
+  defp lease_token(_lease), do: {:error, :missing_quicprobe_experiment_lease_token}
 
   defp last_run_sequence_from_content(content) do
     with {:ok, records} <- decode_jsonl(content) do
@@ -188,8 +252,8 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
     do: Map.has_key?(match, :after_run_sequence) or Map.has_key?(match, "after_run_sequence")
 
   defp record_to_evidence(receipt, source, record) do
-    complete? = Map.get(record, "receiver_evidence_complete", true)
-    error = Map.get(record, "receiver_evidence_failure_cause")
+    complete? = evidence_complete?(receipt, record)
+    error = if complete?, do: nil, else: Map.get(record, "receiver_evidence_failure_cause")
 
     Evidence.from_observed(receipt, observed_counters(record),
       source: :quicprobe,
@@ -197,6 +261,19 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
       error: error,
       metadata: Map.put(source_metadata(source), :raw, record)
     )
+  end
+
+  defp evidence_complete?(receipt, record) do
+    if expected_receiver_complete?(receipt) do
+      Map.get(record, "receiver_evidence_complete", true)
+    else
+      true
+    end
+  end
+
+  defp expected_receiver_complete?(%RunReceipt{expected: expected}) do
+    Map.has_key?(expected, :receiver_evidence_complete) or
+      Map.has_key?(expected, "receiver_evidence_complete")
   end
 
   defp observed_counters(record) do
@@ -228,9 +305,37 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
     end
   end
 
+  defp post_api_json(base_url, path, payload, timeout_ms) do
+    _ = Application.ensure_all_started(:inets)
+    _ = Application.ensure_all_started(:ssl)
+
+    url = base_url |> String.trim_trailing("/") |> Kernel.<>(path)
+    body = JSON.encode!(payload)
+    request = {String.to_charlist(url), [], ~c"application/json", body}
+    http_options = [{:timeout, timeout_ms}]
+    options = [body_format: :binary]
+
+    case :httpc.request(:post, request, http_options, options) do
+      {:ok, {{_version, status, _reason}, _headers, body}} when status in 200..299 ->
+        decode_api_json(body)
+
+      {:ok, {{_version, status, reason}, _headers, body}} ->
+        {:error, {:http_error, status, to_string(reason), body}}
+
+      {:error, reason} ->
+        {:error, {:http_request_failed, reason}}
+    end
+  end
+
   defp decode_api_json(body) do
     {:ok, JSON.decode!(body)}
   rescue
     reason -> {:error, {:invalid_json, reason}}
+  end
+
+  defp decode_error_body(body) do
+    JSON.decode!(body)
+  rescue
+    _reason -> body
   end
 end

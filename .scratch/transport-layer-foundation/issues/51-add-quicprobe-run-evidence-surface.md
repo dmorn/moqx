@@ -54,13 +54,13 @@ Automation surface:
 
 - stdout JSONL remains useful for local operation and systemd/journal
   inspection;
-- expose the same records through an always-on tiny read-only HTTP API because
+- expose the same records through an always-on tiny HTTP API because
   it materially simplifies `moqxprobe` automation against both local and
   persistent remote targets;
 - the HTTP API should expose records from an in-memory ring buffer using simple
   endpoints for health, latest sequence, and records since sequence number;
-- no remote run orchestration, authentication, or control plane should be added
-  here.
+- the only control-plane addition is an exclusive experiment lease so parallel
+  benchmark suites cannot share one persistent target.
 
 Run identity:
 
@@ -136,7 +136,7 @@ Remote verification on `moqx-quicprobe-fra.exe.xyz` / `100.124.193.59`:
 
 ### 2026-06-18 always-on evidence HTTP API
 
-Added a tiny read-only evidence HTTP API to `quicprobe server`. The API is
+Added a tiny evidence HTTP API to `quicprobe server`. The API is
 always started with the server; `--evidence-http-addr` only controls the bind
 address and defaults to `:55434`.
 
@@ -160,3 +160,21 @@ Validation:
 - API `GET /evidence/latest` reported sequence 1 after the smoke;
 - API `GET /evidence/runs?after_sequence=0` returned the matching
   `server_run_evidence` record.
+
+### 2026-06-18 experiment lease extension
+
+The HTTP surface is now evidence plus a minimal experiment lease, not purely
+read-only. This is required because parallel benchmark suites against one
+persistent `quicprobe` would corrupt target-local sequence matching and timing
+readings.
+
+New endpoints:
+
+- `GET /experiment/lease`
+- `POST /experiment/lease/acquire`
+- `POST /experiment/lease/release`
+
+Acquire returns a lease token or `409 busy` when another suite owns the target.
+Every `server_run_evidence` record emitted while a lease is active includes
+`experiment_lease_owner` and `experiment_lease_token`, allowing `moqxprobe` to
+match evidence to the suite that acquired the target.

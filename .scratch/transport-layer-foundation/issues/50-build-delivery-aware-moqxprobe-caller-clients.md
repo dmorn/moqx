@@ -2,7 +2,7 @@
 
 # Build delivery-aware moqxprobe caller clients
 
-Status: open
+Status: done
 Type: HITL
 Category: performance
 
@@ -61,8 +61,7 @@ Delivery verification must be target-specific and explicit:
   those counters after the timed workload;
 - `quicprobe` target: the long-running server emits per-connection or per-run
   evidence records, similar in spirit to `iperf3` server reports; the driver
-  reads those records after the timed workload, preferably through a small
-  read-only API once available;
+  reads those records after the timed workload through the small HTTP API;
 - future targets: add a target adapter that can produce the same delivery
   evidence shape without changing the client implementation under test.
 
@@ -150,16 +149,16 @@ starts.
 - [x] Stream delivery-aware runs wait for or collect a receiver-side signal:
       peer echo, server stats, a drain window/cooldown with stats verification,
       or another explicit target-side criterion.
-- [ ] DATAGRAM delivery-aware runs use delivered DATAGRAM counts or echo
+- [x] DATAGRAM delivery-aware runs use delivered DATAGRAM counts or echo
       counts as the delivery signal, not just local send acceptance.
 - [x] Target selection remains flag-driven and does not use mutable
       `Application` config.
 - [x] The fake target remains available for process-model calibration without
       being confused with real-network evidence.
-- [ ] Remote runs record sidecar metadata: target host, ports, CA/server name,
+- [x] Remote runs record sidecar metadata: target host, ports, CA/server name,
       git SHA, `iperf3` preflight summary, Tailscale path mode when available,
       and any server stats path used.
-- [ ] Profile names and result fields make clear whether the run is control
+- [x] Profile names and result fields make clear whether the run is control
       bidi, object uni, object DATAGRAM, or mixed control-plus-object pressure.
 - [x] A small local or remote smoke proves the first delivery-aware client
       rejects or reports missing receiver-side evidence instead of silently
@@ -233,9 +232,9 @@ post-send grace, local quicprobe smokes validated both `stream_owner` and
 
 ### 2026-06-18 quicprobe HTTP evidence adapter
 
-`quicprobe` now exposes receiver evidence through an always-on read-only HTTP
-API, and `moqxprobe` can consume it directly. For `target=quicprobe` evidence
-mode, `bench/moqxprobe/bench/stream_clients.exs` now defaults to
+`quicprobe` now exposes receiver evidence through an always-on HTTP API, and
+`moqxprobe` can consume it directly. For `target=quicprobe` evidence mode,
+`bench/moqxprobe/bench/stream_clients.exs` now defaults to
 `http://<host>:55434` and keeps `--quicprobe-evidence-url`,
 `--quicprobe-evidence-port`, and `--quicprobe-evidence-path` as explicit
 flags. The local JSONL path remains available only as a fallback; HTTP is the
@@ -245,3 +244,89 @@ Local validation started `quicprobe server` with the evidence API on
 `127.0.0.1:55435`, ran `moqxprobe` without a JSONL evidence path, and produced
 1/1 valid delivery evidence records. The generated sidecar recorded
 `quicprobe_evidence_url=http://127.0.0.1:55435` and no JSONL evidence path.
+
+### 2026-06-18 delivery-aware DATAGRAM client
+
+`bench/moqxprobe/bench/datagram_clients.exs` now provides the first
+delivery-aware DATAGRAM caller benchmark. It uses the existing Flow-produced,
+GenStage-paced `MOQXProbe.Traffic.DatagramSender` and calls
+`MOQX.Transport.send_datagram/3` through the public transport boundary.
+
+The script supports the same target/evidence lifecycle as the stream driver:
+
+- fake target records DATAGRAM receive counters in explicit ETS state;
+- quicprobe target captures a run-sequence cursor before the measured function
+  and scrapes receiver evidence from the always-on HTTP API after the measured
+  function returns;
+- the sidecar format is still `moqxprobe-benchee-evidence-v1`;
+- evidence collection remains outside timed Benchee measurements.
+
+The profile name is `draft14_object_datagram`. For this publish-only profile,
+delivery validity is based on server-side `datagrams_received`,
+`datagram_bytes_received`, and explicit `datagram_semantics=drain` receiver
+evidence. quicprobe still supports `datagram_semantics=echo`, but that mode is
+reserved for round-trip/reference-client DATAGRAM checks.
+
+Remote validation against `moqx-quicprobe-fra.exe.xyz`:
+
+```bash
+mix run bench/datagram_clients.exs -- \
+  --target quicprobe \
+  --host 100.124.193.59 \
+  --quic-port 55433 \
+  --ca /private/tmp/moqx-quicprobe-fra-ca.pem \
+  --servername localhost \
+  --alpn moqx-test \
+  --datagram-count 5 \
+  --datagram-rate 1000 \
+  --datagram-size 64 \
+  --max-burst 1 \
+  --max-queue-depth 4 \
+  --benchee-warmup 0 \
+  --benchee-time 0.05 \
+  --benchee-parallel 1 \
+  --connect-timeout-ms 5000 \
+  --timeout-ms 10000 \
+  --evidence-output /tmp/moqxprobe-remote-datagram-drain-evidence.jsonl \
+  --evidence-timeout-ms 5000 \
+  --evidence-poll-ms 25 \
+  --tailscale-path-mode unknown-relay-candidate \
+  --quicprobe-evidence-url http://100.124.193.59:55434
+```
+
+Result: `total=1, valid=1, invalid=0, timeout=0, error=0`. quicprobe recorded
+`run_sequence=1`, `datagram_semantics=drain`, `datagrams_received=5`,
+`datagram_bytes_received=320`, `datagrams_echo_accepted=0`, and
+`receiver_evidence_complete=true`.
+
+The DATAGRAM smoke also clarified an important receiver-side detail: a
+publish-only benchmark must run against a drain-mode server. Echo-mode
+quicprobe is reserved for round-trip/reference-client DATAGRAM checks, where
+server-to-client echo is part of the expected behavior. quicprobe now models
+this explicitly with `--datagram-semantics drain|echo`; the persistent
+`moqxprobe` target is deployed in drain mode.
+
+`bench/moqxprobe` sidecars now carry profile names and remote-run metadata:
+target host, QUIC/iperf ports, CA/server name, git SHA, optional iperf3
+summary files, optional Tailscale path mode, optional server stats path,
+evidence URL/path, and local sender summary.
+
+### 2026-06-18 quicprobe experiment lease contract
+
+Parallel benchmark suites must not share one `quicprobe` target. The target
+evidence stream is connection-sequence based, and a second client using the
+same persistent server can make both timing and receiver-evidence attribution
+invalid.
+
+`quicprobe` now exposes an exclusive experiment lease on the same HTTP API:
+
+- `GET /experiment/lease` reports whether the target is available or leased;
+- `POST /experiment/lease/acquire` acquires the lease or returns `409 busy`;
+- `POST /experiment/lease/release` releases the lease with the returned token.
+
+`bench/moqxprobe` stream and DATAGRAM scripts acquire the lease for every
+`--target quicprobe` suite, even when delivery-evidence sidecars are disabled.
+When evidence is enabled, the suite records the lease metadata in each receipt
+and matches receiver evidence by `experiment_lease_token` as well as run
+sequence. This makes the no-parallel-target contract enforced, documented, and
+visible in sidecars.

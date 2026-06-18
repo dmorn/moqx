@@ -135,6 +135,20 @@ func TestValidateInitialPacketSize(t *testing.T) {
 	}
 }
 
+func TestValidateDatagramSemantics(t *testing.T) {
+	t.Parallel()
+
+	for _, semantics := range []string{"", datagramSemanticsDrain, datagramSemanticsEcho} {
+		if err := validateDatagramSemantics(semantics); err != nil {
+			t.Fatalf("validateDatagramSemantics(%q) error = %v", semantics, err)
+		}
+	}
+
+	if err := validateDatagramSemantics("mirror"); err == nil {
+		t.Fatal("validateDatagramSemantics(mirror) error = nil, want error")
+	}
+}
+
 func TestClientServerJSONStreamPressure(t *testing.T) {
 	t.Parallel()
 
@@ -261,11 +275,12 @@ func TestClientServerJSONMixedMOQTShapedPressure(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() {
 		errc <- runServer(ctx, serverConfig{
-			addr:        "127.0.0.1:0",
-			certFile:    certs.serverCert,
-			keyFile:     certs.serverKey,
-			alpn:        "moqx-test",
-			statsOutput: statsOutput,
+			addr:              "127.0.0.1:0",
+			certFile:          certs.serverCert,
+			keyFile:           certs.serverKey,
+			alpn:              "moqx-test",
+			statsOutput:       statsOutput,
+			datagramSemantics: datagramSemanticsEcho,
 		}, ready, nil)
 	}()
 
@@ -391,11 +406,12 @@ func TestClientServerJSONDatagramPressure(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() {
 		errc <- runServer(ctx, serverConfig{
-			addr:        "127.0.0.1:0",
-			certFile:    certs.serverCert,
-			keyFile:     certs.serverKey,
-			alpn:        "moqx-test",
-			statsOutput: statsOutput,
+			addr:              "127.0.0.1:0",
+			certFile:          certs.serverCert,
+			keyFile:           certs.serverKey,
+			alpn:              "moqx-test",
+			statsOutput:       statsOutput,
+			datagramSemantics: datagramSemanticsEcho,
 		}, ready, nil)
 	}()
 
@@ -509,6 +525,38 @@ func TestEchoDatagramsDrainsReceivesWhileEchoSendIsBlocked(t *testing.T) {
 	}
 }
 
+func TestDrainDatagramsDoesNotEcho(t *testing.T) {
+	t.Parallel()
+
+	payloads := [][]byte{
+		[]byte("one"),
+		[]byte("two"),
+		[]byte("three"),
+	}
+
+	conn := newBlockingEchoConn(payloads)
+	stats := drainDatagrams(context.Background(), conn)
+
+	if stats.datagramsReceived != len(payloads) {
+		t.Fatalf("datagramsReceived = %d, want %d", stats.datagramsReceived, len(payloads))
+	}
+	if stats.bytesReceived != int64(len("one")+len("two")+len("three")) {
+		t.Fatalf("bytesReceived = %d, want %d", stats.bytesReceived, len("one")+len("two")+len("three"))
+	}
+	if stats.datagramsEchoAccepted != 0 {
+		t.Fatalf("datagramsEchoAccepted = %d, want 0", stats.datagramsEchoAccepted)
+	}
+	if stats.bytesEchoAccepted != 0 {
+		t.Fatalf("bytesEchoAccepted = %d, want 0", stats.bytesEchoAccepted)
+	}
+
+	select {
+	case <-conn.sendStarted:
+		t.Fatal("SendDatagram was called in drain mode")
+	default:
+	}
+}
+
 func TestServerRunEvidenceRecorderWritesStdoutAndStatsOutput(t *testing.T) {
 	t.Parallel()
 
@@ -524,6 +572,7 @@ func TestServerRunEvidenceRecorderWritesStdoutAndStatsOutput(t *testing.T) {
 		localAddr:                 "127.0.0.1:4433",
 		remoteAddr:                "127.0.0.1:55555",
 		alpn:                      "moqx-test",
+		datagramSemantics:         datagramSemanticsEcho,
 		datagramsReceived:         4,
 		datagramsEchoAccepted:     3,
 		datagramBytesReceived:     256,
@@ -619,6 +668,101 @@ func TestServerRunEvidenceHTTPAPI(t *testing.T) {
 	}
 }
 
+func TestExperimentLeaseHTTPAPI(t *testing.T) {
+	t.Parallel()
+
+	recorder := newServerRunEvidenceRecorder(nil, "")
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+
+	var initial experimentLeaseResponse
+	getJSON(t, server.URL+"/experiment/lease", &initial)
+	if initial.Status != "available" {
+		t.Fatalf("initial lease status = %q, want available", initial.Status)
+	}
+
+	var acquired experimentLeaseResponse
+	postJSON(t, server.URL+"/experiment/lease/acquire", http.StatusOK, experimentLeaseRequest{
+		Owner: "suite-1",
+		TTLMS: 60_000,
+		Metadata: map[string]string{
+			"profile": "draft14_object_datagram",
+		},
+	}, &acquired)
+
+	if acquired.Status != "acquired" {
+		t.Fatalf("acquire status = %q, want acquired", acquired.Status)
+	}
+	if acquired.Lease == nil {
+		t.Fatal("acquire response lease is nil")
+	}
+	if acquired.Lease.Owner != "suite-1" {
+		t.Fatalf("lease owner = %q, want suite-1", acquired.Lease.Owner)
+	}
+	if acquired.Lease.Token == "" {
+		t.Fatal("lease token is empty")
+	}
+
+	var busy experimentLeaseResponse
+	postJSON(t, server.URL+"/experiment/lease/acquire", http.StatusConflict, experimentLeaseRequest{
+		Owner: "suite-2",
+	}, &busy)
+	if busy.Status != "busy" {
+		t.Fatalf("busy status = %q, want busy", busy.Status)
+	}
+	if busy.Lease == nil || busy.Lease.Token != acquired.Lease.Token {
+		t.Fatalf("busy lease token = %#v, want active lease token", busy.Lease)
+	}
+
+	snapshot := serverConnectionStatsSnapshot{
+		startedAt:            time.Unix(1_700_000_000, 0),
+		finishedAt:           time.Unix(1_700_000_001, 0),
+		localAddr:            "127.0.0.1:4433",
+		remoteAddr:           "127.0.0.1:55555",
+		alpn:                 "moqx-test",
+		experimentLeaseOwner: acquired.Lease.Owner,
+		experimentLeaseToken: acquired.Lease.Token,
+	}
+
+	if err := recorder.Record(snapshot); err != nil {
+		t.Fatalf("Record() error = %v", err)
+	}
+
+	var runs evidenceRunsResponse
+	getJSON(t, server.URL+"/evidence/runs?after_sequence=0", &runs)
+	if len(runs.Runs) != 1 {
+		t.Fatalf("runs length = %d, want 1", len(runs.Runs))
+	}
+	if runs.Runs[0].ExperimentLeaseOwner != "suite-1" {
+		t.Fatalf("evidence experiment lease owner = %q, want suite-1", runs.Runs[0].ExperimentLeaseOwner)
+	}
+	if runs.Runs[0].ExperimentLeaseToken != acquired.Lease.Token {
+		t.Fatalf("evidence experiment lease token = %q, want %q", runs.Runs[0].ExperimentLeaseToken, acquired.Lease.Token)
+	}
+
+	var wrongRelease experimentLeaseResponse
+	postJSON(t, server.URL+"/experiment/lease/release", http.StatusConflict, experimentLeaseRequest{
+		Token: "wrong-token",
+	}, &wrongRelease)
+	if wrongRelease.Status != "not_released" {
+		t.Fatalf("wrong release status = %q, want not_released", wrongRelease.Status)
+	}
+
+	var released experimentLeaseResponse
+	postJSON(t, server.URL+"/experiment/lease/release", http.StatusOK, experimentLeaseRequest{
+		Token: acquired.Lease.Token,
+	}, &released)
+	if released.Status != "released" {
+		t.Fatalf("release status = %q, want released", released.Status)
+	}
+
+	var afterRelease experimentLeaseResponse
+	getJSON(t, server.URL+"/experiment/lease", &afterRelease)
+	if afterRelease.Status != "available" {
+		t.Fatalf("after release status = %q, want available", afterRelease.Status)
+	}
+}
+
 func TestServerRunEvidenceHTTPAPIRejectsInvalidQuery(t *testing.T) {
 	t.Parallel()
 
@@ -644,6 +788,7 @@ func TestServerRunEvidenceIgnoresNormalRemoteApplicationClose(t *testing.T) {
 		startedAt:          time.Unix(1_700_000_000, 0),
 		finishedAt:         time.Unix(1_700_000_001, 0),
 		alpn:               "moqx-test",
+		datagramSemantics:  datagramSemanticsDrain,
 		datagramReceiveErr: &quic.ApplicationError{Remote: true, ErrorCode: 0, ErrorMessage: "done"},
 	})
 
@@ -666,10 +811,11 @@ func TestClientServerJSONPacedDatagramPressure(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() {
 		errc <- runServer(ctx, serverConfig{
-			addr:     "127.0.0.1:0",
-			certFile: certs.serverCert,
-			keyFile:  certs.serverKey,
-			alpn:     "moqx-test",
+			addr:              "127.0.0.1:0",
+			certFile:          certs.serverCert,
+			keyFile:           certs.serverKey,
+			alpn:              "moqx-test",
+			datagramSemantics: datagramSemanticsEcho,
 		}, ready, nil)
 	}()
 
@@ -986,6 +1132,29 @@ func getJSON(t *testing.T, url string, target any) {
 
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
 		t.Fatalf("GET %s JSON decode error = %v", url, err)
+	}
+}
+
+func postJSON(t *testing.T, url string, wantStatus int, payload any, target any) {
+	t.Helper()
+
+	var body bytes.Buffer
+	if err := json.NewEncoder(&body).Encode(payload); err != nil {
+		t.Fatalf("POST %s JSON encode error = %v", url, err)
+	}
+
+	resp, err := http.Post(url, "application/json", &body)
+	if err != nil {
+		t.Fatalf("POST %s error = %v", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("POST %s status = %d, want %d", url, resp.StatusCode, wantStatus)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		t.Fatalf("POST %s JSON decode error = %v", url, err)
 	}
 }
 

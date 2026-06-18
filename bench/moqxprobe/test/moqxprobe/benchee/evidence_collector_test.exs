@@ -196,6 +196,81 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
     assert evidence.metadata.raw["run_sequence"] == 2
   end
 
+  test "quicprobe adapter matches evidence by experiment lease token" do
+    path = temp_jsonl_path()
+    on_exit(fn -> File.rm(path) end)
+
+    write_jsonl!(path, [
+      %{
+        record_type: "server_run_evidence",
+        run_sequence: 2,
+        experiment_lease_token: "other-lease",
+        stream_bytes_received: 384,
+        streams_completed: 1,
+        receiver_evidence_complete: true
+      },
+      %{
+        record_type: "server_run_evidence",
+        run_sequence: 3,
+        experiment_lease_token: "suite-lease",
+        stream_bytes_received: 384,
+        streams_completed: 1,
+        receiver_evidence_complete: true
+      }
+    ])
+
+    receipt =
+      RunReceipt.new!(
+        id: :lease_matched,
+        target: :quicprobe,
+        match: %{after_run_sequence: 1, experiment_lease_token: "suite-lease"},
+        expected: %{stream_bytes_received: 384, streams_completed: 1}
+      )
+
+    assert {:ok, %Evidence{valid: true} = evidence} =
+             Quicprobe.collect(receipt, path: path, timeout_ms: 10, poll_ms: 1)
+
+    assert evidence.metadata.raw["run_sequence"] == 3
+  end
+
+  test "quicprobe adapter can validate DATAGRAM receive evidence without echo completion" do
+    path = temp_jsonl_path()
+    on_exit(fn -> File.rm(path) end)
+
+    write_jsonl!(path, [
+      %{
+        record_type: "server_run_evidence",
+        run_sequence: 1,
+        datagram_semantics: "drain",
+        datagrams_received: 5,
+        datagram_bytes_received: 320,
+        datagrams_echo_accepted: 0,
+        datagram_bytes_echo_accepted: 0,
+        receiver_evidence_complete: false,
+        receiver_evidence_failure_cause: "datagram_send_error"
+      }
+    ])
+
+    receipt =
+      RunReceipt.new!(
+        id: :datagram_receive_only,
+        target: :quicprobe,
+        match: %{run_sequence: 1},
+        expected: %{
+          datagram_semantics: "drain",
+          datagrams_received: 5,
+          datagram_bytes_received: 320
+        }
+      )
+
+    assert {:ok, %Evidence{valid: true, status: :valid, error: nil} = evidence} =
+             Quicprobe.collect(receipt, path: path, timeout_ms: 10, poll_ms: 1)
+
+    assert evidence.observed.datagrams_received == 5
+    assert evidence.observed.datagrams_echo_accepted == 0
+    assert evidence.metadata.raw["receiver_evidence_complete"] == false
+  end
+
   test "quicprobe adapter reports the last observed run sequence" do
     path = temp_jsonl_path()
     on_exit(fn -> File.rm(path) end)
@@ -259,6 +334,66 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
 
     assert evidence.metadata.url == url
     assert evidence.metadata.raw["run_sequence"] == 2
+  end
+
+  test "quicprobe adapter acquires and releases an experiment lease" do
+    url =
+      start_json_http_server(fn
+        "POST /experiment/lease/acquire" <> _rest ->
+          %{
+            schema_version: "quicprobe-evidence-api-v1",
+            record_type: "experiment_lease",
+            status: "acquired",
+            lease: %{
+              token: "lease-1",
+              owner: "suite-1",
+              acquired_at: "2026-06-18T17:00:00Z",
+              expires_at: "2026-06-18T17:30:00Z",
+              ttl_ms: 1_800_000
+            }
+          }
+
+        "POST /experiment/lease/release" <> _rest ->
+          %{
+            schema_version: "quicprobe-evidence-api-v1",
+            record_type: "experiment_lease",
+            status: "released"
+          }
+      end)
+
+    assert {:ok, %{"token" => "lease-1", "owner" => "suite-1"} = lease} =
+             Quicprobe.acquire_experiment_lease(
+               url: url,
+               owner: "suite-1",
+               ttl_ms: 1_800_000,
+               timeout_ms: 50,
+               metadata: %{profile: "draft14_object_stream"}
+             )
+
+    assert :ok = Quicprobe.release_experiment_lease([url: url, timeout_ms: 50], lease)
+  end
+
+  test "quicprobe adapter reports a busy experiment lease" do
+    url =
+      start_json_http_server(fn "POST /experiment/lease/acquire" <> _rest ->
+        {409,
+         %{
+           schema_version: "quicprobe-evidence-api-v1",
+           record_type: "experiment_lease",
+           status: "busy",
+           error: "quicprobe target already has an active experiment lease",
+           lease: %{token: "lease-1", owner: "suite-1"}
+         }}
+      end)
+
+    assert {:error,
+            {:quicprobe_experiment_lease_busy,
+             %{"status" => "busy", "lease" => %{"owner" => "suite-1"}}}} =
+             Quicprobe.acquire_experiment_lease(
+               url: url,
+               owner: "suite-2",
+               timeout_ms: 50
+             )
   end
 
   test "quicprobe adapter returns timeout evidence when no matching record appears" do
@@ -354,12 +489,18 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
     case :gen_tcp.recv(client, 0, 1_000) do
       {:ok, request} ->
         request_line = request |> String.split("\r\n", parts: 2) |> hd()
-        body = request_line |> handler.() |> JSON.encode!()
-        status = "200 OK"
+
+        {status, body} =
+          case handler.(request_line) do
+            {status, body} -> {status, body}
+            body -> {200, body}
+          end
+
+        body = JSON.encode!(body)
 
         response = [
           "HTTP/1.1 ",
-          status,
+          http_status(status),
           "\r\ncontent-type: application/json\r\ncontent-length: ",
           Integer.to_string(byte_size(body)),
           "\r\nconnection: close\r\n\r\n",
@@ -373,4 +514,8 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
         :gen_tcp.close(client)
     end
   end
+
+  defp http_status(200), do: "200 OK"
+  defp http_status(409), do: "409 Conflict"
+  defp http_status(status), do: "#{status} Test"
 end
