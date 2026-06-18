@@ -35,8 +35,8 @@ The evidence collector uses target adapters:
 
 - `MOQXProbe.Benchee.Adapters.FakeTransport` reads explicit fake transport
   state/counters after timing.
-- `MOQXProbe.Benchee.Adapters.Quicprobe` reads `server_run_evidence` JSONL
-  from `quicprobe` after timing.
+- `MOQXProbe.Benchee.Adapters.Quicprobe` reads the always-on quicprobe
+  evidence HTTP API after timing, with local JSONL as a fallback artifact path.
 
 ## Install
 
@@ -104,14 +104,16 @@ mix run bench/stream_clients.exs -- \
   --quic-port <quic-port> \
   --ca <ca.pem> \
   --servername <cert-name> \
-  --evidence-output results/quicprobe-evidence.jsonl \
-  --quicprobe-evidence-path <quicprobe-server-jsonl>
+  --evidence-output results/quicprobe-evidence.jsonl
 ```
 
 Evidence mode requires `--benchee-parallel 1` so each invocation can be matched
 to one receiver evidence record. For `quicprobe`, the post-run hook waits an
 unmeasured close grace before closing the connection; override it with
 `--evidence-close-grace-ms` when a path needs a longer drain window.
+The quicprobe evidence API defaults to `http://<host>:55434`; override it with
+`--quicprobe-evidence-url` or use `--quicprobe-evidence-path` for a local JSONL
+fallback.
 
 The script exposes setup through flags, not environment variables or
 `Application` configuration. Use `--help` for the full option list.
@@ -148,6 +150,12 @@ connection to stdout and to `--stats-output` when configured. The record is
 receiver-side evidence, not a client benchmark result: bidirectional streams
 are echoed, unidirectional streams are drained and counted, and DATAGRAMs are
 echoed and counted.
+The server also always exposes a read-only evidence HTTP API on
+`--evidence-http-addr`, defaulting to `:55434`:
+
+- `GET /healthz`
+- `GET /evidence/latest`
+- `GET /evidence/runs?after_sequence=N`
 
 For remote VMs, keep `iperf3` and `quicprobe` running under systemd and deploy
 new `quicprobe` artifacts with the root `just` recipes. VM setup and service

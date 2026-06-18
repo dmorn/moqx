@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,21 +30,25 @@ const quicGoModulePath = "github.com/quic-go/quic-go"
 const streamPressureWorkload = "stream_pressure"
 const datagramPressureWorkload = "datagram_pressure"
 const mixedMOQTShapedWorkload = "mixed_moqt_shaped"
+const evidenceAPISchema = "quicprobe-evidence-api-v1"
 const serverRunEvidenceSchema = "quicprobe-server-run-evidence-v1"
 const serverRunEvidenceRecordType = "server_run_evidence"
 const datagramHeaderSize = 16
 const datagramEchoQueueLen = 131_072
+const serverRunEvidenceBufferLimit = 4096
 const pacedSpinThreshold = 200 * time.Microsecond
 const udpNetworkAuto = "auto"
+const defaultEvidenceHTTPAddr = ":55434"
 
 type serverConfig struct {
-	addr        string
-	certFile    string
-	keyFile     string
-	alpn        string
-	statsOutput string
-	udpNetwork  string
-	initialSize int
+	addr             string
+	certFile         string
+	keyFile          string
+	alpn             string
+	statsOutput      string
+	evidenceHTTPAddr string
+	udpNetwork       string
+	initialSize      int
 }
 
 type clientConfig struct {
@@ -166,11 +172,27 @@ type serverRunEvidence struct {
 	ReceiverEvidenceFailureCause string  `json:"receiver_evidence_failure_cause,omitempty"`
 }
 
+type evidenceLatestResponse struct {
+	SchemaVersion     string `json:"schema_version"`
+	RecordType        string `json:"record_type"`
+	LatestRunSequence uint64 `json:"latest_run_sequence"`
+}
+
+type evidenceRunsResponse struct {
+	SchemaVersion     string              `json:"schema_version"`
+	RecordType        string              `json:"record_type"`
+	LatestRunSequence uint64              `json:"latest_run_sequence"`
+	Runs              []serverRunEvidence `json:"runs"`
+}
+
 type serverRunEvidenceRecorder struct {
-	mu          sync.Mutex
-	sequence    atomic.Uint64
-	stdout      io.Writer
-	statsOutput string
+	mu              sync.Mutex
+	sequence        atomic.Uint64
+	stdout          io.Writer
+	statsOutput     string
+	evidence        []serverRunEvidence
+	evidenceCap     int
+	evidenceDropped uint64
 }
 
 type datagramEchoStats struct {
@@ -312,6 +334,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&cfg.keyFile, "key", "", "TLS private key PEM file")
 	flags.StringVar(&cfg.alpn, "alpn", envOrDefault("QUICPROBE_ALPN", defaultALPN), "QUIC ALPN")
 	flags.StringVar(&cfg.statsOutput, "stats-output", "", "optional JSONL path for per-connection server ingress summaries")
+	flags.StringVar(&cfg.evidenceHTTPAddr, "evidence-http-addr", defaultEvidenceHTTPAddr, "TCP address for the always-on read-only evidence HTTP API")
 	flags.StringVar(&cfg.udpNetwork, "udp-network", udpNetworkAuto, "UDP socket network: auto, udp, udp4, or udp6")
 	flags.IntVar(&cfg.initialSize, "initial-packet-size", 0, "QUIC Initial packet size in bytes; 0 uses the quic-go default")
 
@@ -324,6 +347,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	}
 	if cfg.alpn == "" {
 		return serverConfig{}, errors.New("server requires --alpn")
+	}
+	if cfg.evidenceHTTPAddr == "" {
+		return serverConfig{}, errors.New("server requires --evidence-http-addr")
 	}
 	if err := validateUDPNetwork(cfg.udpNetwork); err != nil {
 		return serverConfig{}, err
@@ -440,6 +466,17 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string, evide
 		return fmt.Errorf("load server certificate: %w", err)
 	}
 
+	recorder := newServerRunEvidenceRecorder(evidenceOut, cfg.statsOutput)
+	evidenceHTTPAddr := cfg.evidenceHTTPAddr
+	if evidenceHTTPAddr == "" {
+		evidenceHTTPAddr = "127.0.0.1:0"
+	}
+	evidenceHTTPServer, _, err := startEvidenceHTTPServer(ctx, evidenceHTTPAddr, recorder)
+	if err != nil {
+		return err
+	}
+	defer evidenceHTTPServer.Close()
+
 	udpNetwork, udpAddr, err := resolveListenUDPAddr(cfg.addr, cfg.udpNetwork)
 	if err != nil {
 		return err
@@ -463,8 +500,6 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string, evide
 	if ready != nil {
 		ready <- listener.Addr().String()
 	}
-
-	recorder := newServerRunEvidenceRecorder(evidenceOut, cfg.statsOutput)
 
 	for {
 		conn, err := listener.Accept(ctx)
@@ -779,14 +814,38 @@ func sendDatagramEchoes(conn datagramConn, echoQueue <-chan []byte) (stats datag
 	return stats
 }
 
-func newServerRunEvidenceRecorder(stdout io.Writer, statsOutput string) *serverRunEvidenceRecorder {
-	if stdout == nil && statsOutput == "" {
-		return nil
+func startEvidenceHTTPServer(ctx context.Context, addr string, handler http.Handler) (*http.Server, net.Addr, error) {
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("listen evidence http: %w", err)
 	}
 
+	server := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 2 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+
+	go func() {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			fmt.Fprintf(os.Stderr, "evidence http server: %v\n", err)
+		}
+	}()
+
+	return server, listener.Addr(), nil
+}
+
+func newServerRunEvidenceRecorder(stdout io.Writer, statsOutput string) *serverRunEvidenceRecorder {
 	return &serverRunEvidenceRecorder{
 		stdout:      stdout,
 		statsOutput: statsOutput,
+		evidenceCap: serverRunEvidenceBufferLimit,
 	}
 }
 
@@ -795,6 +854,8 @@ func (r *serverRunEvidenceRecorder) Record(stats serverConnectionStatsSnapshot) 
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	r.recordEvidenceLocked(evidence)
 
 	if r.stdout != nil {
 		if err := json.NewEncoder(r.stdout).Encode(evidence); err != nil {
@@ -809,6 +870,152 @@ func (r *serverRunEvidenceRecorder) Record(stats serverConnectionStatsSnapshot) 
 	}
 
 	return nil
+}
+
+func (r *serverRunEvidenceRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	switch req.URL.Path {
+	case "/healthz":
+		r.handleEvidenceHealth(w, req)
+	case "/evidence/latest":
+		r.handleEvidenceLatest(w, req)
+	case "/evidence/runs":
+		r.handleEvidenceRuns(w, req)
+	default:
+		http.NotFound(w, req)
+	}
+}
+
+func (r *serverRunEvidenceRecorder) handleEvidenceHealth(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	writeJSON(w, map[string]any{
+		"status":              "ok",
+		"latest_run_sequence": r.latestRunSequence(),
+	})
+}
+
+func (r *serverRunEvidenceRecorder) handleEvidenceLatest(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	writeJSON(w, evidenceLatestResponse{
+		SchemaVersion:     evidenceAPISchema,
+		RecordType:        "evidence_latest",
+		LatestRunSequence: r.latestRunSequence(),
+	})
+}
+
+func (r *serverRunEvidenceRecorder) handleEvidenceRuns(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		writeMethodNotAllowed(w)
+		return
+	}
+
+	afterSequence, err := nonNegativeUintQuery(req, "after_sequence", 0)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+
+	limit, err := nonNegativeIntQuery(req, "limit", 0)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+
+	writeJSON(w, evidenceRunsResponse{
+		SchemaVersion:     evidenceAPISchema,
+		RecordType:        "evidence_runs",
+		LatestRunSequence: r.latestRunSequence(),
+		Runs:              r.evidenceAfter(afterSequence, limit),
+	})
+}
+
+func (r *serverRunEvidenceRecorder) latestRunSequence() uint64 {
+	return r.sequence.Load()
+}
+
+func (r *serverRunEvidenceRecorder) evidenceAfter(afterSequence uint64, limit int) []serverRunEvidence {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	runs := make([]serverRunEvidence, 0, len(r.evidence))
+	for _, evidence := range r.evidence {
+		if evidence.RunSequence <= afterSequence {
+			continue
+		}
+
+		runs = append(runs, evidence)
+		if limit > 0 && len(runs) >= limit {
+			break
+		}
+	}
+
+	return runs
+}
+
+func (r *serverRunEvidenceRecorder) recordEvidenceLocked(evidence serverRunEvidence) {
+	if r.evidenceCap <= 0 {
+		return
+	}
+
+	if len(r.evidence) >= r.evidenceCap {
+		copy(r.evidence, r.evidence[1:])
+		r.evidence[len(r.evidence)-1] = evidence
+		r.evidenceDropped++
+		return
+	}
+
+	r.evidence = append(r.evidence, evidence)
+}
+
+func nonNegativeUintQuery(req *http.Request, key string, defaultValue uint64) (uint64, error) {
+	raw := req.URL.Query().Get(key)
+	if raw == "" {
+		return defaultValue, nil
+	}
+
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a non-negative integer", key)
+	}
+
+	return value, nil
+}
+
+func nonNegativeIntQuery(req *http.Request, key string, defaultValue int) (int, error) {
+	raw := req.URL.Query().Get(key)
+	if raw == "" {
+		return defaultValue, nil
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return 0, fmt.Errorf("%s must be a non-negative integer", key)
+	}
+
+	return value, nil
+}
+
+func writeJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		fmt.Fprintf(os.Stderr, "write evidence http response: %v\n", err)
+	}
+}
+
+func writeMethodNotAllowed(w http.ResponseWriter) {
+	w.Header().Set("Allow", http.MethodGet)
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+func writeBadRequest(w http.ResponseWriter, err error) {
+	http.Error(w, err.Error(), http.StatusBadRequest)
 }
 
 func serverRunEvidenceFromSnapshot(sequence uint64, stats serverConnectionStatsSnapshot) serverRunEvidence {

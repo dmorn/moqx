@@ -112,9 +112,9 @@ Implemented the reusable evidence layer under `bench/moqxprobe`:
 - `MOQXProbe.Benchee.EvidenceAdapter` defines the adapter contract;
 - `MOQXProbe.Benchee.Adapters.FakeTransport` reads explicit fake transport
   state/counters after the timed invocation;
-- `MOQXProbe.Benchee.Adapters.Quicprobe` polls a `server_run_evidence` JSONL
-  file after the timed invocation and turns matching receiver evidence into
-  collector evidence.
+- `MOQXProbe.Benchee.Adapters.Quicprobe` polls the quicprobe evidence HTTP API
+  or an explicit local `server_run_evidence` JSONL file after the timed
+  invocation and turns matching receiver evidence into collector evidence.
 
 Follow-up integration in `bench/moqxprobe/bench/stream_clients.exs` wires the
 collector into the first object-stream benchmark path:
@@ -127,8 +127,8 @@ collector into the first object-stream benchmark path:
   transport counter store and read by
   `MOQXProbe.Benchee.Adapters.FakeTransport`;
 - quicprobe-target evidence records the latest server `run_sequence` before
-  the timed invocation, then matches the first `server_run_evidence` record
-  after that cursor;
+  the timed invocation through the HTTP API by default, then matches the first
+  `server_run_evidence` record after that cursor;
 - for quicprobe, connection finalization happens in the unmeasured post hook
   with a target-aware close grace (`--evidence-close-grace-ms`, default 25 ms)
   before polling receiver evidence.
@@ -149,3 +149,5 @@ Validation:
 - post-`JSON` wrapper smoke, fake target `stream_owner`: 2795/2795 valid
   evidence records, decoded sidecar values round-tripped optional fields as
   Elixir `nil` and contained no `"nil"` JSON strings.
+- post-HTTP API smoke, local quicprobe target `stream_owner`: 1/1 valid
+  evidence records with sidecar metadata pointing at the evidence API URL.

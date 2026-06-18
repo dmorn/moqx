@@ -14,7 +14,7 @@ defmodule MOQXProbe.MixProject do
 
   def application do
     [
-      extra_applications: [:logger, :telemetry]
+      extra_applications: [:inets, :logger, :public_key, :ssl, :telemetry]
     ]
   end
 

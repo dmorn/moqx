@@ -63,6 +63,8 @@ defmodule MOQXProbe.Bench.StreamClients do
     evidence_timeout_ms: :integer,
     evidence_poll_ms: :integer,
     evidence_close_grace_ms: :integer,
+    quicprobe_evidence_url: :string,
+    quicprobe_evidence_port: :integer,
     quicprobe_evidence_path: :string,
     save: :string
   ]
@@ -507,14 +509,11 @@ defmodule MOQXProbe.Bench.StreamClients do
   defp put_evidence_options(%{base: base} = options, opts) do
     output = Keyword.get(opts, :evidence_output)
     enabled? = is_binary(output)
+    quicprobe_evidence_url = quicprobe_evidence_url(base, opts, enabled?)
     quicprobe_evidence_path = Keyword.get(opts, :quicprobe_evidence_path)
 
     if enabled? and options.benchee.parallel != 1 do
       Mix.raise("--evidence-output requires --benchee-parallel 1")
-    end
-
-    if enabled? and base.target == :quicprobe and is_nil(quicprobe_evidence_path) do
-      Mix.raise("--quicprobe-evidence-path is required when evidence is enabled for quicprobe")
     end
 
     Map.put(options, :evidence, %{
@@ -528,6 +527,7 @@ defmodule MOQXProbe.Bench.StreamClients do
           :evidence_close_grace_ms,
           default_evidence_close_grace_ms(base.target)
         ),
+      quicprobe_evidence_url: quicprobe_evidence_url,
       quicprobe_evidence_path: quicprobe_evidence_path,
       run_id: evidence_run_id(),
       collector: nil,
@@ -558,13 +558,15 @@ defmodule MOQXProbe.Bench.StreamClients do
   defp evidence_before_each(%{evidence: evidence, base: %{target: :quicprobe}}) do
     fn input ->
       receipt_id = receipt_id(input)
-      after_run_sequence = quicprobe_evidence_cursor(evidence.quicprobe_evidence_path)
+      after_run_sequence = quicprobe_evidence_cursor(evidence)
 
       input
       |> Map.put(:evidence_enabled?, true)
       |> Map.put(:receipt_id, receipt_id)
       |> Map.put(:quicprobe_after_run_sequence, after_run_sequence)
       |> Map.put(:evidence_close_grace_ms, evidence.close_grace_ms)
+      |> Map.put(:quicprobe_evidence_url, evidence.quicprobe_evidence_url)
+      |> Map.put(:quicprobe_evidence_path, evidence.quicprobe_evidence_path)
     end
   end
 
@@ -575,11 +577,7 @@ defmodule MOQXProbe.Bench.StreamClients do
   end
 
   defp evidence_after_each(%{evidence: evidence, base: %{target: :quicprobe}}) do
-    evidence_after_each_fun(evidence, Adapters.Quicprobe,
-      path: evidence.quicprobe_evidence_path,
-      timeout_ms: evidence.timeout_ms,
-      poll_ms: evidence.poll_ms
-    )
+    evidence_after_each_fun(evidence, Adapters.Quicprobe, quicprobe_evidence_opts(evidence))
   end
 
   defp evidence_after_each_fun(evidence, adapter, adapter_opts) do
@@ -598,10 +596,52 @@ defmodule MOQXProbe.Bench.StreamClients do
     end
   end
 
-  defp quicprobe_evidence_cursor(path) do
-    case Adapters.Quicprobe.last_run_sequence(path) do
+  defp quicprobe_evidence_cursor(evidence) do
+    case Adapters.Quicprobe.last_run_sequence(quicprobe_evidence_opts(evidence)) do
       {:ok, sequence} -> sequence
       {:error, _reason} -> 0
+    end
+  end
+
+  defp quicprobe_evidence_opts(evidence) do
+    [
+      url: evidence.quicprobe_evidence_url,
+      path: evidence.quicprobe_evidence_path,
+      timeout_ms: evidence.timeout_ms,
+      poll_ms: evidence.poll_ms
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp quicprobe_evidence_url(%{target: :quicprobe, host: host}, opts, true) do
+    cond do
+      Keyword.has_key?(opts, :quicprobe_evidence_url) ->
+        Keyword.fetch!(opts, :quicprobe_evidence_url)
+
+      Keyword.has_key?(opts, :quicprobe_evidence_path) ->
+        nil
+
+      true ->
+        default_quicprobe_evidence_url(
+          host,
+          positive_integer(opts, :quicprobe_evidence_port, 55_434)
+        )
+    end
+  end
+
+  defp quicprobe_evidence_url(_base, opts, _enabled?) do
+    Keyword.get(opts, :quicprobe_evidence_url)
+  end
+
+  defp default_quicprobe_evidence_url(host, port) do
+    "http://#{url_host(host)}:#{port}"
+  end
+
+  defp url_host(host) do
+    if String.contains?(host, ":") and not String.starts_with?(host, "[") do
+      "[#{host}]"
+    else
+      host
     end
   end
 
@@ -988,6 +1028,8 @@ defmodule MOQXProbe.Bench.StreamClients do
       payload_size: input.payload_size,
       stream_send_window: input.stream_send_window,
       evidence_close_grace_ms: Map.get(input, :evidence_close_grace_ms),
+      quicprobe_evidence_url: Map.get(input, :quicprobe_evidence_url),
+      quicprobe_evidence_path: Map.get(input, :quicprobe_evidence_path),
       local_sender: result,
       quicprobe_after_run_sequence: Map.get(input, :quicprobe_after_run_sequence)
     }
@@ -1066,7 +1108,9 @@ defmodule MOQXProbe.Bench.StreamClients do
       --evidence-timeout-ms N       evidence collection timeout (default: 5000)
       --evidence-poll-ms N          evidence polling interval (default: 50)
       --evidence-close-grace-ms N   post-send grace before close; quicprobe default: 25
-      --quicprobe-evidence-path P   quicprobe server JSONL path for evidence
+      --quicprobe-evidence-url URL  quicprobe evidence API URL (default: http://<host>:55434)
+      --quicprobe-evidence-port N   default evidence API port (default: 55434)
+      --quicprobe-evidence-path P   local quicprobe server JSONL path fallback
 
     Example:
       mix run bench/stream_clients.exs -- --stream-count 32 --payload-count 1000 --stream-send-window 16 --benchee-time 3

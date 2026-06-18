@@ -211,6 +211,56 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
     assert {:ok, 3} = Quicprobe.last_run_sequence(path)
   end
 
+  test "quicprobe adapter reports the last observed run sequence from HTTP API" do
+    url =
+      start_json_http_server(fn "GET /evidence/latest" <> _rest ->
+        %{schema_version: "quicprobe-evidence-api-v1", latest_run_sequence: 7}
+      end)
+
+    assert {:ok, 7} = Quicprobe.last_run_sequence(url: url, timeout_ms: 50)
+  end
+
+  test "quicprobe adapter reads matching server_run_evidence from HTTP API" do
+    url =
+      start_json_http_server(fn "GET /evidence/runs?after_sequence=1" <> _rest ->
+        %{
+          schema_version: "quicprobe-evidence-api-v1",
+          record_type: "evidence_runs",
+          latest_run_sequence: 3,
+          runs: [
+            %{
+              record_type: "server_run_evidence",
+              run_sequence: 2,
+              stream_bytes_received: 384,
+              streams_completed: 1,
+              receiver_evidence_complete: true
+            },
+            %{
+              record_type: "server_run_evidence",
+              run_sequence: 3,
+              stream_bytes_received: 999,
+              streams_completed: 1,
+              receiver_evidence_complete: true
+            }
+          ]
+        }
+      end)
+
+    receipt =
+      RunReceipt.new!(
+        id: :http_after_cursor,
+        target: :quicprobe,
+        match: %{after_run_sequence: 1},
+        expected: %{stream_bytes_received: 384, streams_completed: 1}
+      )
+
+    assert {:ok, %Evidence{valid: true} = evidence} =
+             Quicprobe.collect(receipt, url: url, timeout_ms: 50, poll_ms: 1)
+
+    assert evidence.metadata.url == url
+    assert evidence.metadata.raw["run_sequence"] == 2
+  end
+
   test "quicprobe adapter returns timeout evidence when no matching record appears" do
     path = temp_jsonl_path()
     on_exit(fn -> File.rm(path) end)
@@ -246,7 +296,7 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
              Quicprobe.collect(receipt, path: path, timeout_ms: 0, poll_ms: 1)
   end
 
-  test "quicprobe adapter requires an explicit evidence path" do
+  test "quicprobe adapter requires an explicit evidence source" do
     receipt =
       RunReceipt.new!(
         id: :missing_path,
@@ -254,7 +304,7 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
         expected: %{stream_bytes_received: 384}
       )
 
-    assert {:error, :missing_quicprobe_evidence_path} = Quicprobe.collect(receipt, [])
+    assert {:error, :missing_quicprobe_evidence_source} = Quicprobe.collect(receipt, [])
   end
 
   defp temp_jsonl_path do
@@ -267,4 +317,60 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
   end
 
   defp json_encode!(record), do: JSON.encode!(record)
+
+  defp start_json_http_server(handler) do
+    {:ok, listen_socket} =
+      :gen_tcp.listen(0, [
+        :binary,
+        packet: :raw,
+        active: false,
+        reuseaddr: true,
+        ip: {127, 0, 0, 1}
+      ])
+
+    {:ok, {_ip, port}} = :inet.sockname(listen_socket)
+    pid = spawn(fn -> accept_json_http(listen_socket, handler) end)
+
+    on_exit(fn ->
+      :gen_tcp.close(listen_socket)
+      Process.exit(pid, :shutdown)
+    end)
+
+    "http://127.0.0.1:#{port}"
+  end
+
+  defp accept_json_http(listen_socket, handler) do
+    case :gen_tcp.accept(listen_socket) do
+      {:ok, client} ->
+        serve_json_http_client(client, handler)
+        accept_json_http(listen_socket, handler)
+
+      {:error, :closed} ->
+        :ok
+    end
+  end
+
+  defp serve_json_http_client(client, handler) do
+    case :gen_tcp.recv(client, 0, 1_000) do
+      {:ok, request} ->
+        request_line = request |> String.split("\r\n", parts: 2) |> hd()
+        body = request_line |> handler.() |> JSON.encode!()
+        status = "200 OK"
+
+        response = [
+          "HTTP/1.1 ",
+          status,
+          "\r\ncontent-type: application/json\r\ncontent-length: ",
+          Integer.to_string(byte_size(body)),
+          "\r\nconnection: close\r\n\r\n",
+          body
+        ]
+
+        :gen_tcp.send(client, response)
+        :gen_tcp.close(client)
+
+      {:error, _reason} ->
+        :gen_tcp.close(client)
+    end
+  end
 end

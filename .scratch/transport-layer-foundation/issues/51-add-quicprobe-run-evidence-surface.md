@@ -52,12 +52,13 @@ Initial shape:
 
 Automation surface:
 
-- stdout JSONL is enough for local operation and systemd/journal inspection;
-- add a tiny read-only HTTP API only if it materially simplifies `moqxprobe`
-  automation against persistent remote targets;
-- the HTTP API, if added, should expose the same records from an in-memory ring
-  buffer using simple endpoints such as health, latest records, and records
-  since sequence number;
+- stdout JSONL remains useful for local operation and systemd/journal
+  inspection;
+- expose the same records through an always-on tiny read-only HTTP API because
+  it materially simplifies `moqxprobe` automation against both local and
+  persistent remote targets;
+- the HTTP API should expose records from an in-memory ring buffer using simple
+  endpoints for health, latest sequence, and records since sequence number;
 - no remote run orchestration, authentication, or control plane should be added
   here.
 
@@ -80,13 +81,14 @@ Run identity:
       control-plus-object profiles.
 - [x] Local operation can inspect evidence through stdout JSONL or an explicit
       stats output file.
-- [x] HTTP API intentionally not added in this slice; stdout JSONL, journal, and
-      `--stats-output` are enough for the current loop.
+- [x] HTTP API is always enabled for `quicprobe server`; stdout JSONL, journal,
+      and `--stats-output` remain optional/debug evidence surfaces.
 - [x] Evidence records are emitted in a form that `moqxprobe` target adapters
       can consume after timed workloads without including remote reads in
       Benchee hot-path timing. The actual adapter implementation remains in
       `.scratch/transport-layer-foundation/issues/50-build-delivery-aware-moqxprobe-caller-clients.md`.
-- [x] `go test ./...` covers the evidence record formatting. No API was added.
+- [x] `go test ./...` covers the evidence record formatting and HTTP evidence
+      API behavior.
 
 ## Notes
 
@@ -131,3 +133,30 @@ Remote verification on `moqx-quicprobe-fra.exe.xyz` / `100.124.193.59`:
 - last DATAGRAM record showed `datagrams_received=5`,
   `datagrams_echo_accepted=5`, `datagram_bytes_received=320`, and
   `datagram_bytes_echo_accepted=320`.
+
+### 2026-06-18 always-on evidence HTTP API
+
+Added a tiny read-only evidence HTTP API to `quicprobe server`. The API is
+always started with the server; `--evidence-http-addr` only controls the bind
+address and defaults to `:55434`.
+
+Endpoints:
+
+- `GET /healthz`
+- `GET /evidence/latest`
+- `GET /evidence/runs?after_sequence=N`
+
+The API serves the same `server_run_evidence` records from a bounded in-memory
+ring buffer while preserving stdout and `--stats-output` JSONL behavior.
+`moqxprobe` now prefers this HTTP API for `target=quicprobe` evidence
+collection and falls back to a local JSONL path when explicitly requested.
+
+Validation:
+
+- `cd bench/quicprobe && go test ./...`: passed;
+- local API health returned `latest_run_sequence=0` before any client run;
+- local moqxprobe stream-owner smoke against quicprobe using only HTTP
+  evidence produced 1/1 valid delivery evidence records;
+- API `GET /evidence/latest` reported sequence 1 after the smoke;
+- API `GET /evidence/runs?after_sequence=0` returned the matching
+  `server_run_evidence` record.

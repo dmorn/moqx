@@ -12,6 +12,8 @@ import (
 	"errors"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -562,6 +564,79 @@ func TestServerRunEvidenceRecorderWritesStdoutAndStatsOutput(t *testing.T) {
 	}
 }
 
+func TestServerRunEvidenceHTTPAPI(t *testing.T) {
+	t.Parallel()
+
+	recorder := newServerRunEvidenceRecorder(nil, "")
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+
+	assertEvidenceLatestSequence(t, server.URL, 0)
+
+	snapshot := serverConnectionStatsSnapshot{
+		startedAt:              time.Unix(1_700_000_000, 0),
+		finishedAt:             time.Unix(1_700_000_001, 0),
+		localAddr:              "127.0.0.1:4433",
+		remoteAddr:             "127.0.0.1:55555",
+		alpn:                   "moqx-test",
+		uniStreamsAccepted:     1,
+		streamsCompleted:       1,
+		streamBytesReceived:    512,
+		firstStreamByteLatency: 3 * time.Millisecond,
+	}
+
+	if err := recorder.Record(snapshot); err != nil {
+		t.Fatalf("Record() error = %v", err)
+	}
+
+	snapshot.streamBytesReceived = 1024
+	if err := recorder.Record(snapshot); err != nil {
+		t.Fatalf("Record() second error = %v", err)
+	}
+
+	assertEvidenceLatestSequence(t, server.URL, 2)
+
+	var runs evidenceRunsResponse
+	getJSON(t, server.URL+"/evidence/runs?after_sequence=1&limit=1", &runs)
+
+	if runs.SchemaVersion != evidenceAPISchema {
+		t.Fatalf("schema_version = %q, want %s", runs.SchemaVersion, evidenceAPISchema)
+	}
+	if runs.RecordType != "evidence_runs" {
+		t.Fatalf("record_type = %q, want evidence_runs", runs.RecordType)
+	}
+	if runs.LatestRunSequence != 2 {
+		t.Fatalf("latest_run_sequence = %d, want 2", runs.LatestRunSequence)
+	}
+	if len(runs.Runs) != 1 {
+		t.Fatalf("runs length = %d, want 1", len(runs.Runs))
+	}
+	if runs.Runs[0].RunSequence != 2 {
+		t.Fatalf("run_sequence = %d, want 2", runs.Runs[0].RunSequence)
+	}
+	if runs.Runs[0].StreamBytesReceived != 1024 {
+		t.Fatalf("stream_bytes_received = %d, want 1024", runs.Runs[0].StreamBytesReceived)
+	}
+}
+
+func TestServerRunEvidenceHTTPAPIRejectsInvalidQuery(t *testing.T) {
+	t.Parallel()
+
+	recorder := newServerRunEvidenceRecorder(nil, "")
+	server := httptest.NewServer(recorder)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/evidence/runs?after_sequence=not-a-number")
+	if err != nil {
+		t.Fatalf("GET evidence runs error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
 func TestServerRunEvidenceIgnoresNormalRemoteApplicationClose(t *testing.T) {
 	t.Parallel()
 
@@ -877,6 +952,41 @@ func decodeServerRunEvidence(t *testing.T, raw string) serverRunEvidence {
 	}
 
 	return evidence
+}
+
+func assertEvidenceLatestSequence(t *testing.T, baseURL string, want uint64) {
+	t.Helper()
+
+	var latest evidenceLatestResponse
+	getJSON(t, baseURL+"/evidence/latest", &latest)
+
+	if latest.SchemaVersion != evidenceAPISchema {
+		t.Fatalf("schema_version = %q, want %s", latest.SchemaVersion, evidenceAPISchema)
+	}
+	if latest.RecordType != "evidence_latest" {
+		t.Fatalf("record_type = %q, want evidence_latest", latest.RecordType)
+	}
+	if latest.LatestRunSequence != want {
+		t.Fatalf("latest_run_sequence = %d, want %d", latest.LatestRunSequence, want)
+	}
+}
+
+func getJSON(t *testing.T, url string, target any) {
+	t.Helper()
+
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s error = %v", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s status = %d, want %d", url, resp.StatusCode, http.StatusOK)
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		t.Fatalf("GET %s JSON decode error = %v", url, err)
+	}
 }
 
 func firstNonEmptyLine(raw string) string {

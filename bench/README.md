@@ -29,6 +29,9 @@ The current performance loop is intentionally small:
 written to server stdout and, when configured, to `--stats-output` as JSONL.
 Those records are the receiver-side truth for stream bytes, stream echo bytes,
 DATAGRAM receive/echo counts, and error counters.
+The same records are also available through the server's always-on read-only
+evidence HTTP API, defaulting to `:55434`, so local and remote `moqxprobe`
+runs can scrape evidence through the same adapter.
 
 Historical Terraform, `probed`, release-deploy, ledger, and
 `transport-bench-v1` JSONL tooling has been removed from the active benchmark

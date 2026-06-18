@@ -23,21 +23,21 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
 
   @impl true
   def collect(%RunReceipt{} = receipt, opts) do
-    case Keyword.fetch(opts, :path) do
-      {:ok, path} ->
+    case evidence_source(opts) do
+      {:ok, source} ->
         timeout_ms = Keyword.get(opts, :timeout_ms, 5_000)
         poll_ms = Keyword.get(opts, :poll_ms, 50)
         deadline = System.monotonic_time(:millisecond) + timeout_ms
 
-        poll_for_evidence(receipt, path, deadline, poll_ms, timeout_ms)
+        poll_for_evidence(receipt, source, deadline, poll_ms, timeout_ms)
 
-      :error ->
-        {:error, :missing_quicprobe_evidence_path}
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
   @spec last_run_sequence(Path.t()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def last_run_sequence(path) do
+  def last_run_sequence(path) when is_binary(path) do
     case File.read(path) do
       {:ok, content} ->
         last_run_sequence_from_content(content)
@@ -47,6 +47,22 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  def last_run_sequence(opts) when is_list(opts) do
+    case evidence_source(opts) do
+      {:ok, {:path, path}} -> last_run_sequence(path)
+      {:ok, {:url, url}} -> last_run_sequence_from_url(url, Keyword.get(opts, :timeout_ms, 5_000))
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp evidence_source(opts) do
+    case {Keyword.fetch(opts, :url), Keyword.fetch(opts, :path)} do
+      {{:ok, url}, _path} -> {:ok, {:url, url}}
+      {:error, {:ok, path}} -> {:ok, {:path, path}}
+      {:error, :error} -> {:error, :missing_quicprobe_evidence_source}
     end
   end
 
@@ -63,37 +79,60 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
     |> Enum.max(fn -> 0 end)
   end
 
-  defp poll_for_evidence(receipt, path, deadline, poll_ms, timeout_ms) do
-    case read_matching_evidence(path, receipt) do
-      {:ok, record} ->
-        {:ok, record_to_evidence(receipt, path, record)}
-
-      :not_found ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          {:ok, Evidence.timeout(receipt, :quicprobe, timeout_ms, metadata: %{path: path})}
-        else
-          Process.sleep(poll_ms)
-          poll_for_evidence(receipt, path, deadline, poll_ms, timeout_ms)
-        end
-
-      {:error, reason} ->
-        {:ok, Evidence.error(receipt, :quicprobe, reason, metadata: %{path: path})}
+  defp last_run_sequence_from_url(url, timeout_ms) do
+    case get_api_json(url, "/evidence/latest", timeout_ms) do
+      {:ok, response} -> {:ok, Map.get(response, "latest_run_sequence", 0)}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp read_matching_evidence(path, receipt) do
+  defp poll_for_evidence(receipt, source, deadline, poll_ms, timeout_ms) do
+    case read_matching_evidence(source, receipt, timeout_ms) do
+      {:ok, record} ->
+        {:ok, record_to_evidence(receipt, source, record)}
+
+      :not_found ->
+        if System.monotonic_time(:millisecond) >= deadline do
+          {:ok,
+           Evidence.timeout(receipt, :quicprobe, timeout_ms, metadata: source_metadata(source))}
+        else
+          Process.sleep(poll_ms)
+          poll_for_evidence(receipt, source, deadline, poll_ms, timeout_ms)
+        end
+
+      {:error, reason} ->
+        {:ok, Evidence.error(receipt, :quicprobe, reason, metadata: source_metadata(source))}
+    end
+  end
+
+  defp read_matching_evidence({:path, path}, receipt, _timeout_ms) do
     with {:ok, content} <- File.read(path),
          {:ok, records} <- decode_jsonl(content) do
-      records
-      |> Enum.filter(&(server_run_evidence?(&1) and matches_receipt?(&1, receipt)))
-      |> select_match(receipt)
-      |> case do
-        nil -> :not_found
-        record -> {:ok, record}
-      end
+      select_matching_evidence(records, receipt)
     else
       {:error, :enoent} -> :not_found
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp read_matching_evidence({:url, url}, receipt, timeout_ms) do
+    path =
+      "/evidence/runs?" <> URI.encode_query(%{"after_sequence" => after_run_sequence(receipt)})
+
+    with {:ok, response} <- get_api_json(url, path, timeout_ms) do
+      response
+      |> Map.get("runs", [])
+      |> select_matching_evidence(receipt)
+    end
+  end
+
+  defp select_matching_evidence(records, receipt) do
+    records
+    |> Enum.filter(&(server_run_evidence?(&1) and matches_receipt?(&1, receipt)))
+    |> select_match(receipt)
+    |> case do
+      nil -> :not_found
+      record -> {:ok, record}
     end
   end
 
@@ -122,16 +161,19 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
   end
 
   defp matches_receipt?(record, %RunReceipt{match: match}) do
-    after_run_sequence =
-      Map.get(match, :after_run_sequence, Map.get(match, "after_run_sequence", 0))
-
     exact_match =
       match
       |> Map.delete(:after_run_sequence)
       |> Map.delete("after_run_sequence")
 
-    Map.get(record, "run_sequence", 0) > after_run_sequence and
+    Map.get(record, "run_sequence", 0) > after_run_sequence(match) and
       Enum.all?(exact_match, fn {key, value} -> Map.get(record, to_string(key)) == value end)
+  end
+
+  defp after_run_sequence(%RunReceipt{match: match}), do: after_run_sequence(match)
+
+  defp after_run_sequence(match) do
+    Map.get(match, :after_run_sequence, Map.get(match, "after_run_sequence", 0))
   end
 
   defp select_match(records, %RunReceipt{match: match}) do
@@ -145,7 +187,7 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
   defp has_after_run_sequence?(match),
     do: Map.has_key?(match, :after_run_sequence) or Map.has_key?(match, "after_run_sequence")
 
-  defp record_to_evidence(receipt, path, record) do
+  defp record_to_evidence(receipt, source, record) do
     complete? = Map.get(record, "receiver_evidence_complete", true)
     error = Map.get(record, "receiver_evidence_failure_cause")
 
@@ -153,11 +195,42 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
       source: :quicprobe,
       complete?: complete?,
       error: error,
-      metadata: %{path: path, raw: record}
+      metadata: Map.put(source_metadata(source), :raw, record)
     )
   end
 
   defp observed_counters(record) do
     Map.new(@counter_fields, fn field -> {String.to_atom(field), Map.get(record, field)} end)
+  end
+
+  defp source_metadata({:path, path}), do: %{path: path}
+  defp source_metadata({:url, url}), do: %{url: url}
+
+  defp get_api_json(base_url, path, timeout_ms) do
+    _ = Application.ensure_all_started(:inets)
+    _ = Application.ensure_all_started(:ssl)
+
+    url = base_url |> String.trim_trailing("/") |> Kernel.<>(path)
+
+    request = {String.to_charlist(url), []}
+    http_options = [{:timeout, timeout_ms}]
+    options = [body_format: :binary]
+
+    case :httpc.request(:get, request, http_options, options) do
+      {:ok, {{_version, 200, _reason}, _headers, body}} ->
+        decode_api_json(body)
+
+      {:ok, {{_version, status, reason}, _headers, body}} ->
+        {:error, {:http_error, status, to_string(reason), body}}
+
+      {:error, reason} ->
+        {:error, {:http_request_failed, reason}}
+    end
+  end
+
+  defp decode_api_json(body) do
+    {:ok, JSON.decode!(body)}
+  rescue
+    reason -> {:error, {:invalid_json, reason}}
   end
 end

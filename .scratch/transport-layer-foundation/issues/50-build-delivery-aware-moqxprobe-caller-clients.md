@@ -152,7 +152,7 @@ starts.
       or another explicit target-side criterion.
 - [ ] DATAGRAM delivery-aware runs use delivered DATAGRAM counts or echo
       counts as the delivery signal, not just local send acceptance.
-- [ ] Target selection remains flag-driven and does not use mutable
+- [x] Target selection remains flag-driven and does not use mutable
       `Application` config.
 - [x] The fake target remains available for process-model calibration without
       being confused with real-network evidence.
@@ -161,7 +161,7 @@ starts.
       and any server stats path used.
 - [ ] Profile names and result fields make clear whether the run is control
       bidi, object uni, object DATAGRAM, or mixed control-plus-object pressure.
-- [ ] A small local or remote smoke proves the first delivery-aware client
+- [x] A small local or remote smoke proves the first delivery-aware client
       rejects or reports missing receiver-side evidence instead of silently
       passing.
 
@@ -230,3 +230,18 @@ client closes immediately after local send completion, quicprobe can accept the
 stream but record zero stream bytes and a receive error. With the unmeasured
 post-send grace, local quicprobe smokes validated both `stream_owner` and
 `context_owner` with 2/2 valid evidence records each.
+
+### 2026-06-18 quicprobe HTTP evidence adapter
+
+`quicprobe` now exposes receiver evidence through an always-on read-only HTTP
+API, and `moqxprobe` can consume it directly. For `target=quicprobe` evidence
+mode, `bench/moqxprobe/bench/stream_clients.exs` now defaults to
+`http://<host>:55434` and keeps `--quicprobe-evidence-url`,
+`--quicprobe-evidence-port`, and `--quicprobe-evidence-path` as explicit
+flags. The local JSONL path remains available only as a fallback; HTTP is the
+normal local/remote scraping path.
+
+Local validation started `quicprobe server` with the evidence API on
+`127.0.0.1:55435`, ran `moqxprobe` without a JSONL evidence path, and produced
+1/1 valid delivery evidence records. The generated sidecar recorded
+`quicprobe_evidence_url=http://127.0.0.1:55435` and no JSONL evidence path.
