@@ -33,6 +33,7 @@ defmodule MOQXProbe.MixProject do
       {:flow, "~> 1.2"},
       {:gen_stage, "~> 1.3"},
       {:telemetry_metrics, "~> 1.1"},
+      {:benchee, "~> 1.5", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
