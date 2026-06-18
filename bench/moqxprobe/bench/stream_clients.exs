@@ -9,11 +9,28 @@ defmodule MOQXProbe.Bench.StreamClients do
   alias MOQX.Transport.Conn.Stream
   alias MOQX.Transport.Conn.Stream.Info
   alias MOQX.Transport.Quicer
+  alias MOQXProbe.Benchee.Adapters
+  alias MOQXProbe.Benchee.EvidenceCollector
+  alias MOQXProbe.Benchee.RunReceipt
   alias MOQXProbe.Traffic.StreamSender
 
   @input_names ["flow-generated", "flow-prebuilt-list"]
   @implementation_names ["context_owner", "stream_owner"]
   @target_names ["fake", "quicprobe"]
+  @zero_evidence %{
+    datagrams_received: 0,
+    datagrams_echo_accepted: 0,
+    datagram_bytes_received: 0,
+    datagram_bytes_echo_accepted: 0,
+    bidi_streams_accepted: 0,
+    uni_streams_accepted: 0,
+    streams_completed: 0,
+    stream_bytes_received: 0,
+    stream_bytes_echo_accepted: 0,
+    stream_receive_error_count: 0,
+    stream_send_error_count: 0,
+    receiver_evidence_complete: true
+  }
   @switches [
     help: :boolean,
     target: :string,
@@ -42,14 +59,108 @@ defmodule MOQXProbe.Bench.StreamClients do
     benchee_memory_time: :float,
     benchee_reduction_time: :float,
     benchee_parallel: :integer,
+    evidence_output: :string,
+    evidence_timeout_ms: :integer,
+    evidence_poll_ms: :integer,
+    evidence_close_grace_ms: :integer,
+    quicprobe_evidence_path: :string,
     save: :string
   ]
   @aliases [h: :help]
+
+  defmodule TimedRun do
+    @moduledoc false
+
+    defstruct [:receipt, :cleanup]
+  end
+
+  defmodule FakeEvidenceState do
+    @moduledoc false
+
+    @counter_fields [
+      :datagrams_received,
+      :datagrams_echo_accepted,
+      :datagram_bytes_received,
+      :datagram_bytes_echo_accepted,
+      :bidi_streams_accepted,
+      :uni_streams_accepted,
+      :streams_completed,
+      :stream_bytes_received,
+      :stream_bytes_echo_accepted,
+      :stream_receive_error_count,
+      :stream_send_error_count
+    ]
+
+    def start do
+      :ets.new(__MODULE__, [
+        :set,
+        :public,
+        {:read_concurrency, true},
+        {:write_concurrency, true}
+      ])
+    end
+
+    def stop(nil), do: :ok
+
+    def stop(table) do
+      if :ets.info(table) != :undefined do
+        :ets.delete(table)
+      end
+
+      :ok
+    end
+
+    def record_stream_open(nil, _receipt_id, _direction), do: :ok
+    def record_stream_open(_table, nil, _direction), do: :ok
+
+    def record_stream_open(table, receipt_id, :bidirectional) do
+      increment(table, receipt_id, :bidi_streams_accepted, 1)
+    end
+
+    def record_stream_open(table, receipt_id, :unidirectional) do
+      increment(table, receipt_id, :uni_streams_accepted, 1)
+    end
+
+    def record_stream_open(_table, _receipt_id, _direction), do: :ok
+
+    def record_stream_send(nil, _receipt_id, _byte_size, _finish?), do: :ok
+    def record_stream_send(_table, nil, _byte_size, _finish?), do: :ok
+
+    def record_stream_send(table, receipt_id, byte_size, finish?) do
+      increment(table, receipt_id, :stream_bytes_received, byte_size)
+
+      if finish? do
+        increment(table, receipt_id, :streams_completed, 1)
+      end
+
+      :ok
+    end
+
+    def snapshot(table, receipt_id) do
+      @counter_fields
+      |> Map.new(fn field -> {field, counter(table, receipt_id, field)} end)
+      |> Map.put(:receiver_evidence_complete, true)
+    end
+
+    defp increment(table, receipt_id, field, delta) do
+      :ets.update_counter(table, {receipt_id, field}, {2, delta}, {{receipt_id, field}, 0})
+      :ok
+    end
+
+    defp counter(table, receipt_id, field) do
+      case :ets.lookup(table, {receipt_id, field}) do
+        [{{^receipt_id, ^field}, value}] -> value
+        [] -> 0
+      end
+    end
+  end
 
   defmodule FakeTransport do
     @moduledoc false
 
     @behaviour Transport
+
+    alias MOQXProbe.Bench.StreamClients.FakeEvidenceState
 
     @impl true
     def listen(_port, _opts), do: {:error, :unsupported}
@@ -67,19 +178,35 @@ defmodule MOQXProbe.Bench.StreamClients do
     def handshake(connection, _timeout), do: {:ok, connection}
 
     @impl true
-    def connect(_host, _port, _opts, _timeout), do: {:ok, {:fake_conn, make_ref()}}
+    def connect(_host, _port, opts, _timeout) do
+      {:ok,
+       {:fake_conn, make_ref(), option(opts, :evidence_table, nil),
+        option(opts, :receipt_id, nil)}}
+    end
 
     @impl true
-    def open_stream(connection, opts) do
+    def open_stream({:fake_conn, conn_ref, evidence_table, receipt_id}, opts) do
       direction = option(opts, :direction, :unidirectional)
-      {:ok, {:fake_stream, elem(connection, 1), make_ref(), direction}}
+      FakeEvidenceState.record_stream_open(evidence_table, receipt_id, direction)
+      {:ok, {:fake_stream, conn_ref, make_ref(), direction, evidence_table, receipt_id}}
     end
 
     @impl true
     def accept_stream(_connection, _opts, _timeout), do: {:error, :unsupported}
 
     @impl true
-    def send_stream(stream, _data, _opts) do
+    def send_stream(
+          {:fake_stream, _conn_ref, _stream_ref, _direction, evidence_table, receipt_id} = stream,
+          data,
+          opts
+        ) do
+      FakeEvidenceState.record_stream_send(
+        evidence_table,
+        receipt_id,
+        :erlang.iolist_size(data),
+        option(opts, :finish, false) == true
+      )
+
       send(self(), {:moqx_transport, {:stream_event, stream, :send_complete, false}})
       :ok
     end
@@ -116,7 +243,11 @@ defmodule MOQXProbe.Bench.StreamClients do
     def normalize_message(_message), do: :unknown
 
     @impl true
-    def stream_info({:fake_stream, _conn_ref, stream_ref, direction}, local_role, initiator) do
+    def stream_info(
+          {:fake_stream, _conn_ref, stream_ref, direction, _evidence_table, _receipt_id},
+          local_role,
+          initiator
+        ) do
       {:ok,
        %Info{
          stream_id: :erlang.phash2(stream_ref),
@@ -137,6 +268,8 @@ defmodule MOQXProbe.Bench.StreamClients do
   end
 
   def run_context_owner(input) do
+    input = Map.put_new(input, :implementation, "context_owner")
+    started_at = receipt_timestamp(input)
     {ctx, streams, connection} = setup_streams(input)
     payload = payload(input)
     count = input.stream_count * input.payload_count
@@ -160,44 +293,74 @@ defmodule MOQXProbe.Bench.StreamClients do
         event_forward_pid: self()
       )
 
-    try do
-      drive_context_owner(sender, ctx, count, input)
-    after
+    cleanup = fn ->
       _snapshot = StreamSender.stop(sender)
+      maybe_evidence_close_grace(input)
       close_connection(ctx, connection)
       flush_mailbox()
     end
+
+    result =
+      try do
+        drive_context_owner(sender, ctx, count, input)
+      rescue
+        exception ->
+          if evidence_enabled?(input), do: cleanup.()
+          reraise exception, __STACKTRACE__
+      after
+        unless evidence_enabled?(input), do: cleanup.()
+      end
+
+    maybe_run_receipt(input, result, started_at, cleanup)
   end
 
   def run_stream_owner(input) do
+    input = Map.put_new(input, :implementation, "stream_owner")
+    started_at = receipt_timestamp(input)
     {ctx, streams, connection} = setup_streams(input)
     payload = payload(input)
     deadline_us = monotonic_us() + input.timeout_ms * 1_000
 
-    try do
-      streams
-      |> Enum.map(fn stream_state ->
-        Task.async(fn ->
-          run_stream_owner_worker(stream_state.stream, payload, input, deadline_us)
-        end)
-      end)
-      |> Task.await_many(input.timeout_ms + 1_000)
-      |> Enum.reduce(%{accepted: 0, completed: 0}, fn result, acc ->
-        %{
-          accepted: acc.accepted + result.accepted,
-          completed: acc.completed + result.completed
-        }
-      end)
-    after
+    cleanup = fn ->
+      maybe_evidence_close_grace(input)
       close_connection(ctx, connection)
       flush_mailbox()
     end
+
+    result =
+      try do
+        streams
+        |> Enum.map(fn stream_state ->
+          Task.async(fn ->
+            run_stream_owner_worker(stream_state.stream, payload, input, deadline_us)
+          end)
+        end)
+        |> Task.await_many(input.timeout_ms + 1_000)
+        |> Enum.reduce(%{accepted: 0, completed: 0}, fn result, acc ->
+          %{
+            accepted: acc.accepted + result.accepted,
+            completed: acc.completed + result.completed
+          }
+        end)
+      rescue
+        exception ->
+          if evidence_enabled?(input), do: cleanup.()
+          reraise exception, __STACKTRACE__
+      after
+        unless evidence_enabled?(input), do: cleanup.()
+      end
+
+    maybe_run_receipt(input, result, started_at, cleanup)
   end
 
   def jobs(options) do
     all = %{
-      "context_owner" => &run_context_owner/1,
-      "stream_owner" => &run_stream_owner/1
+      "context_owner" => fn input ->
+        input |> Map.put(:implementation, "context_owner") |> run_context_owner()
+      end,
+      "stream_owner" => fn input ->
+        input |> Map.put(:implementation, "stream_owner") |> run_stream_owner()
+      end
     }
 
     Map.new(options.implementations, fn name -> {name, Map.fetch!(all, name)} end)
@@ -230,6 +393,7 @@ defmodule MOQXProbe.Bench.StreamClients do
           implementations: selected_values(opts, :implementation, @implementation_names),
           benchee: benchee_options(opts)
         }
+        |> put_evidence_options(opts)
     end
   end
 
@@ -244,11 +408,57 @@ defmodule MOQXProbe.Bench.StreamClients do
       print: [fast_warning: false]
     ]
 
+    config = maybe_put_evidence_hooks(config, options)
+
     case options.benchee.save do
       nil -> config
       path -> Keyword.put(config, :save, path: path, tag: "stream-clients")
     end
   end
+
+  def prepare_evidence!(%{evidence: %{enabled?: false}} = options), do: options
+
+  def prepare_evidence!(%{evidence: evidence} = options) do
+    {:ok, collector} = EvidenceCollector.start(run_id: evidence.run_id)
+
+    fake_state =
+      case options.base.target do
+        :fake -> FakeEvidenceState.start()
+        :quicprobe -> nil
+      end
+
+    evidence = %{evidence | collector: collector, fake_state: fake_state}
+    %{options | evidence: evidence}
+  end
+
+  def write_evidence!(%{evidence: %{enabled?: false}}), do: :ok
+
+  def write_evidence!(%{evidence: %{collector: collector, output: output}}) do
+    output |> Path.dirname() |> File.mkdir_p!()
+
+    case EvidenceCollector.write_jsonl(collector, output) do
+      :ok ->
+        summary = EvidenceCollector.summary(collector)
+
+        IO.puts(
+          "Delivery evidence: wrote #{output} " <>
+            "(total=#{summary.total}, valid=#{summary.valid}, invalid=#{summary.invalid}, " <>
+            "timeout=#{summary.timeout}, error=#{summary.error})"
+        )
+
+        :ok
+
+      {:error, reason} ->
+        Mix.raise("failed to write delivery evidence sidecar #{output}: #{inspect(reason)}")
+    end
+  end
+
+  def cleanup_evidence(%{evidence: %{collector: collector, fake_state: fake_state}}) do
+    if collector, do: EvidenceCollector.stop(collector)
+    FakeEvidenceState.stop(fake_state)
+  end
+
+  def cleanup_evidence(_options), do: :ok
 
   defp drop_mix_separator(["--" | argv]), do: argv
   defp drop_mix_separator(argv), do: argv
@@ -293,6 +503,119 @@ defmodule MOQXProbe.Bench.StreamClients do
       save: Keyword.get(opts, :save)
     }
   end
+
+  defp put_evidence_options(%{base: base} = options, opts) do
+    output = Keyword.get(opts, :evidence_output)
+    enabled? = is_binary(output)
+    quicprobe_evidence_path = Keyword.get(opts, :quicprobe_evidence_path)
+
+    if enabled? and options.benchee.parallel != 1 do
+      Mix.raise("--evidence-output requires --benchee-parallel 1")
+    end
+
+    if enabled? and base.target == :quicprobe and is_nil(quicprobe_evidence_path) do
+      Mix.raise("--quicprobe-evidence-path is required when evidence is enabled for quicprobe")
+    end
+
+    Map.put(options, :evidence, %{
+      enabled?: enabled?,
+      output: output,
+      timeout_ms: positive_integer(opts, :evidence_timeout_ms, 5_000),
+      poll_ms: positive_integer(opts, :evidence_poll_ms, 50),
+      close_grace_ms:
+        non_negative_integer(
+          opts,
+          :evidence_close_grace_ms,
+          default_evidence_close_grace_ms(base.target)
+        ),
+      quicprobe_evidence_path: quicprobe_evidence_path,
+      run_id: evidence_run_id(),
+      collector: nil,
+      fake_state: nil
+    })
+  end
+
+  defp maybe_put_evidence_hooks(config, %{evidence: %{enabled?: false}}), do: config
+
+  defp maybe_put_evidence_hooks(config, options) do
+    config
+    |> Keyword.put(:before_each, evidence_before_each(options))
+    |> Keyword.put(:after_each, evidence_after_each(options))
+  end
+
+  defp evidence_before_each(%{evidence: evidence, base: %{target: :fake}}) do
+    fn input ->
+      receipt_id = receipt_id(input)
+
+      input
+      |> Map.put(:evidence_enabled?, true)
+      |> Map.put(:receipt_id, receipt_id)
+      |> Map.put(:evidence_table, evidence.fake_state)
+      |> Map.put(:evidence_close_grace_ms, evidence.close_grace_ms)
+    end
+  end
+
+  defp evidence_before_each(%{evidence: evidence, base: %{target: :quicprobe}}) do
+    fn input ->
+      receipt_id = receipt_id(input)
+      after_run_sequence = quicprobe_evidence_cursor(evidence.quicprobe_evidence_path)
+
+      input
+      |> Map.put(:evidence_enabled?, true)
+      |> Map.put(:receipt_id, receipt_id)
+      |> Map.put(:quicprobe_after_run_sequence, after_run_sequence)
+      |> Map.put(:evidence_close_grace_ms, evidence.close_grace_ms)
+    end
+  end
+
+  defp evidence_after_each(%{evidence: evidence, base: %{target: :fake}}) do
+    evidence_after_each_fun(evidence, Adapters.FakeTransport,
+      source: fn receipt -> FakeEvidenceState.snapshot(evidence.fake_state, receipt.id) end
+    )
+  end
+
+  defp evidence_after_each(%{evidence: evidence, base: %{target: :quicprobe}}) do
+    evidence_after_each_fun(evidence, Adapters.Quicprobe,
+      path: evidence.quicprobe_evidence_path,
+      timeout_ms: evidence.timeout_ms,
+      poll_ms: evidence.poll_ms
+    )
+  end
+
+  defp evidence_after_each_fun(evidence, adapter, adapter_opts) do
+    fn
+      %TimedRun{receipt: receipt, cleanup: cleanup} ->
+        cleanup.()
+        _ = EvidenceCollector.collect(evidence.collector, adapter, receipt, adapter_opts)
+        receipt
+
+      %RunReceipt{} = receipt ->
+        _ = EvidenceCollector.collect(evidence.collector, adapter, receipt, adapter_opts)
+        receipt
+
+      other ->
+        other
+    end
+  end
+
+  defp quicprobe_evidence_cursor(path) do
+    case Adapters.Quicprobe.last_run_sequence(path) do
+      {:ok, sequence} -> sequence
+      {:error, _reason} -> 0
+    end
+  end
+
+  defp evidence_run_id do
+    iso =
+      DateTime.utc_now()
+      |> DateTime.to_iso8601(:basic)
+      |> String.replace("Z", "")
+
+    "#{iso}-#{System.unique_integer([:positive])}"
+  end
+
+  defp default_evidence_close_grace_ms(:quicprobe), do: 25
+  defp default_evidence_close_grace_ms(_target), do: 0
 
   defp positive_integer(opts, key, default) do
     value = Keyword.get(opts, key, default)
@@ -376,7 +699,7 @@ defmodule MOQXProbe.Bench.StreamClients do
   defp input_for("flow-prebuilt-list", base), do: Map.put(base, :producer, :flow_prebuilt_list)
 
   defp setup_streams(%{target: :fake} = input) do
-    {:ok, ctx} = Transport.new(FakeTransport, [])
+    {:ok, ctx} = Transport.new(FakeTransport, fake_transport_opts(input))
     {:ok, connection, ctx} = Transport.connect(ctx, "localhost", 4433, [], 1_000)
     open_streams(ctx, connection, input)
   end
@@ -412,6 +735,13 @@ defmodule MOQXProbe.Bench.StreamClients do
       server_name: input.servername,
       peer_bidi_stream_count: max(input.stream_count + 2, 10),
       peer_unidi_stream_count: max(input.stream_count + 2, 10)
+    ]
+  end
+
+  defp fake_transport_opts(input) do
+    [
+      evidence_table: Map.get(input, :evidence_table),
+      receipt_id: Map.get(input, :receipt_id)
     ]
   end
 
@@ -594,6 +924,78 @@ defmodule MOQXProbe.Bench.StreamClients do
     %{state | completed: state.completed + 1, in_flight: max(state.in_flight - 1, 0)}
   end
 
+  defp maybe_run_receipt(%{evidence_enabled?: true} = input, result, started_at, cleanup) do
+    receipt =
+      RunReceipt.new!(
+        id: input.receipt_id,
+        target: input.target,
+        scenario: "object-stream",
+        input: producer_name(input.producer),
+        implementation: input.implementation,
+        expected: expected_evidence(input),
+        match: evidence_match(input),
+        metadata: receipt_metadata(input, result),
+        started_at: started_at,
+        finished_at: DateTime.utc_now()
+      )
+
+    %TimedRun{receipt: receipt, cleanup: cleanup}
+  end
+
+  defp maybe_run_receipt(_input, result, _started_at, _cleanup), do: result
+
+  defp receipt_timestamp(%{evidence_enabled?: true}), do: DateTime.utc_now()
+  defp receipt_timestamp(_input), do: nil
+
+  defp evidence_enabled?(%{evidence_enabled?: true}), do: true
+  defp evidence_enabled?(_input), do: false
+
+  defp maybe_evidence_close_grace(%{evidence_enabled?: true, evidence_close_grace_ms: ms})
+       when ms > 0 do
+    Process.sleep(ms)
+  end
+
+  defp maybe_evidence_close_grace(_input), do: :ok
+
+  defp receipt_id(input) do
+    suffix = System.unique_integer([:positive])
+    "#{producer_name(input.producer)}-#{suffix}"
+  end
+
+  defp expected_evidence(input) do
+    Map.merge(@zero_evidence, %{
+      uni_streams_accepted: input.stream_count,
+      streams_completed: input.stream_count,
+      stream_bytes_received: input.stream_count * input.payload_count * input.payload_size
+    })
+  end
+
+  defp evidence_match(%{target: :quicprobe, quicprobe_after_run_sequence: sequence}) do
+    %{after_run_sequence: sequence}
+  end
+
+  defp evidence_match(_input), do: %{}
+
+  defp receipt_metadata(input, result) do
+    %{
+      target: input.target,
+      host: Map.get(input, :host),
+      quic_port: Map.get(input, :quic_port),
+      alpn: Map.get(input, :alpn),
+      producer: producer_name(input.producer),
+      stream_count: input.stream_count,
+      payload_count: input.payload_count,
+      payload_size: input.payload_size,
+      stream_send_window: input.stream_send_window,
+      evidence_close_grace_ms: Map.get(input, :evidence_close_grace_ms),
+      local_sender: result,
+      quicprobe_after_run_sequence: Map.get(input, :quicprobe_after_run_sequence)
+    }
+  end
+
+  defp producer_name(:flow_generated), do: "flow-generated"
+  defp producer_name(:flow_prebuilt_list), do: "flow-prebuilt-list"
+
   defp events(%{producer: :flow_prebuilt_list} = input, streams, payload) do
     StreamSender.events_for(
       streams: streams,
@@ -659,15 +1061,31 @@ defmodule MOQXProbe.Bench.StreamClients do
       --benchee-parallel N         default: 1
       --save PATH                  save Benchee suite for later comparison
 
+    Evidence:
+      --evidence-output PATH        write post-run delivery evidence JSONL
+      --evidence-timeout-ms N       evidence collection timeout (default: 5000)
+      --evidence-poll-ms N          evidence polling interval (default: 50)
+      --evidence-close-grace-ms N   post-send grace before close; quicprobe default: 25
+      --quicprobe-evidence-path P   quicprobe server JSONL path for evidence
+
     Example:
       mix run bench/stream_clients.exs -- --stream-count 32 --payload-count 1000 --stream-send-window 16 --benchee-time 3
     """
   end
 end
 
-options = MOQXProbe.Bench.StreamClients.parse_cli!(System.argv())
+options =
+  System.argv()
+  |> MOQXProbe.Bench.StreamClients.parse_cli!()
+  |> MOQXProbe.Bench.StreamClients.prepare_evidence!()
 
-Benchee.run(
-  MOQXProbe.Bench.StreamClients.jobs(options),
-  MOQXProbe.Bench.StreamClients.benchee_config(options)
-)
+try do
+  Benchee.run(
+    MOQXProbe.Bench.StreamClients.jobs(options),
+    MOQXProbe.Bench.StreamClients.benchee_config(options)
+  )
+
+  MOQXProbe.Bench.StreamClients.write_evidence!(options)
+after
+  MOQXProbe.Bench.StreamClients.cleanup_evidence(options)
+end

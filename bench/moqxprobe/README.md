@@ -24,11 +24,19 @@ claims need a real target path and an `iperf3` baseline from the same client to
 the same server.
 
 Delivery-aware runs keep timing and delivery validity separate. The measured
-Benchee function sends the workload and returns a small run receipt. After the
-timed invocation, an unmeasured post-run hook reads target evidence, stores it
-through a reusable `MOQXProbe.Benchee.EvidenceCollector`, and emits sidecar
-validity data. Polling `quicprobe` or any other target for final evidence must
-not happen inside the measured function.
+Benchee function sends the workload and returns a small run receipt. When
+evidence is enabled, an unmeasured post-run hook finalizes the connection,
+reads target evidence, stores it through a reusable
+`MOQXProbe.Benchee.EvidenceCollector`, and emits sidecar validity data.
+Polling `quicprobe` or any other target for final evidence must not happen
+inside the measured function.
+
+The evidence collector uses target adapters:
+
+- `MOQXProbe.Benchee.Adapters.FakeTransport` reads explicit fake transport
+  state/counters after timing.
+- `MOQXProbe.Benchee.Adapters.Quicprobe` reads `server_run_evidence` JSONL
+  from `quicprobe` after timing.
 
 ## Install
 
@@ -76,6 +84,34 @@ mix run bench/stream_clients.exs -- \
   --stream-count 32 \
   --payload-count 1000
 ```
+
+Enable delivery evidence for the fake target:
+
+```bash
+mix run bench/stream_clients.exs -- \
+  --target fake \
+  --implementation stream_owner \
+  --input flow-generated \
+  --evidence-output results/fake-evidence.jsonl
+```
+
+Enable delivery evidence for `quicprobe`:
+
+```bash
+mix run bench/stream_clients.exs -- \
+  --target quicprobe \
+  --host <target-host-or-ip> \
+  --quic-port <quic-port> \
+  --ca <ca.pem> \
+  --servername <cert-name> \
+  --evidence-output results/quicprobe-evidence.jsonl \
+  --quicprobe-evidence-path <quicprobe-server-jsonl>
+```
+
+Evidence mode requires `--benchee-parallel 1` so each invocation can be matched
+to one receiver evidence record. For `quicprobe`, the post-run hook waits an
+unmeasured close grace before closing the connection; override it with
+`--evidence-close-grace-ms` when a path needs a longer drain window.
 
 The script exposes setup through flags, not environment variables or
 `Application` configuration. Use `--help` for the full option list.

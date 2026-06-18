@@ -2,7 +2,7 @@
 
 # Add reusable Benchee evidence collector
 
-Status: open
+Status: done
 Type: HITL
 Category: performance
 
@@ -68,22 +68,22 @@ Non-goals:
 
 ## Acceptance criteria
 
-- [ ] `bench/moqxprobe` contains a reusable
+- [x] `bench/moqxprobe` contains a reusable
       `MOQXProbe.Benchee.EvidenceCollector` module, or an equally clear module
       name in the `MOQXProbe.Benchee` namespace.
-- [ ] The collector uses explicit arguments and ownership; no `Application`
+- [x] The collector uses explicit arguments and ownership; no `Application`
       env seam is introduced.
-- [ ] The collector is ETS-backed or otherwise gives equivalent low-overhead,
+- [x] The collector is ETS-backed or otherwise gives equivalent low-overhead,
       process-safe storage for post-run evidence.
-- [ ] A benchmark function can return a run receipt while keeping the timed
+- [x] A benchmark function can return a run receipt while keeping the timed
       function free of target polling/waiting.
-- [ ] A Benchee `after_each`, `after_scenario`, or explicit script-level
+- [x] A Benchee `after_each`, `after_scenario`, or explicit script-level
       post hook can attach receiver evidence to a receipt after timing.
-- [ ] The collector can emit sidecar evidence records and a compact validity
+- [x] The collector can emit sidecar evidence records and a compact validity
       summary.
-- [ ] Unit tests cover receipt storage, evidence attachment, validity status,
+- [x] Unit tests cover receipt storage, evidence attachment, validity status,
       timeout/error recording, and sidecar serialization.
-- [ ] Documentation explains that send speed and delivery validity are separate
+- [x] Documentation explains that send speed and delivery validity are separate
       outputs.
 
 ## Notes
@@ -94,3 +94,58 @@ owned by the script rather than an implicit mutation of the Benchee result.
 
 The first consumer should be the delivery-aware stream/object profile in
 `.scratch/transport-layer-foundation/issues/50-build-delivery-aware-moqxprobe-caller-clients.md`.
+
+## Comments
+
+### 2026-06-18 implementation
+
+Implemented the reusable evidence layer under `bench/moqxprobe`:
+
+- `MOQXProbe.Benchee.RunReceipt` describes a measured invocation and expected
+  receiver counters without polling inside the timed path;
+- `MOQXProbe.Benchee.Evidence` stores expected-vs-observed counters, validity,
+  mismatches, timeout/error state, and target metadata;
+- `MOQXProbe.Benchee.EvidenceCollector` owns an ETS table, stores receipts and
+  post-run evidence, provides a Benchee-compatible `after_each/3` helper,
+  emits JSONL sidecars with Elixir's native `JSON` wrapper, and produces
+  compact summary counts;
+- `MOQXProbe.Benchee.EvidenceAdapter` defines the adapter contract;
+- `MOQXProbe.Benchee.Adapters.FakeTransport` reads explicit fake transport
+  state/counters after the timed invocation;
+- `MOQXProbe.Benchee.Adapters.Quicprobe` polls a `server_run_evidence` JSONL
+  file after the timed invocation and turns matching receiver evidence into
+  collector evidence.
+
+Follow-up integration in `bench/moqxprobe/bench/stream_clients.exs` wires the
+collector into the first object-stream benchmark path:
+
+- `--evidence-output` enables evidence mode and writes the collector sidecar
+  JSONL after `Benchee.run/2`;
+- evidence mode requires `--benchee-parallel 1` so each measured invocation has
+  an unambiguous receiver record;
+- fake-target evidence is recorded through an explicit ETS-backed fake
+  transport counter store and read by
+  `MOQXProbe.Benchee.Adapters.FakeTransport`;
+- quicprobe-target evidence records the latest server `run_sequence` before
+  the timed invocation, then matches the first `server_run_evidence` record
+  after that cursor;
+- for quicprobe, connection finalization happens in the unmeasured post hook
+  with a target-aware close grace (`--evidence-close-grace-ms`, default 25 ms)
+  before polling receiver evidence.
+
+Validation:
+
+- verified the project runtime exposes `JSON` and that `JSON.encode!/1`
+  encodes Elixir `nil` as JSON `null`;
+- `cd bench/moqxprobe && mix format --check-formatted && mix test && mix credo --strict`:
+  36 passed, no Credo findings;
+- root `mix format --check-formatted && mix test && mix credo --strict`:
+  178 passed, 18 excluded, no Credo findings;
+- fake target, `stream_owner`: 2100/2100 valid evidence records;
+- fake target, `context_owner`: 384/384 valid evidence records;
+- local quicprobe target, `stream_owner`: 2/2 valid evidence records after
+  adding the unmeasured close grace;
+- local quicprobe target, `context_owner`: 2/2 valid evidence records;
+- post-`JSON` wrapper smoke, fake target `stream_owner`: 2795/2795 valid
+  evidence records, decoded sidecar values round-tripped optional fields as
+  Elixir `nil` and contained no `"nil"` JSON strings.

@@ -133,28 +133,28 @@ starts.
 
 ## Acceptance criteria
 
-- [ ] `bench/moqxprobe` documents the difference between admission benchmarks
+- [x] `bench/moqxprobe` documents the difference between admission benchmarks
       and delivery-aware benchmarks.
-- [ ] `bench/moqxprobe` represents delivery verification through target
+- [x] `bench/moqxprobe` represents delivery verification through target
       adapters, not through implementation-specific client shortcuts.
-- [ ] Timed Benchee functions exclude remote evidence collection; evidence is
+- [x] Timed Benchee functions exclude remote evidence collection; evidence is
       captured before or after the timed workload.
-- [ ] Delivery-aware scripts use the reusable ETS-backed
+- [x] Delivery-aware scripts use the reusable ETS-backed
       `MOQXProbe.Benchee.EvidenceCollector` module rather than each script
       inventing its own result side channel.
-- [ ] Benchee timing reports and receiver-evidence validity reports remain
+- [x] Benchee timing reports and receiver-evidence validity reports remain
       separate fields/artifacts, so polling/waiting never affects measured
       send speed.
-- [ ] Stream caller benchmarks do not report remote success solely because
+- [x] Stream caller benchmarks do not report remote success solely because
       local send completions were observed.
-- [ ] Stream delivery-aware runs wait for or collect a receiver-side signal:
+- [x] Stream delivery-aware runs wait for or collect a receiver-side signal:
       peer echo, server stats, a drain window/cooldown with stats verification,
       or another explicit target-side criterion.
 - [ ] DATAGRAM delivery-aware runs use delivered DATAGRAM counts or echo
       counts as the delivery signal, not just local send acceptance.
 - [ ] Target selection remains flag-driven and does not use mutable
       `Application` config.
-- [ ] The fake target remains available for process-model calibration without
+- [x] The fake target remains available for process-model calibration without
       being confused with real-network evidence.
 - [ ] Remote runs record sidecar metadata: target host, ports, CA/server name,
       git SHA, `iperf3` preflight summary, Tailscale path mode when available,
@@ -209,3 +209,24 @@ should be a clear helper/plugin module for every Benchee-based script in the
 benchmark project, not stream-client-specific code. The collector stores
 per-scenario/per-invocation evidence records and can flush sidecar JSONL or
 print a compact validity summary after the suite.
+
+### 2026-06-18 first stream evidence integration
+
+`bench/moqxprobe/bench/stream_clients.exs` now supports opt-in evidence mode
+for the object-stream benchmark path:
+
+- `--evidence-output` writes a `moqxprobe-benchee-evidence-v1` JSONL sidecar;
+- fake-target evidence uses explicit fake transport counters read after the
+  measured invocation;
+- quicprobe-target evidence captures a `run_sequence` cursor before the timed
+  invocation and matches the first server evidence record after that cursor;
+- evidence mode requires `--benchee-parallel 1` to keep cursor matching
+  unambiguous;
+- quicprobe connection finalization happens in the unmeasured post hook, with
+  `--evidence-close-grace-ms` defaulting to 25 ms.
+
+The close grace was added because local validation showed a real race: if the
+client closes immediately after local send completion, quicprobe can accept the
+stream but record zero stream bytes and a receive error. With the unmeasured
+post-send grace, local quicprobe smokes validated both `stream_owner` and
+`context_owner` with 2/2 valid evidence records each.
