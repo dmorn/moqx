@@ -2,7 +2,7 @@
 
 # Simplify transport benchmark loop around Benchee targets
 
-Status: in-progress
+Status: done
 Type: HITL
 Category: performance
 
@@ -158,9 +158,7 @@ loop obvious to a new contributor.
 
 ## Blocked by
 
-Human review of the cleanup boundary. This issue intentionally removes a lot
-of previously built benchmark infrastructure, so implementation should start
-only after confirming which old artifacts must be archived versus deleted.
+None.
 
 ## Notes
 
@@ -188,8 +186,37 @@ performance remains future work.
   transport foundation PRD, ADR-0001, ADR-0005, ADR-0008, `.gitignore`, and the
   repo benchmark skill source to describe the new target-based loop and mark
   `transport-bench-v1`/remote lab paths as legacy.
-- 2026-06-18: Remote smoke against `100.124.193.59` remains pending because
-  SSH authentication from this workspace failed. Direct SSH hit too many
-  offered keys, `IdentitiesOnly=yes` failed with `Permission denied
-  (publickey)`, and `ssh-add -L` was not available in the sandbox. This is an
-  access/identity gap, not evidence about the benchmark target.
+- 2026-06-18: Corrected the remote access path. `100.124.193.59` is the
+  Tailscale IP for the exe.dev VM `moqx-quicprobe-fra`; VM operations should
+  start from `ssh exe.dev ls -l --json` and direct SSH should use
+  `ssh moqx-quicprobe-fra.exe.xyz`, not the raw Tailscale IP.
+- 2026-06-18: Remote target smoke passed. `ssh exe.dev ls -l --json` showed
+  `moqx-quicprobe-fra` running in `fra` with tags `benchmark,moqx`. The VM is
+  `x86_64`, Tailscale IP `100.124.193.59`, with `moqx-iperf3.service` active on
+  TCP/UDP `55202` and `moqx-quicprobe.service` active on UDP `55433`.
+  `quicprobe` runs with `--initial-packet-size 1200`; the certificate SANs
+  include `localhost`, `moqx-quicprobe-fra`,
+  `moqx-quicprobe-fra.exe.xyz`, `moqx-quicprobe-fra.tail8711b.ts.net`,
+  `127.0.0.1`, and `100.124.193.59`.
+- 2026-06-18: Path smoke results from local `silver` to the VM: TCP `iperf3`
+  connected but only reached about 14.0 Mbps received with 478 retransmits over
+  two seconds; Tailscale status showed the VM active through relay `nue`, so
+  this is connectivity evidence, not a clean path-ceiling benchmark. UDP
+  `iperf3` at 5 Mbps delivered with 0 loss and about 1.13 ms jitter.
+- 2026-06-18: Reference `quicprobe` checks passed. VM-local stream echo
+  returned `smoke` with only the standard quic-go UDP receive-buffer warning.
+  Local-to-remote stream echo also returned `smoke`. Local-to-remote DATAGRAM
+  pressure with 5 datagrams of 64 bytes delivered 5/5 with handshake latency
+  about 58.5 ms and first-byte latency about 50.3 ms.
+- 2026-06-18: `moqxprobe` can use the remote `quicprobe` target:
+  `mix run bench/stream_clients.exs -- --target quicprobe --host
+  100.124.193.59 --quic-port 55433 --ca
+  /private/tmp/moqx-quicprobe-fra-ca.pem --servername moqx-quicprobe-fra
+  --alpn moqx-test --stream-count 1 --payload-count 2 --payload-size 64
+  --stream-send-window 1 --implementation stream_owner --input flow-generated`
+  completed a tiny Benchee run at about 53.6 ms average. Server stats showed
+  accepted unidirectional streams but no stream bytes before the client closed,
+  so the current stream-client Benchee script is admission/connectivity
+  evidence, not peer-delivery evidence. Follow-up work should build
+  delivery-aware caller benchmarks before using remote `moqxprobe` numbers as
+  performance claims.
