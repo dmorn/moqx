@@ -14,6 +14,7 @@ Category: performance
 
 - `.scratch/transport-layer-foundation/issues/49-simplify-transport-bench-loop-around-benchee-targets.md`
 - `.scratch/transport-layer-foundation/issues/51-add-quicprobe-run-evidence-surface.md`
+- `.scratch/transport-layer-foundation/issues/52-add-reusable-benchee-evidence-collector.md`
 - `.scratch/transport-layer-foundation/issues/43-build-stream-benchmark-sender-client.md`
 - `.scratch/transport-layer-foundation/issues/48-add-moqxprobe-stream-owner-sender-topology.md`
 - `.scratch/transport-layer-foundation/issues/46-improve-moqx-client-stream-throughput.md`
@@ -69,6 +70,26 @@ Timed benchmark code should measure the client implementation. Evidence
 collection and validation should happen around the timed workload, not by
 smuggling remote stats reads into the hot path.
 
+The agreed lifecycle is:
+
+1. measured section: run only the caller implementation under test, including
+   payload sends and transport operations that are part of publishing the
+   workload;
+2. unmeasured post-run hook: after the measured invocation has returned and any
+   test teardown has closed/finalized the connection, poll/read the target
+   evidence surface until matching receiver evidence appears or a timeout
+   fires;
+3. result annotation: attach expected-vs-observed delivery evidence as
+   sidecar metadata and derive run validity from that evidence.
+
+Receiver evidence must never be part of the timed function. A fast send with
+missing or incomplete receiver evidence is a measured send result with invalid
+delivery, not a successful delivery-aware benchmark.
+
+`bench/moqxprobe` should provide a reusable Benchee integration module, modeled
+as `MOQXProbe.Benchee.EvidenceCollector`, so stream, DATAGRAM, mixed, and
+future scripts can all share the same post-run evidence pattern.
+
 ## MOQT-shaped profiles
 
 Delivery-aware benchmarks should be shaped like plausible MOQT transport
@@ -118,6 +139,12 @@ starts.
       adapters, not through implementation-specific client shortcuts.
 - [ ] Timed Benchee functions exclude remote evidence collection; evidence is
       captured before or after the timed workload.
+- [ ] Delivery-aware scripts use the reusable ETS-backed
+      `MOQXProbe.Benchee.EvidenceCollector` module rather than each script
+      inventing its own result side channel.
+- [ ] Benchee timing reports and receiver-evidence validity reports remain
+      separate fields/artifacts, so polling/waiting never affects measured
+      send speed.
 - [ ] Stream caller benchmarks do not report remote success solely because
       local send completions were observed.
 - [ ] Stream delivery-aware runs wait for or collect a receiver-side signal:
@@ -167,3 +194,18 @@ and close the connection before the server records all accepted/drained streams.
 That belongs in this issue, not in the evidence-surface issue. The next
 delivery-aware client work must make pure object-stream runs wait for explicit
 receiver evidence instead of treating local close/send completion as delivery.
+
+### 2026-06-18 Benchee evidence collector decision
+
+Delivery evidence collection must happen after the measured Benchee invocation,
+not during it. The benchmark function should return a small run receipt that
+identifies the target run/connection and expected delivery shape. An unmeasured
+post hook then polls/reads target evidence, stores the result in a collector,
+and leaves the timing sample untouched.
+
+Use a reusable ETS-backed module in `bench/moqxprobe`, tentatively
+`MOQXProbe.Benchee.EvidenceCollector`, as the Benchee integration surface. It
+should be a clear helper/plugin module for every Benchee-based script in the
+benchmark project, not stream-client-specific code. The collector stores
+per-scenario/per-invocation evidence records and can flush sidecar JSONL or
+print a compact validity summary after the suite.

@@ -23,6 +23,13 @@ Local loopback and fake-target results are calibration only. Real network
 claims need a real target path and an `iperf3` baseline from the same client to
 the same server.
 
+Delivery-aware runs keep timing and delivery validity separate. The measured
+Benchee function sends the workload and returns a small run receipt. After the
+timed invocation, an unmeasured post-run hook reads target evidence, stores it
+through a reusable `MOQXProbe.Benchee.EvidenceCollector`, and emits sidecar
+validity data. Polling `quicprobe` or any other target for final evidence must
+not happen inside the measured function.
+
 ## Install
 
 ```bash
@@ -115,6 +122,7 @@ operation details live in the `exe-dev-vm-ops` skill.
 The active artifact story is intentionally small:
 
 - Benchee saved suites or console output.
+- Delivery-evidence sidecars collected after timed invocations.
 - Optional sidecar metadata for target, git SHA, command flags, `iperf3`
   baseline, telemetry summaries, packet captures, and flamegraphs.
 - Optional `quicprobe` server run evidence when the target writes it.
