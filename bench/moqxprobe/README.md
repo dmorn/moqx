@@ -75,10 +75,17 @@ Save a Benchee suite for later comparison:
 ```bash
 mix run bench/stream_clients.exs -- \
   --target fake \
-  --implementation stream_owner \
+  --implementation sender_shards \
+  --sender-shard-count 4 \
   --input flow-generated \
-  --save results/stream-owner.benchee
+  --save results/sender-shards.benchee
 ```
+
+Stream sender implementations are Flow-fed so process-model comparisons use
+the same payload input path. `context_owner` uses one GenStage sink and shared
+context event pump, `stream_owner` uses one sender worker per stream, and
+`sender_shards` uses a configurable number of sender workers that each own a
+subset of streams.
 
 Run against a `quicprobe` target:
 

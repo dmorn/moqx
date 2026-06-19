@@ -18,6 +18,8 @@ defmodule MOQXProbe.BenchCliTest do
         "context_owner",
         "--implementation",
         "stream_owner",
+        "--implementation",
+        "sender_shards",
         "--git-sha",
         "test-sha",
         "--iperf-preflight-summary",
@@ -27,7 +29,7 @@ defmodule MOQXProbe.BenchCliTest do
       ])
 
     assert options.inputs == ["flow-generated", "flow-prebuilt-list"]
-    assert options.implementations == ["context_owner", "stream_owner"]
+    assert options.implementations == ["context_owner", "stream_owner", "sender_shards"]
 
     assert Enum.map(options.base.iperf3_preflight, & &1.path) == [
              "/tmp/tcp.json",
@@ -54,7 +56,7 @@ defmodule MOQXProbe.BenchCliTest do
     assert max_tick_send_count > 0
   end
 
-  test "stream-owned stream client reports worker and receive-loop diagnostics" do
+  test "stream-owned stream client is flow-fed and reports shard diagnostics" do
     input = stream_client_input("stream_owner")
 
     assert %{
@@ -62,17 +64,37 @@ defmodule MOQXProbe.BenchCliTest do
              accepted: 6,
              completed: 6,
              in_flight: 0,
-             max_worker_in_flight: 1,
-             worker_count: 2,
+             configured_shard_count: 2,
+             active_shard_count: 2,
+             streams_per_shard: %{max: 1},
              send_calls: 6,
+             payload_events: 6,
              completion_events: 6,
-             worker_duration_us: %{count: 2},
+             dispatcher: %{routed_events: 6, unknown_stream_events: 0},
+             shard_duration_us: %{count: 2},
              receive_calls: %{count: 2, total: receive_call_count},
              schedule_rounds: %{count: 2, total: schedule_round_count}
            } = StreamClients.run_stream_owner(input)
 
     assert receive_call_count > 0
     assert schedule_round_count > 0
+  end
+
+  test "sender-shards stream client routes flow input across configured shards" do
+    input = stream_client_input("sender_shards") |> Map.put(:sender_shard_count, 1)
+
+    assert %{
+             implementation: "sender_shards",
+             accepted: 6,
+             completed: 6,
+             configured_shard_count: 1,
+             active_shard_count: 1,
+             streams_per_shard: %{max: 2},
+             send_calls: 6,
+             payload_events: 6,
+             completion_events: 6,
+             dispatcher: %{routed_events: 6, unknown_stream_events: 0}
+           } = StreamClients.run_sender_shards(input)
   end
 
   test "datagram client CLI keeps repeated send flags and preflight flags" do

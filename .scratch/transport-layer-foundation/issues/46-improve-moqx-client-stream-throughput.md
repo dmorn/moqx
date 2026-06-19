@@ -325,3 +325,39 @@ with object publishing.
   keep testing against the fake target and optimize the stream-client process
   model directly, then use the exe.dev quicprobe only as a delivery-validity
   smoke check.
+- 2026-06-19: Corrected the process-model comparison so every stream sender
+  consumes the same Flow-produced event stream. The previous fake/local
+  `stream_owner` implementation generated work manually inside each worker,
+  which made it useful for isolation but not apples-to-apples with
+  `context_owner`. The current `stream_owner` is now the degenerate Flow-fed
+  sharded topology where shard count equals stream count. The new
+  `sender_shards` topology consumes the same Flow input through a GenStage
+  dispatcher and routes payload events to a configurable number of shard
+  workers; each shard owns several `Conn.Stream.Sender` states and uses backend
+  send completions to refill per-stream windows.
+- 2026-06-19: Flow-fed fake/local comparison strongly favors bounded sender
+  shards. On `32 x 100 x 1180`, window `16`, valid fake evidence for all
+  invocations: `sender_shards` reached `120.49 ips`, Flow-fed `stream_owner`
+  reached `97.04 ips`, and `context_owner` reached `46.20 ips`. On
+  `128 x 1000 x 1180`, window `16`, `sender_shards` reached `3.32 ips`
+  (`~0.30 s` average), Flow-fed `stream_owner` reached `0.99 ips` (`~1.01 s`),
+  and `context_owner` reached `0.95 ips` (`~1.05 s`). Every sender delivered
+  the expected Flow payload count to fake receiver evidence.
+- 2026-06-19: Shard diagnostics show the gain is process topology, not a
+  payload-generation artifact. For `128 x 1000`, both Flow-fed worker
+  topologies routed exactly `128,000` Flow payload events. `sender_shards`
+  used the default `10` shards and averaged about `300 ms` task await time;
+  `stream_owner` used `128` shards/workers and averaged about `978 ms` task
+  await time. The `context_owner` sink still needed about `2,124` global ticks
+  with `64`-send bursts. A small shard-count sweep on the same fake shape
+  showed `4` shards at about `290.59 ms`, default `10` shards at about
+  `301 ms`, and `16` shards regressing to about `591.26 ms` with high
+  deviation and deeper shard queues. This supports a bounded-shard architecture
+  as the next benchmark-client baseline, with shard count treated as a tunable
+  process-model parameter rather than "one worker per stream".
+- 2026-06-19: Next decision: keep the transport API unchanged and use
+  Flow-fed `sender_shards` as the current fake/local process-model winner.
+  Before making remote performance claims, run the same implementation against
+  the exe.dev `quicprobe` target only as receiver-validity smoke evidence, then
+  repeat on a cleaner network path with iperf3 and same-run reference once
+  available.

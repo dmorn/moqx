@@ -13,10 +13,11 @@ defmodule MOQXProbe.Bench.StreamClients do
   alias MOQXProbe.Benchee.EvidenceCollector
   alias MOQXProbe.Benchee.RunReceipt
   alias MOQXProbe.Benchee.RunMetadata
+  alias MOQXProbe.Traffic
   alias MOQXProbe.Traffic.StreamSender
 
   @input_names ["flow-generated", "flow-prebuilt-list"]
-  @implementation_names ["context_owner", "stream_owner"]
+  @implementation_names ["context_owner", "stream_owner", "sender_shards"]
   @target_names ["fake", "quicprobe"]
   @profile_name "draft14_object_stream"
   @quicprobe_experiment_lease_ttl_ms 30 * 60 * 1000
@@ -48,6 +49,7 @@ defmodule MOQXProbe.Bench.StreamClients do
     payload_count: :integer,
     payload_size: :integer,
     stream_send_window: :integer,
+    sender_shard_count: :integer,
     max_burst: :integer,
     max_queue_depth: :integer,
     min_demand: :integer,
@@ -81,6 +83,65 @@ defmodule MOQXProbe.Bench.StreamClients do
     @moduledoc false
 
     defstruct [:receipt, :cleanup]
+  end
+
+  defmodule FlowSenderDispatcher do
+    @moduledoc false
+
+    use GenStage
+
+    def start_link(opts) when is_list(opts) do
+      GenStage.start_link(__MODULE__, opts)
+    end
+
+    def snapshot(dispatcher) do
+      GenStage.call(dispatcher, :snapshot)
+    end
+
+    def stop(dispatcher) do
+      if Process.alive?(dispatcher) do
+        Process.unlink(dispatcher)
+        GenStage.stop(dispatcher, :normal, 1_000)
+      end
+
+      :ok
+    catch
+      :exit, _reason -> :ok
+    end
+
+    @impl GenStage
+    def init(opts) do
+      {:consumer,
+       %{
+         routes: Keyword.fetch!(opts, :routes),
+         routed_events: 0,
+         unknown_stream_events: 0
+       }}
+    end
+
+    @impl GenStage
+    def handle_events(events, _from, state) do
+      state = Enum.reduce(events, state, &route_event/2)
+      {:noreply, [], state}
+    end
+
+    @impl GenStage
+    def handle_call(:snapshot, _from, state) do
+      {:reply, Map.take(state, [:routed_events, :unknown_stream_events]), [], state}
+    end
+
+    defp route_event(%{stream: stream} = event, state) do
+      case Map.fetch(state.routes, raw_stream(stream)) do
+        {:ok, worker} ->
+          send(worker, {:moqxprobe_stream_payload, event})
+          %{state | routed_events: state.routed_events + 1}
+
+        :error ->
+          %{state | unknown_stream_events: state.unknown_stream_events + 1}
+      end
+    end
+
+    defp raw_stream(%MOQX.Transport.Conn.Stream{backend: %{data: raw_stream}}), do: raw_stream
   end
 
   defmodule FakeEvidenceState do
@@ -324,11 +385,23 @@ defmodule MOQXProbe.Bench.StreamClients do
   end
 
   def run_stream_owner(input) do
-    input = Map.put_new(input, :implementation, "stream_owner")
+    input
+    |> Map.put_new(:implementation, "stream_owner")
+    |> run_flow_sender_topology("stream_owner", input.stream_count)
+  end
+
+  def run_sender_shards(input) do
+    input
+    |> Map.put_new(:implementation, "sender_shards")
+    |> run_flow_sender_topology("sender_shards", input.sender_shard_count)
+  end
+
+  defp run_flow_sender_topology(input, implementation, shard_count) do
     started_at = receipt_timestamp(input)
     {ctx, streams, connection} = setup_streams(input)
     payload = payload(input)
     deadline_us = monotonic_us() + input.timeout_ms * 1_000
+    shard_groups = shard_streams(streams, shard_count)
 
     cleanup = fn ->
       maybe_evidence_close_grace(input)
@@ -338,22 +411,47 @@ defmodule MOQXProbe.Bench.StreamClients do
 
     result =
       try do
-        {task_spawn_duration_us, tasks} =
+        {task_spawn_duration_us, shard_tasks} =
           timed(fn ->
-            Enum.map(streams, fn stream_state ->
-              Task.async(fn ->
-                run_stream_owner_worker(stream_state.stream, payload, input, deadline_us)
-              end)
+            Enum.map(shard_groups, fn {shard_index, shard_streams} ->
+              task =
+                Task.async(fn ->
+                  run_sender_shard(shard_index, shard_streams, input, deadline_us)
+                end)
+
+              {shard_index, shard_streams, task}
             end)
           end)
 
-        {task_await_duration_us, worker_results} =
-          timed(fn -> Task.await_many(tasks, input.timeout_ms + 1_000) end)
+        routes = sender_shard_routes(shard_tasks)
+        {:ok, dispatcher} = FlowSenderDispatcher.start_link(routes: routes)
 
-        local_sender_stream_owner_summary(
-          worker_results,
+        {:ok, producer} =
+          Traffic.start_payloads(stream_events(input, streams, payload), dispatcher,
+            mapper: & &1,
+            stages: 1,
+            min_demand: input.min_demand,
+            max_demand: input.max_demand
+          )
+
+        {task_await_duration_us, shard_results} =
+          timed(fn ->
+            shard_tasks
+            |> Enum.map(fn {_shard_index, _streams, task} -> task end)
+            |> Task.await_many(input.timeout_ms + 1_000)
+          end)
+
+        :ok = Traffic.await_payloads(producer, input.timeout_ms)
+        dispatcher_snapshot = FlowSenderDispatcher.snapshot(dispatcher)
+        :ok = FlowSenderDispatcher.stop(dispatcher)
+
+        local_sender_flow_sender_summary(
+          implementation,
+          shard_results,
+          shard_count,
           task_spawn_duration_us,
-          task_await_duration_us
+          task_await_duration_us,
+          dispatcher_snapshot
         )
       rescue
         exception ->
@@ -373,6 +471,9 @@ defmodule MOQXProbe.Bench.StreamClients do
       end,
       "stream_owner" => fn input ->
         input |> Map.put(:implementation, "stream_owner") |> run_stream_owner()
+      end,
+      "sender_shards" => fn input ->
+        input |> Map.put(:implementation, "sender_shards") |> run_sender_shards()
       end
     }
 
@@ -512,6 +613,8 @@ defmodule MOQXProbe.Bench.StreamClients do
       payload_count: positive_integer(opts, :payload_count, 1_000),
       payload_size: positive_integer(opts, :payload_size, 1_180),
       stream_send_window: positive_integer(opts, :stream_send_window, 16),
+      sender_shard_count:
+        positive_integer(opts, :sender_shard_count, default_sender_shard_count(opts)),
       max_burst: max_burst,
       max_queue_depth: positive_integer(opts, :max_queue_depth, 256),
       idle_retries: non_negative_integer(opts, :idle_retries, 1_000),
@@ -970,133 +1073,309 @@ defmodule MOQXProbe.Bench.StreamClients do
     end
   end
 
-  defp run_stream_owner_worker(stream, payload, input, deadline_us) do
+  defp shard_streams(streams, shard_count) do
+    shard_count = min(max(shard_count, 1), length(streams))
+
+    1..shard_count
+    |> Map.new(&{&1, []})
+    |> then(fn initial ->
+      streams
+      |> Enum.with_index()
+      |> Enum.reduce(initial, fn {stream, index}, shards ->
+        shard_index = rem(index, shard_count) + 1
+        Map.update!(shards, shard_index, &[stream | &1])
+      end)
+    end)
+    |> Enum.map(fn {shard_index, streams} -> {shard_index, Enum.reverse(streams)} end)
+  end
+
+  defp sender_shard_routes(shard_tasks) do
+    Map.new(
+      for {_shard_index, streams, %Task{pid: pid}} <- shard_tasks,
+          %{stream: stream} <- streams do
+        {raw_stream(stream), pid}
+      end
+    )
+  end
+
+  defp run_sender_shard(shard_index, streams, input, deadline_us) do
     started_at_us = monotonic_us()
-    {:ok, sender} = Stream.sender(stream)
 
-    {sender, state} =
-      schedule_stream_owner_window(
-        sender,
-        stream_owner_initial_state(),
-        payload,
-        input
-      )
+    state =
+      %{
+        shard_index: shard_index,
+        backend: shard_backend(streams),
+        streams: sender_shard_stream_states(streams, input),
+        receive_calls: 0,
+        ready_drain_calls: 0,
+        schedule_rounds: 0,
+        payload_events: 0,
+        completion_events: 0,
+        send_cancelled_events: 0,
+        orphan_completion_events: 0,
+        ignored_events: 0,
+        unknown_events: 0
+      }
+      |> drive_sender_shard(input, deadline_us)
 
-    state = drive_stream_owner(state, sender, payload, input, deadline_us)
-    Map.put(state, :duration_us, monotonic_us() - started_at_us)
-  end
-
-  defp drive_stream_owner(state, _sender, _payload, input, _deadline_us)
-       when state.completed >= input.payload_count do
     state
+    |> sender_shard_result(input)
+    |> Map.put(:duration_us, monotonic_us() - started_at_us)
   end
 
-  defp drive_stream_owner(state, sender, payload, input, deadline_us) do
-    if monotonic_us() >= deadline_us do
-      raise "stream_owner benchmark timed out with #{state.completed} completions"
-    else
-      {sender, state} = receive_stream_owner_batch(sender, state, input, deadline_us)
+  defp shard_backend([%{stream: %Stream{backend: backend}} | _streams]), do: backend.module
 
-      {sender, state} = schedule_stream_owner_window(sender, state, payload, input)
-      drive_stream_owner(state, sender, payload, input, deadline_us)
+  defp sender_shard_stream_states(streams, input) do
+    Map.new(streams, fn %{stream: stream, index: index} ->
+      {:ok, sender} = Stream.sender(stream)
+
+      {raw_stream(stream),
+       %{
+         sender: sender,
+         stream_index: index,
+         stream_send_window: input.stream_send_window,
+         accepted: 0,
+         completed: 0,
+         in_flight: 0,
+         max_in_flight: 0,
+         queued: :queue.new(),
+         max_queue_depth: 0,
+         send_calls: 0
+       }}
+    end)
+  end
+
+  defp drive_sender_shard(state, input, deadline_us) when is_map(state) do
+    cond do
+      sender_shard_complete?(state, input) ->
+        state
+
+      monotonic_us() >= deadline_us ->
+        raise "sender_shards benchmark timed out with #{sender_shard_completed(state)}/#{sender_shard_expected(input, state)} completions"
+
+      true ->
+        state
+        |> receive_sender_shard_batch(input, deadline_us)
+        |> drive_sender_shard(input, deadline_us)
     end
   end
 
-  defp schedule_stream_owner_window(sender, state, payload, input) do
-    state = %{state | schedule_rounds: state.schedule_rounds + 1}
-    schedule_stream_owner_window_payloads(sender, state, payload, input)
+  defp sender_shard_complete?(state, input) do
+    Enum.all?(state.streams, fn {_raw_stream, stream_state} ->
+      stream_state.completed >= input.payload_count
+    end)
   end
 
-  defp schedule_stream_owner_window_payloads(sender, state, payload, input) do
-    if state.accepted < input.payload_count and state.in_flight < input.stream_send_window do
-      finish? = state.accepted + 1 == input.payload_count
-      {:ok, _send, sender} = Stream.Sender.send(sender, payload, finish: finish?)
-
-      schedule_stream_owner_window_payloads(
-        sender,
-        %{
-          state
-          | accepted: state.accepted + 1,
-            in_flight: state.in_flight + 1,
-            max_in_flight: max(state.max_in_flight, state.in_flight + 1),
-            send_calls: state.send_calls + 1
-        },
-        payload,
-        input
-      )
-    else
-      {sender, state}
-    end
-  end
-
-  defp receive_stream_owner_batch(sender, state, input, deadline_us) do
+  defp receive_sender_shard_batch(state, input, deadline_us) do
     timeout_ms = max(div(deadline_us - monotonic_us(), 1_000), 0)
     state = %{state | receive_calls: state.receive_calls + 1}
 
-    case Stream.Sender.receive_event(sender, timeout_ms) do
-      {:ok, {:stream_event, _stream, :send_completed, _metadata}, sender} ->
-        state = complete_stream_owner(state)
-        drain_ready_stream_owner(sender, state, input.event_batch_size - 1)
-
-      {:ok, _event, sender} ->
-        {sender, state}
-
-      {:unknown, _message, sender} ->
-        {sender, state}
-
-      {:error, reason, _sender} ->
-        raise "stream_owner receive failed: #{inspect(reason)}"
-
-      {:timeout, _sender} ->
-        raise "stream_owner completion timeout"
+    case receive_sender_shard_message(state, timeout_ms) do
+      {:ok, state} -> drain_ready_sender_shard(state, input.event_batch_size - 1)
+      {:timeout, _state} -> raise "sender_shards completion timeout"
     end
   end
 
-  defp drain_ready_stream_owner(sender, state, remaining) when remaining <= 0, do: {sender, state}
+  defp drain_ready_sender_shard(state, remaining) when remaining <= 0, do: state
 
-  defp drain_ready_stream_owner(sender, state, remaining) do
+  defp drain_ready_sender_shard(state, remaining) do
     state = %{state | ready_drain_calls: state.ready_drain_calls + 1}
 
-    case Stream.Sender.receive_event(sender, 0) do
-      {:ok, {:stream_event, _stream, :send_completed, _metadata}, sender} ->
-        drain_ready_stream_owner(sender, complete_stream_owner(state), remaining - 1)
-
-      {:ok, _event, sender} ->
-        drain_ready_stream_owner(sender, state, remaining - 1)
-
-      {:unknown, _message, sender} ->
-        drain_ready_stream_owner(sender, state, remaining - 1)
-
-      {:timeout, sender} ->
-        {sender, state}
-
-      {:error, reason, _sender} ->
-        raise "stream_owner drain failed: #{inspect(reason)}"
+    case receive_sender_shard_message(state, 0) do
+      {:ok, state} -> drain_ready_sender_shard(state, remaining - 1)
+      {:timeout, state} -> state
     end
   end
 
-  defp complete_stream_owner(state) do
+  defp receive_sender_shard_message(state, timeout_ms) do
+    receive do
+      message -> {:ok, handle_sender_shard_message(state, message)}
+    after
+      timeout_ms -> {:timeout, state}
+    end
+  end
+
+  defp handle_sender_shard_message(state, message) do
+    case message do
+      {:moqxprobe_stream_payload, event} ->
+        enqueue_sender_shard_payload(state, event)
+
+      _other ->
+        handle_sender_shard_backend_message(state, message)
+    end
+  end
+
+  defp handle_sender_shard_backend_message(state, message) do
+    case state.backend.normalize_message(message) do
+      {:stream_event, raw_stream, :send_complete, false} ->
+        complete_sender_shard_stream(state, raw_stream)
+
+      {:stream_event, raw_stream, :send_complete, true} ->
+        cancel_sender_shard_stream(state, raw_stream)
+
+      {:stream_event, raw_stream, _event, _metadata} ->
+        update_sender_shard_stream_event(state, raw_stream, :ignored_events)
+
+      :unknown ->
+        %{state | unknown_events: state.unknown_events + 1}
+
+      _event ->
+        %{state | ignored_events: state.ignored_events + 1}
+    end
+  end
+
+  defp enqueue_sender_shard_payload(state, event) do
+    raw_stream = raw_stream(event.stream)
+
+    state
+    |> update_sender_shard_stream_event(raw_stream, :payload_events, fn stream_state ->
+      queued = :queue.in(event, stream_state.queued)
+
+      stream_state
+      |> Map.put(:queued, queued)
+      |> Map.put(:max_queue_depth, max(stream_state.max_queue_depth, :queue.len(queued)))
+      |> schedule_sender_shard_stream()
+    end)
+    |> Map.update!(:schedule_rounds, &(&1 + 1))
+  end
+
+  defp schedule_sender_shard_stream(stream_state) do
+    do_schedule_sender_shard_stream(stream_state)
+  end
+
+  defp do_schedule_sender_shard_stream(stream_state) do
+    case :queue.out(stream_state.queued) do
+      {{:value, event}, queued} when stream_state.in_flight < stream_state.stream_send_window ->
+        send_sender_shard_event(%{stream_state | queued: queued}, event)
+        |> do_schedule_sender_shard_stream()
+
+      {{:value, event}, queued} ->
+        %{stream_state | queued: :queue.in_r(event, queued)}
+
+      {:empty, _queued} ->
+        stream_state
+    end
+  end
+
+  defp send_sender_shard_event(stream_state, event) do
+    opts = if event.finish?, do: [finish: true], else: []
+    {:ok, _send, sender} = Stream.Sender.send(stream_state.sender, event.payload, opts)
+    in_flight = stream_state.in_flight + 1
+
     %{
-      state
-      | completed: state.completed + 1,
-        in_flight: max(state.in_flight - 1, 0),
-        completion_events: state.completion_events + 1
+      stream_state
+      | sender: sender,
+        accepted: stream_state.accepted + 1,
+        in_flight: in_flight,
+        max_in_flight: max(stream_state.max_in_flight, in_flight),
+        send_calls: stream_state.send_calls + 1
     }
   end
 
-  defp stream_owner_initial_state do
+  defp complete_sender_shard_stream(state, raw_stream) do
+    update_sender_shard_stream_event(state, raw_stream, :completion_events, fn stream_state ->
+      case pop_sender_shard_pending_send(stream_state.sender) do
+        {:ok, sender} ->
+          %{
+            stream_state
+            | sender: sender,
+              completed: stream_state.completed + 1,
+              in_flight: max(stream_state.in_flight - 1, 0)
+          }
+          |> schedule_sender_shard_stream()
+
+        :empty ->
+          stream_state
+      end
+    end)
+    |> Map.update!(:schedule_rounds, &(&1 + 1))
+  end
+
+  defp cancel_sender_shard_stream(state, raw_stream) do
+    update_sender_shard_stream_event(state, raw_stream, :send_cancelled_events, fn stream_state ->
+      case pop_sender_shard_pending_send(stream_state.sender) do
+        {:ok, sender} ->
+          %{stream_state | sender: sender, in_flight: max(stream_state.in_flight - 1, 0)}
+          |> schedule_sender_shard_stream()
+
+        :empty ->
+          stream_state
+      end
+    end)
+    |> Map.update!(:schedule_rounds, &(&1 + 1))
+  end
+
+  defp update_sender_shard_stream_event(
+         state,
+         raw_stream,
+         counter,
+         fun \\ fn stream_state ->
+           stream_state
+         end
+       ) do
+    case Map.fetch(state.streams, raw_stream) do
+      {:ok, stream_state} ->
+        streams = Map.put(state.streams, raw_stream, fun.(stream_state))
+        %{state | streams: streams} |> increment_sender_shard_counter(counter)
+
+      :error ->
+        %{state | orphan_completion_events: state.orphan_completion_events + 1}
+    end
+  end
+
+  defp increment_sender_shard_counter(state, :payload_events),
+    do: %{state | payload_events: state.payload_events + 1}
+
+  defp increment_sender_shard_counter(state, :completion_events),
+    do: %{state | completion_events: state.completion_events + 1}
+
+  defp increment_sender_shard_counter(state, :send_cancelled_events),
+    do: %{state | send_cancelled_events: state.send_cancelled_events + 1}
+
+  defp increment_sender_shard_counter(state, :ignored_events),
+    do: %{state | ignored_events: state.ignored_events + 1}
+
+  defp pop_sender_shard_pending_send(sender) do
+    case :queue.out(sender.pending_sends) do
+      {{:value, _send}, remaining} -> {:ok, %{sender | pending_sends: remaining}}
+      {:empty, _queue} -> :empty
+    end
+  end
+
+  defp sender_shard_result(state, input) do
+    stream_results = Map.values(state.streams)
+
     %{
-      accepted: 0,
-      completed: 0,
-      in_flight: 0,
-      max_in_flight: 0,
-      send_calls: 0,
-      completion_events: 0,
-      receive_calls: 0,
-      ready_drain_calls: 0,
-      schedule_rounds: 0
+      shard_index: state.shard_index,
+      stream_count: length(stream_results),
+      accepted: sum_field(stream_results, :accepted),
+      completed: sum_field(stream_results, :completed),
+      in_flight: sum_field(stream_results, :in_flight),
+      max_in_flight: max_field(stream_results, :max_in_flight),
+      max_queue_depth: max_field(stream_results, :max_queue_depth),
+      send_calls: sum_field(stream_results, :send_calls),
+      payload_events: state.payload_events,
+      completion_events: state.completion_events,
+      send_cancelled_events: state.send_cancelled_events,
+      orphan_completion_events: state.orphan_completion_events,
+      ignored_events: state.ignored_events,
+      unknown_events: state.unknown_events,
+      receive_calls: state.receive_calls,
+      ready_drain_calls: state.ready_drain_calls,
+      schedule_rounds: state.schedule_rounds,
+      expected: sender_shard_expected(input, state)
     }
   end
+
+  defp sender_shard_completed(state) do
+    state.streams
+    |> Map.values()
+    |> sum_field(:completed)
+  end
+
+  defp sender_shard_expected(input, state), do: map_size(state.streams) * input.payload_count
+
+  defp raw_stream(%Stream{backend: %{data: raw_stream}}), do: raw_stream
 
   defp local_sender_context_owner_summary(snapshot) do
     %{
@@ -1120,26 +1399,38 @@ defmodule MOQXProbe.Bench.StreamClients do
     }
   end
 
-  defp local_sender_stream_owner_summary(
-         worker_results,
+  defp local_sender_flow_sender_summary(
+         implementation,
+         shard_results,
+         configured_shard_count,
          task_spawn_duration_us,
-         task_await_duration_us
+         task_await_duration_us,
+         dispatcher_snapshot
        ) do
     %{
-      implementation: "stream_owner",
-      accepted: sum_field(worker_results, :accepted),
-      completed: sum_field(worker_results, :completed),
-      in_flight: sum_field(worker_results, :in_flight),
-      max_worker_in_flight: max_field(worker_results, :max_in_flight),
-      worker_count: length(worker_results),
+      implementation: implementation,
+      accepted: sum_field(shard_results, :accepted),
+      completed: sum_field(shard_results, :completed),
+      in_flight: sum_field(shard_results, :in_flight),
+      configured_shard_count: configured_shard_count,
+      active_shard_count: length(shard_results),
+      streams_per_shard: count_summary(map_field(shard_results, :stream_count)),
+      max_shard_in_flight: max_field(shard_results, :max_in_flight),
+      max_shard_queue_depth: max_field(shard_results, :max_queue_depth),
       task_spawn_duration_us: task_spawn_duration_us,
       task_await_duration_us: task_await_duration_us,
-      worker_duration_us: count_summary(map_field(worker_results, :duration_us)),
-      send_calls: sum_field(worker_results, :send_calls),
-      completion_events: sum_field(worker_results, :completion_events),
-      receive_calls: count_summary(map_field(worker_results, :receive_calls)),
-      ready_drain_calls: count_summary(map_field(worker_results, :ready_drain_calls)),
-      schedule_rounds: count_summary(map_field(worker_results, :schedule_rounds))
+      shard_duration_us: count_summary(map_field(shard_results, :duration_us)),
+      dispatcher: dispatcher_snapshot,
+      send_calls: sum_field(shard_results, :send_calls),
+      payload_events: sum_field(shard_results, :payload_events),
+      completion_events: sum_field(shard_results, :completion_events),
+      send_cancelled_events: sum_field(shard_results, :send_cancelled_events),
+      orphan_completion_events: sum_field(shard_results, :orphan_completion_events),
+      ignored_events: sum_field(shard_results, :ignored_events),
+      unknown_events: sum_field(shard_results, :unknown_events),
+      receive_calls: count_summary(map_field(shard_results, :receive_calls)),
+      ready_drain_calls: count_summary(map_field(shard_results, :ready_drain_calls)),
+      schedule_rounds: count_summary(map_field(shard_results, :schedule_rounds))
     }
   end
 
@@ -1294,6 +1585,7 @@ defmodule MOQXProbe.Bench.StreamClients do
       payload_count: input.payload_count,
       payload_size: input.payload_size,
       stream_send_window: input.stream_send_window,
+      sender_shard_count: input.sender_shard_count,
       evidence_close_grace_ms: Map.get(input, :evidence_close_grace_ms),
       quicprobe_evidence_url: Map.get(input, :quicprobe_evidence_url),
       quicprobe_evidence_path: Map.get(input, :quicprobe_evidence_path),
@@ -1323,6 +1615,15 @@ defmodule MOQXProbe.Bench.StreamClients do
 
   defp events(%{producer: :flow_generated}, _streams, _payload), do: nil
 
+  defp stream_events(input, streams, payload) do
+    events(input, streams, payload) ||
+      StreamSender.events_for(
+        streams: streams,
+        payload: payload,
+        payload_count: input.payload_count
+      )
+  end
+
   defp payload(input), do: :binary.copy(<<0>>, input.payload_size)
 
   defp completion_list(completions),
@@ -1334,6 +1635,11 @@ defmodule MOQXProbe.Bench.StreamClients do
     after
       0 -> :ok
     end
+  end
+
+  defp default_sender_shard_count(opts) do
+    stream_count = positive_integer(opts, :stream_count, 32)
+    max(min(stream_count, System.schedulers_online()), 1)
   end
 
   defp monotonic_us, do: System.monotonic_time(:microsecond)
@@ -1358,6 +1664,7 @@ defmodule MOQXProbe.Bench.StreamClients do
       --payload-count N            payload writes per stream (default: 1000)
       --payload-size BYTES         payload bytes per write (default: 1180)
       --stream-send-window N       per-stream in-flight send window (default: 16)
+      --sender-shard-count N       sender_shards worker count (default: min(streams, schedulers))
       --max-burst N                max sends emitted by one StreamSink tick (default: 64)
       --max-queue-depth N          Flow-to-sink queue bound (default: 256)
       --min-demand N               Flow min demand (default: max_burst - 1)
@@ -1368,7 +1675,7 @@ defmodule MOQXProbe.Bench.StreamClients do
 
     Matrix:
       --input NAME                 repeatable; flow-generated or flow-prebuilt-list
-      --implementation NAME        repeatable; context_owner or stream_owner
+      --implementation NAME        repeatable; context_owner, stream_owner, or sender_shards
 
     Benchee:
       --benchee-warmup SECONDS     default: 1.0
