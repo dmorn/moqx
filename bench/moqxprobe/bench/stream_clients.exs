@@ -13,11 +13,12 @@ defmodule MOQXProbe.Bench.StreamClients do
   alias MOQXProbe.Benchee.EvidenceCollector
   alias MOQXProbe.Benchee.RunReceipt
   alias MOQXProbe.Benchee.RunMetadata
+  alias MOQXProbe.Bench.StreamImplementations
   alias MOQXProbe.Traffic
   alias MOQXProbe.Traffic.StreamSender
 
   @input_names ["flow-generated", "flow-prebuilt-list"]
-  @implementation_names ["context_owner", "stream_owner", "sender_shards"]
+  @implementation_names StreamImplementations.names()
   @target_names ["fake", "quicprobe"]
   @profile_name "draft14_object_stream"
   @quicprobe_experiment_lease_ttl_ms 30 * 60 * 1000
@@ -1378,8 +1379,9 @@ defmodule MOQXProbe.Bench.StreamClients do
   defp raw_stream(%Stream{backend: %{data: raw_stream}}), do: raw_stream
 
   defp local_sender_context_owner_summary(snapshot) do
-    %{
-      implementation: "context_owner",
+    "context_owner"
+    |> implementation_summary()
+    |> Map.merge(%{
       accepted: snapshot.accepted,
       completed: snapshot.completed,
       errors: snapshot.errors,
@@ -1396,7 +1398,7 @@ defmodule MOQXProbe.Bench.StreamClients do
       tick_lag_ms: count_summary(snapshot.tick_lags_ms),
       tick_due_count: count_summary(snapshot.tick_due_counts),
       tick_send_count: count_summary(snapshot.tick_send_counts)
-    }
+    })
   end
 
   defp local_sender_flow_sender_summary(
@@ -1407,8 +1409,9 @@ defmodule MOQXProbe.Bench.StreamClients do
          task_await_duration_us,
          dispatcher_snapshot
        ) do
-    %{
-      implementation: implementation,
+    implementation
+    |> implementation_summary()
+    |> Map.merge(%{
       accepted: sum_field(shard_results, :accepted),
       completed: sum_field(shard_results, :completed),
       in_flight: sum_field(shard_results, :in_flight),
@@ -1431,7 +1434,12 @@ defmodule MOQXProbe.Bench.StreamClients do
       receive_calls: count_summary(map_field(shard_results, :receive_calls)),
       ready_drain_calls: count_summary(map_field(shard_results, :ready_drain_calls)),
       schedule_rounds: count_summary(map_field(shard_results, :schedule_rounds))
-    }
+    })
+  end
+
+  defp implementation_summary(name) do
+    StreamImplementations.metadata(name)
+    |> Map.put(:implementation, name)
   end
 
   defp timed(fun) when is_function(fun, 0) do
@@ -1675,7 +1683,10 @@ defmodule MOQXProbe.Bench.StreamClients do
 
     Matrix:
       --input NAME                 repeatable; flow-generated or flow-prebuilt-list
-      --implementation NAME        repeatable; context_owner, stream_owner, or sender_shards
+      --implementation NAME        repeatable; #{StreamImplementations.help_names()}
+
+    Stream implementations:
+    #{StreamImplementations.help_details()}
 
     Benchee:
       --benchee-warmup SECONDS     default: 1.0

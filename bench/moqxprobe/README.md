@@ -81,11 +81,23 @@ mix run bench/stream_clients.exs -- \
   --save results/sender-shards.benchee
 ```
 
-Stream sender implementations are Flow-fed so process-model comparisons use
-the same payload input path. `context_owner` uses one GenStage sink and shared
-context event pump, `stream_owner` uses one sender worker per stream, and
-`sender_shards` uses a configurable number of sender workers that each own a
-subset of streams.
+Stream sender implementations are intentionally kept as named benchmark
+artifacts. `moqxprobe` is a small client-architecture lab: new process models
+are added as explicit implementations, compared with Benchee, and kept as
+trace even after one implementation becomes the preferred baseline.
+
+Current stream implementations:
+
+| implementation | status | purpose |
+| --- | --- | --- |
+| `context_owner` | control | One Flow-fed GenStage sink owns all stream queues and completion state; useful as the simple global-queue baseline. |
+| `stream_owner` | historical | One Flow-fed worker per stream; useful for measuring per-stream process ownership overhead. |
+| `sender_shards` | current best | Bounded Flow-fed worker set; each shard owns a subset of streams and `--sender-shard-count` tunes the process-model shape. |
+
+All stream sender implementations consume the same Flow-produced payload path
+so process-model comparisons are apples-to-apples. Local sender summaries and
+delivery-evidence metadata include the implementation label, status,
+architecture, and tested bottleneck so saved suites remain self-describing.
 
 Run against a `quicprobe` target:
 

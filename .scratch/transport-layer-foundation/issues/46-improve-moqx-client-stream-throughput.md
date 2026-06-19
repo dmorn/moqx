@@ -15,6 +15,7 @@ Category: performance
 - `.scratch/transport-layer-foundation/issues/43-build-stream-benchmark-sender-client.md`
 - `.scratch/transport-layer-foundation/issues/45-improve-moqx-client-mixed-stream-control-pressure.md`
 - `.scratch/transport-layer-foundation/issues/47-refactor-transport-conn-stream-ownership.md`
+- `.scratch/transport-layer-foundation/issues/53-add-flow-partitioned-stream-client-implementation.md`
 
 ## What to build
 
@@ -361,3 +362,11 @@ with object publishing.
   the exe.dev `quicprobe` target only as receiver-validity smoke evidence, then
   repeat on a cleaner network path with iperf3 and same-run reference once
   available.
+- 2026-06-19: Refactored `bench/moqxprobe` around an explicit stream
+  implementation registry. `moqxprobe` is now treated as a benchmark-client
+  architecture lab: runnable implementations keep status/architecture/bottleneck
+  metadata, local sender summaries are self-describing, and the current
+  fake/local winner is marked as `sender_shards` rather than implied by prose.
+  Opened #53 for the next experiment, `flow_partitions`, which should test
+  Flow/GenStage-native partition routing before replacing or promoting any
+  current topology.

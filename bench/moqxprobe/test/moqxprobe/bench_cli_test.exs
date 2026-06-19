@@ -6,6 +6,17 @@ defmodule MOQXProbe.BenchCliTest do
 
   alias MOQXProbe.Bench.DatagramClients
   alias MOQXProbe.Bench.StreamClients
+  alias MOQXProbe.Bench.StreamImplementations
+
+  test "stream implementation registry names the benchmark matrix and current best" do
+    assert StreamImplementations.names() == ["context_owner", "stream_owner", "sender_shards"]
+    assert StreamImplementations.current_best().name == "sender_shards"
+
+    assert %{
+             implementation_status: "current_best",
+             implementation_label: "Bounded sender shards"
+           } = StreamImplementations.metadata("sender_shards")
+  end
 
   test "stream client CLI keeps repeated matrix and preflight flags" do
     options =
