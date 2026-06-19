@@ -226,3 +226,11 @@ performance remains future work.
   lease token plus target-local sequence. The earlier warning above describes
   the first non-delivery-aware stream smoke only, not the current benchmark
   contract.
+- 2026-06-18 follow-up: Exercised the simplified loop end to end against
+  `moqx-quicprobe-fra.exe.xyz` with current `quicprobe` artifact `f5a7678`.
+  Verified service health, evidence API, exclusive lease release, iperf3
+  sidecars, delivery-aware stream evidence, and delivery-aware DATAGRAM
+  evidence. The loop found and fixed two benchmark-tooling issues: documented
+  repeatable CLI flags now use `OptionParser`'s `:keep` switch type, and
+  `RunMetadata.iperf3_summaries/1` now classifies UDP iperf3 JSON by protocol
+  before falling back to `sum_received`.

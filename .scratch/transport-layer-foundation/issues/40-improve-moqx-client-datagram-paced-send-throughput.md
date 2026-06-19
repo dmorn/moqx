@@ -74,6 +74,18 @@ Keep the async `MOQX.Transport.send_datagram/3` model and the extracted paced
 benchmark sender as-is. The x86-control lab remains intentionally alive by
 operator instruction; teardown is deferred until the operator asks for it.
 
+Follow-up on 2026-06-18, after the benchmark loop moved to local Benchee plus
+persistent `quicprobe`: a path-safe delivery-aware DATAGRAM smoke passed
+against `moqx-quicprobe-fra.exe.xyz` (`100.124.193.59`, artifact `f5a7678`).
+The Tailscale path is constrained, so this does not reopen #40 or replace the
+old 32k pps closure evidence. It validates the new receiver-evidence loop:
+`draft14_object_datagram`, `2500` DATAGRAMs at `2500 pps`, `1180` bytes each,
+`paced_sink` average about `1.09 s`, and quicprobe receiver evidence `3/3`
+valid with exactly `2500/2500` DATAGRAMs and `2,950,000` bytes delivered per
+invocation. The same path's iperf3 baseline was UDP `25 Mbps` with `0%` loss
+and UDP `100 Mbps` with about `63.28%` loss, so it is useful for correctness
+and harness validation, not high-throughput DATAGRAM claims.
+
 ## Progress
 
 - 2026-05-28: Started the first local #40 slice. Added MOQX-client paced

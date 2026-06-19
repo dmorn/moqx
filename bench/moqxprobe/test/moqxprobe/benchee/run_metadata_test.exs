@@ -50,6 +50,47 @@ defmodule MOQXProbe.Benchee.RunMetadataTest do
            ] = RunMetadata.iperf3_summaries([path])
   end
 
+  test "summarizes UDP iperf3 JSON with receiver-side sum_received" do
+    path =
+      write_json!(%{
+        start: %{test_start: %{protocol: "UDP"}},
+        end: %{
+          sum: %{
+            bits_per_second: 25_000_000.0,
+            bytes: 15_625_000,
+            jitter_ms: 0.5,
+            lost_percent: 0.0
+          },
+          sum_received: %{
+            bits_per_second: 24_000_000.0,
+            bytes: 15_000_000,
+            jitter_ms: 1.0,
+            lost_percent: 0.2,
+            lost_packets: 10,
+            packets: 5_000
+          },
+          sum_sent: %{
+            bits_per_second: 25_000_000.0,
+            bytes: 15_625_000
+          }
+        }
+      })
+
+    assert [
+             %{
+               path: ^path,
+               status: :ok,
+               protocol: "udp",
+               bits_per_second: 24_000_000.0,
+               bytes: 15_000_000,
+               jitter_ms: 1.0,
+               lost_percent: 0.2,
+               lost_packets: 10,
+               packets: 5_000
+             }
+           ] = RunMetadata.iperf3_summaries([path])
+  end
+
   test "records unreadable iperf3 summary errors as metadata" do
     path = Path.join(System.tmp_dir!(), "missing-#{System.unique_integer([:positive])}.json")
 

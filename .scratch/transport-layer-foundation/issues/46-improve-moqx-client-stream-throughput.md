@@ -218,3 +218,30 @@ with object publishing.
   BEAM-side stream sender remains paced around a ~6s active send span despite
   cheap send calls and full server ingress, rather than treating per-stream
   ownership alone as the fix.
+- 2026-06-18: Established the first delivery-aware `moqxprobe` remote baseline
+  on the simplified exe.dev loop. Target was `moqx-quicprobe-fra.exe.xyz`
+  (`100.124.193.59`, x86_64, `quicprobe` artifact `f5a7678`) over Tailscale
+  from local `silver`. Path baseline is constrained and not suitable for
+  absolute stream-performance claims: TCP iperf3 receive was about `11.82 Mbps`
+  with `224` retransmits; UDP at `25 Mbps` was lossless; UDP at `100 Mbps`
+  lost about `63.28%`.
+- 2026-06-18: The clean delivery-aware stream matrix used
+  `draft14_object_stream`, `32` unidirectional streams, `100 x 1180-byte`
+  writes per stream, `stream_send_window=16`, and `--evidence-close-grace-ms
+  1000`. Benchee timing was similar for both current process architectures:
+  `context_owner` averaged about `1.17 s`, `stream_owner` about `1.22 s`.
+  Receiver evidence was `6/6` valid, with all `32` streams completed and all
+  `3,776,000` expected bytes received on every invocation.
+- 2026-06-18: A preceding matrix with the default `250 ms` evidence close grace
+  produced invalid receiver evidence for `context_owner` despite local
+  `3200/3200` send completions: one record completed `31/32` streams with one
+  receive error, another `27/32` with five receive errors. Rerunning
+  `context_owner` with `1000 ms` close grace made it `3/3` valid. Treat this as
+  lifecycle evidence: send completions are not peer-delivery evidence, and
+  delivery-aware stream runs need a target-specific unmeasured drain/finalize
+  window before reading receiver evidence.
+- 2026-06-18: This exe.dev baseline is now good enough to use as a fast
+  correctness/evidence loop, but not as the final #46 throughput closure lane.
+  The next optimization slice should use fake/local process-model runs for
+  fast iteration and this remote target for receiver-validity checks; final
+  throughput claims still need a cleaner path or same-run reference comparison.

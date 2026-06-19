@@ -55,6 +55,19 @@ Use `--initial-packet-size 1200` for quicprobe over Tailscale or another path
 with a 1280 MTU. quic-go's default 1280-byte Initial becomes too large once
 IPv4/UDP headers are added, and normal UDP sockets set DF. The matching client
 commands below must also include `--initial-packet-size 1200`.
+For high-throughput QUIC runs, also verify Linux UDP socket caps. If
+`quicprobe` or `quicprobe client` prints the quic-go UDP buffer warning, follow
+quic-go's documented Linux guidance and raise both caps:
+
+```bash
+ssh <vm>.exe.xyz 'set -euo pipefail
+printf "%s\n" "net.core.rmem_max=7500000" "net.core.wmem_max=7500000" | sudo tee /etc/sysctl.d/99-moqx-quicprobe-udp-buffers.conf >/dev/null
+sudo sysctl --system
+sysctl net.core.rmem_max net.core.wmem_max'
+```
+
+Restart `moqx-quicprobe.service` after changing the caps and rerun the
+VM-local smoke to confirm the warning is gone.
 
 If the tailnet IP or DNS names change, rotate the cert so its SANs match the
 current endpoint used by clients. Keep `ca.pem` available for clients.

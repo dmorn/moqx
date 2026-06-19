@@ -1,4 +1,4 @@
-unless Code.ensure_loaded?(Benchee) do
+unless Mix.env() == :test or Code.ensure_loaded?(Benchee) do
   Mix.raise("Benchee is not available. Run `mix deps.get` in bench/moqxprobe first.")
 end
 
@@ -47,7 +47,7 @@ defmodule MOQXProbe.Bench.DatagramClients do
     datagram_count: :integer,
     datagram_size: :integer,
     datagram_rate: :integer,
-    datagram_send_flag: :string,
+    datagram_send_flag: :keep,
     max_burst: :integer,
     max_queue_depth: :integer,
     min_demand: :integer,
@@ -55,8 +55,8 @@ defmodule MOQXProbe.Bench.DatagramClients do
     flow_stages: :integer,
     max_lag_ms: :integer,
     timeout_ms: :integer,
-    input: :string,
-    implementation: :string,
+    input: :keep,
+    implementation: :keep,
     benchee_warmup: :float,
     benchee_time: :float,
     benchee_memory_time: :float,
@@ -70,7 +70,7 @@ defmodule MOQXProbe.Bench.DatagramClients do
     quicprobe_evidence_port: :integer,
     quicprobe_evidence_path: :string,
     git_sha: :string,
-    iperf_preflight_summary: :string,
+    iperf_preflight_summary: :keep,
     tailscale_path_mode: :string,
     server_stats_path: :string,
     save: :string
@@ -1056,20 +1056,23 @@ defmodule MOQXProbe.Bench.DatagramClients do
       mix run bench/datagram_clients.exs -- --datagram-count 10000 --datagram-rate 30000 --benchee-time 3
     """
   end
+
+  def main(argv \\ System.argv()) do
+    options =
+      argv
+      |> parse_cli!()
+      |> prepare_run!()
+
+    try do
+      apply(Benchee, :run, [jobs(options), benchee_config(options)])
+
+      write_evidence!(options)
+    after
+      cleanup_run(options)
+    end
+  end
 end
 
-options =
-  System.argv()
-  |> MOQXProbe.Bench.DatagramClients.parse_cli!()
-  |> MOQXProbe.Bench.DatagramClients.prepare_run!()
-
-try do
-  Benchee.run(
-    MOQXProbe.Bench.DatagramClients.jobs(options),
-    MOQXProbe.Bench.DatagramClients.benchee_config(options)
-  )
-
-  MOQXProbe.Bench.DatagramClients.write_evidence!(options)
-after
-  MOQXProbe.Bench.DatagramClients.cleanup_run(options)
+unless Mix.env() == :test do
+  MOQXProbe.Bench.DatagramClients.main()
 end

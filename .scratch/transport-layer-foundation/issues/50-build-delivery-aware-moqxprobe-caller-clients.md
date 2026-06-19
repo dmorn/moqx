@@ -258,6 +258,69 @@ The script supports the same target/evidence lifecycle as the stream driver:
 - quicprobe target captures a run-sequence cursor before the measured function
   and scrapes receiver evidence from the always-on HTTP API after the measured
   function returns;
+
+### 2026-06-18 first exe.dev delivery-aware baseline
+
+Ran the first current-loop remote baseline against the persistent exe.dev
+target `moqx-quicprobe-fra.exe.xyz` (`100.124.193.59`, `fra`, x86_64) from the
+local `silver` workstation.
+
+Environment and target setup:
+
+- deployed current `bench/quicprobe` artifact `f5a7678` to
+  `/opt/moqx-bench/quicprobe/current`;
+- verified `moqx-iperf3.service` on `55202`, `moqx-quicprobe.service` on UDP
+  `55433`, and the evidence/lease API on `55434`;
+- raised VM Linux UDP socket caps to `net.core.rmem_max=7500000` and
+  `net.core.wmem_max=7500000`, which removed quic-go's UDP buffer warning for
+  local smokes;
+- verified VM-local and local-to-remote `quicprobe` stream echo;
+- verified the experiment lease was released after every `moqxprobe` suite.
+
+Path baseline:
+
+- Tailscale initially used DERP `nue`, then punched through to direct
+  `67.213.121.207:32435`; treat this as a constrained workstation-to-VM path,
+  not a clean datacenter benchmark lane.
+- clean `iperf3` TCP receive was about `11.82 Mbps` with `224` retransmits;
+- UDP at `25 Mbps` delivered with `0%` loss and about `0.99 ms` jitter;
+- UDP at `100 Mbps` received about `31.53 Mbps` with about `63.28%` loss.
+
+Delivery-aware `moqxprobe` results:
+
+- stream object profile `draft14_object_stream`, `32` unidirectional streams,
+  `100` writes per stream, `1180` bytes per write, `stream_send_window=16`;
+- the final clean matrix used `--evidence-close-grace-ms 1000`, because the
+  earlier `250 ms` grace could close before `context_owner` receiver drain
+  completed on this path;
+- final stream matrix: `context_owner` averaged about `1.17 s`,
+  `stream_owner` averaged about `1.22 s`, and receiver evidence was `6/6`
+  valid with all `3,776,000` expected bytes delivered per invocation;
+- DATAGRAM object profile `draft14_object_datagram`, `2500` datagrams at
+  `2500 pps`, `1180` bytes each: `paced_sink` averaged about `1.09 s` and
+  receiver evidence was `3/3` valid with exactly `2500/2500` DATAGRAMs and
+  `2,950,000` bytes delivered per invocation.
+
+Artifacts are under ignored
+`bench/moqxprobe/results/remote-baseline-20260618T1908Z/`. The clean stream
+artifacts are `stream-matrix-grace1000.*`; the clean DATAGRAM artifacts are
+`datagram-2500pps-v2.*`.
+
+Important interpretation: Benchee timing remains the sender-side measured
+value. Receiver evidence validates delivery after the timed invocation. Any
+receiver-side duration that includes a close/drain grace must not be used as
+send goodput.
+
+Tooling fixes found during this baseline:
+
+- `OptionParser` collapses repeated `:string` switches, so `--input`,
+  `--implementation`, `--datagram-send-flag`, and
+  `--iperf-preflight-summary` now use `:keep`;
+- the benchmark scripts now expose `main/1` and skip execution when loaded
+  under `MIX_ENV=test`, allowing parse-level tests;
+- `RunMetadata.iperf3_summaries/1` now classifies modern UDP iperf3 JSON by
+  `start.test_start.protocol` before falling back to `sum_received`, because
+  UDP JSON may also include `sum_received` and `sum_sent`.
 - the sidecar format is still `moqxprobe-benchee-evidence-v1`;
 - evidence collection remains outside timed Benchee measurements.
 

@@ -1,4 +1,4 @@
-unless Code.ensure_loaded?(Benchee) do
+unless Mix.env() == :test or Code.ensure_loaded?(Benchee) do
   Mix.raise("Benchee is not available. Run `mix deps.get` in bench/moqxprobe first.")
 end
 
@@ -55,8 +55,8 @@ defmodule MOQXProbe.Bench.StreamClients do
     idle_retries: :integer,
     event_batch_size: :integer,
     timeout_ms: :integer,
-    input: :string,
-    implementation: :string,
+    input: :keep,
+    implementation: :keep,
     benchee_warmup: :float,
     benchee_time: :float,
     benchee_memory_time: :float,
@@ -70,7 +70,7 @@ defmodule MOQXProbe.Bench.StreamClients do
     quicprobe_evidence_port: :integer,
     quicprobe_evidence_path: :string,
     git_sha: :string,
-    iperf_preflight_summary: :string,
+    iperf_preflight_summary: :keep,
     tailscale_path_mode: :string,
     server_stats_path: :string,
     save: :string
@@ -1246,20 +1246,23 @@ defmodule MOQXProbe.Bench.StreamClients do
       mix run bench/stream_clients.exs -- --stream-count 32 --payload-count 1000 --stream-send-window 16 --benchee-time 3
     """
   end
+
+  def main(argv \\ System.argv()) do
+    options =
+      argv
+      |> parse_cli!()
+      |> prepare_run!()
+
+    try do
+      apply(Benchee, :run, [jobs(options), benchee_config(options)])
+
+      write_evidence!(options)
+    after
+      cleanup_run(options)
+    end
+  end
 end
 
-options =
-  System.argv()
-  |> MOQXProbe.Bench.StreamClients.parse_cli!()
-  |> MOQXProbe.Bench.StreamClients.prepare_run!()
-
-try do
-  Benchee.run(
-    MOQXProbe.Bench.StreamClients.jobs(options),
-    MOQXProbe.Bench.StreamClients.benchee_config(options)
-  )
-
-  MOQXProbe.Bench.StreamClients.write_evidence!(options)
-after
-  MOQXProbe.Bench.StreamClients.cleanup_run(options)
+unless Mix.env() == :test do
+  MOQXProbe.Bench.StreamClients.main()
 end

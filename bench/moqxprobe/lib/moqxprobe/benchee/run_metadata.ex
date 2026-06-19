@@ -41,12 +41,23 @@ defmodule MOQXProbe.Benchee.RunMetadata do
 
   defp compact_iperf3(decoded, path) when is_map(decoded) do
     end_summary = Map.get(decoded, "end", %{})
+    protocol = decoded |> get_in(["start", "test_start", "protocol"]) |> normalize_protocol()
+    sum = Map.get(end_summary, "sum")
 
     cond do
+      protocol == "udp" ->
+        udp_summary(path, end_summary)
+
+      protocol == "tcp" and is_map(Map.get(end_summary, "sum_received")) ->
+        tcp_summary(path, end_summary)
+
+      udp_summary?(sum) ->
+        udp_summary(path, end_summary)
+
       is_map(Map.get(end_summary, "sum_received")) ->
         tcp_summary(path, end_summary)
 
-      is_map(Map.get(end_summary, "sum")) ->
+      is_map(sum) ->
         udp_summary(path, end_summary)
 
       true ->
@@ -57,6 +68,15 @@ defmodule MOQXProbe.Benchee.RunMetadata do
   defp compact_iperf3(_decoded, path) do
     %{path: path, status: :error, error: "iperf3 JSON root is not an object"}
   end
+
+  defp normalize_protocol(protocol) when is_binary(protocol), do: protocol |> String.downcase()
+  defp normalize_protocol(_protocol), do: nil
+
+  defp udp_summary?(summary) when is_map(summary) do
+    Map.has_key?(summary, "jitter_ms") or Map.has_key?(summary, "lost_percent")
+  end
+
+  defp udp_summary?(_summary), do: false
 
   defp tcp_summary(path, end_summary) do
     sum_received = Map.fetch!(end_summary, "sum_received")
@@ -73,7 +93,7 @@ defmodule MOQXProbe.Benchee.RunMetadata do
   end
 
   defp udp_summary(path, end_summary) do
-    sum = Map.fetch!(end_summary, "sum")
+    sum = Map.get(end_summary, "sum_received") || Map.fetch!(end_summary, "sum")
 
     %{
       path: path,
@@ -82,7 +102,9 @@ defmodule MOQXProbe.Benchee.RunMetadata do
       bits_per_second: Map.get(sum, "bits_per_second"),
       bytes: Map.get(sum, "bytes"),
       jitter_ms: Map.get(sum, "jitter_ms"),
-      lost_percent: Map.get(sum, "lost_percent")
+      lost_percent: Map.get(sum, "lost_percent"),
+      lost_packets: Map.get(sum, "lost_packets"),
+      packets: Map.get(sum, "packets")
     }
   end
 end
