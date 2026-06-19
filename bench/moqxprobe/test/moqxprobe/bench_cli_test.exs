@@ -35,6 +35,46 @@ defmodule MOQXProbe.BenchCliTest do
            ]
   end
 
+  test "context-owned stream client reports compact local sender diagnostics" do
+    input = stream_client_input("context_owner")
+
+    assert %{
+             implementation: "context_owner",
+             accepted: 6,
+             completed: 6,
+             errors: 0,
+             stop_reason: "complete",
+             pacer: %{tick_count: tick_count},
+             bursts: %{count: burst_count},
+             tick_send_count: %{max: max_tick_send_count}
+           } = StreamClients.run_context_owner(input)
+
+    assert tick_count > 0
+    assert burst_count > 0
+    assert max_tick_send_count > 0
+  end
+
+  test "stream-owned stream client reports worker and receive-loop diagnostics" do
+    input = stream_client_input("stream_owner")
+
+    assert %{
+             implementation: "stream_owner",
+             accepted: 6,
+             completed: 6,
+             in_flight: 0,
+             max_worker_in_flight: 1,
+             worker_count: 2,
+             send_calls: 6,
+             completion_events: 6,
+             worker_duration_us: %{count: 2},
+             receive_calls: %{count: 2, total: receive_call_count},
+             schedule_rounds: %{count: 2, total: schedule_round_count}
+           } = StreamClients.run_stream_owner(input)
+
+    assert receive_call_count > 0
+    assert schedule_round_count > 0
+  end
+
   test "datagram client CLI keeps repeated send flags and preflight flags" do
     options =
       DatagramClients.parse_cli!([
@@ -56,5 +96,36 @@ defmodule MOQXProbe.BenchCliTest do
              "/tmp/tcp.json",
              "/tmp/udp.json"
            ]
+  end
+
+  defp stream_client_input(implementation) do
+    options =
+      StreamClients.parse_cli!([
+        "--input",
+        "flow-generated",
+        "--implementation",
+        implementation,
+        "--stream-count",
+        "2",
+        "--payload-count",
+        "3",
+        "--payload-size",
+        "8",
+        "--stream-send-window",
+        "1",
+        "--event-batch-size",
+        "8",
+        "--max-burst",
+        "4",
+        "--timeout-ms",
+        "1000",
+        "--git-sha",
+        "test-sha"
+      ])
+
+    options
+    |> StreamClients.inputs()
+    |> Map.fetch!("flow-generated")
+    |> Map.put(:implementation, implementation)
   end
 end

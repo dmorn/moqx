@@ -245,3 +245,83 @@ with object publishing.
   The next optimization slice should use fake/local process-model runs for
   fast iteration and this remote target for receiver-validity checks; final
   throughput claims still need a cleaner path or same-run reference comparison.
+- 2026-06-19: Reran a fresh simplified-loop baseline against the same
+  persistent exe.dev target before starting optimization. Target remained
+  `moqx-quicprobe-fra.exe.xyz` / `100.124.193.59`, x86_64, quicprobe artifact
+  `f5a7678`, with `moqx-iperf3`, `moqx-quicprobe`, evidence API, and exclusive
+  experiment lease all healthy. Tailscale started on DERP `nue` and later
+  punched through direct, but the path was still noisy and constrained. TCP
+  iperf3 receive samples were `13.82 Mbps`, `16.99 Mbps`, and `7.68 Mbps`,
+  with `846`, `1261`, and `3070` retransmits respectively. UDP was clean only
+  at the lowest offered rate: `10 Mbps` delivered `9.91 Mbps` with `0%` loss,
+  while `25 Mbps` delivered `18.06 Mbps` with `22.7%` loss, `50 Mbps`
+  delivered `18.18 Mbps` with `61.1%` loss, and `100 Mbps` delivered
+  `18.07 Mbps` with `80.8%` loss.
+- 2026-06-19: Same-shape `quicprobe` reference for the current object-stream
+  profile (`stream_pressure`, unidirectional, `32` streams, `100 x 1180-byte`
+  writes) averaged only `8.92 Mbps` across three samples, with a `7.15 Mbps`
+  minimum and `12.15 Mbps` maximum. The current delivery-aware `moqxprobe`
+  stream matrix on the same path and shape was `6/6` receiver-valid:
+  `context_owner` reached about `18.09 Mbps` sender goodput, `stream_owner`
+  reached about `17.34 Mbps`, every invocation delivered all `3,776,000`
+  expected bytes, and receiver stream errors were `0`. The experiment lease was
+  available after the run. Artifacts are under ignored
+  `bench/moqxprobe/results/remote-baseline-20260619T0736Z/`.
+- 2026-06-19: Interpretation: this path is currently a receiver-validity and
+  workflow check, not an optimization lane. MOQX is already at or above the
+  measured same-path TCP and `quicprobe` reference baselines, so further remote
+  runs here cannot expose stream-client improvements reliably. The next #46
+  slice should move to fake/local process-model measurements and use the
+  exe.dev target only as a post-change delivery-validity check until a cleaner
+  path is available.
+- 2026-06-19: The small but repeatable-looking `context_owner > stream_owner`
+  result is counter-intuitive and should be treated as the first fake/local
+  hypothesis, not as proof that stream ownership is wrong. Plausible causes to
+  split apart locally: per-stream worker/process overhead dominates at this
+  small `32 x 100` workload; the stream-owner implementation serializes on the
+  same event pump despite extra processes; completion credits are still
+  delivered or drained through a global chokepoint; process startup/linking and
+  message fan-out hide any per-stream parallelism; or the stream-owner path is
+  simply implemented incorrectly. The local/fake benchmark should make those
+  costs visible before changing transport APIs.
+- 2026-06-19: Added compact fake/local sender diagnostics to the
+  `stream_clients.exs` receipt metadata so the process-model loop can explain
+  benchmark-client costs without changing transport behavior. `context_owner`
+  now records sink/pacer summaries, queue/window counters, tick/burst summaries,
+  and final completion state. `stream_owner` now records task spawn/await time,
+  worker duration summaries, per-worker receive-loop counts, schedule rounds,
+  send calls, completion events, and max per-worker in-flight sends. Local tests
+  assert both implementations complete the same fake stream workload and emit
+  those diagnostics.
+- 2026-06-19: Fake/local matrix falsified the strongest suspicion that
+  `stream_owner` is simply broken. With `32 x 100 x 1180`, window `16`, and
+  default `max_burst=64`, `context_owner` reached `45.31 ips` in the longer
+  baseline and `44.45 ips` in the diagnostic rerun, while `stream_owner` was
+  near parity in the baseline (`44.12 ips`) but slower in the diagnostic rerun
+  (`36.54 ips`) with higher tail variance. With `32 x 1000 x 1180`, both stayed
+  near parity (`4.33 ips` vs `4.30 ips`). With `128 x 100 x 1180`,
+  `stream_owner` was slightly ahead (`10.26 ips` vs `10.02 ips`). With
+  `128 x 1000 x 1180`, `stream_owner` clearly won in both runs (`1.02-1.03
+  ips`) while `context_owner` stayed around `0.90-0.91 ips`. All fake receiver
+  evidence was valid.
+- 2026-06-19: Diagnostics explain the crossover as benchmark-client topology,
+  not QUIC/NIF behavior. At `32 x 100`, `context_owner` avoided per-stream task
+  startup and completed the full `3,200` sends through about `57` sink ticks,
+  while `stream_owner` used `32` worker tasks and averaged about `26.5 ms` in
+  task await time. At `128 x 1000`, the `context_owner` global sink emitted the
+  `128,000` sends through about `2,124` ticks with `64`-send bursts and was
+  stream-window-limited almost every tick, while `stream_owner` spread the work
+  across `128` workers and completed in about `0.95-0.98 s`. Raising
+  `context_owner` to `max_burst=512` reduced tick count to about `374`, but
+  made total time worse (`2.34 s`) and produced large tick lag, which points at
+  queue scanning / large-burst single-process work rather than a simple burst
+  starvation problem.
+- 2026-06-19: Next optimization decision: do not change the functional
+  transport API from this evidence. The fake target proves both ownership
+  topologies can drive correct stream sends, and the remaining gap is in the
+  benchmark client architecture: one global sink pays queue/window scanning and
+  tick/burst costs at high stream counts, while one task per stream pays worker
+  startup/await and receive-loop overhead at small shapes. The next slice should
+  keep testing against the fake target and optimize the stream-client process
+  model directly, then use the exe.dev quicprobe only as a delivery-validity
+  smoke check.

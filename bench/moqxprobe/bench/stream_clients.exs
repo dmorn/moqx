@@ -338,19 +338,23 @@ defmodule MOQXProbe.Bench.StreamClients do
 
     result =
       try do
-        streams
-        |> Enum.map(fn stream_state ->
-          Task.async(fn ->
-            run_stream_owner_worker(stream_state.stream, payload, input, deadline_us)
+        {task_spawn_duration_us, tasks} =
+          timed(fn ->
+            Enum.map(streams, fn stream_state ->
+              Task.async(fn ->
+                run_stream_owner_worker(stream_state.stream, payload, input, deadline_us)
+              end)
+            end)
           end)
-        end)
-        |> Task.await_many(input.timeout_ms + 1_000)
-        |> Enum.reduce(%{accepted: 0, completed: 0}, fn result, acc ->
-          %{
-            accepted: acc.accepted + result.accepted,
-            completed: acc.completed + result.completed
-          }
-        end)
+
+        {task_await_duration_us, worker_results} =
+          timed(fn -> Task.await_many(tasks, input.timeout_ms + 1_000) end)
+
+        local_sender_stream_owner_summary(
+          worker_results,
+          task_spawn_duration_us,
+          task_await_duration_us
+        )
       rescue
         exception ->
           if evidence_enabled?(input), do: cleanup.()
@@ -917,7 +921,7 @@ defmodule MOQXProbe.Bench.StreamClients do
 
     cond do
       snapshot.completed >= count ->
-        %{accepted: snapshot.accepted, completed: snapshot.completed}
+        local_sender_context_owner_summary(snapshot)
 
       monotonic_us() >= deadline_us ->
         raise "context_owner benchmark timed out with #{snapshot.completed}/#{count} completions"
@@ -967,17 +971,19 @@ defmodule MOQXProbe.Bench.StreamClients do
   end
 
   defp run_stream_owner_worker(stream, payload, input, deadline_us) do
+    started_at_us = monotonic_us()
     {:ok, sender} = Stream.sender(stream)
 
     {sender, state} =
       schedule_stream_owner_window(
         sender,
-        %{accepted: 0, completed: 0, in_flight: 0},
+        stream_owner_initial_state(),
         payload,
         input
       )
 
-    drive_stream_owner(state, sender, payload, input, deadline_us)
+    state = drive_stream_owner(state, sender, payload, input, deadline_us)
+    Map.put(state, :duration_us, monotonic_us() - started_at_us)
   end
 
   defp drive_stream_owner(state, _sender, _payload, input, _deadline_us)
@@ -997,13 +1003,24 @@ defmodule MOQXProbe.Bench.StreamClients do
   end
 
   defp schedule_stream_owner_window(sender, state, payload, input) do
+    state = %{state | schedule_rounds: state.schedule_rounds + 1}
+    schedule_stream_owner_window_payloads(sender, state, payload, input)
+  end
+
+  defp schedule_stream_owner_window_payloads(sender, state, payload, input) do
     if state.accepted < input.payload_count and state.in_flight < input.stream_send_window do
       finish? = state.accepted + 1 == input.payload_count
       {:ok, _send, sender} = Stream.Sender.send(sender, payload, finish: finish?)
 
-      schedule_stream_owner_window(
+      schedule_stream_owner_window_payloads(
         sender,
-        %{state | accepted: state.accepted + 1, in_flight: state.in_flight + 1},
+        %{
+          state
+          | accepted: state.accepted + 1,
+            in_flight: state.in_flight + 1,
+            max_in_flight: max(state.max_in_flight, state.in_flight + 1),
+            send_calls: state.send_calls + 1
+        },
         payload,
         input
       )
@@ -1014,6 +1031,7 @@ defmodule MOQXProbe.Bench.StreamClients do
 
   defp receive_stream_owner_batch(sender, state, input, deadline_us) do
     timeout_ms = max(div(deadline_us - monotonic_us(), 1_000), 0)
+    state = %{state | receive_calls: state.receive_calls + 1}
 
     case Stream.Sender.receive_event(sender, timeout_ms) do
       {:ok, {:stream_event, _stream, :send_completed, _metadata}, sender} ->
@@ -1037,6 +1055,8 @@ defmodule MOQXProbe.Bench.StreamClients do
   defp drain_ready_stream_owner(sender, state, remaining) when remaining <= 0, do: {sender, state}
 
   defp drain_ready_stream_owner(sender, state, remaining) do
+    state = %{state | ready_drain_calls: state.ready_drain_calls + 1}
+
     case Stream.Sender.receive_event(sender, 0) do
       {:ok, {:stream_event, _stream, :send_completed, _metadata}, sender} ->
         drain_ready_stream_owner(sender, complete_stream_owner(state), remaining - 1)
@@ -1056,8 +1076,141 @@ defmodule MOQXProbe.Bench.StreamClients do
   end
 
   defp complete_stream_owner(state) do
-    %{state | completed: state.completed + 1, in_flight: max(state.in_flight - 1, 0)}
+    %{
+      state
+      | completed: state.completed + 1,
+        in_flight: max(state.in_flight - 1, 0),
+        completion_events: state.completion_events + 1
+    }
   end
+
+  defp stream_owner_initial_state do
+    %{
+      accepted: 0,
+      completed: 0,
+      in_flight: 0,
+      max_in_flight: 0,
+      send_calls: 0,
+      completion_events: 0,
+      receive_calls: 0,
+      ready_drain_calls: 0,
+      schedule_rounds: 0
+    }
+  end
+
+  defp local_sender_context_owner_summary(snapshot) do
+    %{
+      implementation: "context_owner",
+      accepted: snapshot.accepted,
+      completed: snapshot.completed,
+      errors: snapshot.errors,
+      in_flight: snapshot.in_flight,
+      queue_depth: snapshot.queue_depth,
+      outstanding_demand: snapshot.outstanding_demand,
+      max_queue_depth: snapshot.max_queue_depth,
+      stream_send_window: snapshot.stream_send_window,
+      stop_reason: encode_atom(snapshot.stop_reason),
+      stream_window_limited_tick_count: snapshot.stream_window_limited_tick_count,
+      pacer: pacer_summary(snapshot.pacer),
+      bursts: count_summary(snapshot.burst_counts),
+      burst_duration_us: count_summary(snapshot.burst_durations_us),
+      tick_lag_ms: count_summary(snapshot.tick_lags_ms),
+      tick_due_count: count_summary(snapshot.tick_due_counts),
+      tick_send_count: count_summary(snapshot.tick_send_counts)
+    }
+  end
+
+  defp local_sender_stream_owner_summary(
+         worker_results,
+         task_spawn_duration_us,
+         task_await_duration_us
+       ) do
+    %{
+      implementation: "stream_owner",
+      accepted: sum_field(worker_results, :accepted),
+      completed: sum_field(worker_results, :completed),
+      in_flight: sum_field(worker_results, :in_flight),
+      max_worker_in_flight: max_field(worker_results, :max_in_flight),
+      worker_count: length(worker_results),
+      task_spawn_duration_us: task_spawn_duration_us,
+      task_await_duration_us: task_await_duration_us,
+      worker_duration_us: count_summary(map_field(worker_results, :duration_us)),
+      send_calls: sum_field(worker_results, :send_calls),
+      completion_events: sum_field(worker_results, :completion_events),
+      receive_calls: count_summary(map_field(worker_results, :receive_calls)),
+      ready_drain_calls: count_summary(map_field(worker_results, :ready_drain_calls)),
+      schedule_rounds: count_summary(map_field(worker_results, :schedule_rounds))
+    }
+  end
+
+  defp timed(fun) when is_function(fun, 0) do
+    started_at_us = monotonic_us()
+    result = fun.()
+    {monotonic_us() - started_at_us, result}
+  end
+
+  defp pacer_summary(pacer) do
+    %{
+      count: pacer.count,
+      emitted_count: pacer.emitted_count,
+      rate_per_second: pacer.rate_per_second,
+      tick_ms: pacer.tick_ms,
+      max_burst: pacer.max_burst,
+      tick_count: pacer.tick_count,
+      capped_tick_count: pacer.capped_tick_count,
+      empty_tick_count: pacer.empty_tick_count,
+      tool_limited_tick_count: pacer.tool_limited_tick_count
+    }
+  end
+
+  defp count_summary(values) do
+    values = Enum.filter(values, &is_number/1)
+    count = length(values)
+
+    %{
+      count: count,
+      min: min_value(values),
+      avg: average_value(values, count),
+      max: max_value(values),
+      p95: percentile_value(values, 0.95),
+      total: Enum.sum(values)
+    }
+  end
+
+  defp min_value([]), do: nil
+  defp min_value(values), do: Enum.min(values)
+
+  defp max_value([]), do: nil
+  defp max_value(values), do: Enum.max(values)
+
+  defp average_value(_values, 0), do: nil
+  defp average_value(values, count), do: Enum.sum(values) / count
+
+  defp percentile_value([], _percentile), do: nil
+
+  defp percentile_value(values, percentile) do
+    sorted = Enum.sort(values)
+    index = ceil(length(sorted) * percentile) - 1
+    Enum.at(sorted, max(index, 0))
+  end
+
+  defp sum_field(values, field) do
+    values
+    |> map_field(field)
+    |> Enum.sum()
+  end
+
+  defp max_field(values, field) do
+    values
+    |> map_field(field)
+    |> max_value()
+  end
+
+  defp map_field(values, field), do: Enum.map(values, &Map.fetch!(&1, field))
+
+  defp encode_atom(nil), do: nil
+  defp encode_atom(atom) when is_atom(atom), do: Atom.to_string(atom)
+  defp encode_atom(value), do: value
 
   defp maybe_run_receipt(%{evidence_enabled?: true} = input, result, started_at, cleanup) do
     receipt =
