@@ -26,6 +26,34 @@ defmodule MOQXProbe.Traffic do
     Flow.into_stages(flow, [{sink, subscription_opts}])
   end
 
+  def start_partitioned_payloads(enumerable, consumers, opts) when is_list(consumers) do
+    partition_count = Keyword.fetch!(opts, :partition_count)
+    hash = Keyword.fetch!(opts, :hash)
+
+    flow =
+      PayloadFlow.from_enumerable(
+        enumerable,
+        opts
+        |> Keyword.take([:mapper, :stages, :min_demand, :max_demand])
+        |> Keyword.put_new(:stages, 1)
+      )
+
+    subscription_opts = Keyword.take(opts, [:min_demand, :max_demand])
+
+    partition_consumers =
+      Enum.map(consumers, fn {partition, sink} ->
+        {sink, Keyword.put(subscription_opts, :partition, partition)}
+      end)
+
+    Flow.into_stages(flow, partition_consumers,
+      dispatcher: {GenStage.PartitionDispatcher, partition_opts(partition_count, hash)}
+    )
+  end
+
+  defp partition_opts(partition_count, hash) do
+    [partitions: 0..(partition_count - 1), hash: hash]
+  end
+
   def await_payloads(coordinator, timeout) when is_pid(coordinator) do
     ref = Process.monitor(coordinator)
 

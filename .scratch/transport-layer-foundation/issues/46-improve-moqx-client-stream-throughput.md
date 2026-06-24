@@ -370,3 +370,39 @@ with object publishing.
   Opened #53 for the next experiment, `flow_partitions`, which should test
   Flow/GenStage-native partition routing before replacing or promoting any
   current topology.
+- 2026-06-19: Implemented #53 as `flow_partitions`, a candidate stream client
+  where a Flow source feeds `GenStage.PartitionDispatcher` at the final
+  consumer boundary and one `StreamPartitionSink` owns each shard's stream
+  sender state and completion mailbox. The key lifecycle decision is explicit
+  per-partition source EOF control events: source exhaustion does not mean QUIC
+  FIN, and sinks stop only after EOF, empty queues, zero in-flight sends, and
+  expected completions. Local validation passed (`54` tests, Credo strict clean)
+  and a tiny `8 x 20 x 256` fake comparison kept `sender_shards` ahead
+  (`1.76 K ips`) of `flow_partitions` (`1.65 K ips`), so `sender_shards`
+  remains `current_best` and `flow_partitions` stays a candidate trace.
+- 2026-06-19: Tuned #53 and reversed the initial ranking. Source Flow
+  parallelism is not currently safe for ordered stream workloads:
+  `--flow-stages 2` can reorder same-stream payloads and send FIN before
+  earlier payloads, so the CLI now rejects `--flow-stages > 1`. With safe
+  source stages (`1`) and tuned demand/backlog, `flow_partitions` became the
+  fake/local winner. Best observed settings:
+  `--sender-shard-count 8 --min-demand 128 --max-demand 256 --max-queue-depth 1024`.
+  On `32 x 100 x 1180`, the four-way tuned matrix was `flow_partitions`
+  `410.49 ips`, `sender_shards` `264.25 ips`, `stream_owner` `181.28 ips`,
+  and `context_owner` `43.52 ips`. On `128 x 1000 x 1180`,
+  `flow_partitions` reached `13.64 ips` (`73.34 ms`) versus `sender_shards`
+  `8.85 ips` (`113.01 ms`) at shard/partition `8`. Promoted
+  `flow_partitions` to `current_best` for fake/local process-model work.
+- 2026-06-19: Local loopback `iperf3` + `quicprobe` calibration shows the fake
+  process-model winner does not automatically stay ahead once the real QUIC
+  stack and receiver are in the loop. Baseline on `127.0.0.1` was about
+  `61.64 Gbps` TCP with zero retransmits; UDP `100 Mbps` preflight had about
+  `0.014 ms` jitter and `0.61%` loss. Against local `quicprobe`, all receiver
+  evidence was valid. On `32 x 100 x 1180`, `sender_shards` reached
+  `36.55 ips` (`27.36 ms`) and `flow_partitions` reached `35.33 ips`
+  (`28.30 ms`). On `64 x 1000 x 1180`, `sender_shards` reached `2.46 ips`
+  (`406.54 ms`, about `1.49 Gbps` workload goodput) and `flow_partitions`
+  reached `2.31 ips` (`432.83 ms`, about `1.40 Gbps`). Treat this as local
+  calibration only, but it means the next optimization loop must separate fake
+  process overhead from real transport/NIF/quic-go interaction before changing
+  the current-best label again.

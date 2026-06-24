@@ -2,7 +2,7 @@
 
 # Add Flow-partitioned stream client implementation
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 Category: performance
 
@@ -35,8 +35,8 @@ final shard boundary.
 
 Flow and GenStage already provide the lower-level shape we want:
 
-- `Flow.partition/2` materializes partitioned producers with
-  `GenStage.PartitionDispatcher`;
+- `Flow.into_stages/3` can use `GenStage.PartitionDispatcher` as the
+  consumer-facing dispatcher;
 - `GenStage.PartitionDispatcher` routes events to named partitions;
 - each consumer subscribes with `partition: shard_index`;
 - each partition consumer can own shard-local stream sender state and receive
@@ -65,7 +65,7 @@ The implementation should keep the benchmark model unchanged:
 
 The expected data path is:
 
-`Flow source -> Flow.partition/2 -> one GenStage shard sink per partition`
+`Flow source -> GenStage.PartitionDispatcher -> one GenStage shard sink per partition`
 
 Partitioning should be deterministic and diagnosable. Prefer explicit stream
 index modulo shard count over opaque stream-handle hashing:
@@ -94,24 +94,24 @@ timed function returns.
 
 ## Acceptance criteria
 
-- [ ] `bench/moqxprobe` contains a new named stream implementation,
+- [x] `bench/moqxprobe` contains a new named stream implementation,
       `flow_partitions`, registered alongside the existing stream
       implementations.
-- [ ] The implementation uses `Flow.partition/2` or an equivalent
+- [x] The implementation uses `Flow.partition/2` or an equivalent
       GenStage-native partitioned producer path instead of manually routing
       payloads through `send(worker, event)`.
-- [ ] The implementation remains Flow-fed and uses the same payload event shape
+- [x] The implementation remains Flow-fed and uses the same payload event shape
       as the other stream implementations.
-- [ ] Each shard owns its stream sender state and handles send completions in
+- [x] Each shard owns its stream sender state and handles send completions in
       its own OTP process.
-- [ ] The implementation reports configured shard count, active shard count,
+- [x] The implementation reports configured shard count, active shard count,
       routed/received payload count, completion count, queue/window pressure,
       and timing diagnostics comparable to `sender_shards`.
-- [ ] Fake-target tests prove the implementation completes the same workload
+- [x] Fake-target tests prove the implementation completes the same workload
       and receiver evidence as the existing implementations.
-- [ ] A fake/local Benchee comparison records `context_owner`, `stream_owner`,
+- [x] A fake/local Benchee comparison records `context_owner`, `stream_owner`,
       `sender_shards`, and `flow_partitions` with the same input shape.
-- [ ] Promote `flow_partitions` to current best only if it is cleaner and at
+- [x] Promote `flow_partitions` to current best only if it is cleaner and at
       least performance-neutral against `sender_shards`; otherwise keep it as a
       historical/rejected architecture with the evidence recorded.
 
@@ -138,3 +138,153 @@ cleaner OTP/process ownership model:
 
 If the experiment fails, record why and keep it in the registry as historical
 or rejected evidence rather than deleting the trace.
+
+## Comments
+
+### 2026-06-19 implementation
+
+Implemented the first `flow_partitions` candidate.
+
+Important design correction: `Flow.partition/2` partitions internal Flow
+stages, but `Flow.into_stages/3` still defaults to a demand dispatcher for the
+external consumers. The final consumer boundary must use
+`GenStage.PartitionDispatcher` directly, so `MOQXProbe.Traffic` now provides
+`start_partitioned_payloads/3` that starts a Flow source and attaches sinks
+with:
+
+```elixir
+dispatcher: {GenStage.PartitionDispatcher, partitions: 0..(n - 1), hash: hash}
+```
+
+Added `MOQXProbe.Traffic.StreamPartitionSink`:
+
+- one GenStage consumer per partition;
+- explicit partition subscription;
+- shard-local stream sender state;
+- per-stream queue and send window ownership;
+- backend send-completion handling in `handle_info/2`;
+- final snapshot emission before normal stop.
+
+Termination is explicit. The benchmark driver appends one
+`%{control: :source_eof, partition: partition}` event per partition after the
+payload workload. A partition sink treats source EOF as "no more payload events
+for this partition", not as QUIC FIN. The sink stops only when source EOF has
+arrived, local queues are empty, in-flight sends are zero, and expected send
+completions have been observed.
+
+Initial local tests cover:
+
+- direct partition sink lifecycle through Flow source EOF and send-completion
+  drain;
+- fake-target `flow_partitions` benchmark completion through
+  `bench/stream_clients.exs`;
+- CLI/registry inclusion as a `candidate` implementation.
+
+Validation:
+
+- `cd bench/moqxprobe && mix format --check-formatted && mix test && mix credo --strict`:
+  54 tests passed, Credo strict found no issues.
+- Single-candidate smoke:
+  `mix run bench/stream_clients.exs -- --target fake --input flow-generated --implementation flow_partitions --stream-count 8 --payload-count 20 --payload-size 256 --stream-send-window 4 --sender-shard-count 2 --benchee-warmup 0 --benchee-time 1 --benchee-memory-time 0 --benchee-reduction-time 0 --git-sha test-smoke`
+  reached about `1.55 K ips` (`646.35 us` average).
+- Four-way fake comparison on the same tiny shape:
+  `stream_owner` about `1.89 K ips`, `sender_shards` about `1.76 K ips`,
+  `flow_partitions` about `1.65 K ips`, and `context_owner` about `0.81 K ips`.
+
+Initial decision: keep `sender_shards` as `current_best`. `flow_partitions`
+was cleaner in ownership and termination semantics, but the first small local
+smoke was not performance-neutral against `sender_shards`, so it remained a
+`candidate` architecture trace.
+
+### 2026-06-19 tuning pass
+
+Tuned the fake-target comparison across shard/partition count and GenStage
+demand/backlog.
+
+Important correctness boundary:
+
+- `--flow-stages 2` is unsafe for the current ordered stream workload. It can
+  reorder payload events for the same stream and deliver a non-final payload
+  after the `finish?: true` payload, causing `:send_side_finished`. The CLI now
+  rejects `--flow-stages > 1` for this stream script until a source architecture
+  can preserve per-stream order with parallel source stages.
+
+Small shape, `32 x 100 x 1180`, window `16`, fake target:
+
+- shard/partition `2`, demand `64`, queue `256`: `sender_shards` `134.42 ips`,
+  `flow_partitions` `125.75 ips`;
+- shard/partition `4`, demand `64`, queue `256`: `flow_partitions`
+  `145.25 ips`, `sender_shards` `137.64 ips`;
+- shard/partition `8`, demand `64`, queue `256`: `flow_partitions`
+  `134.34 ips`, `sender_shards` `129.71 ips`;
+- shard/partition `4`, demand `128`, queue `512`: `flow_partitions`
+  `322.71 ips`, `sender_shards` `267.83 ips`;
+- shard/partition `4`, demand `256`, queue `1024`: `flow_partitions`
+  `337.18 ips`, `sender_shards` `279.93 ips`;
+- shard/partition `8`, demand `256`, queue `1024`: `flow_partitions`
+  `422.29 ips`, `sender_shards` `262.85 ips`;
+- shard/partition `16`, demand `256`, queue `1024`: `flow_partitions`
+  `409.07 ips`, `sender_shards` `210.56 ips`.
+
+Four-way tuned small-shape matrix with shard/partition `8`, demand `256`,
+queue `1024`:
+
+- `flow_partitions`: `410.49 ips`;
+- `sender_shards`: `264.25 ips`;
+- `stream_owner`: `181.28 ips`;
+- `context_owner`: `43.52 ips`.
+
+Large fake shape, `128 x 1000 x 1180`, window `16`, demand `256`,
+queue `1024`:
+
+- shard/partition `8`: `flow_partitions` `13.64 ips` (`73.34 ms` average),
+  `sender_shards` `8.85 ips` (`113.01 ms` average);
+- shard/partition `16`: `flow_partitions` `13.50 ips` (`74.10 ms` average),
+  `sender_shards` `6.68 ips` (`149.65 ms` average).
+
+Decision: promote `flow_partitions` to `current_best` for fake/local
+process-model work. Keep `sender_shards` as a historical comparison trace.
+Best observed local fake settings for now:
+
+`--sender-shard-count 8 --flow-stages 1 --min-demand 128 --max-demand 256 --max-queue-depth 1024`
+
+### 2026-06-19 local quicprobe calibration
+
+Ran the tuned `flow_partitions` setup against a same-host `quicprobe` target
+with local `iperf3` preflights and receiver evidence enabled.
+
+Target setup:
+
+- `iperf3 --server --bind 127.0.0.1 --port 55201`
+- `quicprobe server --addr 127.0.0.1:55433 --alpn moqx-test --datagram-semantics drain --evidence-http-addr 127.0.0.1:55434`
+- TLS used the repo integration CA/cert under `.tmp/integration-certs`.
+
+Preflight:
+
+- TCP loopback: about `61.64 Gbps`, zero retransmits.
+- UDP loopback at `100 Mbps`: about `0.014 ms` jitter, `0.61%` loss.
+
+Small real-QUIC shape, `32 x 100 x 1180`, window `16`, shard/partition `8`,
+demand `128..256`, queue `1024`:
+
+- `sender_shards`: `36.55 ips`, `27.36 ms` average;
+- `flow_partitions`: `35.33 ips`, `28.30 ms` average;
+- receiver evidence: `38/38` valid, each sample delivered `32` completed
+  streams and `3,776,000` bytes.
+
+Heavier real-QUIC shape, `64 x 1000 x 1180`, window `16`, shard/partition `8`,
+demand `128..256`, queue `1024`:
+
+- `sender_shards`: `2.46 ips`, `406.54 ms` average, about `1.49 Gbps`
+  workload goodput;
+- `flow_partitions`: `2.31 ips`, `432.83 ms` average, about `1.40 Gbps`
+  workload goodput;
+- receiver evidence: `6/6` valid, each sample delivered `64` completed
+  streams and `75,520,000` bytes.
+
+Conclusion: the fake-target process-model win is real, but local quicprobe
+does not yet confirm `flow_partitions` as the better end-to-end QUIC sender.
+Keep this result as calibration only. The next performance loop should compare
+fake, same-host quicprobe, and remote quicprobe explicitly so we can see where
+the bottleneck moves from BEAM process ownership into transport/NIF/QUIC-stack
+interaction.

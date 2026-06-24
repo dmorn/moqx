@@ -15,6 +15,7 @@ defmodule MOQXProbe.Bench.StreamClients do
   alias MOQXProbe.Benchee.RunMetadata
   alias MOQXProbe.Bench.StreamImplementations
   alias MOQXProbe.Traffic
+  alias MOQXProbe.Traffic.StreamPartitionSink
   alias MOQXProbe.Traffic.StreamSender
 
   @input_names ["flow-generated", "flow-prebuilt-list"]
@@ -53,6 +54,7 @@ defmodule MOQXProbe.Bench.StreamClients do
     sender_shard_count: :integer,
     max_burst: :integer,
     max_queue_depth: :integer,
+    flow_stages: :integer,
     min_demand: :integer,
     max_demand: :integer,
     idle_retries: :integer,
@@ -397,6 +399,12 @@ defmodule MOQXProbe.Bench.StreamClients do
     |> run_flow_sender_topology("sender_shards", input.sender_shard_count)
   end
 
+  def run_flow_partitions(input) do
+    input
+    |> Map.put_new(:implementation, "flow_partitions")
+    |> run_flow_partition_topology("flow_partitions", input.sender_shard_count)
+  end
+
   defp run_flow_sender_topology(input, implementation, shard_count) do
     started_at = receipt_timestamp(input)
     {ctx, streams, connection} = setup_streams(input)
@@ -430,7 +438,7 @@ defmodule MOQXProbe.Bench.StreamClients do
         {:ok, producer} =
           Traffic.start_payloads(stream_events(input, streams, payload), dispatcher,
             mapper: & &1,
-            stages: 1,
+            stages: input.flow_stages,
             min_demand: input.min_demand,
             max_demand: input.max_demand
           )
@@ -465,6 +473,67 @@ defmodule MOQXProbe.Bench.StreamClients do
     maybe_run_receipt(input, result, started_at, cleanup)
   end
 
+  defp run_flow_partition_topology(input, implementation, shard_count) do
+    started_at = receipt_timestamp(input)
+    {ctx, streams, connection} = setup_streams(input)
+    payload = payload(input)
+    shard_groups = shard_streams(streams, shard_count)
+    partition_count = length(shard_groups)
+
+    cleanup = fn ->
+      maybe_evidence_close_grace(input)
+      close_connection(ctx, connection)
+      flush_mailbox()
+    end
+
+    result =
+      try do
+        {sink_start_duration_us, sinks} =
+          timed(fn -> start_partition_sinks(shard_groups, input) end)
+
+        try do
+          {:ok, producer} =
+            Traffic.start_partitioned_payloads(
+              partition_stream_events(input, streams, payload, partition_count),
+              sinks,
+              mapper: & &1,
+              stages: input.flow_stages,
+              partition_count: partition_count,
+              hash: partition_hash(partition_count),
+              min_demand: input.min_demand,
+              max_demand: input.max_demand
+            )
+
+          {sink_await_duration_us, shard_results} =
+            timed(fn -> await_partition_sinks(sinks, input.timeout_ms) end)
+
+          case Traffic.await_payloads(producer, input.timeout_ms) do
+            :ok ->
+              local_sender_flow_partition_summary(
+                implementation,
+                shard_results,
+                partition_count,
+                sink_start_duration_us,
+                sink_await_duration_us
+              )
+
+            {:error, reason} ->
+              raise "flow_partitions producer failed: #{inspect(reason)}"
+          end
+        after
+          stop_partition_sinks(sinks)
+        end
+      rescue
+        exception ->
+          if evidence_enabled?(input), do: cleanup.()
+          reraise exception, __STACKTRACE__
+      after
+        unless evidence_enabled?(input), do: cleanup.()
+      end
+
+    maybe_run_receipt(input, result, started_at, cleanup)
+  end
+
   def jobs(options) do
     all = %{
       "context_owner" => fn input ->
@@ -475,6 +544,9 @@ defmodule MOQXProbe.Bench.StreamClients do
       end,
       "sender_shards" => fn input ->
         input |> Map.put(:implementation, "sender_shards") |> run_sender_shards()
+      end,
+      "flow_partitions" => fn input ->
+        input |> Map.put(:implementation, "flow_partitions") |> run_flow_partitions()
       end
     }
 
@@ -618,6 +690,7 @@ defmodule MOQXProbe.Bench.StreamClients do
         positive_integer(opts, :sender_shard_count, default_sender_shard_count(opts)),
       max_burst: max_burst,
       max_queue_depth: positive_integer(opts, :max_queue_depth, 256),
+      flow_stages: positive_integer(opts, :flow_stages, 1),
       idle_retries: non_negative_integer(opts, :idle_retries, 1_000),
       event_batch_size: positive_integer(opts, :event_batch_size, 1_024),
       timeout_ms: positive_integer(opts, :timeout_ms, 15_000)
@@ -634,6 +707,7 @@ defmodule MOQXProbe.Bench.StreamClients do
     |> Map.put(:min_demand, non_negative_integer(opts, :min_demand, max(base.max_burst - 1, 0)))
     |> Map.put(:max_demand, positive_integer(opts, :max_demand, base.max_burst))
     |> validate_flow_demand!()
+    |> validate_flow_stages!()
     |> validate_target!()
   end
 
@@ -908,6 +982,16 @@ defmodule MOQXProbe.Bench.StreamClients do
     end
   end
 
+  defp validate_flow_stages!(%{flow_stages: 1} = options), do: options
+
+  defp validate_flow_stages!(%{flow_stages: flow_stages}) do
+    Mix.raise(
+      "--flow-stages #{flow_stages} is unsafe for ordered stream workloads; " <>
+        "multiple source stages can reorder payloads for one stream and send FIN before " <>
+        "earlier payloads"
+    )
+  end
+
   defp cli_key(key), do: key |> Atom.to_string() |> String.replace("_", "-")
 
   defp target(opts) do
@@ -1088,6 +1172,88 @@ defmodule MOQXProbe.Bench.StreamClients do
       end)
     end)
     |> Enum.map(fn {shard_index, streams} -> {shard_index, Enum.reverse(streams)} end)
+  end
+
+  defp start_partition_sinks(shard_groups, input) do
+    Enum.map(shard_groups, fn {shard_index, streams} ->
+      partition = shard_index - 1
+
+      {:ok, sink} =
+        StreamPartitionSink.start_link(
+          partition: partition,
+          shard_index: shard_index,
+          streams: streams,
+          payload_count: input.payload_count,
+          stream_send_window: input.stream_send_window,
+          max_queue_depth: input.max_queue_depth,
+          notify_pid: self()
+        )
+
+      {partition, sink}
+    end)
+  end
+
+  defp stop_partition_sinks(sinks) do
+    Enum.each(sinks, fn {_partition, sink} -> StreamPartitionSink.stop(sink) end)
+  end
+
+  defp partition_hash(partition_count) do
+    fn event ->
+      partition = Map.get(event, :partition) || rem(event.stream_index - 1, partition_count)
+      {event, partition}
+    end
+  end
+
+  defp await_partition_sinks(sinks, timeout_ms) do
+    monitors = Map.new(sinks, fn {_partition, sink} -> {Process.monitor(sink), sink} end)
+    deadline_us = monotonic_us() + timeout_ms * 1_000
+
+    try do
+      monitors
+      |> collect_partition_sinks(%{}, deadline_us)
+      |> Map.values()
+      |> Enum.sort_by(& &1.shard_index)
+    after
+      Enum.each(Map.keys(monitors), &Process.demonitor(&1, [:flush]))
+    end
+  end
+
+  defp collect_partition_sinks(monitors, snapshots, _deadline_us)
+       when map_size(monitors) == map_size(snapshots),
+       do: snapshots
+
+  defp collect_partition_sinks(monitors, snapshots, deadline_us) do
+    timeout_ms = max(div(deadline_us - monotonic_us(), 1_000), 0)
+
+    receive do
+      {:moqxprobe_stream_partition_sink_done, sink, partition, snapshot} ->
+        if Enum.member?(Map.values(monitors), sink) do
+          collect_partition_sinks(
+            monitors,
+            Map.put(snapshots, partition, snapshot),
+            deadline_us
+          )
+        else
+          collect_partition_sinks(monitors, snapshots, deadline_us)
+        end
+
+      {:DOWN, ref, :process, sink, :normal} ->
+        if Map.get(monitors, ref) == sink do
+          collect_partition_sinks(monitors, snapshots, deadline_us)
+        else
+          collect_partition_sinks(monitors, snapshots, deadline_us)
+        end
+
+      {:DOWN, ref, :process, sink, reason} ->
+        if Map.get(monitors, ref) == sink do
+          raise "flow_partitions sink #{inspect(sink)} exited: #{inspect(reason)}"
+        else
+          collect_partition_sinks(monitors, snapshots, deadline_us)
+        end
+    after
+      timeout_ms ->
+        raise "flow_partitions completion timeout with #{map_size(snapshots)}/#{map_size(monitors)} shard snapshots"
+    end
   end
 
   defp sender_shard_routes(shard_tasks) do
@@ -1437,6 +1603,48 @@ defmodule MOQXProbe.Bench.StreamClients do
     })
   end
 
+  defp local_sender_flow_partition_summary(
+         implementation,
+         shard_results,
+         configured_shard_count,
+         sink_start_duration_us,
+         sink_await_duration_us
+       ) do
+    implementation
+    |> implementation_summary()
+    |> Map.merge(%{
+      accepted: sum_field(shard_results, :accepted),
+      completed: sum_field(shard_results, :completed),
+      in_flight: sum_field(shard_results, :in_flight),
+      configured_shard_count: configured_shard_count,
+      active_shard_count: length(shard_results),
+      streams_per_shard: count_summary(map_field(shard_results, :stream_count)),
+      max_shard_in_flight: max_field(shard_results, :max_in_flight),
+      max_shard_queue_depth: max_field(shard_results, :max_queue_depth),
+      sink_start_duration_us: sink_start_duration_us,
+      sink_await_duration_us: sink_await_duration_us,
+      shard_duration_us: count_summary(map_field(shard_results, :duration_us)),
+      dispatcher: %{
+        mode: "gen_stage_partition",
+        routed_events: sum_field(shard_results, :payload_events),
+        unknown_stream_events: sum_field(shard_results, :orphan_completion_events)
+      },
+      send_calls: sum_field(shard_results, :send_calls),
+      payload_events: sum_field(shard_results, :payload_events),
+      source_eof_events: sum_field(shard_results, :source_eof_events),
+      completion_events: sum_field(shard_results, :completion_events),
+      send_cancelled_events: sum_field(shard_results, :send_cancelled_events),
+      orphan_completion_events: sum_field(shard_results, :orphan_completion_events),
+      ignored_events: sum_field(shard_results, :ignored_events),
+      unknown_events: sum_field(shard_results, :unknown_events),
+      receive_calls: count_summary(map_field(shard_results, :receive_calls)),
+      ready_drain_calls: count_summary(map_field(shard_results, :ready_drain_calls)),
+      schedule_rounds: count_summary(map_field(shard_results, :schedule_rounds)),
+      upstream_closed_count: Enum.count(shard_results, & &1.upstream_closed?),
+      producer_cancel_reasons: unique_flat_map(shard_results, :producer_cancel_reasons)
+    })
+  end
+
   defp implementation_summary(name) do
     StreamImplementations.metadata(name)
     |> Map.put(:implementation, name)
@@ -1506,6 +1714,13 @@ defmodule MOQXProbe.Bench.StreamClients do
   end
 
   defp map_field(values, field), do: Enum.map(values, &Map.fetch!(&1, field))
+
+  defp unique_flat_map(values, field) do
+    values
+    |> map_field(field)
+    |> List.flatten()
+    |> Enum.uniq()
+  end
 
   defp encode_atom(nil), do: nil
   defp encode_atom(atom) when is_atom(atom), do: Atom.to_string(atom)
@@ -1594,6 +1809,7 @@ defmodule MOQXProbe.Bench.StreamClients do
       payload_size: input.payload_size,
       stream_send_window: input.stream_send_window,
       sender_shard_count: input.sender_shard_count,
+      flow_stages: input.flow_stages,
       evidence_close_grace_ms: Map.get(input, :evidence_close_grace_ms),
       quicprobe_evidence_url: Map.get(input, :quicprobe_evidence_url),
       quicprobe_evidence_path: Map.get(input, :quicprobe_evidence_path),
@@ -1630,6 +1846,19 @@ defmodule MOQXProbe.Bench.StreamClients do
         payload: payload,
         payload_count: input.payload_count
       )
+  end
+
+  defp partition_stream_events(input, streams, payload, partition_count) do
+    Elixir.Stream.concat(
+      stream_events(input, streams, payload),
+      source_eof_events(partition_count)
+    )
+  end
+
+  defp source_eof_events(partition_count) do
+    Enum.map(0..(partition_count - 1), fn partition ->
+      %{control: :source_eof, partition: partition}
+    end)
   end
 
   defp payload(input), do: :binary.copy(<<0>>, input.payload_size)
@@ -1673,6 +1902,7 @@ defmodule MOQXProbe.Bench.StreamClients do
       --payload-size BYTES         payload bytes per write (default: 1180)
       --stream-send-window N       per-stream in-flight send window (default: 16)
       --sender-shard-count N       sender_shards worker count (default: min(streams, schedulers))
+      --flow-stages N              Flow source stages; ordered stream workloads require 1
       --max-burst N                max sends emitted by one StreamSink tick (default: 64)
       --max-queue-depth N          Flow-to-sink queue bound (default: 256)
       --min-demand N               Flow min demand (default: max_burst - 1)

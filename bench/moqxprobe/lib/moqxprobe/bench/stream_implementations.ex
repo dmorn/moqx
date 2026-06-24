@@ -59,7 +59,7 @@ defmodule MOQXProbe.Bench.StreamImplementations do
       %__MODULE__{
         name: "sender_shards",
         label: "Bounded sender shards",
-        status: :current_best,
+        status: :historical,
         summary: "Flow-fed bounded worker set; each shard owns a subset of streams",
         architecture:
           "Flow source feeds a GenStage dispatcher that routes stream payload events to a " <>
@@ -67,8 +67,24 @@ defmodule MOQXProbe.Bench.StreamImplementations do
         tested_bottleneck:
           "whether bounded parallel ownership beats both global queue scanning and one worker per stream",
         notes: [
-          "current fake/local process-model winner",
+          "previous fake/local process-model winner before flow_partitions tuning",
           "shard count is intentionally tunable through --sender-shard-count"
+        ]
+      },
+      %__MODULE__{
+        name: "flow_partitions",
+        label: "Flow partition sinks",
+        status: :current_best,
+        summary: "GenStage partition dispatcher routes Flow events to one sink per shard",
+        architecture:
+          "Flow source uses GenStage.PartitionDispatcher at the final consumer boundary; " <>
+            "each partition sink owns stream " <>
+            "sender state and completion feedback for its shard.",
+        tested_bottleneck:
+          "whether GenStage-native partition demand beats the custom dispatcher-to-worker mailbox path",
+        notes: [
+          "current fake/local process-model winner after demand and shard-count tuning",
+          "keeps Flow source exhaustion separate from QUIC send completion"
         ]
       }
     ]

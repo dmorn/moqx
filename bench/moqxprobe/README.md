@@ -77,6 +77,7 @@ mix run bench/stream_clients.exs -- \
   --target fake \
   --implementation sender_shards \
   --sender-shard-count 4 \
+  --flow-stages 1 \
   --input flow-generated \
   --save results/sender-shards.benchee
 ```
@@ -92,12 +93,34 @@ Current stream implementations:
 | --- | --- | --- |
 | `context_owner` | control | One Flow-fed GenStage sink owns all stream queues and completion state; useful as the simple global-queue baseline. |
 | `stream_owner` | historical | One Flow-fed worker per stream; useful for measuring per-stream process ownership overhead. |
-| `sender_shards` | current best | Bounded Flow-fed worker set; each shard owns a subset of streams and `--sender-shard-count` tunes the process-model shape. |
+| `sender_shards` | historical | Bounded Flow-fed worker set; each shard owns a subset of streams and `--sender-shard-count` tunes the process-model shape. |
+| `flow_partitions` | current best | Flow source with `GenStage.PartitionDispatcher` at the final consumer boundary; one GenStage sink owns each shard and stops after source EOF plus send-completion drain. |
 
 All stream sender implementations consume the same Flow-produced payload path
 so process-model comparisons are apples-to-apples. Local sender summaries and
 delivery-evidence metadata include the implementation label, status,
 architecture, and tested bottleneck so saved suites remain self-describing.
+
+`flow_partitions` uses explicit per-partition source EOF control events. Source
+EOF only means no more payload events will arrive for that partition; QUIC stream
+FIN remains part of the final payload event for each stream. A partition sink
+stops normally only after source EOF, empty local queues, zero in-flight sends,
+and all expected send completions.
+
+The stream-client matrix exposes tuning knobs independently:
+
+- `--sender-shard-count` controls sender worker count for `sender_shards` and
+  partition sink count for `flow_partitions`.
+- `--flow-stages` is currently constrained to `1` for ordered stream workloads;
+  increasing source stages can reorder payload events for one stream and send
+  FIN before earlier payloads.
+- `--min-demand`, `--max-demand`, and `--max-queue-depth` control GenStage
+  demand/backlog.
+- `--stream-send-window` controls per-stream backend send-completion credit.
+
+The best local fake calibration seen so far for `flow_partitions` used
+`--sender-shard-count 8 --min-demand 128 --max-demand 256 --max-queue-depth 1024`
+with `--flow-stages 1`.
 
 Run against a `quicprobe` target:
 
