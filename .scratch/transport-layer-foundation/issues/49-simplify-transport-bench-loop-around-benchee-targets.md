@@ -169,6 +169,36 @@ local-runner loop produces a candidate client architecture worth validating.
 The near-term goal is faster iteration on `moqx` as a caller. Listener/relay
 performance remains future work.
 
+## Available persistent targets
+
+Verified on 2026-06-29. Each target runs `iperf3` on `55202`, `quicprobe` on
+UDP `55433`, and the `quicprobe` evidence/lease HTTP API on `55434`. Use one
+active `moqxprobe` suite per target so receiver evidence remains attributable.
+
+- `reform`: Linux `aarch64`, LAN `192.168.178.29`, Tailscale
+  `100.91.146.108`, server name `reform`, CA
+  `/private/tmp/reform-quicprobe-ca.pem`, artifact
+  `quicprobe-41e8c7a-linux-arm64`. Services are systemd units
+  `moqx-iperf3.service` and `moqx-quicprobe.service`. This is the clean local
+  same-subnet target from `silver`; smoke baselines reached about 94 Mbps TCP
+  over LAN and about 89 Mbps TCP over Tailscale, with 0% loss at UDP 20 Mbps on
+  both paths.
+- `KIM-Server-i5`: macOS `x86_64`, LAN `192.168.20.73`, Tailscale
+  `100.72.153.65`, MagicDNS `kim-server-i5.tail8711b.ts.net`, server name
+  `kim-server-i5`, CA
+  `/private/tmp/kim-server-i5-quicprobe-ca.pem`, artifact
+  `quicprobe-41e8c7a-darwin-x86_64`. Services are launchd jobs
+  `com.moqx.iperf3` and `com.moqx.quicprobe`. Treat path measurements from
+  `silver` carefully: when `silver` is on `192.168.10.x`, this target is only
+  reachable over public-direct Tailscale and the client uplink caps around
+  20 Mbps; when `silver` is on `192.168.178.x`, LAN/Tailscale traffic may also
+  traverse the company inter-subnet route.
+- `moqx-quicprobe-fra`: existing exe.dev Linux `x86_64` target, Tailscale
+  `100.124.193.59`, server name `moqx-quicprobe-fra`, CA
+  `/private/tmp/moqx-quicprobe-fra-ca.pem`. This remains useful for remote
+  connectivity and smoke checks, but recent local paths reached it through DERP,
+  so do not treat those results as clean direct-path capacity evidence.
+
 ## Activity
 
 - 2026-06-18: Opened after deciding to replace the Hetzner/probed/release
@@ -234,3 +264,12 @@ performance remains future work.
   repeatable CLI flags now use `OptionParser`'s `:keep` switch type, and
   `RunMetadata.iperf3_summaries/1` now classifies UDP iperf3 JSON by protocol
   before falling back to `sum_received`.
+- 2026-06-29: Added local persistent targets `KIM-Server-i5` and `reform`.
+  Both expose the same target contract as the existing VM: `iperf3 :55202`,
+  `quicprobe` UDP `:55433` with `--datagram-semantics drain` and
+  `--initial-packet-size 1200`, and evidence/lease HTTP `:55434`. `reform`
+  passed LAN and Tailscale `iperf3`, raw `quicprobe`, delivery-aware stream,
+  and delivery-aware DATAGRAM smokes from `silver`. `KIM-Server-i5` passed
+  service, raw `quicprobe`, evidence API, and small `moqxprobe` stream/DATAGRAM
+  smokes; path interpretation depends on whether `silver` is using the
+  `192.168.10.x`, `192.168.178.x`, or Tailscale-only route.
