@@ -8,6 +8,18 @@ The active goal is caller-side performance work: compare process architectures
 that publish over QUIC streams or DATAGRAMs, first in isolation and then
 against a simple `quicprobe` target.
 
+## Measurement contract
+
+How to read these numbers — what each layer measures, the closed-loop vs
+open-loop distinction, metric naming rules, lifecycle windows, and confidence
+tiers — is defined in
+[ADR-0009: Layered benchmark evidence contract](../../docs/adr/0009-layered-benchmark-evidence-contract.md)
+(handler discipline and the telemetry event bus come from ADR-0005). In short:
+Benchee `ips` is closed-loop invocation throughput, not wire bandwidth or
+latency-under-load; every reported metric carries its source layer, window, and
+confidence tier; and naked `bandwidth`/`goodput` and stream `pkts/s` are
+forbidden.
+
 ## Current Loop
 
 The benchmark loop is target-driven:

@@ -375,3 +375,27 @@ tier:
 - the workload is bursty rather than steady;
 - the measurement itself is too intrusive.
 
+## Comments
+
+### 2026-06-30 — Slice 1: contract documented
+
+Implemented the documentation slice as
+`docs/adr/0009-layered-benchmark-evidence-contract.md`, linked from
+`bench/moqxprobe/README.md`.
+
+The ADR adds one framing the issue gestured at but did not name: the
+**closed-loop vs open-loop** distinction. Benchee is a closed-loop
+service-time harness, so `ips` is invocation throughput, not wire bandwidth or
+latency-under-load. Reading it as the latter is the root cause of "we can't
+trust the numbers." The ADR splits measurement into two explicitly labelled
+modes (closed-loop Benchee A/B vs open-loop paced sender) and names
+**coordinated omission** as the reason a backpressured sender-paced benchmark
+under-reports tail behavior — motivating the open-loop slice.
+
+Remaining slices, in dependency order:
+
+- Slice 2: `quicprobe` receiver interval bins (delivery shape over time).
+- Slice 3: out-of-band BEAM sampler (scheduler util, run-queue, mailbox depth).
+- Slice 4: open-loop paced sender recording offered-vs-accepted.
+- Slice 5: run manifest tying artifacts together.
+
