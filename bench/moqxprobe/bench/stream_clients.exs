@@ -14,6 +14,7 @@ defmodule MOQXProbe.Bench.StreamClients do
   alias MOQXProbe.Benchee.RunReceipt
   alias MOQXProbe.Benchee.RunMetadata
   alias MOQXProbe.Bench.StreamImplementations
+  alias MOQXProbe.HostSampler
   alias MOQXProbe.Traffic
   alias MOQXProbe.Traffic.StreamPartitionSink
   alias MOQXProbe.Traffic.StreamSender
@@ -71,6 +72,8 @@ defmodule MOQXProbe.Bench.StreamClients do
     evidence_timeout_ms: :integer,
     evidence_poll_ms: :integer,
     evidence_close_grace_ms: :integer,
+    host_sample_ms: :integer,
+    host_samples_output: :string,
     quicprobe_evidence_url: :string,
     quicprobe_evidence_port: :integer,
     quicprobe_evidence_path: :string,
@@ -581,6 +584,7 @@ defmodule MOQXProbe.Bench.StreamClients do
           benchee: benchee_options(opts)
         }
         |> put_evidence_options(opts)
+        |> put_host_samples_options(opts)
     end
   end
 
@@ -751,6 +755,64 @@ defmodule MOQXProbe.Bench.StreamClients do
       fake_state: nil
     })
   end
+
+  defp put_host_samples_options(options, opts) do
+    interval_ms = non_negative_integer(opts, :host_sample_ms, 0)
+    output = Keyword.get(opts, :host_samples_output)
+    enabled? = interval_ms > 0 and is_binary(output)
+
+    if interval_ms > 0 and not is_binary(output) do
+      Mix.raise("--host-sample-ms requires --host-samples-output PATH")
+    end
+
+    if enabled? and options.benchee.parallel != 1 do
+      Mix.raise("--host-samples-output requires --benchee-parallel 1")
+    end
+
+    Map.put(options, :host_samples, %{
+      enabled?: enabled?,
+      interval_ms: interval_ms,
+      output: output,
+      sampler: nil
+    })
+  end
+
+  @doc """
+  Starts the out-of-band BEAM/host sampler in its own process before the
+  measured suite, monitoring the suite driver process under a stable role
+  label. Returns the updated options. No-op when host sampling is disabled.
+
+  The sampler never runs inside the timed Benchee function or a telemetry
+  handler (ADR-0009 observer-effect rule); it samples the driver process from
+  the outside on a fixed interval.
+  """
+  def start_host_sampler(%{host_samples: %{enabled?: false}} = options), do: options
+
+  def start_host_sampler(%{host_samples: host_samples} = options) do
+    {:ok, sampler} =
+      HostSampler.start_link(
+        interval_ms: host_samples.interval_ms,
+        output: host_samples.output,
+        roles: [{"benchee_suite_driver", self()}]
+      )
+
+    put_in(options, [:host_samples, :sampler], sampler)
+  end
+
+  def start_host_sampler(options), do: options
+
+  @doc """
+  Stops the host sampler, flushing the sidecar. Safe to call when sampling was
+  never started.
+  """
+  def stop_host_sampler(%{host_samples: %{sampler: sampler, output: output}})
+      when is_pid(sampler) do
+    :ok = HostSampler.stop(sampler)
+    IO.puts("Host samples: wrote #{output}")
+    :ok
+  end
+
+  def stop_host_sampler(_options), do: :ok
 
   defp maybe_put_evidence_hooks(config, %{evidence: %{enabled?: false}}), do: config
 
@@ -1937,6 +1999,13 @@ defmodule MOQXProbe.Bench.StreamClients do
                                     quicprobe targets acquire an exclusive experiment lease;
                                     do not run parallel experiments against one quicprobe
 
+    Host and BEAM samples (out-of-band sampler, ADR-0009):
+      --host-sample-ms N            sampling interval in ms (default: 0 = disabled)
+      --host-samples-output PATH    write host/BEAM saturation samples JSONL sidecar
+                                    samples are taken in a dedicated sampler process,
+                                    never inside the timed function or a telemetry handler;
+                                    requires --benchee-parallel 1
+
     Run metadata:
       --git-sha SHA                  git SHA metadata (default: current HEAD)
       --iperf-preflight-summary PATH repeatable iperf3 JSON summary sidecar
@@ -1955,9 +2024,15 @@ defmodule MOQXProbe.Bench.StreamClients do
       |> prepare_run!()
 
     try do
-      apply(Benchee, :run, [jobs(options), benchee_config(options)])
+      options = start_host_sampler(options)
 
-      write_evidence!(options)
+      try do
+        apply(Benchee, :run, [jobs(options), benchee_config(options)])
+
+        write_evidence!(options)
+      after
+        stop_host_sampler(options)
+      end
     after
       cleanup_run(options)
     end

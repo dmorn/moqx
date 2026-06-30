@@ -64,6 +64,40 @@ defmodule MOQXProbe.BenchCliTest do
            ]
   end
 
+  test "stream client CLI parses out-of-band host sampler flags" do
+    options =
+      StreamClients.parse_cli!([
+        "--host-sample-ms",
+        "100",
+        "--host-samples-output",
+        "/tmp/host-samples.jsonl"
+      ])
+
+    assert options.host_samples == %{
+             enabled?: true,
+             interval_ms: 100,
+             output: "/tmp/host-samples.jsonl",
+             sampler: nil
+           }
+  end
+
+  test "stream client CLI keeps host sampling disabled by default" do
+    options = StreamClients.parse_cli!([])
+
+    assert options.host_samples.enabled? == false
+    assert options.host_samples.interval_ms == 0
+    assert options.host_samples.output == nil
+  end
+
+  test "stream client CLI requires an output path when host sampling is enabled" do
+    exception =
+      assert_raise Mix.Error, fn ->
+        StreamClients.parse_cli!(["--host-sample-ms", "100"])
+      end
+
+    assert Exception.message(exception) =~ "--host-sample-ms requires --host-samples-output"
+  end
+
   test "stream client CLI rejects unsafe source Flow parallelism" do
     exception =
       assert_raise Mix.Error, fn ->

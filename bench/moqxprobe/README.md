@@ -199,6 +199,72 @@ opening QUIC connections.
 The script exposes setup through flags, not environment variables or
 `Application` configuration. Use `--help` for the full option list.
 
+## Host and BEAM samples
+
+`MOQXProbe.HostSampler` is the out-of-band sampler for the "Host and BEAM
+samples" evidence layer in
+[ADR-0009](../../docs/adr/0009-layered-benchmark-evidence-contract.md). It
+periodically records BEAM/host saturation evidence during a run and writes a
+`host-samples` JSONL sidecar, mirroring the `--evidence-output` pattern.
+
+Enable it with two explicit flags (both required together):
+
+```bash
+mix run bench/stream_clients.exs -- \
+  --target fake \
+  --implementation flow_partitions \
+  --input flow-generated \
+  --host-sample-ms 20 \
+  --host-samples-output results/host-samples.jsonl
+```
+
+- `--host-sample-ms N` — sampling interval in milliseconds. Default `0` disables
+  sampling. A positive value requires `--host-samples-output`.
+- `--host-samples-output PATH` — JSONL sidecar destination.
+
+Like delivery evidence, host sampling requires `--benchee-parallel 1`.
+
+### Out-of-band guarantee
+
+The sampler runs in its **own process**. It is never invoked from inside a
+`:telemetry` handler and never from inside the timed Benchee function
+(ADR-0009 observer-effect rule, ADR-0005 handler discipline). The script starts
+it before the measured suite and stops it after; sampling spans the run but all
+of its work — VM statistics, the `:scheduler.utilization/1` delta, and a bounded
+`Process.info/2` read per monitored role — happens in the sampler process, not
+in the hot path. On start it enables the `:scheduler_wall_time` system flag and
+restores the prior value on stop. It never shells out on the sampling cadence.
+
+All inputs are passed explicitly as `start_link/1` arguments (interval, output
+path, monitored `{label, pid}` roles). There is no `Application` configuration.
+
+### Sidecar shape
+
+The sidecar is JSONL with a header line followed by one object per sample. Raw
+values only (ADR-0009): utilization fractions in `[0, 1]`, raw run-queue lengths
+and mailbox depths, the sampler interval on every row, and stable string role
+labels — never raw pids, and no derived `bandwidth`/`goodput`.
+
+Header (`record_type: "header"`): `schema_version`
+(`moqxprobe-host-samples-v1`), `sample_interval_ms`, `schedulers`,
+`schedulers_online`, `otp_release`, and the list of monitored `roles` (labels).
+
+Each sample (`record_type: "host_sample"`):
+
+- `sample_index`, `offset_ms` (monotonic offset from sampler start),
+  `sample_interval_ms`;
+- `scheduler_utilization_fraction`, `scheduler_utilization_weighted_fraction`,
+  and `per_scheduler_utilization_fraction` (per-scheduler fractions);
+  utilization fields are `null` on the first sample (no baseline yet);
+- `total_run_queue_length`, `per_run_queue_length`, `run_queue`,
+  `total_active_tasks`, `schedulers_online`, `process_count`;
+- `roles`: one entry per monitored process with the stable `role` label,
+  `alive?`, and `message_queue_len`/`reductions`/`memory_bytes` (all `null` and
+  `alive?: false` when the monitored pid is dead).
+
+The stream client monitors the Benchee suite driver process under the
+`benchee_suite_driver` role label.
+
 ## DATAGRAM Clients
 
 Run the Flow-produced, GenStage-paced DATAGRAM client against the fake target:
