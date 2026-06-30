@@ -247,6 +247,39 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
     refute Map.has_key?(evidence.observed, :first_stream_byte_at_ms)
   end
 
+  test "quicprobe adapter keeps interval evidence for a zero-traffic new build" do
+    path = temp_jsonl_path()
+    on_exit(fn -> File.rm(path) end)
+
+    # A new quicprobe build that received no stream bytes and no datagrams omits
+    # interval_bins and the *_at_ms offsets, but still reports the bin width.
+    write_jsonl!(path, [
+      %{
+        record_type: "server_run_evidence",
+        run_sequence: 1,
+        stream_bytes_received: 0,
+        streams_completed: 0,
+        interval_bin_width_ms: 100.0,
+        receiver_evidence_complete: true
+      }
+    ])
+
+    receipt =
+      RunReceipt.new!(
+        id: :quicprobe_zero_traffic_run,
+        target: :quicprobe,
+        match: %{run_sequence: 1},
+        expected: %{receiver_evidence_complete: true}
+      )
+
+    assert {:ok, %Evidence{source: :quicprobe} = evidence} =
+             Quicprobe.collect(receipt, path: path, timeout_ms: 10, poll_ms: 1)
+
+    interval = evidence.metadata.receiver_interval
+    assert interval.bin_width_ms == 100.0
+    assert interval.bins == []
+  end
+
   test "quicprobe adapter matches the first evidence record after a cursor" do
     path = temp_jsonl_path()
     on_exit(fn -> File.rm(path) end)

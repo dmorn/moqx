@@ -289,9 +289,7 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
   defp receiver_interval(record) do
     bins = normalize_interval_bins(Map.get(record, "interval_bins"))
 
-    if bins == [] and not has_interval_timestamps?(record) do
-      nil
-    else
+    if interval_evidence?(record, bins) do
       %{
         bin_width_ms: Map.get(record, "interval_bin_width_ms"),
         first_stream_byte_at_ms: Map.get(record, "first_stream_byte_at_ms"),
@@ -301,6 +299,17 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
         bins: bins
       }
     end
+  end
+
+  # A quicprobe build that emits interval evidence always carries a positive
+  # interval_bin_width_ms (validated > 0 server-side), so that field is the
+  # reliable additive sentinel: a zero-traffic new build emits no bins and
+  # omits the *_at_ms offsets, but still reports the width. The bins/timestamp
+  # checks remain as defensive fallbacks. A genuinely old build carries none of
+  # these and yields nil, keeping the sidecar backward compatible.
+  defp interval_evidence?(record, bins) do
+    Map.has_key?(record, "interval_bin_width_ms") or bins != [] or
+      has_interval_timestamps?(record)
   end
 
   defp has_interval_timestamps?(record) do
