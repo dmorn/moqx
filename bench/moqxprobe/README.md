@@ -199,6 +199,164 @@ opening QUIC connections.
 The script exposes setup through flags, not environment variables or
 `Application` configuration. Use `--help` for the full option list.
 
+## Open-loop paced stream sender
+
+`bench/paced_stream.exs` is the **open-loop** measurement mode of
+[ADR-0009](../../docs/adr/0009-layered-benchmark-evidence-contract.md). It is a
+standalone script, deliberately separate from the closed-loop Benchee scripts
+above. Do not compare its numbers with Benchee `ips`: the two modes answer
+different questions and ADR-0009 forbids cross-mode comparison.
+
+The difference is the harness shape:
+
+- **Closed loop (Benchee, `stream_clients.exs`/`datagram_clients.exs`)** calls a
+  job, waits for it to return, then calls it again. It measures per-invocation
+  service time. The offered rate is whatever the job can self-throttle to, so
+  backpressure is silently absorbed and the run can coordinated-omit the stalls.
+- **Open loop (`paced_stream.exs`)** offers payload intents on a fixed
+  **wall-clock** schedule regardless of completion. It never throttles the
+  offered rate to match what the transport accepts — that is the whole point.
+  Backpressure shows up as growing backlog and tick lag instead of a slower
+  offered rate.
+
+Run it against the fake target:
+
+```bash
+cd bench/moqxprobe
+mix run bench/paced_stream.exs -- \
+  --target fake \
+  --offered-rate 50000 \
+  --tick-ms 1 \
+  --duration-ms 3000 \
+  --stream-count 32 \
+  --payload-size 1180 \
+  --paced-output results/paced.jsonl
+```
+
+Run it against a `quicprobe` target with delivery evidence:
+
+```bash
+mix run bench/paced_stream.exs -- \
+  --target quicprobe \
+  --host <target-host-or-ip> \
+  --quic-port <quic-port> \
+  --ca <ca.pem> \
+  --servername <cert-name> \
+  --tier remote_quic_no_wire \
+  --offered-rate 50000 \
+  --duration-ms 5000 \
+  --paced-output results/paced.jsonl \
+  --evidence-output results/paced-evidence.jsonl
+```
+
+### Flags
+
+Schedule (the open-loop core):
+
+- `--offered-rate N` — schedule rate. Payload events per second in the default
+  `--rate-mode payload-events`, or bytes per second in `--rate-mode bytes`. The
+  cumulative scheduled intent count is `floor(offered_rate * elapsed / 1000)`
+  (divided by `--payload-size` in bytes mode), so integer truncation in one tick
+  is repaid by the next rather than drifting.
+- `--rate-mode payload-events|bytes` — schedule unit (default
+  `payload-events`).
+- `--tick-ms N` — wall-clock tick interval (default `1`).
+- `--duration-ms N` — schedule window length (default `3000`).
+- `--stream-count N` — unidirectional streams the intents are spread over
+  round-robin (default `32`).
+- `--payload-size BYTES` — bytes per payload intent (default `1180`).
+- `--drain-ms N` — post-window settle/drain budget for in-flight send
+  completions (default `500`); out of band, never throttles the schedule.
+
+Coordinated-omission detection (detect only):
+
+- `--backlog-threshold N` — trip the flag when backlog (offered minus accepted)
+  exceeds N (default `4096`).
+- `--sustained-lag-ms N` — a tick is "lagging" when its `tick_lag_ms` exceeds N
+  (default `5`).
+- `--sustained-lag-ticks N` — trip the flag after N consecutive lagging ticks
+  (default `10`).
+
+Output and tier:
+
+- `--paced-output PATH` — write the `moqxprobe-paced-v1` JSONL sidecar.
+- `--tier TIER` — evidence tier metadata: `loopback_quic` (default),
+  `remote_quic_no_wire`, or `remote_quic_with_wire`.
+
+It also reuses the closed-loop scripts' delivery-evidence flags
+(`--evidence-output`, `--quicprobe-evidence-url`/`-path`, `--evidence-*-ms`),
+the out-of-band host sampler (`--host-sample-ms` / `--host-samples-output`,
+monitoring the `paced_sender` role), and the run-metadata flags (`--git-sha`,
+`--tailscale-path-mode`, `--server-stats-path`). Use `--help` for the full list.
+
+### Coordinated omission
+
+When the offered rate cannot be sustained — backlog grows past
+`--backlog-threshold`, or tick lag stays above `--sustained-lag-ms` for
+`--sustained-lag-ticks` consecutive ticks — the run sets a `coordinated_omission`
+flag (latched for the rest of the run, with a recorded cause) and prints a
+warning. This means a naive latency reading would omit the stalls, so the
+system would look healthier than it is.
+
+This slice is **detect only**: it records the *fact* of coordinated omission so
+a corrected reading can be built later. It does **not** compute a corrected
+latency histogram or corrected percentiles — that is deferred to issue 56
+(`.scratch/transport-layer-foundation/issues/56-add-coordinated-omission-corrected-latency-histogram.md`).
+The schedule math and offered/accepted/backlog/lag
+accounting live in the pure, unit-tested modules `MOQXProbe.OpenLoop.Pacer` and
+`MOQXProbe.OpenLoop.Accounting`; the script is a thin transport/IO shell around
+them.
+
+### Sidecar shape
+
+`--paced-output` writes a `moqxprobe-paced-v1` JSONL sidecar: a header line, one
+row per tick, and a final summary row. Metric names follow the ADR-0009 rule
+(source layer + numerator + denominator/window); counts are raw, windows are
+explicit, and there is no naked `bandwidth`/`goodput` and no stream `pkts/s`.
+
+Header (`record_type: "header"`): `schema_version` (`moqxprobe-paced-v1`),
+`mode: "open_loop"`, `tier`, `target`, `rate_mode`, `offered_rate` and
+`offered_rate_unit`, `tick_ms`, `duration_ms`, `stream_count`, `payload_size`,
+the detection thresholds, run metadata, and
+`coordinated_omission_corrected_latency: "deferred_to_issue_56"`.
+
+Each tick (`record_type: "tick"`, `window: "sender_active"`,
+`source_layer: "sender"`): `tick_index`, `scheduled_at_ms`/`now_ms`/`elapsed_ms`,
+`scheduled_total`, `offered_payload_events`,
+`accepted_payload_events_sender_active`, `send_admission_error_count`,
+`backlog_payload_events`, `tick_lag_ms`, the running totals, and the current
+`coordinated_omission` flag.
+
+Summary (`record_type: "summary"`): `tick_count`,
+`offered_payload_events_total`, `accepted_payload_events_sender_active_total`,
+`send_admission_error_count`, `send_completions_drain_total` and
+`send_cancellations_drain_total` (the post-window tail-drain counters credited
+by `Accounting.record_settlement/2`), `backlog_payload_events`,
+`max_backlog_payload_events`, `max_tick_lag_ms`, a `tick_lag_ms` distribution
+summary, and the final `coordinated_omission` flag plus
+`coordinated_omission_cause`.
+
+The per-second sender-active views (e.g.
+`offered_payload_events_per_second`,
+`accepted_payload_events_sender_active`) are derived in the report layer from
+these raw counts and the explicit `duration_ms` window; the sidecar keeps raw
+counts only, per the ADR-0009 evidence-layer rule.
+
+Delivery evidence (`--evidence-output`) is collected **out of band**, after the
+paced send window, through the same `EvidenceCollector` and quicprobe adapter as
+the closed-loop scripts — the paced send loop never blocks on evidence polling.
+Against `quicprobe` the run still proves delivery, but as a **lower bound**, not
+exact equality: open loop deliberately offers faster than the transport can
+deliver, so at window close some admitted sends are still in flight and the
+receiver keeps draining after the schedule ends. The check is therefore
+`receiver stream bytes >= accepted payload events * --payload-size` (an
+`{:at_least, …}` expectation); the receiver may legitimately report more once
+the tail drains, and asserting exact equality would mark a valid run invalid.
+The tail itself is made explicit: `settle/3` drains the post-window send
+completions/cancellations and records them through
+`Accounting.record_settlement/2` as `send_completions_drain_total` /
+`send_cancellations_drain_total` in the summary, rather than discarding them.
+
 ## Host and BEAM samples
 
 `MOQXProbe.HostSampler` is the out-of-band sampler for the "Host and BEAM

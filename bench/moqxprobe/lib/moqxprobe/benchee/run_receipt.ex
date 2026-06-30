@@ -1,6 +1,8 @@
 defmodule MOQXProbe.Benchee.RunReceipt do
   @moduledoc false
 
+  alias MOQXProbe.Benchee.Evidence
+
   @enforce_keys [:id, :target, :expected]
   defstruct [
     :id,
@@ -57,7 +59,7 @@ defmodule MOQXProbe.Benchee.RunReceipt do
       scenario: receipt.scenario,
       input: receipt.input,
       implementation: receipt.implementation,
-      expected: receipt.expected,
+      expected: Evidence.encode_expected_map(receipt.expected),
       match: receipt.match,
       metadata: receipt.metadata,
       started_at: format_time(receipt.started_at),

@@ -93,7 +93,7 @@ defmodule MOQXProbe.Benchee.Evidence do
       source: evidence.source,
       status: evidence.status,
       valid: evidence.valid,
-      expected: evidence.expected,
+      expected: encode_expected_map(evidence.expected),
       observed: evidence.observed,
       mismatches: evidence.mismatches,
       error: inspect_error(evidence.error),
@@ -107,14 +107,40 @@ defmodule MOQXProbe.Benchee.Evidence do
 
   defp mismatches(expected, observed) do
     expected
-    |> Enum.reject(fn {key, expected_value} -> Map.get(observed, key) == expected_value end)
+    |> Enum.reject(fn {key, expected_value} ->
+      satisfied?(expected_value, Map.get(observed, key))
+    end)
     |> Enum.map(fn {key, expected_value} ->
       %{
         field: key,
-        expected: expected_value,
+        expected: encode_expected(expected_value),
         observed: Map.get(observed, key)
       }
     end)
+  end
+
+  # An expectation is either an exact value (default, equality) or a tagged
+  # lower-bound `{:at_least, min}`. The lower bound exists for the open-loop
+  # paced sender (ADR-0009): the receiver keeps draining bytes after the sender
+  # window closes, so observed receiver bytes must be at least the accepted
+  # bytes, never exactly equal. Equality stays the default for closed-loop and
+  # fake evidence so existing exact-count checks are unchanged.
+  defp satisfied?({:at_least, min}, observed) when is_number(observed) and is_number(min) do
+    observed >= min
+  end
+
+  defp satisfied?({:at_least, _min}, _observed), do: false
+  defp satisfied?(expected_value, observed), do: observed == expected_value
+
+  # Keep `expected` JSON-serializable in the sidecar: render the comparator as a
+  # plain map instead of leaking an Elixir tuple into the encoder.
+  defp encode_expected({:at_least, min}), do: %{comparator: "at_least", value: min}
+  defp encode_expected(expected_value), do: expected_value
+
+  @doc false
+  @spec encode_expected_map(map()) :: map()
+  def encode_expected_map(expected) when is_map(expected) do
+    Map.new(expected, fn {key, value} -> {key, encode_expected(value)} end)
   end
 
   defp normalize_map(nil), do: %{}
