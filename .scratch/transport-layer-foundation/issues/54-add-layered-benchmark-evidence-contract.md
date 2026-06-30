@@ -399,3 +399,27 @@ Remaining slices, in dependency order:
 - Slice 4: open-loop paced sender recording offered-vs-accepted.
 - Slice 5: run manifest tying artifacts together.
 
+### 2026-06-30 — Slice 2: quicprobe receiver interval evidence
+
+Committed `12498ec` (interval bins + first/last timestamps, additive) and
+`76f921f` (fix: detect interval evidence by `interval_bin_width_ms` so a
+zero-traffic new build is not misread as legacy). Loopback smoke reconciled
+per-bin stream bytes to the aggregate exactly (47200 B).
+
+Notes for the future report/derivation slice (raw evidence only for now, no
+`*_bps` derived yet):
+
+- **Interval-bin cap-folding window.** quicprobe caps bins at
+  `serverRunEvidenceIntervalBinLimit` (36000, ~1h at 100 ms). Events past the
+  cap fold into the final bin, whose `start_offset_ms` is `(limit-1)*width`.
+  A report layer deriving interval rates must not assume the last bin's
+  effective window equals `bin_width_ms`.
+- **Two datagram clocks.** `first_datagram_at_ms` is measured from the
+  connection's `startedAt` (the shared timeline the interval bins use), while
+  the pre-existing `first_datagram_latency_ms` is measured from the datagram
+  loop's own start. They legitimately differ for the same first DATAGRAM; the
+  connection-relative origin is correct for bin alignment.
+
+The expired loopback test cert discovered during the smoke is tracked
+separately as issue 55.
+
