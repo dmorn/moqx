@@ -109,6 +109,11 @@ defmodule MOQXProbe.Bench.PacedStream do
 
     @impl true
     def send_stream({:fake_stream, _conn_ref, _stream_ref, _direction} = stream, _data, _opts) do
+      # Fake-only: each send self-posts a completion that is drained out of band
+      # after the send window, so the caller mailbox holds one message per
+      # offered intent during the run. This is bounded by offered_rate * duration
+      # and is acceptable for fake calibration; real transports do not buffer
+      # completions this way.
       send(self(), {:moqx_transport, {:stream_event, stream, :send_complete, false}})
       :ok
     end

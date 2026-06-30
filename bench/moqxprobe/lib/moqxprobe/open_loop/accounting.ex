@@ -222,6 +222,10 @@ defmodule MOQXProbe.OpenLoop.Accounting do
       send_cancellations_drain_total: acc.settled_cancelled_total,
       backlog_payload_events: backlog(acc),
       max_backlog_payload_events: acc.max_backlog,
+      # `max_tick_lag_ms` is a running maximum seeded at 0, so it never reports a
+      # negative lag; `tick_lag_ms` (below) summarizes the raw per-tick lags and
+      # may report a negative min/max for a run that stayed ahead of schedule.
+      # The two `max` values can therefore differ for an all-early run.
       max_tick_lag_ms: acc.max_tick_lag_ms,
       tick_lag_ms: lag_summary(lags),
       coordinated_omission: acc.coordinated_omission?,
