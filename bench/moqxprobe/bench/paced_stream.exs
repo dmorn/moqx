@@ -29,6 +29,7 @@ defmodule MOQXProbe.Bench.PacedStream do
   alias MOQX.Transport.Quicer
   alias MOQXProbe.Benchee.Adapters
   alias MOQXProbe.Benchee.EvidenceCollector
+  alias MOQXProbe.Benchee.RunManifest
   alias MOQXProbe.Benchee.RunMetadata
   alias MOQXProbe.Benchee.RunReceipt
   alias MOQXProbe.HostSampler
@@ -64,6 +65,7 @@ defmodule MOQXProbe.Bench.PacedStream do
     drain_ms: :integer,
     tier: :string,
     paced_output: :string,
+    manifest_output: :string,
     evidence_output: :string,
     evidence_timeout_ms: :integer,
     evidence_poll_ms: :integer,
@@ -198,6 +200,7 @@ defmodule MOQXProbe.Bench.PacedStream do
     print_summary(options, summary)
 
     maybe_collect_delivery_evidence(options, accounting, started_at)
+    write_manifest!(options)
   end
 
   # The schedule loop. It advances the pacer on wall-clock ticks and offers the
@@ -443,6 +446,98 @@ defmodule MOQXProbe.Bench.PacedStream do
 
   defp offered_rate_unit(:payload_events), do: "payload_events_per_second"
   defp offered_rate_unit(:bytes), do: "bytes_per_second"
+
+  # --- run manifest (ADR-0009 experiment lifecycle) --------------------------
+
+  # Opt-in/additive; no-op without --manifest-output. Records mode=open_loop
+  # and references the sidecars this paced run actually produced, with explicit
+  # nil for unproduced slots.
+  defp write_manifest!(%{manifest: %{enabled?: false}}), do: :ok
+
+  defp write_manifest!(%{manifest: manifest} = options) do
+    inputs = %{
+      run_id: manifest_run_id(options),
+      created_at: DateTime.to_iso8601(DateTime.utc_now()),
+      command: "mix run bench/paced_stream.exs",
+      args: manifest.args,
+      git_sha: options.git_sha,
+      versions: manifest_versions(),
+      target_type: manifest_target_type(options.target, options.tier),
+      mode: :open_loop,
+      tier: String.to_atom(options.tier),
+      target: manifest_target(options),
+      client_implementation: "open_loop_paced",
+      workload: manifest_workload(options),
+      sidecars: manifest_sidecars(options),
+      clock_source_notes: %{
+        schedule: "System.monotonic_time/1 fixed wall-clock pacer",
+        sampler: "System.monotonic_time/1 out-of-band sampler"
+      }
+    }
+
+    case RunManifest.write(inputs, manifest.output) do
+      :ok ->
+        IO.puts("Run manifest: wrote #{manifest.output}")
+        :ok
+
+      {:error, reason} ->
+        Mix.raise("failed to write run manifest #{manifest.output}: #{inspect(reason)}")
+    end
+  end
+
+  defp manifest_run_id(%{evidence: %{enabled?: true, run_id: run_id}}), do: run_id
+  defp manifest_run_id(_options), do: evidence_run_id()
+
+  defp manifest_target_type(:fake, _tier), do: :fake
+  defp manifest_target_type(:quicprobe, "loopback_quic"), do: :loopback_quic
+  defp manifest_target_type(:quicprobe, _tier), do: :remote_quic
+
+  defp manifest_versions do
+    %{
+      moqx: Application.spec(:moqx, :vsn) |> version_string(),
+      moqxprobe: Application.spec(:moqxprobe, :vsn) |> version_string(),
+      elixir: System.version(),
+      otp: System.otp_release()
+    }
+  end
+
+  defp version_string(nil), do: nil
+  defp version_string(vsn), do: List.to_string(vsn)
+
+  defp manifest_target(%{target: :fake}), do: nil
+
+  defp manifest_target(options) do
+    %{
+      host: options.host,
+      quic_port: options.quic_port,
+      iperf_port: options.iperf_port,
+      servername: options.servername,
+      alpn: options.alpn
+    }
+  end
+
+  defp manifest_workload(options) do
+    %{
+      profile: @profile_name,
+      stream_count: options.stream_count,
+      payload_size: options.payload_size,
+      offered_rate: options.offered_rate,
+      offered_rate_unit: offered_rate_unit(options.rate_mode),
+      tick_ms: options.tick_ms,
+      duration_ms: options.duration_ms
+    }
+  end
+
+  defp manifest_sidecars(options) do
+    %{
+      paced: options.paced_output,
+      delivery_evidence: produced_sidecar(options.evidence.enabled?, options.evidence.output),
+      host_samples: produced_sidecar(options.host_samples.enabled?, options.host_samples.output)
+    }
+  end
+
+  defp produced_sidecar(true, output), do: output
+  defp produced_sidecar(_enabled, _output), do: nil
 
   defp print_summary(options, summary) do
     IO.puts(
@@ -701,8 +796,37 @@ defmodule MOQXProbe.Bench.PacedStream do
         Mix.raise("invalid options: #{invalid_text}\n\n#{help()}")
 
       true ->
-        opts |> base_options() |> put_evidence_options(opts) |> put_host_samples_options(opts)
+        opts
+        |> base_options()
+        |> put_evidence_options(opts)
+        |> put_host_samples_options(opts)
+        |> put_manifest_options(opts)
     end
+  end
+
+  # Run manifest (ADR-0009 experiment-lifecycle layer): opt-in via
+  # --manifest-output. The script supplies the runtime values; the pure
+  # RunManifest module only assembles and serializes them.
+  defp put_manifest_options(options, opts) do
+    output = Keyword.get(opts, :manifest_output)
+
+    Map.put(options, :manifest, %{
+      enabled?: is_binary(output),
+      output: output,
+      args: manifest_args(opts)
+    })
+  end
+
+  defp manifest_args(opts) do
+    Enum.flat_map(opts, fn {key, value} ->
+      flag = "--#{cli_key(key)}"
+
+      case value do
+        true -> [flag]
+        false -> []
+        value -> [flag, to_string(value)]
+      end
+    end)
   end
 
   defp base_options(opts) do
@@ -902,6 +1026,10 @@ defmodule MOQXProbe.Bench.PacedStream do
 
     Output:
       --paced-output PATH          write moqxprobe-paced-v1 JSONL sidecar
+      --manifest-output PATH       write a moqxprobe-run-manifest-v1 manifest.json
+                                   tying this open-loop run's artifacts together;
+                                   records mode=open_loop and references the
+                                   sidecars this run produced (explicit null otherwise)
       --tier TIER                  evidence tier: #{Enum.join(@tiers, ", ")} (default: loopback_quic)
 
     Delivery evidence (out of band, after the paced window):

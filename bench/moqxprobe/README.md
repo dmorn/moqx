@@ -425,6 +425,74 @@ Each sample (`record_type: "host_sample"`):
 The stream client monitors the Benchee suite driver process under the
 `benchee_suite_driver` role label.
 
+## Run manifest
+
+The run manifest is the experiment-lifecycle layer of
+[ADR-0009](../../docs/adr/0009-layered-benchmark-evidence-contract.md): a single
+`manifest.json` that ties every artifact of one benchmark run together and makes
+missing optional artifacts explicit. It is opt-in and additive — pass
+`--manifest-output PATH` to either script and nothing else about the run
+changes. Without the flag, the scripts behave exactly as before.
+
+```bash
+# Closed-loop (Benchee) manifest.
+mix run bench/stream_clients.exs -- \
+  --target fake --implementation flow_partitions \
+  --evidence-output results/run/delivery-evidence.jsonl \
+  --host-sample-ms 100 --host-samples-output results/run/host-samples.jsonl \
+  --manifest-output results/run/manifest.json
+
+# Open-loop (paced sender) manifest.
+mix run bench/paced_stream.exs -- \
+  --target fake --offered-rate 50000 --duration-ms 3000 \
+  --paced-output results/run/paced.jsonl \
+  --evidence-output results/run/delivery-evidence.jsonl \
+  --manifest-output results/run/manifest.json
+```
+
+`stream_clients.exs` records `mode: "closed_loop"`; `paced_stream.exs` records
+`mode: "open_loop"`. The two modes answer different questions and ADR-0009
+forbids cross-mode comparison, so the manifest carries the mode explicitly. The
+script generates the run id and reads the git SHA and project/tool versions at
+runtime; the pure `MOQXProbe.Benchee.RunManifest` module only assembles and
+serializes the values it is handed (no `Application` env, no shelling out).
+
+### Manifest fields (`moqxprobe-run-manifest-v1`)
+
+- `schema_version` — `moqxprobe-run-manifest-v1`;
+- `run_id` — stable per-run id (shared with the delivery-evidence sidecar when
+  `--evidence-output` is set, otherwise freshly minted);
+- `created_at` — ISO 8601 timestamp;
+- `command` and `args` — the command and reconstructed argument list;
+- `git_sha` — the git SHA the run was built from;
+- `versions` — `moqx`, `moqxprobe`, `elixir`, `otp` (and a reference/quicprobe
+  version when known); unknown versions are explicit `null`;
+- `target_type` — `fake`, `loopback_quic`, or `remote_quic`;
+- `mode` — `closed_loop` or `open_loop`;
+- `tier` — the ADR-0009 confidence tier (`fake`, `loopback_quic`,
+  `remote_quic_no_wire`, `remote_quic_with_wire`, `forensic`);
+- `target` — host/ports/servername/ALPN (`null` for fake targets);
+- `client_implementation` — the client implementation(s) under test
+  (`open_loop_paced` for the paced sender);
+- `workload` — profile and workload parameters;
+- `sidecars` — the sidecar path map (see below);
+- `clock_source_notes` — clock/source provenance notes.
+
+### Sidecar path map and the explicit-null convention
+
+The `sidecars` map always contains every canonical slot — `manifest`,
+`benchee`, `delivery_evidence`, `host_samples`, `paced`, `iperf3`, `capture`,
+`flamegraph`. A slot the run produced holds the path the corresponding flag
+wrote to; a slot the run did **not** produce holds an explicit `null`, never
+absent-by-omission. This lets a reader tell "not produced" from "forgot to
+record". The manifest references the sidecars wherever the flags wrote them
+(`--evidence-output`, `--host-samples-output`, `--paced-output`, `--save` for
+the Benchee suite); it does not relocate or rename them.
+
+This maps onto ADR-0009's bundle layout: one run produces a bundle under
+`results/<run-id>/` with `manifest.json` linking the additive sidecars by run
+id. The manifest is the index, never a replacement for the sidecars.
+
 ## DATAGRAM Clients
 
 Run the Flow-produced, GenStage-paced DATAGRAM client against the fake target:
@@ -528,6 +596,8 @@ operation details live in the `exe-dev-vm-ops` skill.
 
 The active artifact story is intentionally small:
 
+- An optional `manifest.json` (`moqxprobe-run-manifest-v1`) tying one run's
+  artifacts together by run id, per ADR-0009.
 - Benchee saved suites or console output.
 - Delivery-evidence sidecars collected after timed invocations.
 - Optional sidecar metadata for target, git SHA, command flags, `iperf3`

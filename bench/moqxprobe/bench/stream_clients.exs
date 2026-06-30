@@ -12,6 +12,7 @@ defmodule MOQXProbe.Bench.StreamClients do
   alias MOQXProbe.Benchee.Adapters
   alias MOQXProbe.Benchee.EvidenceCollector
   alias MOQXProbe.Benchee.RunReceipt
+  alias MOQXProbe.Benchee.RunManifest
   alias MOQXProbe.Benchee.RunMetadata
   alias MOQXProbe.Bench.StreamImplementations
   alias MOQXProbe.HostSampler
@@ -22,6 +23,7 @@ defmodule MOQXProbe.Bench.StreamClients do
   @input_names ["flow-generated", "flow-prebuilt-list"]
   @implementation_names StreamImplementations.names()
   @target_names ["fake", "quicprobe"]
+  @manifest_tiers ["fake", "loopback_quic", "remote_quic_no_wire", "remote_quic_with_wire"]
   @profile_name "draft14_object_stream"
   @quicprobe_experiment_lease_ttl_ms 30 * 60 * 1000
   @zero_evidence %{
@@ -81,6 +83,8 @@ defmodule MOQXProbe.Bench.StreamClients do
     iperf_preflight_summary: :keep,
     tailscale_path_mode: :string,
     server_stats_path: :string,
+    tier: :string,
+    manifest_output: :string,
     save: :string
   ]
   @aliases [h: :help]
@@ -585,6 +589,7 @@ defmodule MOQXProbe.Bench.StreamClients do
         }
         |> put_evidence_options(opts)
         |> put_host_samples_options(opts)
+        |> put_manifest_options(opts)
     end
   end
 
@@ -776,6 +781,154 @@ defmodule MOQXProbe.Bench.StreamClients do
       sampler: nil
     })
   end
+
+  # Run manifest (ADR-0009 experiment-lifecycle layer): opt-in via
+  # --manifest-output. The script supplies the runtime values (run id, command,
+  # args, git sha, versions); the pure RunManifest module only assembles and
+  # serializes them. The manifest references wherever the other flags wrote
+  # their sidecars; slots a run did not produce stay explicit nil.
+  defp put_manifest_options(%{base: base} = options, opts) do
+    output = Keyword.get(opts, :manifest_output)
+
+    Map.put(options, :manifest, %{
+      enabled?: is_binary(output),
+      output: output,
+      tier: manifest_tier(base.target, opts),
+      args: manifest_args(opts)
+    })
+  end
+
+  defp manifest_tier(target, opts) do
+    case Keyword.get(opts, :tier, default_manifest_tier(target)) do
+      name when name in @manifest_tiers ->
+        name
+
+      name ->
+        Mix.raise("--tier must be one of #{Enum.join(@manifest_tiers, ", ")}; got #{name}")
+    end
+  end
+
+  defp default_manifest_tier(:fake), do: "fake"
+  defp default_manifest_tier(:quicprobe), do: "loopback_quic"
+
+  # The closed-loop manifest's target type follows ADR-0009: fake targets are
+  # process-model only; quicprobe targets are loopback unless the tier says the
+  # path is remote.
+  defp manifest_target_type(:fake, _tier), do: :fake
+  defp manifest_target_type(:quicprobe, "loopback_quic"), do: :loopback_quic
+  defp manifest_target_type(:quicprobe, "fake"), do: :loopback_quic
+  defp manifest_target_type(:quicprobe, _tier), do: :remote_quic
+
+  defp manifest_args(opts) do
+    Enum.flat_map(opts, fn {key, value} ->
+      flag = "--#{cli_key(key)}"
+
+      case value do
+        true -> [flag]
+        false -> []
+        value -> [flag, to_string(value)]
+      end
+    end)
+  end
+
+  @doc """
+  Writes the run manifest (ADR-0009) when --manifest-output is set. No-op
+  otherwise so the manifest stays opt-in/additive. The manifest references the
+  sidecar paths this run actually produced and records explicit nil for the
+  ones it did not.
+  """
+  def write_manifest!(%{manifest: %{enabled?: false}}), do: :ok
+
+  def write_manifest!(%{manifest: manifest, base: base} = options) do
+    inputs = %{
+      run_id: manifest_run_id(options),
+      created_at: DateTime.to_iso8601(DateTime.utc_now()),
+      command: "mix run bench/stream_clients.exs",
+      args: manifest.args,
+      git_sha: base.git_sha,
+      versions: manifest_versions(),
+      target_type: manifest_target_type(base.target, manifest.tier),
+      mode: :closed_loop,
+      tier: String.to_atom(manifest.tier),
+      target: manifest_target(options),
+      client_implementation: manifest_client_implementation(options),
+      workload: manifest_workload(base),
+      sidecars: manifest_sidecars(options),
+      clock_source_notes: %{
+        invocation_timing: "Benchee closed-loop service time",
+        sampler: "System.monotonic_time/1 out-of-band sampler"
+      }
+    }
+
+    case RunManifest.write(inputs, manifest.output) do
+      :ok ->
+        IO.puts("Run manifest: wrote #{manifest.output}")
+        :ok
+
+      {:error, reason} ->
+        Mix.raise("failed to write run manifest #{manifest.output}: #{inspect(reason)}")
+    end
+  end
+
+  def write_manifest!(_options), do: :ok
+
+  # Prefer the evidence run id (already a stable per-run id) so the manifest
+  # shares an id with the delivery-evidence sidecar; otherwise mint one.
+  defp manifest_run_id(%{evidence: %{enabled?: true, run_id: run_id}}), do: run_id
+  defp manifest_run_id(_options), do: evidence_run_id()
+
+  defp manifest_versions do
+    %{
+      moqx: Application.spec(:moqx, :vsn) |> version_string(),
+      moqxprobe: Application.spec(:moqxprobe, :vsn) |> version_string(),
+      elixir: System.version(),
+      otp: System.otp_release()
+    }
+  end
+
+  defp version_string(nil), do: nil
+  defp version_string(vsn), do: List.to_string(vsn)
+
+  defp manifest_target(%{base: %{target: :fake}}), do: nil
+
+  defp manifest_target(%{base: base}) do
+    %{
+      host: base.host,
+      quic_port: base.quic_port,
+      iperf_port: base.iperf_port,
+      servername: base.servername,
+      alpn: base.alpn
+    }
+  end
+
+  # The closed-loop suite ranks a matrix of implementations; record the set so
+  # the manifest does not falsely claim a single implementation.
+  defp manifest_client_implementation(%{implementations: [name]}), do: name
+  defp manifest_client_implementation(%{implementations: names}), do: names
+
+  defp manifest_workload(base) do
+    %{
+      profile: @profile_name,
+      stream_count: base.stream_count,
+      payload_count: base.payload_count,
+      payload_size: base.payload_size,
+      stream_send_window: base.stream_send_window,
+      sender_shard_count: base.sender_shard_count
+    }
+  end
+
+  defp manifest_sidecars(options) do
+    %{
+      benchee: get_in(options, [:benchee, :save]),
+      delivery_evidence:
+        produced_sidecar(get_in(options, [:evidence, :enabled?]), options.evidence.output),
+      host_samples:
+        produced_sidecar(get_in(options, [:host_samples, :enabled?]), options.host_samples.output)
+    }
+  end
+
+  defp produced_sidecar(true, output), do: output
+  defp produced_sidecar(_enabled, _output), do: nil
 
   @doc """
   Starts the out-of-band BEAM/host sampler in its own process before the
@@ -2012,6 +2165,14 @@ defmodule MOQXProbe.Bench.StreamClients do
       --tailscale-path-mode MODE     optional Tailscale path mode, e.g. direct or relay
       --server-stats-path PATH       optional server stats/evidence path metadata
 
+    Run manifest (ADR-0009 experiment lifecycle; opt-in, additive):
+      --manifest-output PATH         write a moqxprobe-run-manifest-v1 manifest.json
+                                     tying this closed-loop run's artifacts together;
+                                     records mode=closed_loop and references the
+                                     sidecars this run produced (explicit null otherwise)
+      --tier TIER                    evidence tier: #{Enum.join(@manifest_tiers, ", ")}
+                                     (default: fake for --target fake, else loopback_quic)
+
     Example:
       mix run bench/stream_clients.exs -- --stream-count 32 --payload-count 1000 --stream-send-window 16 --benchee-time 3
     """
@@ -2033,6 +2194,8 @@ defmodule MOQXProbe.Bench.StreamClients do
       after
         stop_host_sampler(options)
       end
+
+      write_manifest!(options)
     after
       cleanup_run(options)
     end
