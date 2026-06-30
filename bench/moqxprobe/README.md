@@ -60,6 +60,16 @@ The evidence collector uses target adapters:
   For real `quicprobe` targets, it also acquires an exclusive experiment lease
   before the suite starts.
 
+The Quicprobe adapter captures both the final aggregates and the receiver
+delivery shape over time. Lifecycle offsets surface as observed metrics
+(`first_stream_byte_at_ms`, `last_stream_byte_at_ms`, `first_datagram_at_ms`,
+`last_datagram_at_ms`), and the raw interval bins are preserved under the
+evidence `metadata.receiver_interval` (bin width plus per-window
+bytes/datagrams/events). The sidecar stays backward compatible: against an
+older quicprobe build without interval fields, `receiver_interval` is `nil` and
+no interval metrics are added. The bins are raw counts; deriving `*_bps`
+belongs to a later report slice (ADR-0009).
+
 ## Install
 
 ```bash
@@ -246,6 +256,7 @@ go run ../quicprobe server \
   --key <server-key.pem> \
   --alpn moqx-test \
   --datagram-semantics drain \
+  --evidence-bin-ms 100 \
   --stats-output <run-evidence.jsonl>
 ```
 
@@ -254,6 +265,17 @@ connection to stdout and to `--stats-output` when configured. The record is
 receiver-side evidence, not a client benchmark result: bidirectional streams
 are echoed, unidirectional streams are drained and counted, and DATAGRAMs are
 handled according to `--datagram-semantics`.
+
+Beyond the final aggregates, each record also carries the receiver delivery
+*shape* over time (ADR-0009 receiver-evidence layer). It reports lifecycle
+offsets (`first_stream_byte_at_ms` / `last_stream_byte_at_ms` and
+`first_datagram_at_ms` / `last_datagram_at_ms`) and a sequence of fixed-width
+`interval_bins`. Each bin records its `start_offset_ms` and the raw
+`stream_bytes`, `datagram_bytes`, `datagrams`, `stream_payload_events`, and
+`streams_completed` accumulated in that window. The window width is
+configurable via `--evidence-bin-ms` (default 100) and echoed back as
+`interval_bin_width_ms`. Bins are raw counts only: per ADR-0009 the evidence
+layer never derives a rate, so deriving `*_bps` is left to the report layer.
 Use `drain` for publish-only `moqxprobe` DATAGRAM benchmarks. Use `echo` only
 for round-trip/reference-client DATAGRAM checks where the client expects echoed
 DATAGRAMs back.

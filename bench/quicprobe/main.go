@@ -45,6 +45,8 @@ const datagramSemanticsDrain = "drain"
 const datagramSemanticsEcho = "echo"
 const experimentLeaseDefaultTTL = 30 * time.Minute
 const experimentLeaseMaxTTL = 24 * time.Hour
+const defaultEvidenceBinMS = 100
+const serverRunEvidenceIntervalBinLimit = 36_000
 
 type serverConfig struct {
 	addr              string
@@ -56,6 +58,7 @@ type serverConfig struct {
 	datagramSemantics string
 	udpNetwork        string
 	initialSize       int
+	evidenceBinMS     int
 }
 
 type clientConfig struct {
@@ -179,6 +182,31 @@ type serverRunEvidence struct {
 	ReceiverEvidenceFailureCause string  `json:"receiver_evidence_failure_cause,omitempty"`
 	ExperimentLeaseOwner         string  `json:"experiment_lease_owner,omitempty"`
 	ExperimentLeaseToken         string  `json:"experiment_lease_token,omitempty"`
+
+	// Receiver-evidence delivery shape over time. All fields are additive: an
+	// offset of zero (the *_at_ms timestamps) means the event never occurred.
+	// Interval bins are raw counts per fixed-width window; bandwidth derivation
+	// belongs to the report layer, not here (ADR-0009).
+	FirstStreamByteAtMS float64                        `json:"first_stream_byte_at_ms,omitempty"`
+	LastStreamByteAtMS  float64                        `json:"last_stream_byte_at_ms,omitempty"`
+	FirstDatagramAtMS   float64                        `json:"first_datagram_at_ms,omitempty"`
+	LastDatagramAtMS    float64                        `json:"last_datagram_at_ms,omitempty"`
+	IntervalBinWidthMS  float64                        `json:"interval_bin_width_ms,omitempty"`
+	IntervalBins        []serverRunEvidenceIntervalBin `json:"interval_bins,omitempty"`
+}
+
+// serverRunEvidenceIntervalBin holds raw receiver-side delivery counts that
+// accumulated within one fixed-width time window of the run. It records the
+// window start offset and the bytes/datagrams/events seen in that window; it
+// never carries a derived rate (ADR-0009 forbids naked bandwidth/goodput at
+// the evidence layer).
+type serverRunEvidenceIntervalBin struct {
+	StartOffsetMS       float64 `json:"start_offset_ms"`
+	StreamBytes         int64   `json:"stream_bytes"`
+	DatagramBytes       int64   `json:"datagram_bytes"`
+	Datagrams           int     `json:"datagrams"`
+	StreamPayloadEvents int     `json:"stream_payload_events"`
+	StreamsCompleted    int     `json:"streams_completed"`
 }
 
 type evidenceLatestResponse struct {
@@ -272,8 +300,81 @@ type serverConnectionStats struct {
 	streamReceiveErr       error
 	streamSendErr          error
 	firstStreamByteLatency time.Duration
+	firstStreamByteAt      time.Duration
+	lastStreamByteAt       time.Duration
+	firstDatagramAt        time.Duration
+	lastDatagramAt         time.Duration
+	bins                   intervalBinAccumulator
 	experimentLeaseOwner   string
 	experimentLeaseToken   string
+}
+
+// intervalBinAccumulator buckets receiver-side delivery counts into
+// fixed-width time windows. It is not safe for concurrent use; callers bump it
+// while holding the serverConnectionStats lock that already guards the
+// aggregate counters, so no extra synchronization is added to the hot path.
+type intervalBinAccumulator struct {
+	width time.Duration
+	bins  []serverRunEvidenceIntervalBin
+}
+
+func newIntervalBinAccumulator(width time.Duration) intervalBinAccumulator {
+	return intervalBinAccumulator{width: width}
+}
+
+// binAt returns a pointer to the bin covering the given run offset, growing the
+// backing slice on demand. Empty intermediate bins are materialized so a
+// consumer sees an explicit, gap-free window sequence. The slice is capped at
+// serverRunEvidenceIntervalBinLimit to bound memory for pathologically long
+// runs; events past the cap fold into the last bin.
+func (a *intervalBinAccumulator) binAt(offset time.Duration) *serverRunEvidenceIntervalBin {
+	if a.width <= 0 {
+		a.width = defaultEvidenceBinMS * time.Millisecond
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	index := int(offset / a.width)
+	if index >= serverRunEvidenceIntervalBinLimit {
+		index = serverRunEvidenceIntervalBinLimit - 1
+	}
+
+	for len(a.bins) <= index {
+		startOffset := time.Duration(len(a.bins)) * a.width
+		a.bins = append(a.bins, serverRunEvidenceIntervalBin{
+			StartOffsetMS: durationMillis(startOffset),
+		})
+	}
+
+	return &a.bins[index]
+}
+
+func (a *intervalBinAccumulator) addStream(offset time.Duration, bytes int64, events int) {
+	bin := a.binAt(offset)
+	bin.StreamBytes += bytes
+	bin.StreamPayloadEvents += events
+}
+
+func (a *intervalBinAccumulator) addStreamsCompleted(offset time.Duration, count int) {
+	bin := a.binAt(offset)
+	bin.StreamsCompleted += count
+}
+
+func (a *intervalBinAccumulator) addDatagram(offset time.Duration, bytes int64, count int) {
+	bin := a.binAt(offset)
+	bin.DatagramBytes += bytes
+	bin.Datagrams += count
+}
+
+func (a *intervalBinAccumulator) snapshot() []serverRunEvidenceIntervalBin {
+	if len(a.bins) == 0 {
+		return nil
+	}
+
+	out := make([]serverRunEvidenceIntervalBin, len(a.bins))
+	copy(out, a.bins)
+	return out
 }
 
 type serverConnectionStatsSnapshot struct {
@@ -302,6 +403,12 @@ type serverConnectionStatsSnapshot struct {
 	streamReceiveErr          error
 	streamSendErr             error
 	firstStreamByteLatency    time.Duration
+	firstStreamByteAt         time.Duration
+	lastStreamByteAt          time.Duration
+	firstDatagramAt           time.Duration
+	lastDatagramAt            time.Duration
+	intervalBinWidth          time.Duration
+	intervalBins              []serverRunEvidenceIntervalBin
 	experimentLeaseOwner      string
 	experimentLeaseToken      string
 }
@@ -386,6 +493,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&cfg.datagramSemantics, "datagram-semantics", datagramSemanticsDrain, "server DATAGRAM behavior: drain or echo")
 	flags.StringVar(&cfg.udpNetwork, "udp-network", udpNetworkAuto, "UDP socket network: auto, udp, udp4, or udp6")
 	flags.IntVar(&cfg.initialSize, "initial-packet-size", 0, "QUIC Initial packet size in bytes; 0 uses the quic-go default")
+	flags.IntVar(&cfg.evidenceBinMS, "evidence-bin-ms", defaultEvidenceBinMS, "width in milliseconds of each receiver-evidence interval bin")
 
 	if err := flags.Parse(args); err != nil {
 		return serverConfig{}, err
@@ -408,6 +516,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	}
 	if err := validateInitialPacketSize(cfg.initialSize); err != nil {
 		return serverConfig{}, err
+	}
+	if cfg.evidenceBinMS <= 0 {
+		return serverConfig{}, errors.New("server --evidence-bin-ms must be positive")
 	}
 
 	return cfg, nil
@@ -514,6 +625,7 @@ func parseClientConfig(args []string) (clientConfig, time.Duration, error) {
 
 func runServer(ctx context.Context, cfg serverConfig, ready chan<- string, evidenceOut io.Writer) error {
 	datagramSemantics := normalizedDatagramSemantics(cfg.datagramSemantics)
+	evidenceBinWidth := evidenceBinWidthFromConfig(cfg)
 	cert, err := tls.LoadX509KeyPair(cfg.certFile, cfg.keyFile)
 	if err != nil {
 		return fmt.Errorf("load server certificate: %w", err)
@@ -565,17 +677,26 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string, evide
 		}
 
 		lease := recorder.activeExperimentLease()
-		go handleConnection(ctx, conn, recorder, datagramSemantics, lease)
+		go handleConnection(ctx, conn, recorder, datagramSemantics, evidenceBinWidth, lease)
 	}
 }
 
-func newServerConnectionStats(conn quic.Connection, datagramSemantics string, lease *experimentLeaseInfo) *serverConnectionStats {
+func evidenceBinWidthFromConfig(cfg serverConfig) time.Duration {
+	if cfg.evidenceBinMS <= 0 {
+		return defaultEvidenceBinMS * time.Millisecond
+	}
+
+	return time.Duration(cfg.evidenceBinMS) * time.Millisecond
+}
+
+func newServerConnectionStats(conn quic.Connection, datagramSemantics string, binWidth time.Duration, lease *experimentLeaseInfo) *serverConnectionStats {
 	stats := &serverConnectionStats{
 		startedAt:         time.Now(),
 		localAddr:         conn.LocalAddr().String(),
 		remoteAddr:        conn.RemoteAddr().String(),
 		alpn:              conn.ConnectionState().TLS.NegotiatedProtocol,
 		datagramSemantics: datagramSemantics,
+		bins:              newIntervalBinAccumulator(binWidth),
 	}
 
 	if lease != nil {
@@ -586,8 +707,8 @@ func newServerConnectionStats(conn quic.Connection, datagramSemantics string, le
 	return stats
 }
 
-func handleConnection(ctx context.Context, conn quic.Connection, recorder *serverRunEvidenceRecorder, datagramSemantics string, lease *experimentLeaseInfo) {
-	stats := newServerConnectionStats(conn, datagramSemantics, lease)
+func handleConnection(ctx context.Context, conn quic.Connection, recorder *serverRunEvidenceRecorder, datagramSemantics string, binWidth time.Duration, lease *experimentLeaseInfo) {
+	stats := newServerConnectionStats(conn, datagramSemantics, binWidth, lease)
 	var wg sync.WaitGroup
 	var streamHandlers sync.WaitGroup
 	var datagramStats datagramEchoStats
@@ -606,7 +727,7 @@ func handleConnection(ctx context.Context, conn quic.Connection, recorder *serve
 
 	go func() {
 		defer wg.Done()
-		datagramStats = handleDatagrams(ctx, conn, datagramSemantics)
+		datagramStats = handleDatagrams(ctx, conn, datagramSemantics, stats)
 	}()
 
 	wg.Wait()
@@ -640,10 +761,14 @@ func (s *serverConnectionStats) recordStreamBytesReceived(count int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	offset := time.Since(s.startedAt)
 	s.streamBytesReceived += count
 	if s.firstStreamByteLatency == 0 {
-		s.firstStreamByteLatency = time.Since(s.startedAt)
+		s.firstStreamByteLatency = offset
+		s.firstStreamByteAt = offset
 	}
+	s.lastStreamByteAt = offset
+	s.bins.addStream(offset, count, 1)
 }
 
 func (s *serverConnectionStats) recordStreamBytesEchoed(count int64) {
@@ -658,6 +783,7 @@ func (s *serverConnectionStats) recordStreamCompleted() {
 	defer s.mu.Unlock()
 
 	s.streamsCompleted++
+	s.bins.addStreamsCompleted(time.Since(s.startedAt), 1)
 }
 
 func (s *serverConnectionStats) recordStreamReceiveError(err error) {
@@ -678,6 +804,25 @@ func (s *serverConnectionStats) recordStreamSendError(err error) {
 	if s.streamSendErr == nil {
 		s.streamSendErr = err
 	}
+}
+
+// recordDatagramReceived bumps the interval bin and first/last DATAGRAM offset
+// for a single received DATAGRAM. It is nil-safe so the datagram drain/echo
+// loops can be exercised without a stats sink (for example in tests).
+func (s *serverConnectionStats) recordDatagramReceived(count int64) {
+	if s == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	offset := time.Since(s.startedAt)
+	if s.firstDatagramAt == 0 {
+		s.firstDatagramAt = offset
+	}
+	s.lastDatagramAt = offset
+	s.bins.addDatagram(offset, count, 1)
 }
 
 func (s *serverConnectionStats) setDatagrams(stats datagramEchoStats) {
@@ -724,25 +869,31 @@ func (s *serverConnectionStats) snapshot() serverConnectionStatsSnapshot {
 		streamReceiveErr:          s.streamReceiveErr,
 		streamSendErr:             s.streamSendErr,
 		firstStreamByteLatency:    s.firstStreamByteLatency,
+		firstStreamByteAt:         s.firstStreamByteAt,
+		lastStreamByteAt:          s.lastStreamByteAt,
+		firstDatagramAt:           s.firstDatagramAt,
+		lastDatagramAt:            s.lastDatagramAt,
+		intervalBinWidth:          s.bins.width,
+		intervalBins:              s.bins.snapshot(),
 		experimentLeaseOwner:      s.experimentLeaseOwner,
 		experimentLeaseToken:      s.experimentLeaseToken,
 	}
 }
 
-func handleDatagrams(ctx context.Context, conn datagramConn, semantics string) datagramEchoStats {
+func handleDatagrams(ctx context.Context, conn datagramConn, semantics string, sink *serverConnectionStats) datagramEchoStats {
 	switch semantics {
 	case datagramSemanticsDrain:
-		return drainDatagrams(ctx, conn)
+		return drainDatagrams(ctx, conn, sink)
 	case datagramSemanticsEcho:
-		return echoDatagrams(ctx, conn)
+		return echoDatagrams(ctx, conn, sink)
 	default:
-		stats := drainDatagrams(ctx, conn)
+		stats := drainDatagrams(ctx, conn, sink)
 		stats.sendErr = fmt.Errorf("unsupported datagram semantics %q", semantics)
 		return stats
 	}
 }
 
-func drainDatagrams(ctx context.Context, conn datagramConn) (stats datagramEchoStats) {
+func drainDatagrams(ctx context.Context, conn datagramConn, sink *serverConnectionStats) (stats datagramEchoStats) {
 	stats = datagramEchoStats{
 		startedAt:  time.Now(),
 		localAddr:  conn.LocalAddr().String(),
@@ -763,6 +914,7 @@ func drainDatagrams(ctx context.Context, conn datagramConn) (stats datagramEchoS
 		}
 		stats.datagramsReceived++
 		stats.bytesReceived += int64(len(datagram))
+		sink.recordDatagramReceived(int64(len(datagram)))
 	}
 }
 
@@ -855,7 +1007,7 @@ func drainUniStream(stream quic.ReceiveStream, stats *serverConnectionStats) {
 	}
 }
 
-func echoDatagrams(ctx context.Context, conn datagramConn) (stats datagramEchoStats) {
+func echoDatagrams(ctx context.Context, conn datagramConn, sink *serverConnectionStats) (stats datagramEchoStats) {
 	stats = datagramEchoStats{
 		startedAt:         time.Now(),
 		localAddr:         conn.LocalAddr().String(),
@@ -890,6 +1042,7 @@ func echoDatagrams(ctx context.Context, conn datagramConn) (stats datagramEchoSt
 		}
 		stats.datagramsReceived++
 		stats.bytesReceived += int64(len(datagram))
+		sink.recordDatagramReceived(int64(len(datagram)))
 
 		echoQueue <- datagram
 		if depth := len(echoQueue); depth > stats.echoQueueMaxDepth {
@@ -1360,6 +1513,12 @@ func serverRunEvidenceFromSnapshot(sequence uint64, stats serverConnectionStatsS
 		EchoQueueMaxDepth:         stats.echoQueueMaxDepth,
 		FirstDatagramLatencyMS:    durationMillis(stats.firstDatagramLatency),
 		FirstStreamByteLatencyMS:  durationMillis(stats.firstStreamByteLatency),
+		FirstStreamByteAtMS:       durationMillis(stats.firstStreamByteAt),
+		LastStreamByteAtMS:        durationMillis(stats.lastStreamByteAt),
+		FirstDatagramAtMS:         durationMillis(stats.firstDatagramAt),
+		LastDatagramAtMS:          durationMillis(stats.lastDatagramAt),
+		IntervalBinWidthMS:        durationMillis(stats.intervalBinWidth),
+		IntervalBins:              stats.intervalBins,
 		ReceiverEvidenceComplete:  true,
 		ExperimentLeaseOwner:      stats.experimentLeaseOwner,
 		ExperimentLeaseToken:      stats.experimentLeaseToken,

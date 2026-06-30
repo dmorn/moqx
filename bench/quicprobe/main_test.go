@@ -489,7 +489,7 @@ func TestEchoDatagramsDrainsReceivesWhileEchoSendIsBlocked(t *testing.T) {
 	conn := newBlockingEchoConn(payloads)
 	resultc := make(chan datagramEchoStats, 1)
 	go func() {
-		resultc <- echoDatagrams(context.Background(), conn)
+		resultc <- echoDatagrams(context.Background(), conn, nil)
 	}()
 
 	select {
@@ -535,7 +535,7 @@ func TestDrainDatagramsDoesNotEcho(t *testing.T) {
 	}
 
 	conn := newBlockingEchoConn(payloads)
-	stats := drainDatagrams(context.Background(), conn)
+	stats := drainDatagrams(context.Background(), conn, nil)
 
 	if stats.datagramsReceived != len(payloads) {
 		t.Fatalf("datagramsReceived = %d, want %d", stats.datagramsReceived, len(payloads))
@@ -1345,5 +1345,76 @@ func writePEM(t *testing.T, path string, typ string, der []byte) {
 
 	if err := pem.Encode(file, &pem.Block{Type: typ, Bytes: der}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestParseServerConfigEvidenceBinMS(t *testing.T) {
+	t.Parallel()
+
+	base := []string{"-cert", "cert.pem", "-key", "key.pem"}
+
+	cfg, err := parseServerConfig(base)
+	if err != nil {
+		t.Fatalf("parseServerConfig() error = %v", err)
+	}
+	if cfg.evidenceBinMS != defaultEvidenceBinMS {
+		t.Fatalf("evidenceBinMS = %d, want %d", cfg.evidenceBinMS, defaultEvidenceBinMS)
+	}
+
+	cfg, err = parseServerConfig(append(base, "-evidence-bin-ms", "250"))
+	if err != nil {
+		t.Fatalf("parseServerConfig() with bin flag error = %v", err)
+	}
+	if cfg.evidenceBinMS != 250 {
+		t.Fatalf("evidenceBinMS = %d, want 250", cfg.evidenceBinMS)
+	}
+
+	if _, err := parseServerConfig(append(base, "-evidence-bin-ms", "0")); err == nil {
+		t.Fatal("parseServerConfig() with non-positive bin width: expected error")
+	}
+}
+
+func TestIntervalBinAccumulatorBucketsByWindow(t *testing.T) {
+	t.Parallel()
+
+	acc := newIntervalBinAccumulator(100 * time.Millisecond)
+
+	acc.addStream(10*time.Millisecond, 1200, 1)
+	acc.addStream(50*time.Millisecond, 800, 1)
+	acc.addStreamsCompleted(60*time.Millisecond, 1)
+	acc.addDatagram(120*time.Millisecond, 512, 1)
+	acc.addStream(370*time.Millisecond, 400, 1)
+
+	bins := acc.snapshot()
+	if len(bins) != 4 {
+		t.Fatalf("bin count = %d, want 4 (gap-free windows through offset 370ms)", len(bins))
+	}
+
+	if bins[0].StartOffsetMS != 0 {
+		t.Fatalf("bin[0] start_offset_ms = %v, want 0", bins[0].StartOffsetMS)
+	}
+	if bins[0].StreamBytes != 2000 {
+		t.Fatalf("bin[0] stream_bytes = %d, want 2000", bins[0].StreamBytes)
+	}
+	if bins[0].StreamPayloadEvents != 2 {
+		t.Fatalf("bin[0] stream_payload_events = %d, want 2", bins[0].StreamPayloadEvents)
+	}
+	if bins[0].StreamsCompleted != 1 {
+		t.Fatalf("bin[0] streams_completed = %d, want 1", bins[0].StreamsCompleted)
+	}
+
+	if bins[1].StartOffsetMS != 100 {
+		t.Fatalf("bin[1] start_offset_ms = %v, want 100", bins[1].StartOffsetMS)
+	}
+	if bins[1].Datagrams != 1 || bins[1].DatagramBytes != 512 {
+		t.Fatalf("bin[1] datagrams = %d bytes = %d, want 1/512", bins[1].Datagrams, bins[1].DatagramBytes)
+	}
+
+	if bins[2].StreamBytes != 0 || bins[2].Datagrams != 0 {
+		t.Fatalf("bin[2] should be an empty intermediate window, got %+v", bins[2])
+	}
+
+	if bins[3].StartOffsetMS != 300 || bins[3].StreamBytes != 400 {
+		t.Fatalf("bin[3] = %+v, want start 300 / stream_bytes 400", bins[3])
 	}
 }

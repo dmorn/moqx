@@ -22,6 +22,19 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
     "receiver_evidence_complete"
   ]
 
+  # Receiver-evidence delivery-shape fields surfaced from the quicprobe
+  # server-run record. These are lifecycle windows (first/last byte and
+  # DATAGRAM offsets) plus the raw interval bins. They are additive: an older
+  # quicprobe build omits them and the sidecar simply records nil. Bandwidth
+  # derivation belongs to a later report slice, so nothing is divided here
+  # (ADR-0009).
+  @interval_timestamp_fields [
+    "first_stream_byte_at_ms",
+    "last_stream_byte_at_ms",
+    "first_datagram_at_ms",
+    "last_datagram_at_ms"
+  ]
+
   @impl true
   def collect(%RunReceipt{} = receipt, opts) do
     case evidence_source(opts) do
@@ -255,13 +268,59 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
     complete? = evidence_complete?(receipt, record)
     error = if complete?, do: nil, else: Map.get(record, "receiver_evidence_failure_cause")
 
+    metadata =
+      source
+      |> source_metadata()
+      |> Map.put(:raw, record)
+      |> Map.put(:receiver_interval, receiver_interval(record))
+
     Evidence.from_observed(receipt, observed_counters(record),
       source: :quicprobe,
       complete?: complete?,
       error: error,
-      metadata: Map.put(source_metadata(source), :raw, record)
+      metadata: metadata
     )
   end
+
+  # Builds the explicit receiver-evidence interval view from a quicprobe
+  # server-run record. Keeps raw counts per window (bytes/datagrams/events) and
+  # makes the window width explicit; it never derives a rate. Returns nil when
+  # the quicprobe build predates interval bins so the sidecar stays additive.
+  defp receiver_interval(record) do
+    bins = normalize_interval_bins(Map.get(record, "interval_bins"))
+
+    if bins == [] and not has_interval_timestamps?(record) do
+      nil
+    else
+      %{
+        bin_width_ms: Map.get(record, "interval_bin_width_ms"),
+        first_stream_byte_at_ms: Map.get(record, "first_stream_byte_at_ms"),
+        last_stream_byte_at_ms: Map.get(record, "last_stream_byte_at_ms"),
+        first_datagram_at_ms: Map.get(record, "first_datagram_at_ms"),
+        last_datagram_at_ms: Map.get(record, "last_datagram_at_ms"),
+        bins: bins
+      }
+    end
+  end
+
+  defp has_interval_timestamps?(record) do
+    Enum.any?(@interval_timestamp_fields, fn field -> Map.has_key?(record, field) end)
+  end
+
+  defp normalize_interval_bins(bins) when is_list(bins) do
+    Enum.map(bins, fn bin ->
+      %{
+        start_offset_ms: Map.get(bin, "start_offset_ms"),
+        stream_bytes: Map.get(bin, "stream_bytes"),
+        datagram_bytes: Map.get(bin, "datagram_bytes"),
+        datagrams: Map.get(bin, "datagrams"),
+        stream_payload_events: Map.get(bin, "stream_payload_events"),
+        streams_completed: Map.get(bin, "streams_completed")
+      }
+    end)
+  end
+
+  defp normalize_interval_bins(_other), do: []
 
   defp evidence_complete?(receipt, record) do
     if expected_receiver_complete?(receipt) do
@@ -277,7 +336,14 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
   end
 
   defp observed_counters(record) do
-    Map.new(@counter_fields, fn field -> {String.to_atom(field), Map.get(record, field)} end)
+    counters =
+      Map.new(@counter_fields, fn field -> {String.to_atom(field), Map.get(record, field)} end)
+
+    @interval_timestamp_fields
+    |> Enum.filter(fn field -> Map.has_key?(record, field) end)
+    |> Enum.reduce(counters, fn field, acc ->
+      Map.put(acc, String.to_atom(field), Map.get(record, field))
+    end)
   end
 
   defp source_metadata({:path, path}), do: %{path: path}

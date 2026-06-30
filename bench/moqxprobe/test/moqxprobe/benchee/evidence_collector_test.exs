@@ -154,6 +154,99 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
     assert evidence.metadata.raw["run_sequence"] == 2
   end
 
+  test "quicprobe adapter captures receiver interval bins and lifecycle offsets" do
+    path = temp_jsonl_path()
+    on_exit(fn -> File.rm(path) end)
+
+    write_jsonl!(path, [
+      %{
+        record_type: "server_run_evidence",
+        run_sequence: 1,
+        stream_bytes_received: 2400,
+        streams_completed: 2,
+        receiver_evidence_complete: true,
+        first_stream_byte_at_ms: 5.0,
+        last_stream_byte_at_ms: 180.0,
+        first_datagram_at_ms: 12.0,
+        last_datagram_at_ms: 150.0,
+        interval_bin_width_ms: 100.0,
+        interval_bins: [
+          %{
+            start_offset_ms: 0.0,
+            stream_bytes: 1200,
+            datagram_bytes: 512,
+            datagrams: 1,
+            stream_payload_events: 1,
+            streams_completed: 0
+          },
+          %{
+            start_offset_ms: 100.0,
+            stream_bytes: 1200,
+            datagram_bytes: 0,
+            datagrams: 0,
+            stream_payload_events: 1,
+            streams_completed: 2
+          }
+        ]
+      }
+    ])
+
+    receipt =
+      RunReceipt.new!(
+        id: :quicprobe_interval_run,
+        target: :quicprobe,
+        match: %{run_sequence: 1},
+        expected: %{receiver_evidence_complete: true}
+      )
+
+    assert {:ok, %Evidence{valid: true, source: :quicprobe} = evidence} =
+             Quicprobe.collect(receipt, path: path, timeout_ms: 10, poll_ms: 1)
+
+    assert evidence.observed.first_stream_byte_at_ms == 5.0
+    assert evidence.observed.last_datagram_at_ms == 150.0
+
+    interval = evidence.metadata.receiver_interval
+    assert interval.bin_width_ms == 100.0
+    assert interval.first_stream_byte_at_ms == 5.0
+    assert interval.last_stream_byte_at_ms == 180.0
+    assert length(interval.bins) == 2
+
+    [first_bin, second_bin] = interval.bins
+    assert first_bin.start_offset_ms == 0.0
+    assert first_bin.stream_bytes == 1200
+    assert first_bin.datagrams == 1
+    assert second_bin.streams_completed == 2
+  end
+
+  test "quicprobe adapter stays additive for evidence without interval fields" do
+    path = temp_jsonl_path()
+    on_exit(fn -> File.rm(path) end)
+
+    write_jsonl!(path, [
+      %{
+        record_type: "server_run_evidence",
+        run_sequence: 1,
+        stream_bytes_received: 384,
+        streams_completed: 1,
+        receiver_evidence_complete: true
+      }
+    ])
+
+    receipt =
+      RunReceipt.new!(
+        id: :quicprobe_legacy_run,
+        target: :quicprobe,
+        match: %{run_sequence: 1},
+        expected: %{receiver_evidence_complete: true}
+      )
+
+    assert {:ok, %Evidence{source: :quicprobe} = evidence} =
+             Quicprobe.collect(receipt, path: path, timeout_ms: 10, poll_ms: 1)
+
+    assert evidence.metadata.receiver_interval == nil
+    refute Map.has_key?(evidence.observed, :first_stream_byte_at_ms)
+  end
+
   test "quicprobe adapter matches the first evidence record after a cursor" do
     path = temp_jsonl_path()
     on_exit(fn -> File.rm(path) end)
