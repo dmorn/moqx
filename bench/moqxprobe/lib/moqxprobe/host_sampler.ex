@@ -236,8 +236,9 @@ defmodule MOQXProbe.HostSampler do
   end
 
   # Translates two :scheduler.sample_all/0 snapshots into utilization fractions
-  # in [0, 1] using :scheduler.utilization/2. Returns nils on the first sample
-  # (no previous baseline) or if the VM did not have scheduler_wall_time data.
+  # in [0, 1] using :scheduler.utilization/2. The baseline snapshot is captured
+  # in init/1, so the first emitted sample already carries utilization. The nil
+  # clause is a guard for when no scheduler_wall_time baseline is available.
   defp scheduler_utilization(nil, _current), do: empty_scheduler_utilization()
 
   defp scheduler_utilization(previous, current) do

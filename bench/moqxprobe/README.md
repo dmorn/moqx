@@ -255,7 +255,9 @@ Each sample (`record_type: "host_sample"`):
   `sample_interval_ms`;
 - `scheduler_utilization_fraction`, `scheduler_utilization_weighted_fraction`,
   and `per_scheduler_utilization_fraction` (per-scheduler fractions);
-  utilization fields are `null` on the first sample (no baseline yet);
+  utilization is populated from the first emitted sample (the baseline
+  snapshot is captured when the sampler starts), and is only `null` when the
+  VM has no scheduler_wall_time data;
 - `total_run_queue_length`, `per_run_queue_length`, `run_queue`,
   `total_active_tasks`, `schedulers_online`, `process_count`;
 - `roles`: one entry per monitored process with the stable `role` label,
