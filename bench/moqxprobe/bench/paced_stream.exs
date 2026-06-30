@@ -40,7 +40,7 @@ defmodule MOQXProbe.Bench.PacedStream do
   @profile_name "draft14_object_stream"
   @target_names ["fake", "quicprobe"]
   @rate_modes ["payload-events", "bytes"]
-  @tiers ["loopback_quic", "remote_quic_no_wire", "remote_quic_with_wire"]
+  @tiers ["fake", "loopback_quic", "remote_quic_no_wire", "remote_quic_with_wire"]
   @quicprobe_experiment_lease_ttl_ms 30 * 60 * 1000
 
   @switches [
@@ -849,7 +849,7 @@ defmodule MOQXProbe.Bench.PacedStream do
       sustained_lag_ms: non_negative_integer(opts, :sustained_lag_ms, 5),
       sustained_lag_ticks: positive_integer(opts, :sustained_lag_ticks, 10),
       drain_ms: non_negative_integer(opts, :drain_ms, 500),
-      tier: tier(opts),
+      tier: tier(opts, target(opts)),
       paced_output: Keyword.get(opts, :paced_output),
       git_sha: Keyword.get(opts, :git_sha, RunMetadata.git_sha()),
       tailscale_path_mode: Keyword.get(opts, :tailscale_path_mode),
@@ -915,12 +915,18 @@ defmodule MOQXProbe.Bench.PacedStream do
     end
   end
 
-  defp tier(opts) do
-    case Keyword.get(opts, :tier, "loopback_quic") do
+  # Default the evidence tier from the target so a fake-target paced run is not
+  # silently overclaimed as loopback_quic (ADR-0009: `fake` is process-model
+  # only, with no QUIC/network claim). Mirrors stream_clients.exs.
+  defp tier(opts, target) do
+    case Keyword.get(opts, :tier, default_tier(target)) do
       name when name in @tiers -> name
       name -> Mix.raise("--tier must be one of #{Enum.join(@tiers, ", ")}; got #{name}")
     end
   end
+
+  defp default_tier(:fake), do: "fake"
+  defp default_tier(_target), do: "loopback_quic"
 
   defp validate_target!(%{target: :quicprobe, ca: nil}) do
     Mix.raise("--ca is required when --target quicprobe")
@@ -1030,7 +1036,7 @@ defmodule MOQXProbe.Bench.PacedStream do
                                    tying this open-loop run's artifacts together;
                                    records mode=open_loop and references the
                                    sidecars this run produced (explicit null otherwise)
-      --tier TIER                  evidence tier: #{Enum.join(@tiers, ", ")} (default: loopback_quic)
+      --tier TIER                  evidence tier: #{Enum.join(@tiers, ", ")} (default: fake for --target fake, else loopback_quic)
 
     Delivery evidence (out of band, after the paced window):
       --evidence-output PATH        write post-run delivery evidence JSONL
