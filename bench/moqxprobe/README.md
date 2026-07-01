@@ -94,7 +94,16 @@ run is tagged with a `remote_quic_*` tier (a ranking, not a saturation claim),
 and surfaces the coordinated-omission flag so latency-under-load is not read as
 trustworthy when the offered rate was not sustained. It compares receiver
 goodput against the iperf3 baseline only when the manifest names an explicit
-target. Corrected latency percentiles are deferred to issue 56.
+target.
+
+For open-loop runs it also reports send-completion latency (corrected +
+uncorrected, issue 56) and, when the quicprobe target ran with
+`--object-size` matching `--payload-size`, end-to-end
+`object_delivery_delay_above_min_ms` (issue 59): receiver arrival minus sender
+send-time minus the run minimum — the clock-offset-free queueing delay, since
+absolute one-way latency across unsynced hosts is not recoverable. The paced
+sender embeds an 8-byte send timestamp in each payload for this; total payload
+size is unchanged.
 
 ## Install
 

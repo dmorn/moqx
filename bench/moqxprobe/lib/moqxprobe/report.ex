@@ -69,9 +69,52 @@ defmodule MOQXProbe.Report do
       saturation: saturation,
       baseline: baseline,
       latency: sender_latency(Map.get(inputs, :paced)),
+      # E2e delivery delay only applies to the open-loop sender, which embeds the
+      # send-timestamp header; a closed-loop run's object_delivery would be
+      # garbage (no header), so it is not surfaced.
+      delivery_delay: delivery_delay(mode, Map.get(inputs, :delivery, [])),
       warnings: warnings(ctx) ++ receiver_notes ++ sender_notes ++ baseline_notes
     }
   end
+
+  # End-to-end delivery delay (issue 59) from quicprobe --object-size evidence.
+  # The raw arrival-minus-send values carry a constant clock offset, so we report
+  # only delay-above-min (offset cancels). Picks the record with the most objects.
+  defp delivery_delay("open_loop", delivery) when is_list(delivery) do
+    # Read object_delivery from any record, not just valid ones: under
+    # saturation the run is marked invalid (delivery did not reconcile), but the
+    # objects that DID arrive were still timestamped — that is exactly when the
+    # delivery delay matters most.
+    delivery
+    |> Enum.map(&get_in_ev(&1, ["metadata", "raw", "object_delivery"]))
+    |> Enum.filter(
+      &(is_map(&1) and is_number(num(Map.get(&1, "count"))) and Map.get(&1, "count") > 0)
+    )
+    |> pick_delivery_delay()
+  end
+
+  defp delivery_delay(_mode, _delivery), do: nil
+
+  defp pick_delivery_delay([]), do: nil
+
+  defp pick_delivery_delay(objects) do
+    object = Enum.max_by(objects, &Map.get(&1, "count"))
+    min_ms = num(Map.get(object, "min_ms"))
+
+    %{
+      count: num(Map.get(object, "count")),
+      records: length(objects),
+      min_ms: min_ms,
+      above_min_ms: %{
+        p50: delay_above(Map.get(object, "p50_ms"), min_ms),
+        p90: delay_above(Map.get(object, "p90_ms"), min_ms),
+        p99: delay_above(Map.get(object, "p99_ms"), min_ms)
+      }
+    }
+  end
+
+  defp delay_above(p, min_ms) when is_number(p) and is_number(min_ms), do: max(p - min_ms, 0)
+  defp delay_above(_p, _min_ms), do: nil
 
   # Send-completion latency (issue 56), corrected vs uncorrected, from the paced
   # summary. nil for closed-loop runs or paced runs without latency data.
@@ -438,6 +481,7 @@ defmodule MOQXProbe.Report do
       baseline_section(report.baseline),
       saturation_section(report.saturation),
       latency_section(report.latency),
+      delivery_delay_section(report.delivery_delay),
       "",
       "_Derived per ADR-0009. Each metric names its source layer, window, and " <>
         "confidence tier. Benchee `ips` (closed-loop service time) is not a " <>
@@ -469,6 +513,27 @@ defmodule MOQXProbe.Report do
   end
 
   defp lat(series, key), do: series |> Map.get(key) |> format_number()
+
+  defp delivery_delay_section(nil), do: ""
+
+  defp delivery_delay_section(delay) do
+    above = delay.above_min_ms
+
+    """
+    ## End-to-end delivery delay (open-loop, ms)
+
+    Receiver arrival minus sender send-time, minus the run minimum — the
+    clock-offset-free queueing delay each object experienced across the path
+    (issue 59). Absolute one-way latency is not recoverable without clock sync,
+    so only this delay-above-minimum is reported.
+
+    | metric | p50 | p90 | p99 | objects |
+    | --- | --- | --- | --- | --- |
+    | `object_delivery_delay_above_min_ms` | #{format_number(above.p50)} | #{format_number(above.p90)} | #{format_number(above.p99)} | #{format_number(delay.count)} |
+
+    _Run minimum arrival−send (includes the constant clock offset): #{format_number(delay.min_ms)} ms._
+    """
+  end
 
   defp warnings_section([]), do: ""
 

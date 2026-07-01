@@ -62,6 +62,27 @@ defmodule MOQXProbe.ReportTest do
     end
   end
 
+  describe "build/1 end-to-end delivery delay (open-loop)" do
+    test "derives delay-above-min from quicprobe object_delivery evidence" do
+      inputs = put_in(open_loop_inputs().delivery, [object_delivery_record()])
+      report = Report.build(inputs)
+
+      # object_delivery p99 905 ms, min 5 ms => 900 ms above the offset floor.
+      assert report.delivery_delay.above_min_ms.p99 == 900
+      assert report.delivery_delay.above_min_ms.p50 == 2
+      assert report.delivery_delay.count == 1000
+
+      md = Report.to_markdown(report)
+      assert md =~ "End-to-end delivery delay"
+      assert md =~ "object_delivery_delay_above_min_ms"
+    end
+
+    test "closed-loop runs do not surface delivery delay (no send-time header)" do
+      inputs = put_in(closed_loop_inputs().delivery, [object_delivery_record()])
+      assert Report.build(inputs).delivery_delay == nil
+    end
+  end
+
   test "build/1 skips receiver goodput when no records are valid" do
     inputs = put_in(closed_loop_inputs().delivery, [invalid_record()])
     report = Report.build(inputs)
@@ -269,6 +290,28 @@ defmodule MOQXProbe.ReportTest do
 
   defp invalid_record do
     %{"evidence" => %{"valid" => false, "observed" => %{}, "metadata" => %{}}}
+  end
+
+  defp object_delivery_record do
+    # valid=false on purpose: under saturation the run does not reconcile, but
+    # the objects that arrived are still timestamped and their delay matters.
+    %{
+      "evidence" => %{
+        "valid" => false,
+        "observed" => %{},
+        "metadata" => %{
+          "raw" => %{
+            "object_delivery" => %{
+              "count" => 1000,
+              "min_ms" => 5,
+              "p50_ms" => 7,
+              "p90_ms" => 40,
+              "p99_ms" => 905
+            }
+          }
+        }
+      }
+    }
   end
 
   defp metric(report, name), do: Enum.find(report.metrics, &(&1.name == name))

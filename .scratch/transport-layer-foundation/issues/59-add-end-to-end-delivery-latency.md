@@ -23,20 +23,34 @@ sender-side backpressure, but it is not what an application experiences —
 receiver. On a buffered path the two diverge exactly when it matters (the send
 buffer drains while bytes are still in flight or queued on the wire).
 
-## What to build (sketch)
+## Design (2026-07-01)
 
-A way to correlate a sent payload with its receiver-side arrival time, then
-report end-to-end delivery latency percentiles (corrected for coordinated
-omission the same way as issue 56). Options to evaluate:
+**The clock problem is decisive.** Sender (silver) and receiver (reform) clocks
+are not synchronized, so absolute one-way latency `arrival - send` carries an
+unknown constant offset θ and cannot be reported as-is. The honest,
+clock-offset-free metric is **delivery delay above the run minimum**: θ cancels
+when we subtract the run's minimum `arrival - send`, leaving the path/queueing
+delay each object actually experienced (≈ 0 when healthy, large under
+saturation). No NTP/PTP dependency.
 
-- Per-object receive timestamps in quicprobe (extend `server_run_evidence` /
-  interval evidence with per-object or per-stream arrival times) and a
-  correlation key (e.g. an object/sequence id carried in the payload).
-- A bidirectional/echo profile where the sender times the round trip and halves
-  it (cruder; conflates both directions).
+Mechanism (fixed-size object framing on the existing stream workload):
 
-Prefer the receiver-timestamp approach; it needs a quicprobe change and a payload
-correlation id, so it is a distinct, larger slice than issue 56.
+- **Sender** (`paced_stream.exs`): embed an 8-byte send timestamp
+  (`System.os_time(:nanosecond)`) as the first bytes of each fixed-size payload.
+  Total bytes per send are unchanged, so delivery-evidence reconciliation holds.
+- **quicprobe** (`--object-size N`): chunk each uni-stream's bytes into N-byte
+  objects (the stream is a concatenation of equal-size payloads, in order), read
+  the embedded send timestamp from each object's first 8 bytes, and record
+  `arrival_ns - send_ns` into a bounded histogram. Report `object_count` and the
+  delivery-delay distribution (min + p50/p90/p99, all including θ) in
+  `server_run_evidence`.
+- **Report** (`MOQXProbe.Report`): compute delay-above-min = `pXX - min` and
+  surface it as `object_delivery_delay_above_min_ms` (receiver, e2e), with an
+  explicit note that absolute one-way latency is not recoverable without clock
+  sync.
+
+This keeps the established uni-stream sweep workload (no one-stream-per-object
+change) so results stay comparable across issues 56/58/59.
 
 ## Non-goals
 

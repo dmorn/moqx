@@ -12,6 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -59,6 +60,7 @@ type serverConfig struct {
 	udpNetwork        string
 	initialSize       int
 	evidenceBinMS     int
+	objectSize        int
 }
 
 type clientConfig struct {
@@ -193,6 +195,19 @@ type serverRunEvidence struct {
 	LastDatagramAtMS    float64                        `json:"last_datagram_at_ms,omitempty"`
 	IntervalBinWidthMS  float64                        `json:"interval_bin_width_ms,omitempty"`
 	IntervalBins        []serverRunEvidenceIntervalBin `json:"interval_bins,omitempty"`
+
+	// Per-object delivery delay (issue 59), present only when --object-size is
+	// set. Values carry a constant sender/receiver clock offset, so the report
+	// subtracts min_ms to recover the offset-free queueing delay.
+	ObjectDelivery *serverRunEvidenceObjectDelivery `json:"object_delivery,omitempty"`
+}
+
+type serverRunEvidenceObjectDelivery struct {
+	Count int64 `json:"count"`
+	MinMS int64 `json:"min_ms"`
+	P50MS int64 `json:"p50_ms"`
+	P90MS int64 `json:"p90_ms"`
+	P99MS int64 `json:"p99_ms"`
 }
 
 // serverRunEvidenceIntervalBin holds raw receiver-side delivery counts that
@@ -305,8 +320,85 @@ type serverConnectionStats struct {
 	firstDatagramAt        time.Duration
 	lastDatagramAt         time.Duration
 	bins                   intervalBinAccumulator
+	objectSize             int
+	objectDelivery         deliveryDelayStats
 	experimentLeaseOwner   string
 	experimentLeaseToken   string
+}
+
+// deliveryDelayStats is a bounded, millisecond-resolution histogram of per-object
+// delivery delays (receiver arrival minus the sender timestamp embedded in the
+// object). The values carry a constant, unknown sender/receiver clock offset, so
+// only differences are meaningful — the report subtracts the run minimum to
+// recover the offset-free queueing delay (issue 59).
+type deliveryDelayStats struct {
+	count   int64
+	minMS   int64
+	buckets map[int64]int64
+}
+
+func newDeliveryDelayStats() deliveryDelayStats {
+	return deliveryDelayStats{minMS: math.MaxInt64, buckets: map[int64]int64{}}
+}
+
+func (d *deliveryDelayStats) record(delayNS int64) {
+	ms := delayNS / int64(time.Millisecond)
+	d.count++
+	if ms < d.minMS {
+		d.minMS = ms
+	}
+	d.buckets[ms]++
+}
+
+func (d *deliveryDelayStats) percentileMS(q float64) int64 {
+	if d.count == 0 {
+		return 0
+	}
+
+	rank := int64(math.Ceil(q * float64(d.count)))
+	if rank < 1 {
+		rank = 1
+	}
+
+	keys := make([]int64, 0, len(d.buckets))
+	for k := range d.buckets {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
+
+	var cumulative int64
+	for _, k := range keys {
+		cumulative += d.buckets[k]
+		if cumulative >= rank {
+			return k
+		}
+	}
+
+	return keys[len(keys)-1]
+}
+
+// objectChunker slices a uni-stream's bytes into fixed-size objects (the stream
+// is a concatenation of equal-size payloads, in order) and invokes onDelivery
+// with arrival-minus-send once each object completes. The first 8 bytes of every
+// object are a big-endian sender send-timestamp (unix nanoseconds).
+type objectChunker struct {
+	objectSize int
+	inObject   int
+	header     [8]byte
+}
+
+func (c *objectChunker) feed(buf []byte, nowNS int64, onDelivery func(delayNS int64)) {
+	for _, b := range buf {
+		if c.inObject < 8 {
+			c.header[c.inObject] = b
+		}
+		c.inObject++
+		if c.inObject == c.objectSize {
+			sendNS := int64(binary.BigEndian.Uint64(c.header[:]))
+			onDelivery(nowNS - sendNS)
+			c.inObject = 0
+		}
+	}
 }
 
 // intervalBinAccumulator buckets receiver-side delivery counts into
@@ -409,6 +501,11 @@ type serverConnectionStatsSnapshot struct {
 	lastDatagramAt            time.Duration
 	intervalBinWidth          time.Duration
 	intervalBins              []serverRunEvidenceIntervalBin
+	objectDeliveryCount       int64
+	objectDelayMinMS          int64
+	objectDelayP50MS          int64
+	objectDelayP90MS          int64
+	objectDelayP99MS          int64
 	experimentLeaseOwner      string
 	experimentLeaseToken      string
 }
@@ -494,6 +591,7 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	flags.StringVar(&cfg.udpNetwork, "udp-network", udpNetworkAuto, "UDP socket network: auto, udp, udp4, or udp6")
 	flags.IntVar(&cfg.initialSize, "initial-packet-size", 0, "QUIC Initial packet size in bytes; 0 uses the quic-go default")
 	flags.IntVar(&cfg.evidenceBinMS, "evidence-bin-ms", defaultEvidenceBinMS, "width in milliseconds of each receiver-evidence interval bin")
+	flags.IntVar(&cfg.objectSize, "object-size", 0, "when >0, treat each uni-stream as fixed-size objects of this many bytes and record per-object delivery delay from an 8-byte send timestamp header")
 
 	if err := flags.Parse(args); err != nil {
 		return serverConfig{}, err
@@ -677,7 +775,7 @@ func runServer(ctx context.Context, cfg serverConfig, ready chan<- string, evide
 		}
 
 		lease := recorder.activeExperimentLease()
-		go handleConnection(ctx, conn, recorder, datagramSemantics, evidenceBinWidth, lease)
+		go handleConnection(ctx, conn, recorder, datagramSemantics, evidenceBinWidth, cfg.objectSize, lease)
 	}
 }
 
@@ -689,7 +787,7 @@ func evidenceBinWidthFromConfig(cfg serverConfig) time.Duration {
 	return time.Duration(cfg.evidenceBinMS) * time.Millisecond
 }
 
-func newServerConnectionStats(conn quic.Connection, datagramSemantics string, binWidth time.Duration, lease *experimentLeaseInfo) *serverConnectionStats {
+func newServerConnectionStats(conn quic.Connection, datagramSemantics string, binWidth time.Duration, objectSize int, lease *experimentLeaseInfo) *serverConnectionStats {
 	stats := &serverConnectionStats{
 		startedAt:         time.Now(),
 		localAddr:         conn.LocalAddr().String(),
@@ -697,6 +795,8 @@ func newServerConnectionStats(conn quic.Connection, datagramSemantics string, bi
 		alpn:              conn.ConnectionState().TLS.NegotiatedProtocol,
 		datagramSemantics: datagramSemantics,
 		bins:              newIntervalBinAccumulator(binWidth),
+		objectSize:        objectSize,
+		objectDelivery:    newDeliveryDelayStats(),
 	}
 
 	if lease != nil {
@@ -707,8 +807,8 @@ func newServerConnectionStats(conn quic.Connection, datagramSemantics string, bi
 	return stats
 }
 
-func handleConnection(ctx context.Context, conn quic.Connection, recorder *serverRunEvidenceRecorder, datagramSemantics string, binWidth time.Duration, lease *experimentLeaseInfo) {
-	stats := newServerConnectionStats(conn, datagramSemantics, binWidth, lease)
+func handleConnection(ctx context.Context, conn quic.Connection, recorder *serverRunEvidenceRecorder, datagramSemantics string, binWidth time.Duration, objectSize int, lease *experimentLeaseInfo) {
+	stats := newServerConnectionStats(conn, datagramSemantics, binWidth, objectSize, lease)
 	var wg sync.WaitGroup
 	var streamHandlers sync.WaitGroup
 	var datagramStats datagramEchoStats
@@ -784,6 +884,13 @@ func (s *serverConnectionStats) recordStreamCompleted() {
 
 	s.streamsCompleted++
 	s.bins.addStreamsCompleted(time.Since(s.startedAt), 1)
+}
+
+func (s *serverConnectionStats) recordObjectDelivery(delayNS int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.objectDelivery.record(delayNS)
 }
 
 func (s *serverConnectionStats) recordStreamReceiveError(err error) {
@@ -875,9 +982,22 @@ func (s *serverConnectionStats) snapshot() serverConnectionStatsSnapshot {
 		lastDatagramAt:            s.lastDatagramAt,
 		intervalBinWidth:          s.bins.width,
 		intervalBins:              s.bins.snapshot(),
+		objectDeliveryCount:       s.objectDelivery.count,
+		objectDelayMinMS:          objectDelayMin(s.objectDelivery),
+		objectDelayP50MS:          s.objectDelivery.percentileMS(0.5),
+		objectDelayP90MS:          s.objectDelivery.percentileMS(0.9),
+		objectDelayP99MS:          s.objectDelivery.percentileMS(0.99),
 		experimentLeaseOwner:      s.experimentLeaseOwner,
 		experimentLeaseToken:      s.experimentLeaseToken,
 	}
+}
+
+func objectDelayMin(d deliveryDelayStats) int64 {
+	if d.count == 0 {
+		return 0
+	}
+
+	return d.minMS
 }
 
 func handleDatagrams(ctx context.Context, conn datagramConn, semantics string, sink *serverConnectionStats) datagramEchoStats {
@@ -991,10 +1111,19 @@ func echoStream(stream quic.Stream, stats *serverConnectionStats) error {
 func drainUniStream(stream quic.ReceiveStream, stats *serverConnectionStats) {
 	buffer := make([]byte, 32*1024)
 
+	var chunker *objectChunker
+	if stats.objectSize > 0 {
+		chunker = &objectChunker{objectSize: stats.objectSize}
+	}
+
 	for {
 		n, err := stream.Read(buffer)
 		if n > 0 {
 			stats.recordStreamBytesReceived(int64(n))
+			if chunker != nil {
+				now := time.Now().UnixNano()
+				chunker.feed(buffer[:n], now, stats.recordObjectDelivery)
+			}
 		}
 		if err == io.EOF {
 			stats.recordStreamCompleted()
@@ -1522,6 +1651,16 @@ func serverRunEvidenceFromSnapshot(sequence uint64, stats serverConnectionStatsS
 		ReceiverEvidenceComplete:  true,
 		ExperimentLeaseOwner:      stats.experimentLeaseOwner,
 		ExperimentLeaseToken:      stats.experimentLeaseToken,
+	}
+
+	if stats.objectDeliveryCount > 0 {
+		evidence.ObjectDelivery = &serverRunEvidenceObjectDelivery{
+			Count: stats.objectDeliveryCount,
+			MinMS: stats.objectDelayMinMS,
+			P50MS: stats.objectDelayP50MS,
+			P90MS: stats.objectDelayP90MS,
+			P99MS: stats.objectDelayP99MS,
+		}
 	}
 
 	if isUnexpectedEvidenceError(stats.datagramReceiveErr) {

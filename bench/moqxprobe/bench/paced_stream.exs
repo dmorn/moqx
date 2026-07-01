@@ -234,7 +234,10 @@ defmodule MOQXProbe.Bench.PacedStream do
   # before advancing the schedule. Accepted = transport admitted the send;
   # send-admission errors are counted, never retried inside the schedule.
   defp paced_send_window(ctx, streams, options) do
-    payload = :binary.copy(<<0>>, options.payload_size)
+    # Each payload's first 8 bytes carry the send timestamp (unix ns) so a
+    # quicprobe running --object-size can measure per-object delivery delay
+    # (issue 59). The remaining bytes are filler; total size is unchanged.
+    filler = :binary.copy(<<0>>, options.payload_size - 8)
     stream_vec = List.to_tuple(streams)
 
     pacer =
@@ -258,7 +261,7 @@ defmodule MOQXProbe.Bench.PacedStream do
 
     loop_state = %{
       ctx: ctx,
-      payload: payload,
+      filler: filler,
       stream_vec: stream_vec,
       cursor: 0,
       latency: Latency.new(),
@@ -310,7 +313,9 @@ defmodule MOQXProbe.Bench.PacedStream do
       next_cursor = rem(loop_state.cursor + 1, tuple_size(loop_state.stream_vec))
       loop_state = %{loop_state | cursor: next_cursor}
 
-      case Transport.send_stream(loop_state.ctx, stream, loop_state.payload, []) do
+      payload = <<System.os_time(:nanosecond)::unsigned-big-64, loop_state.filler::binary>>
+
+      case Transport.send_stream(loop_state.ctx, stream, payload, []) do
         {:ok, _send, ctx} ->
           latency = Latency.on_send(loop_state.latency, stream, scheduled_ms, monotonic_ms())
           {accepted + 1, errors, %{loop_state | ctx: ctx, latency: latency}}
@@ -970,7 +975,17 @@ defmodule MOQXProbe.Bench.PacedStream do
       server_stats_path: Keyword.get(opts, :server_stats_path)
     }
     |> validate_target!()
+    |> validate_payload_size!()
   end
+
+  # The payload carries an 8-byte send-timestamp header (issue 59).
+  defp validate_payload_size!(%{payload_size: size}) when size < 8 do
+    Mix.raise(
+      "--payload-size must be at least 8 (payloads carry an 8-byte send-timestamp header)"
+    )
+  end
+
+  defp validate_payload_size!(options), do: options
 
   defp put_evidence_options(options, opts) do
     output = Keyword.get(opts, :evidence_output)
