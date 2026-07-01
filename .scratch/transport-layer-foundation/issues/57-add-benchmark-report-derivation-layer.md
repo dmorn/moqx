@@ -1,6 +1,6 @@
 # Add benchmark report/derivation layer over the evidence contract
 
-Status: ready-for-agent
+Status: done
 Type: enhancement
 Category: performance
 
@@ -57,13 +57,13 @@ A report/derivation layer that consumes a run's manifest + sidecars and emits a
 
 ## Acceptance criteria
 
-- [ ] A pure, unit-tested derivation module turns manifest + sidecars into
+- [x] A pure, unit-tested derivation module turns manifest + sidecars into
       named derived metrics with explicit windows and confidence tier.
-- [ ] Derived metric names follow ADR-0009; forbidden names are rejected and
+- [x] Derived metric names follow ADR-0009; forbidden names are rejected and
       cross-mode/remote-tier misuse is warned.
-- [ ] Interval-derived rates honor the cap-folding and dual-clock caveats.
-- [ ] iperf3 baseline comparison is emitted only with explicit target/path.
-- [ ] A `report.md` is produced under the run bundle and linked from the
+- [x] Interval-derived rates honor the cap-folding and dual-clock caveats.
+- [x] iperf3 baseline comparison is emitted only with explicit target/path.
+- [x] A `report.md` is produced under the run bundle and linked from the
       manifest sidecar map.
 
 ## Non-goals
@@ -76,3 +76,28 @@ A report/derivation layer that consumes a run's manifest + sidecars and emits a
 
 Filed as the natural successor to issue 54: the contract and raw evidence exist;
 this is the reader that makes the numbers trustworthy and comparison-safe.
+
+## Comments
+
+### 2026-07-01 — Implemented
+
+- `lib/moqxprobe/report.ex` (pure) + `test/moqxprobe/report_test.exs` (14
+  tests): derives `receiver_payload_goodput_active_bps` (distribution over the
+  receiver-active window), `receiver_payload_goodput_interval_p95_bps` (pooled
+  per-bin), `client_payload_goodput_sender_active_bps`, and
+  `datagrams_received_per_second`. `build_metric/1` rejects forbidden names;
+  closed-loop + `remote_quic_*` and coordinated omission raise warnings; the
+  cap-folding and dual-clock caveats are honored; iperf3 utilization only with
+  an explicit target.
+- `bench/report.exs`: reads a run bundle, writes `report.md`, links it in the
+  manifest's new `report` sidecar slot (`RunManifest`).
+- Smoke: ran on two real reform bundles (closed + open) and one fresh loopback
+  bundle with real interval bins (receiver goodput median ~1.38 Gbps, p95
+  1.63 Gbps over n=67; interval p95 75.5 Mbps — the two windows correctly
+  reported apart).
+- Adversarial review caught and fixed: iperf3 baseline read string keys but
+  `RunMetadata` returns atom keys (baseline was silently dead); a `put_in`
+  crash when a manifest lacks `sidecars`; and a `format_number` catch-all that
+  could raise on a non-scalar.
+
+Deferred: coordinated-omission-corrected latency percentiles (issue 56).

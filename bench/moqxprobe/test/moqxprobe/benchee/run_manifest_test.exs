@@ -95,6 +95,7 @@ defmodule MOQXProbe.Benchee.RunManifestTest do
     assert manifest.sidecars.benchee == "results/run/benchee.json"
     assert manifest.sidecars.delivery_evidence == "results/run/delivery-evidence.jsonl"
     # Unproduced sidecars are explicit nil.
+    assert manifest.sidecars.report == nil
     assert manifest.sidecars.host_samples == nil
     assert manifest.sidecars.paced == nil
     assert manifest.sidecars.iperf3 == nil

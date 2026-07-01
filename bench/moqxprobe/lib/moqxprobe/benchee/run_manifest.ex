@@ -26,6 +26,7 @@ defmodule MOQXProbe.Benchee.RunManifest do
   # slot the run did not produce is recorded as nil (JSON null), per ADR-0009.
   @sidecar_keys ~w(
     manifest
+    report
     benchee
     delivery_evidence
     host_samples

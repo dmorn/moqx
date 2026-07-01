@@ -67,8 +67,34 @@ delivery shape over time. Lifecycle offsets surface as observed metrics
 evidence `metadata.receiver_interval` (bin width plus per-window
 bytes/datagrams/events). The sidecar stays backward compatible: against an
 older quicprobe build without interval fields, `receiver_interval` is `nil` and
-no interval metrics are added. The bins are raw counts; deriving `*_bps`
-belongs to a later report slice (ADR-0009).
+no interval metrics are added. The bins are raw counts; the report layer below
+derives `*_bps` from them.
+
+## Run report
+
+`bench/report.exs` turns a run bundle into a human-readable `report.md`, the
+report/derivation layer of ADR-0009. It reads the `manifest.json` and the
+sidecars it references, derives comparison-ready metrics via the pure
+`MOQXProbe.Report` module, writes `report.md` next to the manifest, and records
+the report path in the manifest's `sidecars.report` slot.
+
+```bash
+mix run bench/report.exs -- --run-dir results/<run>
+# or: --manifest results/<run>/manifest.json  [--output PATH]
+```
+
+Derived metrics carry an explicit source layer, window, and confidence tier —
+e.g. `receiver_payload_goodput_active_bps` (over the receiver-active window),
+`receiver_payload_goodput_interval_p95_bps` (per interval bin),
+`client_payload_goodput_sender_active_bps`, and `datagrams_received_per_second`.
+The active window and the interval bin are different denominators and are
+reported separately; never conflate them. The layer refuses ambiguous names
+(no naked `bandwidth`/`goodput`, no stream `pkts/s`), warns when a closed-loop
+run is tagged with a `remote_quic_*` tier (a ranking, not a saturation claim),
+and surfaces the coordinated-omission flag so latency-under-load is not read as
+trustworthy when the offered rate was not sustained. It compares receiver
+goodput against the iperf3 baseline only when the manifest names an explicit
+target. Corrected latency percentiles are deferred to issue 56.
 
 ## Install
 
