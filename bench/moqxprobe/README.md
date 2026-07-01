@@ -543,6 +543,18 @@ raw path ceiling and basic loss/jitter context; they are not QUIC measurements.
 `bench/quicprobe` is the reference peer. It can run as a local process or as a
 persistent service on a VM:
 
+For a local loopback run, generate a long-lived (~100-year) `localhost`
+certificate once with the repo script, then point the server and client at it:
+
+```bash
+../../scripts/gen-loopback-certs.sh ../../.tmp/integration-certs
+# server: --cert/--key from .tmp/integration-certs
+# client: --ca .tmp/integration-certs/ca.pem --servername localhost
+```
+
+The certificate only authenticates a `localhost` handshake, so it is
+deliberately long-lived; remote targets (e.g. reform) use their own CA.
+
 ```bash
 go run ../quicprobe server \
   --addr :4433 \

@@ -1,6 +1,6 @@
 # Regenerate expired transport-bench test certs and stop expiry breakage
 
-Status: ready-for-agent
+Status: done
 Type: bug
 Category: tooling
 
@@ -65,3 +65,31 @@ Filed from the issue-54 slice loop. The slice-2 advisory findings about the
 future report layer (interval-bin cap-folding window, and the two datagram
 clocks `first_datagram_at_ms` vs `first_datagram_latency_ms` having different
 origins) are recorded as comments on issue 54, not here.
+
+## Comments
+
+### 2026-07-01 — Resolved
+
+Root cause: the only cert generator was the inline recipe in
+`docker-compose.integration.yml`, which minted the CA and server cert with
+`-days 7` and reused existing files without an expiry check — so once generated,
+the harness served week-old, then expired, certs indefinitely. The expired
+`.tmp/transport-bench-certs/server.pem` the slice-2 smoke tripped on was an
+orphaned manual dir referenced by nothing in the repo.
+
+Fix:
+
+- Added `scripts/gen-loopback-certs.sh`: a shared, idempotent generator that
+  mints a ~100-year (`-days 36500`) self-signed CA + server cert for
+  `localhost`/`127.0.0.1`/`::1` (+ docker service names), reused unless missing
+  or nearly expired (`openssl x509 -checkend`). Verified: `notAfter` 2126, all
+  SANs present, reuse path works, portable across macOS LibreSSL and alpine.
+- `docker-compose.integration.yml` now calls the shared script instead of the
+  inline `-days 7` recipe (single source of truth).
+- Documented the manual loopback step in the root README and
+  `bench/moqxprobe/README.md`.
+- Deleted the orphaned `.tmp/transport-bench-certs/` dir.
+
+Certs are still not committed to git; `.tmp/` remains local/ignored. The
+long-lived cert is acceptable because it only authenticates a loopback
+handshake; remote targets (reform) use their own CA and are untouched.

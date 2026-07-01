@@ -52,8 +52,18 @@ docker compose -f docker-compose.integration.yml down
 ```
 
 The harness provisions self-signed certificates under
-`.tmp/integration-certs/` and runs the repo-owned reference QUIC server from
-`bench/quicprobe` on UDP port 4433.
+`.tmp/integration-certs/` (via `scripts/gen-loopback-certs.sh`) and runs the
+repo-owned reference QUIC server from `bench/quicprobe` on UDP port 4433. The
+generated CA/server certificate is valid for ~100 years — it only authenticates
+a `localhost` QUIC handshake, so it is intentionally long-lived to avoid expiry
+friction. To (re)generate the loopback certificates outside the harness:
+
+```bash
+scripts/gen-loopback-certs.sh .tmp/integration-certs
+```
+
+The script is idempotent: it reuses an existing certificate unless it is missing
+or nearly expired.
 
 For manual debugging, run the reference CLI directly:
 
