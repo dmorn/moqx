@@ -36,6 +36,16 @@ defmodule MOQXProbe.Bench.PacedStream do
   alias MOQXProbe.OpenLoop.Accounting
   alias MOQXProbe.OpenLoop.Pacer
 
+  import MOQXProbe.BenchCLI,
+    only: [
+      drop_mix_separator: 1,
+      positive_integer: 3,
+      non_negative_integer: 3,
+      cli_key: 1,
+      url_host: 1,
+      manifest_args: 1
+    ]
+
   @schema_version "moqxprobe-paced-v1"
   @profile_name "draft14_object_stream"
   @target_names ["fake", "quicprobe"]
@@ -211,7 +221,6 @@ defmodule MOQXProbe.Bench.PacedStream do
   defp paced_send_window(ctx, streams, options) do
     payload = :binary.copy(<<0>>, options.payload_size)
     stream_vec = List.to_tuple(streams)
-    stream_count = tuple_size(stream_vec)
 
     pacer =
       Pacer.new!(
@@ -234,12 +243,10 @@ defmodule MOQXProbe.Bench.PacedStream do
       ctx: ctx,
       payload: payload,
       stream_vec: stream_vec,
-      stream_count: stream_count,
       cursor: 0
     }
 
-    {accounting, _pacer, tick_rows, _loop_state} =
-      schedule_loop(pacer, accounting, loop_state, [])
+    {accounting, tick_rows} = schedule_loop(pacer, accounting, loop_state, [])
 
     {accounting, Enum.reverse(tick_rows)}
   end
@@ -248,7 +255,7 @@ defmodule MOQXProbe.Bench.PacedStream do
     now = monotonic_ms()
 
     if Pacer.schedule_complete?(pacer, now) do
-      {accounting, pacer, tick_rows, loop_state}
+      {accounting, tick_rows}
     else
       sleep_until(Pacer.next_deadline_ms(pacer))
       now = monotonic_ms()
@@ -271,7 +278,8 @@ defmodule MOQXProbe.Bench.PacedStream do
   defp offer_intents(loop_state, due_count) do
     Enum.reduce(1..due_count, {0, 0, loop_state}, fn _i, {accepted, errors, loop_state} ->
       stream = elem(loop_state.stream_vec, loop_state.cursor)
-      loop_state = %{loop_state | cursor: rem(loop_state.cursor + 1, loop_state.stream_count)}
+      next_cursor = rem(loop_state.cursor + 1, tuple_size(loop_state.stream_vec))
+      loop_state = %{loop_state | cursor: next_cursor}
 
       case Transport.send_stream(loop_state.ctx, stream, loop_state.payload, []) do
         {:ok, _send, ctx} ->
@@ -461,8 +469,8 @@ defmodule MOQXProbe.Bench.PacedStream do
       command: "mix run bench/paced_stream.exs",
       args: manifest.args,
       git_sha: options.git_sha,
-      versions: manifest_versions(),
-      target_type: manifest_target_type(options.target, options.tier),
+      versions: RunMetadata.versions(),
+      target_type: RunManifest.target_type(options.target, options.tier),
       mode: :open_loop,
       tier: String.to_atom(options.tier),
       target: manifest_target(options),
@@ -487,22 +495,6 @@ defmodule MOQXProbe.Bench.PacedStream do
 
   defp manifest_run_id(%{evidence: %{enabled?: true, run_id: run_id}}), do: run_id
   defp manifest_run_id(_options), do: evidence_run_id()
-
-  defp manifest_target_type(:fake, _tier), do: :fake
-  defp manifest_target_type(:quicprobe, "loopback_quic"), do: :loopback_quic
-  defp manifest_target_type(:quicprobe, _tier), do: :remote_quic
-
-  defp manifest_versions do
-    %{
-      moqx: Application.spec(:moqx, :vsn) |> version_string(),
-      moqxprobe: Application.spec(:moqxprobe, :vsn) |> version_string(),
-      elixir: System.version(),
-      otp: System.otp_release()
-    }
-  end
-
-  defp version_string(nil), do: nil
-  defp version_string(vsn), do: List.to_string(vsn)
 
   defp manifest_target(%{target: :fake}), do: nil
 
@@ -817,18 +809,6 @@ defmodule MOQXProbe.Bench.PacedStream do
     })
   end
 
-  defp manifest_args(opts) do
-    Enum.flat_map(opts, fn {key, value} ->
-      flag = "--#{cli_key(key)}"
-
-      case value do
-        true -> [flag]
-        false -> []
-        value -> [flag, to_string(value)]
-      end
-    end)
-  end
-
   defp base_options(opts) do
     %{
       target: target(opts),
@@ -915,18 +895,15 @@ defmodule MOQXProbe.Bench.PacedStream do
     end
   end
 
-  # Default the evidence tier from the target so a fake-target paced run is not
-  # silently overclaimed as loopback_quic (ADR-0009: `fake` is process-model
-  # only, with no QUIC/network claim). Mirrors stream_clients.exs.
+  # Default the evidence tier from the target (RunManifest.default_tier/1) so a
+  # fake-target paced run is not silently overclaimed as loopback_quic
+  # (ADR-0009: `fake` is process-model only, with no QUIC/network claim).
   defp tier(opts, target) do
-    case Keyword.get(opts, :tier, default_tier(target)) do
+    case Keyword.get(opts, :tier, RunManifest.default_tier(target)) do
       name when name in @tiers -> name
       name -> Mix.raise("--tier must be one of #{Enum.join(@tiers, ", ")}; got #{name}")
     end
   end
-
-  defp default_tier(:fake), do: "fake"
-  defp default_tier(_target), do: "loopback_quic"
 
   defp validate_target!(%{target: :quicprobe, ca: nil}) do
     Mix.raise("--ca is required when --target quicprobe")
@@ -944,14 +921,6 @@ defmodule MOQXProbe.Bench.PacedStream do
 
   defp quicprobe_evidence_url(_options, opts), do: Keyword.get(opts, :quicprobe_evidence_url)
 
-  defp url_host(host) do
-    if String.contains?(host, ":") and not String.starts_with?(host, "[") do
-      "[#{host}]"
-    else
-      host
-    end
-  end
-
   defp default_close_grace_ms(:quicprobe), do: 25
   defp default_close_grace_ms(_target), do: 0
 
@@ -959,31 +928,6 @@ defmodule MOQXProbe.Bench.PacedStream do
     iso = DateTime.utc_now() |> DateTime.to_iso8601(:basic) |> String.replace("Z", "")
     "paced-#{iso}-#{System.unique_integer([:positive])}"
   end
-
-  defp drop_mix_separator(["--" | argv]), do: argv
-  defp drop_mix_separator(argv), do: argv
-
-  defp positive_integer(opts, key, default) do
-    value = Keyword.get(opts, key, default)
-
-    if is_integer(value) and value > 0 do
-      value
-    else
-      Mix.raise("--#{cli_key(key)} must be a positive integer")
-    end
-  end
-
-  defp non_negative_integer(opts, key, default) do
-    value = Keyword.get(opts, key, default)
-
-    if is_integer(value) and value >= 0 do
-      value
-    else
-      Mix.raise("--#{cli_key(key)} must be a non-negative integer")
-    end
-  end
-
-  defp cli_key(key), do: key |> Atom.to_string() |> String.replace("_", "-")
 
   # --- time helpers ----------------------------------------------------------
 

@@ -11,14 +11,24 @@ defmodule MOQXProbe.Bench.StreamClients do
   alias MOQX.Transport.Quicer
   alias MOQXProbe.Benchee.Adapters
   alias MOQXProbe.Benchee.EvidenceCollector
-  alias MOQXProbe.Benchee.RunReceipt
   alias MOQXProbe.Benchee.RunManifest
   alias MOQXProbe.Benchee.RunMetadata
+  alias MOQXProbe.Benchee.RunReceipt
   alias MOQXProbe.Bench.StreamImplementations
   alias MOQXProbe.HostSampler
   alias MOQXProbe.Traffic
   alias MOQXProbe.Traffic.StreamPartitionSink
   alias MOQXProbe.Traffic.StreamSender
+
+  import MOQXProbe.BenchCLI,
+    only: [
+      drop_mix_separator: 1,
+      positive_integer: 3,
+      non_negative_integer: 3,
+      cli_key: 1,
+      url_host: 1,
+      manifest_args: 1
+    ]
 
   @input_names ["flow-generated", "flow-prebuilt-list"]
   @implementation_names StreamImplementations.names()
@@ -676,9 +686,6 @@ defmodule MOQXProbe.Bench.StreamClients do
     end
   end
 
-  defp drop_mix_separator(["--" | argv]), do: argv
-  defp drop_mix_separator(argv), do: argv
-
   defp base_options(opts) do
     max_burst = positive_integer(opts, :max_burst, 64)
 
@@ -799,36 +806,13 @@ defmodule MOQXProbe.Bench.StreamClients do
   end
 
   defp manifest_tier(target, opts) do
-    case Keyword.get(opts, :tier, default_manifest_tier(target)) do
+    case Keyword.get(opts, :tier, RunManifest.default_tier(target)) do
       name when name in @manifest_tiers ->
         name
 
       name ->
         Mix.raise("--tier must be one of #{Enum.join(@manifest_tiers, ", ")}; got #{name}")
     end
-  end
-
-  defp default_manifest_tier(:fake), do: "fake"
-  defp default_manifest_tier(:quicprobe), do: "loopback_quic"
-
-  # The closed-loop manifest's target type follows ADR-0009: fake targets are
-  # process-model only; quicprobe targets are loopback unless the tier says the
-  # path is remote.
-  defp manifest_target_type(:fake, _tier), do: :fake
-  defp manifest_target_type(:quicprobe, "loopback_quic"), do: :loopback_quic
-  defp manifest_target_type(:quicprobe, "fake"), do: :loopback_quic
-  defp manifest_target_type(:quicprobe, _tier), do: :remote_quic
-
-  defp manifest_args(opts) do
-    Enum.flat_map(opts, fn {key, value} ->
-      flag = "--#{cli_key(key)}"
-
-      case value do
-        true -> [flag]
-        false -> []
-        value -> [flag, to_string(value)]
-      end
-    end)
   end
 
   @doc """
@@ -846,8 +830,8 @@ defmodule MOQXProbe.Bench.StreamClients do
       command: "mix run bench/stream_clients.exs",
       args: manifest.args,
       git_sha: base.git_sha,
-      versions: manifest_versions(),
-      target_type: manifest_target_type(base.target, manifest.tier),
+      versions: RunMetadata.versions(),
+      target_type: RunManifest.target_type(base.target, manifest.tier),
       mode: :closed_loop,
       tier: String.to_atom(manifest.tier),
       target: manifest_target(options),
@@ -876,18 +860,6 @@ defmodule MOQXProbe.Bench.StreamClients do
   # shares an id with the delivery-evidence sidecar; otherwise mint one.
   defp manifest_run_id(%{evidence: %{enabled?: true, run_id: run_id}}), do: run_id
   defp manifest_run_id(_options), do: evidence_run_id()
-
-  defp manifest_versions do
-    %{
-      moqx: Application.spec(:moqx, :vsn) |> version_string(),
-      moqxprobe: Application.spec(:moqxprobe, :vsn) |> version_string(),
-      elixir: System.version(),
-      otp: System.otp_release()
-    }
-  end
-
-  defp version_string(nil), do: nil
-  defp version_string(vsn), do: List.to_string(vsn)
 
   defp manifest_target(%{base: %{target: :fake}}), do: nil
 
@@ -1129,14 +1101,6 @@ defmodule MOQXProbe.Bench.StreamClients do
     "http://#{url_host(host)}:#{port}"
   end
 
-  defp url_host(host) do
-    if String.contains?(host, ":") and not String.starts_with?(host, "[") do
-      "[#{host}]"
-    else
-      host
-    end
-  end
-
   defp evidence_run_id do
     iso =
       DateTime.utc_now()
@@ -1148,26 +1112,6 @@ defmodule MOQXProbe.Bench.StreamClients do
 
   defp default_evidence_close_grace_ms(:quicprobe), do: 25
   defp default_evidence_close_grace_ms(_target), do: 0
-
-  defp positive_integer(opts, key, default) do
-    value = Keyword.get(opts, key, default)
-
-    if is_integer(value) and value > 0 do
-      value
-    else
-      Mix.raise("--#{cli_key(key)} must be a positive integer")
-    end
-  end
-
-  defp non_negative_integer(opts, key, default) do
-    value = Keyword.get(opts, key, default)
-
-    if is_integer(value) and value >= 0 do
-      value
-    else
-      Mix.raise("--#{cli_key(key)} must be a non-negative integer")
-    end
-  end
 
   defp positive_float(opts, key, default) do
     value = Keyword.get(opts, key, default)
@@ -1206,8 +1150,6 @@ defmodule MOQXProbe.Bench.StreamClients do
         "earlier payloads"
     )
   end
-
-  defp cli_key(key), do: key |> Atom.to_string() |> String.replace("_", "-")
 
   defp target(opts) do
     case Keyword.get(opts, :target, "fake") do

@@ -208,7 +208,9 @@ defmodule MOQXProbe.OpenLoop.Accounting do
   """
   @spec summary(t()) :: map()
   def summary(%__MODULE__{} = acc) do
-    lags = Enum.reverse(acc.tick_lags_ms)
+    # tick_lags_ms is accumulated newest-first; order does not matter here since
+    # lag_summary/1 sorts, so it is used as-is (no reverse).
+    lags = acc.tick_lags_ms
 
     %{
       record_type: "summary",
@@ -259,11 +261,12 @@ defmodule MOQXProbe.OpenLoop.Accounting do
     sorted = Enum.sort(lags)
     index = max(ceil(count * 0.95) - 1, 0)
 
+    # min/max come from the sorted list rather than separate Enum.min/max passes.
     %{
       count: count,
-      min: Enum.min(lags),
+      min: List.first(sorted),
       avg: Enum.sum(lags) / count,
-      max: Enum.max(lags),
+      max: List.last(sorted),
       p95: Enum.at(sorted, index)
     }
   end

@@ -49,6 +49,26 @@ defmodule MOQXProbe.Benchee.RunManifest do
   def sidecar_keys, do: @sidecar_keys
 
   @doc """
+  The default confidence tier for a benchmark target, per ADR-0009: a fake
+  target is process-model only (`"fake"`); any real transport target defaults
+  to local QUIC calibration (`"loopback_quic"`) until a remote tier is chosen.
+  """
+  @spec default_tier(atom()) :: String.t()
+  def default_tier(:fake), do: "fake"
+  def default_tier(_target), do: "loopback_quic"
+
+  @doc """
+  Derives the manifest `target_type` from the benchmark target and its
+  confidence tier (ADR-0009). A fake target is always `:fake`; a real
+  transport target is `:loopback_quic` for fake/loopback tiers and
+  `:remote_quic` once the tier declares a remote path.
+  """
+  @spec target_type(atom(), String.t()) :: :fake | :loopback_quic | :remote_quic
+  def target_type(:fake, _tier), do: :fake
+  def target_type(_target, tier) when tier in ~w(fake loopback_quic), do: :loopback_quic
+  def target_type(_target, _tier), do: :remote_quic
+
+  @doc """
   Builds the manifest map from explicit inputs.
 
   Required keys:

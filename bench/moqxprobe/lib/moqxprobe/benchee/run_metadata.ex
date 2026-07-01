@@ -13,6 +13,28 @@ defmodule MOQXProbe.Benchee.RunMetadata do
     _error -> "unknown"
   end
 
+  @doc """
+  Project/tool versions for the run manifest (ADR-0009). Unknown app versions
+  are reported as `nil` rather than omitted.
+  """
+  @spec versions() :: %{
+          moqx: String.t() | nil,
+          moqxprobe: String.t() | nil,
+          elixir: String.t(),
+          otp: String.t()
+        }
+  def versions do
+    %{
+      moqx: :moqx |> Application.spec(:vsn) |> version_string(),
+      moqxprobe: :moqxprobe |> Application.spec(:vsn) |> version_string(),
+      elixir: System.version(),
+      otp: System.otp_release()
+    }
+  end
+
+  defp version_string(nil), do: nil
+  defp version_string(vsn), do: List.to_string(vsn)
+
   @spec iperf3_summaries([Path.t()] | nil) :: [map()]
   def iperf3_summaries(nil), do: []
 
