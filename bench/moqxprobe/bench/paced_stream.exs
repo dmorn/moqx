@@ -15,11 +15,14 @@
 # the closed-loop bench/stream_clients.exs, but the two modes are kept separate:
 # do not entangle Benchee timing with the paced schedule.
 #
-# Detect-only for coordinated omission: when the sender falls behind its
-# schedule (backlog past a threshold or sustained tick lag), it sets a
-# coordinated_omission flag, meaning the offered rate could not be sustained and
-# any naive latency reading would omit the stalls. It does NOT compute a
-# corrected latency histogram — that is deferred to issue 56.
+# When the sender falls behind its schedule (backlog past a threshold or
+# sustained tick lag past the warmup window) it sets a coordinated_omission
+# flag, and a completion deficit / backlog trip sets the trustworthy `saturated`
+# verdict (issue 58). It also measures send-completion latency (issue 56):
+# corrected (from each intent's scheduled time, back-filling never-completed
+# intents) and uncorrected (from actual send time, completed sends only), so the
+# coordinated-omission effect on the tail is visible. True end-to-end delivery
+# latency is a follow-up (issue 59).
 
 defmodule MOQXProbe.Bench.PacedStream do
   @moduledoc false
@@ -34,6 +37,7 @@ defmodule MOQXProbe.Bench.PacedStream do
   alias MOQXProbe.Benchee.RunReceipt
   alias MOQXProbe.HostSampler
   alias MOQXProbe.OpenLoop.Accounting
+  alias MOQXProbe.OpenLoop.Latency
   alias MOQXProbe.OpenLoop.Pacer
 
   import MOQXProbe.BenchCLI,
@@ -197,16 +201,26 @@ defmodule MOQXProbe.Bench.PacedStream do
     {ctx, streams, connection} = setup_streams(options)
     started_at = DateTime.utc_now()
 
-    {accounting, tick_rows} = paced_send_window(ctx, streams, options)
+    {accounting, tick_rows, loop_state} = paced_send_window(ctx, streams, options)
 
     # Settle the transport out of band: drain any send completions still in
     # flight after the schedule window so accepted reconciles with offered
-    # modulo tail drain. This is NOT part of the schedule and never throttles it.
-    accounting = settle(ctx, accounting, options)
+    # modulo tail drain, feeding the same latency collector. This is NOT part of
+    # the schedule and never throttles it.
+    {accounting, loop_state} = settle(accounting, loop_state, options)
 
-    close_connection(ctx, connection, options)
+    # Back-fill intents that never completed (the issue-58 deficit) into the
+    # corrected latency distribution, then summarize.
+    latency = Latency.finalize(loop_state.latency, monotonic_ms())
+    latency_summary = latency_sidecar(Latency.summary(latency))
 
-    summary = Accounting.summary(accounting)
+    close_connection(loop_state.ctx, connection, options)
+
+    summary =
+      accounting
+      |> Accounting.summary()
+      |> Map.put(:send_completion_latency_ms, latency_summary)
+
     write_paced_sidecar!(options, tick_rows, summary)
     print_summary(options, summary)
 
@@ -246,24 +260,35 @@ defmodule MOQXProbe.Bench.PacedStream do
       ctx: ctx,
       payload: payload,
       stream_vec: stream_vec,
-      cursor: 0
+      cursor: 0,
+      latency: Latency.new(),
+      completed: 0,
+      cancelled: 0
     }
 
-    {accounting, tick_rows} = schedule_loop(pacer, accounting, loop_state, [])
+    {accounting, tick_rows, loop_state} = schedule_loop(pacer, accounting, loop_state, [])
 
-    {accounting, Enum.reverse(tick_rows)}
+    {accounting, Enum.reverse(tick_rows), loop_state}
   end
 
   defp schedule_loop(pacer, accounting, loop_state, tick_rows) do
     now = monotonic_ms()
 
     if Pacer.schedule_complete?(pacer, now) do
-      {accounting, tick_rows}
+      {accounting, tick_rows, loop_state}
     else
       sleep_until(Pacer.next_deadline_ms(pacer))
       now = monotonic_ms()
       {tick, pacer} = Pacer.tick(pacer, now)
-      {accepted, errors, loop_state} = offer_intents(loop_state, tick.due_count)
+
+      {accepted, errors, loop_state} =
+        offer_intents(loop_state, tick.due_count, tick.scheduled_at_ms)
+
+      # Drain the completions that arrived this tick and timestamp them now, so
+      # send-completion latency reflects real backpressure rather than being
+      # measured at end-of-run. Bounded by arrivals (drains until the mailbox is
+      # empty), which under overload is slower than the offer rate.
+      loop_state = drain_available(loop_state)
 
       {tick_row, accounting} =
         Accounting.record_tick(accounting, tick, accepted: accepted, errors: errors)
@@ -275,10 +300,11 @@ defmodule MOQXProbe.Bench.PacedStream do
   # Offer `due_count` payload intents by attempting one transport send each,
   # round-robin across streams. Returns {accepted, errors, loop_state}. We do
   # not block on send completion: send_stream returns as soon as the transport
-  # admits (or rejects) the write.
-  defp offer_intents(loop_state, 0), do: {0, 0, loop_state}
+  # admits (or rejects) the write. Each admitted intent is stamped with its
+  # scheduled and actual send times for latency correlation.
+  defp offer_intents(loop_state, 0, _scheduled_ms), do: {0, 0, loop_state}
 
-  defp offer_intents(loop_state, due_count) do
+  defp offer_intents(loop_state, due_count, scheduled_ms) do
     Enum.reduce(1..due_count, {0, 0, loop_state}, fn _i, {accepted, errors, loop_state} ->
       stream = elem(loop_state.stream_vec, loop_state.cursor)
       next_cursor = rem(loop_state.cursor + 1, tuple_size(loop_state.stream_vec))
@@ -286,12 +312,49 @@ defmodule MOQXProbe.Bench.PacedStream do
 
       case Transport.send_stream(loop_state.ctx, stream, loop_state.payload, []) do
         {:ok, _send, ctx} ->
-          {accepted + 1, errors, %{loop_state | ctx: ctx}}
+          latency = Latency.on_send(loop_state.latency, stream, scheduled_ms, monotonic_ms())
+          {accepted + 1, errors, %{loop_state | ctx: ctx, latency: latency}}
 
         {:error, _reason, ctx} ->
           {accepted, errors + 1, %{loop_state | ctx: ctx}}
       end
     end)
+  end
+
+  # Non-blocking drain of whatever completions/cancellations are available now.
+  # Records completion latency against each intent's scheduled/sent time and
+  # tallies the tail-drain counters. Returns when the mailbox is empty.
+  defp drain_available(loop_state) do
+    case Transport.receive_event(loop_state.ctx, 0) do
+      {:timeout, ctx} ->
+        %{loop_state | ctx: ctx}
+
+      {:ok, {:stream_event, stream, :send_completed, _metadata}, ctx} ->
+        latency = Latency.on_complete(loop_state.latency, stream, monotonic_ms())
+
+        drain_available(%{
+          loop_state
+          | ctx: ctx,
+            latency: latency,
+            completed: loop_state.completed + 1
+        })
+
+      {:ok, {:stream_event, stream, :send_cancelled, _metadata}, ctx} ->
+        latency = Latency.on_cancel(loop_state.latency, stream)
+
+        drain_available(%{
+          loop_state
+          | ctx: ctx,
+            latency: latency,
+            cancelled: loop_state.cancelled + 1
+        })
+
+      {:ok, _other_event, ctx} ->
+        drain_available(%{loop_state | ctx: ctx})
+
+      {:error, _reason, ctx} ->
+        %{loop_state | ctx: ctx}
+    end
   end
 
   # Out-of-band settlement: drains the send completions/cancellations the
@@ -302,28 +365,51 @@ defmodule MOQXProbe.Bench.PacedStream do
   # tail drain visible in the summary, which is what the receiver-byte
   # reconciliation (accepted bytes <= received bytes) relies on. It is bounded by
   # --drain-ms and never throttles the schedule.
-  defp settle(ctx, accounting, options) do
-    {completed, cancelled} = drain_completions(ctx, monotonic_ms() + options.drain_ms, 0, 0)
-    Accounting.record_settlement(accounting, completed: completed, cancelled: cancelled)
+  defp settle(accounting, loop_state, options) do
+    loop_state = drain_until(loop_state, monotonic_ms() + options.drain_ms)
+
+    accounting =
+      Accounting.record_settlement(accounting,
+        completed: loop_state.completed,
+        cancelled: loop_state.cancelled
+      )
+
+    {accounting, loop_state}
   end
 
-  defp drain_completions(ctx, deadline_ms, completed, cancelled) do
+  # Deadline-bounded drain used for the post-window tail: unlike drain_available
+  # it waits (up to --drain-ms) for stragglers, feeding the same latency
+  # collector and tail-drain counters.
+  defp drain_until(loop_state, deadline_ms) do
     if monotonic_ms() >= deadline_ms do
-      {completed, cancelled}
+      loop_state
     else
-      case Transport.receive_event(ctx, 0) do
-        {:timeout, _ctx} ->
+      case Transport.receive_event(loop_state.ctx, 0) do
+        {:timeout, ctx} ->
           sleep_ms(1)
-          drain_completions(ctx, deadline_ms, completed, cancelled)
+          drain_until(%{loop_state | ctx: ctx}, deadline_ms)
 
-        {:ok, {:stream_event, _stream, :send_completed, _metadata}, _ctx} ->
-          drain_completions(ctx, deadline_ms, completed + 1, cancelled)
+        {:ok, {:stream_event, stream, :send_completed, _metadata}, ctx} ->
+          latency = Latency.on_complete(loop_state.latency, stream, monotonic_ms())
 
-        {:ok, {:stream_event, _stream, :send_cancelled, _metadata}, _ctx} ->
-          drain_completions(ctx, deadline_ms, completed, cancelled + 1)
+          drain_until(
+            %{loop_state | ctx: ctx, latency: latency, completed: loop_state.completed + 1},
+            deadline_ms
+          )
 
-        {_tag, _event, _ctx} ->
-          drain_completions(ctx, deadline_ms, completed, cancelled)
+        {:ok, {:stream_event, stream, :send_cancelled, _metadata}, ctx} ->
+          latency = Latency.on_cancel(loop_state.latency, stream)
+
+          drain_until(
+            %{loop_state | ctx: ctx, latency: latency, cancelled: loop_state.cancelled + 1},
+            deadline_ms
+          )
+
+        {:ok, _other_event, ctx} ->
+          drain_until(%{loop_state | ctx: ctx}, deadline_ms)
+
+        {:error, _reason, ctx} ->
+          %{loop_state | ctx: ctx}
       end
     end
   end
@@ -453,7 +539,7 @@ defmodule MOQXProbe.Bench.PacedStream do
       host: options.host,
       quic_port: options.quic_port,
       tailscale_path_mode: options.tailscale_path_mode,
-      coordinated_omission_corrected_latency: "deferred_to_issue_56"
+      send_completion_latency: "corrected_and_uncorrected"
     }
   end
 
@@ -564,10 +650,40 @@ defmodule MOQXProbe.Bench.PacedStream do
     if summary.coordinated_omission do
       IO.puts(
         "note: coordinated_omission flag set (cause=#{summary.coordinated_omission_cause}) — a " <>
-          "sender-scheduling signal (tick lag/backlog), not by itself a saturation claim. " <>
-          "Corrected latency percentiles are deferred to issue 56."
+          "sender-scheduling signal (tick lag/backlog), not by itself a saturation claim."
       )
     end
+
+    lat = summary.send_completion_latency_ms
+
+    IO.puts(
+      "send-completion latency p99 (ms): corrected=#{fmt_ms(lat.corrected.p99)} " <>
+        "uncorrected=#{fmt_ms(lat.uncorrected.p99)} " <>
+        "(corrected measures from scheduled time + back-fills omissions; " <>
+        "uncorrected omits the stalls)"
+    )
+  end
+
+  defp fmt_ms(nil), do: "n/a"
+  defp fmt_ms(v), do: Float.round(v * 1.0, 2)
+
+  # Turns the pure Latency.summary/1 shape (float-keyed percentiles) into a
+  # JSON-safe sidecar map with labelled percentile keys.
+  defp latency_sidecar(%{corrected: corrected, uncorrected: uncorrected}) do
+    %{corrected: hist_sidecar(corrected), uncorrected: hist_sidecar(uncorrected)}
+  end
+
+  defp hist_sidecar(hist) do
+    %{
+      count: hist.count,
+      min: hist.min,
+      max: hist.max,
+      mean: hist.mean,
+      p50: hist.percentiles[0.5],
+      p90: hist.percentiles[0.9],
+      p99: hist.percentiles[0.99],
+      p999: hist.percentiles[0.999]
+    }
   end
 
   # --- transport setup (reused from stream_clients.exs) ----------------------

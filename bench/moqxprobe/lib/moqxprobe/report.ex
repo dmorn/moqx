@@ -68,9 +68,19 @@ defmodule MOQXProbe.Report do
       metrics: metrics,
       saturation: saturation,
       baseline: baseline,
+      latency: sender_latency(Map.get(inputs, :paced)),
       warnings: warnings(ctx) ++ receiver_notes ++ sender_notes ++ baseline_notes
     }
   end
+
+  # Send-completion latency (issue 56), corrected vs uncorrected, from the paced
+  # summary. nil for closed-loop runs or paced runs without latency data.
+  defp sender_latency(paced) when is_map(paced) do
+    summary = Map.get(paced, "summary") || %{}
+    Map.get(summary, "send_completion_latency_ms")
+  end
+
+  defp sender_latency(_paced), do: nil
 
   @doc """
   Constructs a derived metric, validating its name against the ADR-0009 naming
@@ -427,6 +437,7 @@ defmodule MOQXProbe.Report do
       metrics_section(report.metrics),
       baseline_section(report.baseline),
       saturation_section(report.saturation),
+      latency_section(report.latency),
       "",
       "_Derived per ADR-0009. Each metric names its source layer, window, and " <>
         "confidence tier. Benchee `ips` (closed-loop service time) is not a " <>
@@ -435,6 +446,29 @@ defmodule MOQXProbe.Report do
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end
+
+  defp latency_section(nil), do: ""
+
+  defp latency_section(latency) do
+    corrected = Map.get(latency, "corrected") || %{}
+    uncorrected = Map.get(latency, "uncorrected") || %{}
+
+    """
+    ## Send-completion latency (open-loop, ms)
+
+    Corrected measures from each intent's scheduled time and back-fills
+    never-completed intents (coordinated-omission-corrected); uncorrected omits
+    the stalls. A large gap means the offered rate outran what the path could
+    complete. True end-to-end delivery latency is deferred to issue 59.
+
+    | series | p50 | p90 | p99 | p99.9 | max | count |
+    | --- | --- | --- | --- | --- | --- | --- |
+    | `send_completion_latency_corrected_ms` | #{lat(corrected, "p50")} | #{lat(corrected, "p90")} | #{lat(corrected, "p99")} | #{lat(corrected, "p999")} | #{lat(corrected, "max")} | #{lat(corrected, "count")} |
+    | `send_completion_latency_uncorrected_ms` | #{lat(uncorrected, "p50")} | #{lat(uncorrected, "p90")} | #{lat(uncorrected, "p99")} | #{lat(uncorrected, "p999")} | #{lat(uncorrected, "max")} | #{lat(uncorrected, "count")} |
+    """
+  end
+
+  defp lat(series, key), do: series |> Map.get(key) |> format_number()
 
   defp warnings_section([]), do: ""
 

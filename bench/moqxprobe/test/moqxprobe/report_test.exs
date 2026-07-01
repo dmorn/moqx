@@ -109,6 +109,26 @@ defmodule MOQXProbe.ReportTest do
     assert Enum.any?(report.warnings, &String.contains?(&1, "sender-scheduling signal"))
   end
 
+  describe "build/1 send-completion latency (open-loop)" do
+    test "captures corrected and uncorrected latency and renders both" do
+      report = Report.build(open_loop_inputs())
+
+      assert report.latency["corrected"]["p99"] == 950.0
+      assert report.latency["uncorrected"]["p99"] == 11.0
+
+      md = Report.to_markdown(report)
+      assert md =~ "Send-completion latency"
+      assert md =~ "send_completion_latency_corrected_ms"
+      assert md =~ "send_completion_latency_uncorrected_ms"
+    end
+
+    test "latency section is absent for a run without paced latency data" do
+      report = Report.build(closed_loop_inputs())
+      assert report.latency == nil
+      refute Report.to_markdown(report) =~ "Send-completion latency"
+    end
+  end
+
   describe "build/1 iperf3 baseline" do
     test "computes receiver-active utilization only with an explicit target" do
       report = Report.build(closed_loop_inputs())
@@ -186,7 +206,27 @@ defmodule MOQXProbe.ReportTest do
           "coordinated_omission_cause" => "sustained_tick_lag",
           "saturated" => true,
           "saturation_signal" => "completion_deficit",
-          "send_completion_deficit_ratio" => 0.074
+          "send_completion_deficit_ratio" => 0.074,
+          "send_completion_latency_ms" => %{
+            "corrected" => %{
+              "count" => 100,
+              "min" => 1.0,
+              "max" => 1000.0,
+              "p50" => 6.0,
+              "p90" => 400.0,
+              "p99" => 950.0,
+              "p999" => 990.0
+            },
+            "uncorrected" => %{
+              "count" => 60,
+              "min" => 1.0,
+              "max" => 12.0,
+              "p50" => 5.0,
+              "p90" => 8.0,
+              "p99" => 11.0,
+              "p999" => 12.0
+            }
+          }
         }
       },
       host: %{

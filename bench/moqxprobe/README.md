@@ -339,14 +339,18 @@ Both are recorded (latched, with a cause). The report layer keys its saturation
 statement off `saturated` and delivery validity, and demotes a lag-only trip to
 a scheduling note.
 
-This slice is **detect only**: it records the *fact* of coordinated omission so
-a corrected reading can be built later. It does **not** compute a corrected
-latency histogram or corrected percentiles — that is deferred to issue 56
-(`.scratch/transport-layer-foundation/issues/56-add-coordinated-omission-corrected-latency-histogram.md`).
-The schedule math and offered/accepted/backlog/lag
-accounting live in the pure, unit-tested modules `MOQXProbe.OpenLoop.Pacer` and
-`MOQXProbe.OpenLoop.Accounting`; the script is a thin transport/IO shell around
-them.
+The paced sender also measures **send-completion latency** (issue 56):
+`corrected` (from each intent's scheduled time, back-filling never-completed
+intents — coordinated-omission-corrected) and `uncorrected` (from the actual
+send time, completed sends only). Both are summarized (p50/p90/p99/p99.9) in the
+paced sidecar and the report; a large corrected-vs-uncorrected gap is the
+omission effect. This is sender-observable completion latency, not true
+end-to-end delivery latency (deferred to issue 59).
+
+The schedule math, offered/accepted/backlog/lag accounting, and latency
+correlation live in the pure, unit-tested modules `MOQXProbe.OpenLoop.Pacer`,
+`MOQXProbe.OpenLoop.Accounting`, `MOQXProbe.OpenLoop.Latency`, and
+`MOQXProbe.Histogram`; the script is a thin transport/IO shell around them.
 
 ### Sidecar shape
 
