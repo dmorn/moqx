@@ -1,6 +1,6 @@
 # Harden the open-loop coordinated-omission detector
 
-Status: ready-for-agent
+Status: done
 Type: enhancement
 Category: performance
 
@@ -69,18 +69,48 @@ Two problems:
 
 ## Acceptance criteria
 
-- [ ] A warmup window excludes startup ticks from the lag-streak evaluation;
+- [x] A warmup window excludes startup ticks from the lag-streak evaluation;
       the low-rate false positive no longer trips CO on a healthy run.
-- [ ] The summary exposes a completion-deficit signal that flags the moderate-
+- [x] The summary exposes a completion-deficit signal that flags the moderate-
       overload case (accepted >> completed) that the lag flag misses.
-- [ ] The raw tick-lag CO flag and its meaning are documented as distinct from
+- [x] The raw tick-lag CO flag and its meaning are documented as distinct from
       the delivery/saturation verdict.
-- [ ] Pure `Accounting` logic stays unit-tested for both new signals.
+- [x] Pure `Accounting` logic stays unit-tested for both new signals.
 
 ## Non-goals
 
 - Corrected latency percentiles (issue 56).
 - Changing the receiver-side evidence.
+
+## Comments
+
+### 2026-07-01 — Implemented and confirmed on reform
+
+`MOQXProbe.OpenLoop.Accounting` gained a `warmup_ms` window (ticks below it are
+excluded from the lag streak) and a post-run `saturated` verdict driven by the
+**completion deficit** (`accepted_total - settled_completed_total` over
+`--completion-deficit-threshold`, default 1%) or a backlog trip — distinct from
+the raw `coordinated_omission` tick-lag flag, which is now documented as a
+sender-scheduling signal only. Wired `--warmup-ms` (default 500) and
+`--completion-deficit-threshold` into `paced_stream.exs`; the report layer keys
+its saturation statement off `saturated` and demotes a lag-only trip to a
+scheduling note. 6 new unit tests; all gates green.
+
+Re-ran the reform open-loop sweep (16 streams, 1180 B, tick-ms 1) to confirm
+trustworthiness — `saturated` now matches receiver delivery validity 1:1:
+
+| offered ev/s | ~Mbps | deficit | saturated | delivery |
+| --- | --- | --- | --- | --- |
+| 5000 | 47 | 0% | false (was false-positive) | valid |
+| 8000 | 75 | 0% | false | valid |
+| 10000 | 94 | 0% | false | valid |
+| 12000 | 113 | 8.0% | true (was false-negative) | invalid |
+| 15000 | 141 | 26.6% | true | invalid |
+
+The startup false-positive at 5000 is gone; 12000 is now correctly flagged via
+completion deficit. The raw tick-lag CO flag stayed false at every rate — on a
+buffered QUIC sender the schedule is met while the path drops the excess, which
+is exactly why the deficit signal was needed.
 
 ## Notes
 

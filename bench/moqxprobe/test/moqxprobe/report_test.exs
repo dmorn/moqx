@@ -83,10 +83,30 @@ defmodule MOQXProbe.ReportTest do
       assert metric.source_layer == "sender"
     end
 
-    test "surfaces coordinated omission as a trustworthiness warning", %{report: report} do
-      assert Enum.any?(report.warnings, &String.contains?(&1, "Coordinated omission detected"))
+    test "warns on the saturation verdict (completion deficit), not the raw CO flag", %{
+      report: report
+    } do
+      assert Enum.any?(report.warnings, &String.contains?(&1, "Saturation detected"))
+      assert Enum.any?(report.warnings, &String.contains?(&1, "completion deficit 7.4%"))
       assert Enum.any?(report.warnings, &String.contains?(&1, "issue 56"))
     end
+  end
+
+  test "build/1 treats a CO flag without saturation as a scheduling note, not saturation" do
+    inputs =
+      put_in(open_loop_inputs().paced["summary"], %{
+        "accepted_payload_events_sender_active_total" => 32_000,
+        "coordinated_omission" => true,
+        "coordinated_omission_cause" => "sustained_tick_lag",
+        "saturated" => false,
+        "saturation_signal" => nil,
+        "send_completion_deficit_ratio" => 0.0
+      })
+
+    report = Report.build(inputs)
+
+    refute Enum.any?(report.warnings, &String.contains?(&1, "Saturation detected"))
+    assert Enum.any?(report.warnings, &String.contains?(&1, "sender-scheduling signal"))
   end
 
   describe "build/1 iperf3 baseline" do
@@ -163,7 +183,10 @@ defmodule MOQXProbe.ReportTest do
         "summary" => %{
           "accepted_payload_events_sender_active_total" => 32_000,
           "coordinated_omission" => true,
-          "coordinated_omission_cause" => "sustained_tick_lag"
+          "coordinated_omission_cause" => "sustained_tick_lag",
+          "saturated" => true,
+          "saturation_signal" => "completion_deficit",
+          "send_completion_deficit_ratio" => 0.074
         }
       },
       host: %{

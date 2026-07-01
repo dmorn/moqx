@@ -294,14 +294,19 @@ Schedule (the open-loop core):
 - `--drain-ms N` — post-window settle/drain budget for in-flight send
   completions (default `500`); out of band, never throttles the schedule.
 
-Coordinated-omission detection (detect only):
+Saturation / coordinated-omission detection (detect only):
 
 - `--backlog-threshold N` — trip the flag when backlog (offered minus accepted)
   exceeds N (default `4096`).
 - `--sustained-lag-ms N` — a tick is "lagging" when its `tick_lag_ms` exceeds N
   (default `5`).
-- `--sustained-lag-ticks N` — trip the flag after N consecutive lagging ticks
-  (default `10`).
+- `--sustained-lag-ticks N` — trip the coordinated-omission flag after N
+  consecutive lagging ticks (default `10`).
+- `--warmup-ms N` — exclude ticks in the first N ms from the lag-streak
+  evaluation so connection setup / TLS / first-send jitter cannot false-trip the
+  flag (default `500`).
+- `--completion-deficit-threshold R` — the `saturated` verdict fires when the
+  fraction of admitted sends that never completed exceeds R (default `0.01`).
 
 Output and tier:
 
@@ -315,14 +320,24 @@ the out-of-band host sampler (`--host-sample-ms` / `--host-samples-output`,
 monitoring the `paced_sender` role), and the run-metadata flags (`--git-sha`,
 `--tailscale-path-mode`, `--server-stats-path`). Use `--help` for the full list.
 
-### Coordinated omission
+### Saturation verdict vs the coordinated-omission flag
 
-When the offered rate cannot be sustained — backlog grows past
-`--backlog-threshold`, or tick lag stays above `--sustained-lag-ms` for
-`--sustained-lag-ticks` consecutive ticks — the run sets a `coordinated_omission`
-flag (latched for the rest of the run, with a recorded cause) and prints a
-warning. This means a naive latency reading would omit the stalls, so the
-system would look healthier than it is.
+Two distinct signals (issue 58):
+
+- **`saturated`** is the trustworthy verdict that the transport/path could not
+  carry the offered load. It fires on a **completion deficit** (admitted sends
+  that never completed, past `--completion-deficit-threshold`) or an
+  offered-vs-accepted **backlog** trip. On a buffered QUIC sender this is the
+  real saturation signal: the sender can stay on schedule while the network
+  drops the excess.
+- **`coordinated_omission`** is a *sender-scheduling* signal only — the sender
+  fell behind its wall-clock schedule (sustained tick lag past the
+  `--warmup-ms` window, or backlog). A lag trip without saturation is jitter,
+  not a path-saturation claim, and the report treats it as such.
+
+Both are recorded (latched, with a cause). The report layer keys its saturation
+statement off `saturated` and delivery validity, and demotes a lag-only trip to
+a scheduling note.
 
 This slice is **detect only**: it records the *fact* of coordinated omission so
 a corrected reading can be built later. It does **not** compute a corrected

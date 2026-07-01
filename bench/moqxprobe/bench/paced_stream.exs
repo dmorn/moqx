@@ -71,6 +71,8 @@ defmodule MOQXProbe.Bench.PacedStream do
     backlog_threshold: :integer,
     sustained_lag_ms: :integer,
     sustained_lag_ticks: :integer,
+    warmup_ms: :integer,
+    completion_deficit_threshold: :float,
     drain_ms: :integer,
     tier: :string,
     paced_output: :string,
@@ -235,7 +237,9 @@ defmodule MOQXProbe.Bench.PacedStream do
       Accounting.new!(
         backlog_threshold: options.backlog_threshold,
         sustained_lag_ms: options.sustained_lag_ms,
-        sustained_lag_ticks: options.sustained_lag_ticks
+        sustained_lag_ticks: options.sustained_lag_ticks,
+        warmup_ms: options.warmup_ms,
+        completion_deficit_threshold: options.completion_deficit_threshold
       )
 
     loop_state = %{
@@ -443,6 +447,8 @@ defmodule MOQXProbe.Bench.PacedStream do
       backlog_threshold: options.backlog_threshold,
       sustained_lag_ms: options.sustained_lag_ms,
       sustained_lag_ticks: options.sustained_lag_ticks,
+      warmup_ms: options.warmup_ms,
+      completion_deficit_threshold: options.completion_deficit_threshold,
       git_sha: options.git_sha,
       host: options.host,
       quic_port: options.quic_port,
@@ -541,13 +547,24 @@ defmodule MOQXProbe.Bench.PacedStream do
         "backlog=#{summary.backlog_payload_events} " <>
         "max_backlog=#{summary.max_backlog_payload_events} " <>
         "max_tick_lag_ms=#{summary.max_tick_lag_ms} " <>
+        "completion_deficit=#{summary.send_completion_deficit} " <>
+        "saturated=#{summary.saturated} " <>
         "coordinated_omission=#{summary.coordinated_omission}"
     )
 
+    if summary.saturated do
+      IO.puts(
+        "SATURATED (signal=#{summary.saturation_signal}): the transport/path could not carry " <>
+          "the offered load (completion deficit " <>
+          "#{Float.round(summary.send_completion_deficit_ratio * 100, 1)}%). This is the " <>
+          "trustworthy saturation verdict."
+      )
+    end
+
     if summary.coordinated_omission do
       IO.puts(
-        "WARNING: coordinated omission detected (cause=#{summary.coordinated_omission_cause}). " <>
-          "The offered rate could not be sustained; naive latency would omit the stalls. " <>
+        "note: coordinated_omission flag set (cause=#{summary.coordinated_omission_cause}) — a " <>
+          "sender-scheduling signal (tick lag/backlog), not by itself a saturation claim. " <>
           "Corrected latency percentiles are deferred to issue 56."
       )
     end
@@ -827,6 +844,8 @@ defmodule MOQXProbe.Bench.PacedStream do
       backlog_threshold: positive_integer(opts, :backlog_threshold, 4_096),
       sustained_lag_ms: non_negative_integer(opts, :sustained_lag_ms, 5),
       sustained_lag_ticks: positive_integer(opts, :sustained_lag_ticks, 10),
+      warmup_ms: non_negative_integer(opts, :warmup_ms, 500),
+      completion_deficit_threshold: Keyword.get(opts, :completion_deficit_threshold, 0.01),
       drain_ms: non_negative_integer(opts, :drain_ms, 500),
       tier: tier(opts, target(opts)),
       paced_output: Keyword.get(opts, :paced_output),
@@ -968,10 +987,12 @@ defmodule MOQXProbe.Bench.PacedStream do
       --payload-size BYTES         bytes per payload intent (default: 1180)
       --drain-ms N                 post-window settle/drain budget (default: 500)
 
-    Coordinated-omission detection (detect only; correction deferred to issue 56):
-      --backlog-threshold N        trip flag when backlog exceeds N (default: 4096)
+    Saturation / coordinated-omission detection (detect only; correction deferred to issue 56):
+      --backlog-threshold N        trip CO flag when backlog exceeds N (default: 4096)
       --sustained-lag-ms N         a tick lags when tick_lag_ms exceeds N (default: 5)
-      --sustained-lag-ticks N      trip flag after N consecutive lagging ticks (default: 10)
+      --sustained-lag-ticks N      trip CO flag after N consecutive lagging ticks (default: 10)
+      --warmup-ms N                exclude the first N ms from the lag streak (default: 500)
+      --completion-deficit-threshold R  saturated when uncompleted-send fraction exceeds R (default: 0.01)
 
     Output:
       --paced-output PATH          write moqxprobe-paced-v1 JSONL sidecar

@@ -278,7 +278,7 @@ defmodule MOQXProbe.Report do
     metrics =
       maybe_append([], sender_goodput_metric(accepted, payload_size, duration_ms, ctx))
 
-    {metrics, coordinated_omission_notes(summary)}
+    {metrics, sender_notes(summary)}
   end
 
   defp sender_goodput_metric(accepted, payload_size, duration_ms, ctx)
@@ -298,19 +298,48 @@ defmodule MOQXProbe.Report do
 
   defp sender_goodput_metric(_accepted, _payload_size, _duration_ms, _ctx), do: nil
 
-  defp coordinated_omission_notes(summary) do
-    if Map.get(summary, "coordinated_omission") == true do
-      cause = Map.get(summary, "coordinated_omission_cause")
+  # The trustworthy saturation statement uses the `saturated` verdict
+  # (completion deficit / backlog). A raw coordinated_omission flag that is not
+  # accompanied by saturation is a sender-scheduling signal only (issue 58).
+  defp sender_notes(summary) do
+    saturation_note(summary) ++ scheduling_note(summary)
+  end
+
+  defp saturation_note(summary) do
+    if Map.get(summary, "saturated") == true do
+      signal = Map.get(summary, "saturation_signal")
+      ratio = Map.get(summary, "send_completion_deficit_ratio")
 
       [
-        "Coordinated omission detected (cause=#{cause}): the offered rate was " <>
-          "not sustained, so latency-under-load is not trustworthy here. " <>
-          "Corrected latency percentiles are deferred to issue 56."
+        "Saturation detected (signal=#{signal}): the transport/path could not carry the " <>
+          "offered load#{deficit_phrase(ratio)}. Latency-under-load is not trustworthy here; " <>
+          "corrected percentiles are deferred to issue 56."
       ]
     else
       []
     end
   end
+
+  # A scheduling-only lag trip (flag set but not saturated) is worth noting but
+  # is explicitly NOT a saturation claim.
+  defp scheduling_note(summary) do
+    if Map.get(summary, "coordinated_omission") == true and Map.get(summary, "saturated") != true do
+      cause = Map.get(summary, "coordinated_omission_cause")
+
+      [
+        "Sender fell behind schedule (coordinated_omission cause=#{cause}) but delivery did not " <>
+          "saturate — a sender-scheduling signal (e.g. jitter), not a path-saturation claim."
+      ]
+    else
+      []
+    end
+  end
+
+  defp deficit_phrase(ratio) when is_number(ratio) and ratio > 0 do
+    " (completion deficit #{Float.round(ratio * 100, 1)}%)"
+  end
+
+  defp deficit_phrase(_ratio), do: ""
 
   # --- host saturation -------------------------------------------------------
 

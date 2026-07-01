@@ -13,9 +13,12 @@ defmodule MOQXProbe.OpenLoop.Accounting do
   send completions/cancellations (`record_settlement/2`) that confirm
   already-admitted sends. It also raises a
   `coordinated_omission?` flag when the sender falls behind its schedule — when
-  backlog grows past a threshold or tick lag is sustained — meaning the offered
-  rate could not be sustained and any naive latency reading would omit the
-  stalls.
+  backlog grows past a threshold or tick lag is sustained past a `warmup_ms`
+  window. That flag is a *sender-scheduling* signal, not a saturation verdict:
+  on a buffered QUIC sender the schedule can be met while the path drops the
+  excess. The trustworthy saturation verdict is `saturated` (issue 58), driven
+  by the **completion deficit** (admitted sends that never completed) or a
+  backlog trip — not by tick lag alone.
 
   Detect only. This module does **not** compute a corrected latency histogram;
   latency correction is deferred to issue 56. It records the *fact* that
@@ -37,6 +40,8 @@ defmodule MOQXProbe.OpenLoop.Accounting do
   defstruct backlog_threshold: nil,
             sustained_lag_ms: nil,
             sustained_lag_ticks: nil,
+            warmup_ms: 0,
+            completion_deficit_threshold: 0.01,
             offered_total: 0,
             accepted_total: 0,
             error_total: 0,
@@ -51,11 +56,14 @@ defmodule MOQXProbe.OpenLoop.Accounting do
             tick_lags_ms: []
 
   @type cause :: :backlog_threshold_exceeded | :sustained_tick_lag
+  @type saturation_signal :: :completion_deficit | :backlog_threshold_exceeded
 
   @type t :: %__MODULE__{
           backlog_threshold: pos_integer(),
           sustained_lag_ms: non_neg_integer(),
           sustained_lag_ticks: pos_integer(),
+          warmup_ms: non_neg_integer(),
+          completion_deficit_threshold: float(),
           offered_total: non_neg_integer(),
           accepted_total: non_neg_integer(),
           error_total: non_neg_integer(),
@@ -82,13 +90,22 @@ defmodule MOQXProbe.OpenLoop.Accounting do
       is "lagging" when its `tick_lag_ms` exceeds this bound.
     * `:sustained_lag_ticks` (optional, positive integer, default `3`) —
       coordinated omission trips after this many consecutive lagging ticks.
+    * `:warmup_ms` (optional, non-negative integer, default `0`) — ticks whose
+      `elapsed_ms` is below this bound are excluded from the lag-streak
+      evaluation, so connection setup / TLS / first-send jitter cannot
+      false-trip the sustained-tick-lag flag. Backlog trips are unaffected.
+    * `:completion_deficit_threshold` (optional, float in `(0, 1]`, default
+      `0.01`) — the `saturated` verdict fires when the fraction of admitted
+      sends that never completed exceeds this bound.
   """
   @spec new!(keyword()) :: t()
   def new!(opts) when is_list(opts) do
     %__MODULE__{
       backlog_threshold: positive_integer!(opts, :backlog_threshold),
       sustained_lag_ms: non_negative_integer!(opts, :sustained_lag_ms, 0),
-      sustained_lag_ticks: positive_integer_with_default!(opts, :sustained_lag_ticks, 3)
+      sustained_lag_ticks: positive_integer_with_default!(opts, :sustained_lag_ticks, 3),
+      warmup_ms: non_negative_integer!(opts, :warmup_ms, 0),
+      completion_deficit_threshold: ratio_with_default!(opts, :completion_deficit_threshold, 0.01)
     }
   end
 
@@ -120,7 +137,11 @@ defmodule MOQXProbe.OpenLoop.Accounting do
     error_total = acc.error_total + errors
     backlog = max(offered_total - accepted_total, 0)
 
-    lagging? = tick.tick_lag_ms > acc.sustained_lag_ms
+    # Ticks inside the warmup window never count toward the lag streak, so
+    # connection-setup jitter cannot false-trip sustained tick lag. A warmup
+    # tick resets the streak (treated as non-lagging).
+    in_warmup? = tick.elapsed_ms < acc.warmup_ms
+    lagging? = not in_warmup? and tick.tick_lag_ms > acc.sustained_lag_ms
     consecutive_lagging_ticks = if lagging?, do: acc.consecutive_lagging_ticks + 1, else: 0
 
     acc = %{
@@ -212,16 +233,29 @@ defmodule MOQXProbe.OpenLoop.Accounting do
     # lag_summary/1 sorts, so it is used as-is (no reverse).
     lags = acc.tick_lags_ms
 
+    deficit = send_completion_deficit(acc)
+    deficit_ratio = send_completion_deficit_ratio(acc, deficit)
+    {saturated?, signal} = saturation_verdict(acc, deficit_ratio)
+
     %{
       record_type: "summary",
       window: "sender_active",
       source_layer: "sender",
+      warmup_ms: acc.warmup_ms,
       tick_count: acc.tick_count,
       offered_payload_events_total: acc.offered_total,
       accepted_payload_events_sender_active_total: acc.accepted_total,
       send_admission_error_count: acc.error_total,
       send_completions_drain_total: acc.settled_completed_total,
       send_cancellations_drain_total: acc.settled_cancelled_total,
+      # Completion deficit: admitted sends the transport never completed. On a
+      # buffered QUIC sender this is the trustworthy saturation signal — the
+      # sender can stay on schedule while the path drops the excess, so tick lag
+      # alone misses it (ADR-0009 / issue 58).
+      send_completion_deficit: deficit,
+      send_completion_deficit_ratio: deficit_ratio,
+      saturated: saturated?,
+      saturation_signal: encode_signal(signal),
       backlog_payload_events: backlog(acc),
       max_backlog_payload_events: acc.max_backlog,
       # `max_tick_lag_ms` is a running maximum seeded at 0, so it never reports a
@@ -230,9 +264,39 @@ defmodule MOQXProbe.OpenLoop.Accounting do
       # The two `max` values can therefore differ for an all-early run.
       max_tick_lag_ms: acc.max_tick_lag_ms,
       tick_lag_ms: lag_summary(lags),
+      # `coordinated_omission` is the raw sender-scheduling signal (tick lag or
+      # backlog). It is NOT the saturation verdict: a warmup-suppressed or purely
+      # jittery lag trip does not mean the path saturated. Use `saturated`.
       coordinated_omission: acc.coordinated_omission?,
       coordinated_omission_cause: encode_cause(acc.coordinated_omission_cause)
     }
+  end
+
+  # Admitted sends that never reported completion during the run + tail drain.
+  defp send_completion_deficit(%__MODULE__{} = acc) do
+    max(acc.accepted_total - acc.settled_completed_total, 0)
+  end
+
+  defp send_completion_deficit_ratio(%__MODULE__{accepted_total: 0}, _deficit), do: 0.0
+
+  defp send_completion_deficit_ratio(%__MODULE__{accepted_total: accepted}, deficit) do
+    deficit / accepted
+  end
+
+  # The trustworthy saturation verdict: the transport/path could not carry the
+  # offered load. Driven by the completion deficit or an offered-vs-accepted
+  # backlog trip — not by sender-schedule tick lag alone.
+  defp saturation_verdict(%__MODULE__{} = acc, deficit_ratio) do
+    cond do
+      deficit_ratio > acc.completion_deficit_threshold ->
+        {true, :completion_deficit}
+
+      acc.coordinated_omission_cause == :backlog_threshold_exceeded ->
+        {true, :backlog_threshold_exceeded}
+
+      true ->
+        {false, nil}
+    end
   end
 
   defp maybe_trip(%__MODULE__{coordinated_omission?: true} = acc, _backlog, _lagging), do: acc
@@ -283,6 +347,9 @@ defmodule MOQXProbe.OpenLoop.Accounting do
   defp encode_cause(nil), do: nil
   defp encode_cause(cause) when is_atom(cause), do: Atom.to_string(cause)
 
+  defp encode_signal(nil), do: nil
+  defp encode_signal(signal) when is_atom(signal), do: Atom.to_string(signal)
+
   defp positive_integer!(opts, key) do
     case Keyword.fetch(opts, key) do
       {:ok, value} when is_integer(value) and value > 0 -> value
@@ -303,6 +370,14 @@ defmodule MOQXProbe.OpenLoop.Accounting do
       {:ok, value} when is_integer(value) and value >= 0 -> value
       :error -> default
       _invalid -> raise ArgumentError, "#{key} must be a non-negative integer"
+    end
+  end
+
+  defp ratio_with_default!(opts, key, default) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} when is_number(value) and value > 0 and value <= 1 -> value / 1
+      :error -> default
+      _invalid -> raise ArgumentError, "#{key} must be a number in (0, 1]"
     end
   end
 end
