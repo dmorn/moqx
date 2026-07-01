@@ -41,7 +41,6 @@ defmodule MOQXProbe.Bench.PacedStream do
       drop_mix_separator: 1,
       positive_integer: 3,
       non_negative_integer: 3,
-      cli_key: 1,
       url_host: 1,
       manifest_args: 1
     ]
