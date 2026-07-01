@@ -11,8 +11,12 @@ Issues are tracked as local markdown files under `.scratch/`. See `docs/agents/i
 
 ### Triage labels
 
-Use the default five-label triage vocabulary. See `docs/agents/triage-labels.md`.
+Each issue carries a `Status:` line. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
 Single-context repo: use root `CONTEXT.md` and `docs/adr/` when present. See `docs/agents/domain.md`.
+
+### Transport testing
+
+How the transport is verified and measured (contract tests, integration tests, and the `bench/moqxprobe` + `bench/quicprobe` evidence loop). See `docs/agents/transport-testing.md`.

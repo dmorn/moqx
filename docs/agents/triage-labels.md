@@ -1,15 +1,16 @@
-# Triage Labels
+# Triage labels
 
-The skills speak in terms of five canonical triage roles. This file maps those roles to the actual label strings used in this repo's issue tracker.
+Each issue file under `.scratch/` carries a `Status:` line near the top (see
+`issue-tracker.md`). Use one of these values:
 
-| Label in mattpocock/skills | Label in our tracker | Meaning                                  |
-| -------------------------- | -------------------- | ---------------------------------------- |
-| `needs-triage`             | `needs-triage`       | Maintainer needs to evaluate this issue  |
-| `needs-info`               | `needs-info`         | Waiting on reporter for more information |
-| `ready-for-agent`          | `ready-for-agent`    | Fully specified, ready for an AFK agent  |
-| `ready-for-human`          | `ready-for-human`    | Requires human implementation            |
-| `wontfix`                  | `wontfix`            | Will not be actioned                     |
+| Status            | Meaning                                             |
+| ----------------- | --------------------------------------------------- |
+| `needs-triage`    | Not yet evaluated.                                  |
+| `needs-info`      | Blocked waiting on more information.                |
+| `ready-for-agent` | Fully specified; an AFK agent can implement it.     |
+| `ready-for-human` | Needs a human (judgement call, access, or risk).    |
+| `done`            | Implemented and verified.                           |
+| `wontfix`         | Will not be actioned.                               |
 
-When a skill mentions a role (e.g. "apply the AFK-ready triage label"), use the corresponding label string from this table.
-
-Edit the right-hand column to match whatever vocabulary you actually use.
+Record follow-up work as a new issue rather than reopening a `done` one, and
+append progress under a `## Comments` heading at the bottom of the file.
