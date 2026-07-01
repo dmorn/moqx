@@ -1,6 +1,6 @@
 # Add true end-to-end delivery latency to the open-loop measurement
 
-Status: needs-triage
+Status: done
 Type: enhancement
 Category: performance
 
