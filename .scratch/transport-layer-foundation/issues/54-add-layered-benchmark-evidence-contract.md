@@ -2,7 +2,7 @@
 
 # Add layered benchmark evidence contract
 
-Status: ready-for-agent
+Status: done
 Type: AFK
 Category: performance
 
@@ -422,4 +422,28 @@ Notes for the future report/derivation slice (raw evidence only for now, no
 
 The expired loopback test cert discovered during the smoke is tracked
 separately as issue 55.
+
+### 2026-06-30 — Slices 3-5 and completion
+
+All five slices landed on branch `feat/benchmark-evidence-contract`:
+
+- **Slice 3** (`51298f2`, doc fix `881b54e`): out-of-band `MOQXProbe.HostSampler`
+  (scheduler utilization, run-queue lengths, per-sender-role mailbox/reductions/
+  memory) behind `--host-sample-ms`/`--host-samples-output`. Verified on reform
+  real-path; the sampler did not distort the run.
+- **Slice 4** (`f25e19b`, doc note `238005b`): open-loop paced sender
+  (`OpenLoop.Pacer`/`Accounting`, `paced_stream.exs`) recording offered/accepted/
+  backlog/tick-lag with a coordinated-omission flag. reform smoke showed the flag
+  **clear** at a sustainable 8k ev/s (delivery reconciled exactly) and **set**
+  (`sustained_tick_lag`) at an unsustainable 400k ev/s where delivery correctly
+  broke down. Corrected latency percentiles deferred to issue 56.
+- **Slice 5** (`e12c09f`, tier fix `1ce2fcc`): `MOQXProbe.Benchee.RunManifest`
+  (`moqxprobe-run-manifest-v1`) emitted by both the closed-loop and open-loop
+  scripts behind `--manifest-output`, with explicit-null slots for absent
+  sidecars. Both manifests verified on reform.
+
+Acceptance criteria met. Follow-ups: issue 55 (cert fixture), issue 56
+(coordinated-omission-corrected latency histogram). A report/derivation layer
+that turns raw evidence into `*_bps` and enforces ADR-0009 cross-mode/tier
+discipline is the natural next issue (not yet filed).
 
