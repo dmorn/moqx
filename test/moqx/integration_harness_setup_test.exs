@@ -34,7 +34,16 @@ defmodule MOQX.IntegrationHarnessSetupTest do
     assert compose =~ "4433:4433/udp"
     assert compose =~ "healthcheck:"
     assert compose =~ "bench/quicprobe"
-    assert compose =~ "DNS.1 = localhost"
-    assert compose =~ "IP.1 = 127.0.0.1"
+    # Certificate provisioning is delegated to the shared generator script.
+    assert compose =~ "gen-loopback-certs.sh"
+  end
+
+  test "loopback cert generator covers localhost SANs with a long validity" do
+    script = File.read!("scripts/gen-loopback-certs.sh")
+
+    assert script =~ "DNS.1 = localhost"
+    assert script =~ "IP.1 = 127.0.0.1"
+    # ~100 years so routine expiry never breaks local runs (issue 55).
+    assert script =~ "36500"
   end
 end
