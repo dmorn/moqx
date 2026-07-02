@@ -14,6 +14,17 @@ defmodule MOQXProbe.Bench.DatagramClients do
   alias MOQXProbe.DatagramPayload
   alias MOQXProbe.Traffic.DatagramSender
 
+  import MOQXProbe.BenchCLI,
+    only: [
+      drop_mix_separator: 1,
+      positive_integer: 3,
+      non_negative_integer: 3,
+      positive_float: 3,
+      non_negative_float: 3,
+      cli_key: 1,
+      url_host: 1
+    ]
+
   @input_names ["flow-sequence-timestamp"]
   @implementation_names ["paced_sink"]
   @target_names ["fake", "quicprobe"]
@@ -379,9 +390,6 @@ defmodule MOQXProbe.Bench.DatagramClients do
     end
   end
 
-  defp drop_mix_separator(["--" | argv]), do: argv
-  defp drop_mix_separator(argv), do: argv
-
   defp base_options(opts) do
     rate = positive_integer(opts, :datagram_rate, 1_000)
     max_burst = positive_integer(opts, :max_burst, DatagramSender.default_max_burst(rate))
@@ -629,14 +637,6 @@ defmodule MOQXProbe.Bench.DatagramClients do
     "http://#{url_host(host)}:#{port}"
   end
 
-  defp url_host(host) do
-    if String.contains?(host, ":") and not String.starts_with?(host, "[") do
-      "[#{host}]"
-    else
-      host
-    end
-  end
-
   defp evidence_run_id do
     iso =
       DateTime.utc_now()
@@ -649,51 +649,11 @@ defmodule MOQXProbe.Bench.DatagramClients do
   defp default_evidence_close_grace_ms(:quicprobe), do: 25
   defp default_evidence_close_grace_ms(_target), do: 0
 
-  defp positive_integer(opts, key, default) do
-    value = Keyword.get(opts, key, default)
-
-    if is_integer(value) and value > 0 do
-      value
-    else
-      Mix.raise("--#{cli_key(key)} must be a positive integer")
-    end
-  end
-
-  defp non_negative_integer(opts, key, default) do
-    value = Keyword.get(opts, key, default)
-
-    if is_integer(value) and value >= 0 do
-      value
-    else
-      Mix.raise("--#{cli_key(key)} must be a non-negative integer")
-    end
-  end
-
   defp non_negative_integer_or_nil(opts, key) do
     case Keyword.get(opts, key) do
       nil -> nil
       value when is_integer(value) and value >= 0 -> value
       _invalid -> Mix.raise("--#{cli_key(key)} must be a non-negative integer")
-    end
-  end
-
-  defp positive_float(opts, key, default) do
-    value = Keyword.get(opts, key, default)
-
-    if is_number(value) and value > 0 do
-      value
-    else
-      Mix.raise("--#{cli_key(key)} must be a positive number")
-    end
-  end
-
-  defp non_negative_float(opts, key, default) do
-    value = Keyword.get(opts, key, default)
-
-    if is_number(value) and value >= 0 do
-      value
-    else
-      Mix.raise("--#{cli_key(key)} must be a non-negative number")
     end
   end
 
@@ -712,8 +672,6 @@ defmodule MOQXProbe.Bench.DatagramClients do
       Mix.raise("--min-demand must be less than or equal to --max-demand")
     end
   end
-
-  defp cli_key(key), do: key |> Atom.to_string() |> String.replace("_", "-")
 
   defp target(opts) do
     case Keyword.get(opts, :target, "fake") do

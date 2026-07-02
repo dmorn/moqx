@@ -25,7 +25,8 @@ defmodule MOQXProbe.Bench.StreamClients do
       drop_mix_separator: 1,
       positive_integer: 3,
       non_negative_integer: 3,
-      cli_key: 1,
+      positive_float: 3,
+      non_negative_float: 3,
       url_host: 1,
       manifest_args: 1
     ]
@@ -1112,26 +1113,6 @@ defmodule MOQXProbe.Bench.StreamClients do
 
   defp default_evidence_close_grace_ms(:quicprobe), do: 25
   defp default_evidence_close_grace_ms(_target), do: 0
-
-  defp positive_float(opts, key, default) do
-    value = Keyword.get(opts, key, default)
-
-    if is_number(value) and value > 0 do
-      value
-    else
-      Mix.raise("--#{cli_key(key)} must be a positive number")
-    end
-  end
-
-  defp non_negative_float(opts, key, default) do
-    value = Keyword.get(opts, key, default)
-
-    if is_number(value) and value >= 0 do
-      value
-    else
-      Mix.raise("--#{cli_key(key)} must be a non-negative number")
-    end
-  end
 
   defp validate_flow_demand!(%{min_demand: min_demand, max_demand: max_demand} = options) do
     if min_demand <= max_demand do

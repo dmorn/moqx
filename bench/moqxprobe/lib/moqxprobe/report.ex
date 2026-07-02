@@ -619,16 +619,17 @@ defmodule MOQXProbe.Report do
     %{
       count: length(sorted),
       min: List.first(sorted),
-      median: percentile(sorted, 0.5),
-      p95: percentile(sorted, 0.95),
+      median: percentile_sorted(sorted, 0.5),
+      p95: percentile_sorted(sorted, 0.95),
       max: List.last(sorted)
     }
   end
 
-  defp percentile([], _q), do: nil
+  defp percentile(samples, q), do: samples |> Enum.sort() |> percentile_sorted(q)
 
-  defp percentile(samples, q) do
-    sorted = Enum.sort(samples)
+  defp percentile_sorted([], _q), do: nil
+
+  defp percentile_sorted(sorted, q) do
     index = max(ceil(length(sorted) * q) - 1, 0)
     Enum.at(sorted, index)
   end

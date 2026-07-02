@@ -47,6 +47,36 @@ defmodule MOQXProbe.BenchCLI do
   end
 
   @doc """
+  Fetches `key` from `opts` (or `default`) and requires it to be a positive
+  number.
+  """
+  @spec positive_float(keyword(), atom(), number()) :: number()
+  def positive_float(opts, key, default) do
+    value = Keyword.get(opts, key, default)
+
+    if is_number(value) and value > 0 do
+      value
+    else
+      Mix.raise("--#{cli_key(key)} must be a positive number")
+    end
+  end
+
+  @doc """
+  Fetches `key` from `opts` (or `default`) and requires it to be a non-negative
+  number.
+  """
+  @spec non_negative_float(keyword(), atom(), number()) :: number()
+  def non_negative_float(opts, key, default) do
+    value = Keyword.get(opts, key, default)
+
+    if is_number(value) and value >= 0 do
+      value
+    else
+      Mix.raise("--#{cli_key(key)} must be a non-negative number")
+    end
+  end
+
+  @doc """
   Renders an option key as its `--kebab-case` flag name (without the `--`).
   """
   @spec cli_key(atom()) :: String.t()

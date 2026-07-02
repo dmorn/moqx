@@ -331,36 +331,32 @@ defmodule MOQXProbe.Bench.PacedStream do
   # tallies the tail-drain counters. Returns when the mailbox is empty.
   defp drain_available(loop_state) do
     case Transport.receive_event(loop_state.ctx, 0) do
-      {:timeout, ctx} ->
-        %{loop_state | ctx: ctx}
-
-      {:ok, {:stream_event, stream, :send_completed, _metadata}, ctx} ->
-        latency = Latency.on_complete(loop_state.latency, stream, monotonic_ms())
-
-        drain_available(%{
-          loop_state
-          | ctx: ctx,
-            latency: latency,
-            completed: loop_state.completed + 1
-        })
-
-      {:ok, {:stream_event, stream, :send_cancelled, _metadata}, ctx} ->
-        latency = Latency.on_cancel(loop_state.latency, stream)
-
-        drain_available(%{
-          loop_state
-          | ctx: ctx,
-            latency: latency,
-            cancelled: loop_state.cancelled + 1
-        })
-
-      {:ok, _other_event, ctx} ->
-        drain_available(%{loop_state | ctx: ctx})
-
-      {:error, _reason, ctx} ->
-        %{loop_state | ctx: ctx}
+      {:timeout, ctx} -> %{loop_state | ctx: ctx}
+      {:ok, event, ctx} -> drain_available(apply_drain_event(%{loop_state | ctx: ctx}, event))
+      {:error, _reason, ctx} -> %{loop_state | ctx: ctx}
     end
   end
+
+  # Applies one drained transport event to the loop state: records completion
+  # latency and bumps the tail-drain counters. Shared by drain_available (which
+  # stops when the mailbox empties) and drain_until (which waits for stragglers).
+  defp apply_drain_event(loop_state, {:stream_event, stream, :send_completed, _metadata}) do
+    %{
+      loop_state
+      | latency: Latency.on_complete(loop_state.latency, stream, monotonic_ms()),
+        completed: loop_state.completed + 1
+    }
+  end
+
+  defp apply_drain_event(loop_state, {:stream_event, stream, :send_cancelled, _metadata}) do
+    %{
+      loop_state
+      | latency: Latency.on_cancel(loop_state.latency, stream),
+        cancelled: loop_state.cancelled + 1
+    }
+  end
+
+  defp apply_drain_event(loop_state, _other_event), do: loop_state
 
   # Out-of-band settlement: drains the send completions/cancellations the
   # transport reports after the schedule window. These do not change the offered
@@ -394,24 +390,8 @@ defmodule MOQXProbe.Bench.PacedStream do
           sleep_ms(1)
           drain_until(%{loop_state | ctx: ctx}, deadline_ms)
 
-        {:ok, {:stream_event, stream, :send_completed, _metadata}, ctx} ->
-          latency = Latency.on_complete(loop_state.latency, stream, monotonic_ms())
-
-          drain_until(
-            %{loop_state | ctx: ctx, latency: latency, completed: loop_state.completed + 1},
-            deadline_ms
-          )
-
-        {:ok, {:stream_event, stream, :send_cancelled, _metadata}, ctx} ->
-          latency = Latency.on_cancel(loop_state.latency, stream)
-
-          drain_until(
-            %{loop_state | ctx: ctx, latency: latency, cancelled: loop_state.cancelled + 1},
-            deadline_ms
-          )
-
-        {:ok, _other_event, ctx} ->
-          drain_until(%{loop_state | ctx: ctx}, deadline_ms)
+        {:ok, event, ctx} ->
+          drain_until(apply_drain_event(%{loop_state | ctx: ctx}, event), deadline_ms)
 
         {:error, _reason, ctx} ->
           %{loop_state | ctx: ctx}
