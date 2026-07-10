@@ -166,3 +166,26 @@ and MOQT draft-14 send over it.
 
 Next iteration: the actual MOQT-family protocols on top of this boundary. The
 wire is fast enough; now we build the media.
+
+## Parked, on purpose
+
+When transport work was wrapped, the `.scratch/transport-layer-foundation`
+tracker (a PRD + 60 issues) was retired — the completed work is captured above
+and preserved in git history. These items were open and **consciously not
+pursued**, because the measurements showed the client is never the bottleneck;
+they are recorded here so the intent isn't lost, to be reopened only if a real
+need surfaces during protocol work:
+
+- **Deterministic transport failure injection** — a test seam for forcing
+  resets/aborts/close deterministically (was `needs-triage`).
+- **Priority / flow-control / stats surface** — exposing QUIC stream priority
+  and a stats surface through `MOQX.Transport` (was `needs-triage`).
+- **Harden transport pressure abstractions**, **improve mixed
+  stream/control pressure**, **improve stream throughput** — client-side
+  performance work, retired: the client sits idle on every real path; the limit
+  is the network or the transport/NIF, not the process model.
+- **`stream_owner` sender topology** — superseded; `flow_partitions` is the
+  chosen model.
+- **Extract shared bench-script helpers** — a genuine dedup across the three
+  bench scripts (lease, evidence URL, `write_evidence!`, Benchee hooks), left
+  as an opportunistic cleanup for whoever next touches those scripts.
