@@ -1,126 +1,95 @@
-# MOQX Transport Context
+# MOQX Context
 
-This context describes the transport vocabulary used by `moqx` protocol implementations over native QUIC. It exists to keep MOQT-family protocol code independent of backend-specific `quicer` terminology while preserving QUIC shutdown semantics.
+Transport performance work is parked. Next work is MOQT draft-14 protocol code
+over native QUIC.
 
-## Language
+## Decisions
 
-**Finish Sending**:
-A graceful local send-side stream completion that tells the peer no more bytes will be sent without treating the stream as failed.
-_Avoid_: close stream, normal close, finish stream
+- Initial scope is native QUIC via `quicer`; WebTransport/HTTP/3 is out until a
+  browser-facing requirement appears.
+- Protocol code depends on `MOQX.Transport`, not raw `:quicer` messages.
+- `MOQX.Transport` exposes generic QUIC streams, DATAGRAMs, capabilities, and
+  shutdown semantics. Draft-specific stream policy lives above it.
+- `MOQX.Transport.Support` is for deterministic tests. Production facade code
+  must not name or construct support-transport state.
+- Send APIs return backend-admission credit. Peer delivery is proven later by
+  normalized events or receiver evidence.
+- Variant public APIs validate URI-shaped endpoints. Raw transport calls get
+  host, port, options, and timeout. Add a shared endpoint struct only when a
+  generic dispatcher needs one.
+- Benchmarks live under `bench/`. Fake and loopback runs are calibration; real
+  claims need explicit targets and path evidence.
 
-**Abort Sending**:
-An abortive local send-side stream termination carrying an application error code to the peer.
-_Avoid_: close stream with reason, cancellation, reset stream
+## Glossary
 
-**Abort Receiving**:
-An abortive local receive-side stream termination carrying an application error code that tells the peer to stop sending.
-_Avoid_: stop sending, stop receiving, close receive side
+**Finish Sending**: graceful local send-side stream completion; maps to QUIC
+FIN. Avoid "close stream" for this.
 
-**Connection Close**:
-A connection-level shutdown carrying a transport-visible application error code where the backend supports it.
-_Avoid_: disconnect, socket close
+**Abort Sending**: abortive local send-side termination with an application
+error code; maps to RESET_STREAM.
 
-**Application Error Code**:
-An unsigned integer selected by the protocol layer and carried by QUIC stream or connection shutdown signals.
-_Avoid_: reason atom, exception reason
+**Abort Receiving**: abortive local receive-side termination with an
+application error code; maps to STOP_SENDING.
 
-**Transport Profile**:
-A named fixture that records protocol-selected ALPN, transport capabilities, and protocol-level stream expectations for tests and benchmarks.
-Current profiles are `:draft_14` and `:moq_lite_04`.
-_Avoid_: protocol implementation, session implementation
+**Connection Close**: connection-level shutdown carrying a transport-visible
+application error code where the backend supports it.
 
-**Protocol Variant**:
-A concrete MOQT-family protocol version with its own message model and session
-rules, such as MOQ Lite draft-04 or MOQT draft-14.
-_Avoid_: generic protocol behaviour, transport profile
+**Application Error Code**: unsigned integer selected by the protocol layer and
+carried by QUIC stream or connection shutdown.
 
-**Protocol Session**:
-A variant-owned state machine for one negotiated MOQT-family relationship over
-one transport connection. A protocol session owns stream state, role-specific
-rules, protocol events, and transport actions.
-_Avoid_: connection, socket, transport handle
+**Transport Profile**: named fixture for protocol-selected ALPN, transport
+capabilities, and stream expectations. Current profiles: `:draft_14`,
+`:moq_lite_04`.
 
-**Protocol Command**:
-Local application intent submitted to a **Protocol Session**, such as subscribe,
-fetch, publish a frame, or goaway.
-_Avoid_: encode data, send raw bytes
+**Protocol Variant**: concrete MOQT-family protocol version with its own
+message model and session rules, e.g. MOQ Lite draft-04 or MOQT draft-14.
 
-**Protocol Event**:
-Typed output emitted by a **Protocol Session** for application code. Events that
-come from streams remain tagged with a stream identity.
-_Avoid_: raw transport message, decoded bytes
+**Protocol Session**: variant-owned state machine for one protocol
+relationship over one transport connection. It owns stream state, role rules,
+protocol events, and transport actions.
 
-**Transport Action**:
-A side effect requested by a **Protocol Session** and later applied by a runner
-through `MOQX.Transport`, such as opening a stream, sending bytes, finishing a
-send side, aborting a stream side, or closing a connection.
-_Avoid_: direct quicer call, protocol callback side effect
+**Protocol Command**: local application intent submitted to a Protocol Session,
+e.g. subscribe, fetch, publish a frame, or goaway.
 
-**Codec**:
-Shared protocol-neutral binary helpers and encoder/decoder contracts under
+**Protocol Event**: typed output emitted by a Protocol Session. Stream-derived
+events stay tagged with stream identity.
+
+**Transport Action**: side effect requested by a Protocol Session and applied
+by a runner through `MOQX.Transport`: open stream, send bytes, finish a send
+side, abort a stream side, or close a connection.
+
+**Codec**: protocol-neutral binary helpers and encoder/decoder contracts under
 `MOQX.Codec`.
-_Avoid_: session codec, transport adapter
 
-**Payload Codec**:
-Encoding or decoding for one typed protocol payload after stream framing has
-identified the payload shape and removed length fields.
-_Avoid_: stream parser, state machine
+**Payload Codec**: encoding or decoding for one typed protocol payload after
+stream framing removed length/type context.
 
-**Stream Codec**:
-Protocol-specific framing logic that reads stream type prefixes, message
-lengths, and ordered byte buffers before dispatching complete payloads.
-_Avoid_: payload codec, transport receive
+**Stream Codec**: protocol-specific framing and buffering before complete
+payloads are dispatched.
 
-**Transaction Stream**:
-A MOQ Lite bidirectional stream whose first byte identifies an Announce,
-Subscribe, Fetch, Probe, or Goaway transaction.
-_Avoid_: control stream, data stream
+**Transaction Stream**: MOQ Lite bidirectional stream whose first byte names an
+Announce, Subscribe, Fetch, Probe, or Goaway transaction.
 
-**Group Stream**:
-A MOQ Lite publisher-created unidirectional stream that starts with a GROUP
-message and then carries FRAME messages for that group.
-_Avoid_: object stream, subgroup stream
+**Group Stream**: MOQ Lite publisher-created unidirectional stream that starts
+with GROUP and then carries FRAME messages.
 
-**Stream Side**:
-One directional half of a stream, either local sending or local receiving.
-_Avoid_: half-connection, close direction
+**Stream Side**: one directional half of a stream: local sending or local
+receiving.
 
 ## Relationships
 
-- **Finish Sending** affects the local sending **Stream Side** of exactly one stream and maps to QUIC FIN.
-- A stream send accepted with `finish: true` carries the final payload and **Finish Sending** in one ordered send request.
-- A standalone **Finish Sending** is a FIN-only operation ordered after previously accepted sends on the same stream owner path.
-- **Abort Sending** affects the local sending **Stream Side** of exactly one stream and maps to QUIC RESET_STREAM.
-- **Abort Receiving** affects the local receiving **Stream Side** of exactly one stream and maps to QUIC STOP_SENDING.
-- A **Connection Close** ends the connection and may implicitly close all streams on that connection.
-- An **Application Error Code** is interpreted by protocol modules, not by the raw transport boundary.
-- A **Transport Profile** can describe protocol-specific stream expectations,
-  but the raw transport boundary still exposes generic QUIC streams and does
-  not enforce those protocol rules.
-- A **Protocol Variant** consumes **Transport** events and enforces its own
-  stream/session rules above the raw transport boundary.
-- A **Protocol Session** runs above one `MOQX.Transport.Connection`; the raw
-  connection handle remains transport vocabulary, while session names belong to
-  protocol vocabulary.
-- A **Protocol Session** consumes transport input through `handle_transport/2`
-  and local application input through `handle_command/2`.
-- A **Protocol Session** returns **Transport Actions** as data. A runner applies
-  those actions through `MOQX.Transport`.
-- A **Protocol Session** may merge decoded outputs into one logical event
-  stream, but stream-derived **Protocol Events** must preserve stream identity.
-- A **Stream Codec** owns framing and buffering before invoking a
-  **Payload Codec** for complete typed payloads.
-- A **Stream Codec** is kept per transport stream. Raw bytes from different
-  transport streams are never muxed together before decoding.
-- MOQ Lite **Transaction Streams** and **Group Streams** are protocol rules,
-  not transport-layer stream types.
-
-## Example dialogue
-
-> **Dev:** "When an object expires, should we use **Finish Sending**?"
-> **Domain expert:** "No — expiry is **Abort Sending** with an application error code. **Finish Sending** means the sender completed successfully."
-
-## Flagged ambiguities
-
-- "close stream" was overloaded to mean graceful finish, reset, or receive abort — resolved: use explicit **Finish Sending**, **Abort Sending**, and **Abort Receiving** terms.
-- "stop sending" sounds like local send-side intent but names QUIC's peer-directed STOP_SENDING mechanism — resolved: public transport APIs use **Abort Receiving** instead.
+- `send_stream(..., finish: true)` sends the final payload and FIN in one
+  ordered request.
+- Standalone Finish Sending is FIN-only and ordered after accepted sends on the
+  same stream owner path.
+- Connection Close may implicitly close all streams on the connection.
+- Application Error Code is interpreted by protocol modules, not raw transport.
+- A Transport Profile may describe protocol expectations, but the raw transport
+  boundary stays generic.
+- A Protocol Session consumes transport input through `handle_transport/2` and
+  local input through `handle_command/2`.
+- A Protocol Session returns Transport Actions as data. Runners apply them.
+- Stream Codecs are per transport stream. Bytes from different streams are
+  never muxed together before decoding.
+- MOQ Lite Transaction Streams and Group Streams are protocol rules, not
+  transport-layer stream types.

@@ -337,6 +337,14 @@ type deliveryDelayStats struct {
 	buckets map[int64]int64
 }
 
+type deliveryDelaySummary struct {
+	count int64
+	minMS int64
+	p50MS int64
+	p90MS int64
+	p99MS int64
+}
+
 func newDeliveryDelayStats() deliveryDelayStats {
 	return deliveryDelayStats{minMS: math.MaxInt64, buckets: map[int64]int64{}}
 }
@@ -350,14 +358,9 @@ func (d *deliveryDelayStats) record(delayNS int64) {
 	d.buckets[ms]++
 }
 
-func (d *deliveryDelayStats) percentileMS(q float64) int64 {
+func (d *deliveryDelayStats) summary() deliveryDelaySummary {
 	if d.count == 0 {
-		return 0
-	}
-
-	rank := int64(math.Ceil(q * float64(d.count)))
-	if rank < 1 {
-		rank = 1
+		return deliveryDelaySummary{}
 	}
 
 	keys := make([]int64, 0, len(d.buckets))
@@ -366,9 +369,24 @@ func (d *deliveryDelayStats) percentileMS(q float64) int64 {
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 
+	return deliveryDelaySummary{
+		count: d.count,
+		minMS: d.minMS,
+		p50MS: percentileFromSortedBuckets(keys, d.buckets, d.count, 0.5),
+		p90MS: percentileFromSortedBuckets(keys, d.buckets, d.count, 0.9),
+		p99MS: percentileFromSortedBuckets(keys, d.buckets, d.count, 0.99),
+	}
+}
+
+func percentileFromSortedBuckets(keys []int64, buckets map[int64]int64, count int64, q float64) int64 {
+	rank := int64(math.Ceil(q * float64(count)))
+	if rank < 1 {
+		rank = 1
+	}
+
 	var cumulative int64
 	for _, k := range keys {
-		cumulative += d.buckets[k]
+		cumulative += buckets[k]
 		if cumulative >= rank {
 			return k
 		}
@@ -378,27 +396,51 @@ func (d *deliveryDelayStats) percentileMS(q float64) int64 {
 }
 
 // objectChunker slices a uni-stream's bytes into fixed-size objects (the stream
-// is a concatenation of equal-size payloads, in order) and invokes onDelivery
-// with arrival-minus-send once each object completes. The first 8 bytes of every
-// object are a big-endian sender send-timestamp (unix nanoseconds).
+// is a concatenation of equal-size payloads, in order) and returns
+// arrival-minus-send delays for objects completed by each read buffer. The first
+// 8 bytes of every object are a big-endian sender send-timestamp (unix
+// nanoseconds).
 type objectChunker struct {
 	objectSize int
 	inObject   int
 	header     [8]byte
+	delays     []int64
 }
 
-func (c *objectChunker) feed(buf []byte, nowNS int64, onDelivery func(delayNS int64)) {
-	for _, b := range buf {
+func (c *objectChunker) feed(buf []byte, nowNS int64) []int64 {
+	c.delays = c.delays[:0]
+
+	for len(buf) > 0 {
 		if c.inObject < 8 {
-			c.header[c.inObject] = b
+			needed := 8 - c.inObject
+			if needed > len(buf) {
+				copy(c.header[c.inObject:], buf)
+				c.inObject += len(buf)
+				return c.delays
+			}
+
+			copy(c.header[c.inObject:8], buf[:needed])
+			c.inObject += needed
+			buf = buf[needed:]
 		}
-		c.inObject++
+
+		bodyRemaining := c.objectSize - c.inObject
+		if bodyRemaining > len(buf) {
+			c.inObject += len(buf)
+			return c.delays
+		}
+
+		buf = buf[bodyRemaining:]
+		c.inObject += bodyRemaining
+
 		if c.inObject == c.objectSize {
 			sendNS := int64(binary.BigEndian.Uint64(c.header[:]))
-			onDelivery(nowNS - sendNS)
+			c.delays = append(c.delays, nowNS-sendNS)
 			c.inObject = 0
 		}
 	}
+
+	return c.delays
 }
 
 // intervalBinAccumulator buckets receiver-side delivery counts into
@@ -617,6 +659,9 @@ func parseServerConfig(args []string) (serverConfig, error) {
 	}
 	if cfg.evidenceBinMS <= 0 {
 		return serverConfig{}, errors.New("server --evidence-bin-ms must be positive")
+	}
+	if cfg.objectSize > 0 && cfg.objectSize < 8 {
+		return serverConfig{}, errors.New("server --object-size must be at least 8 (objects start with an 8-byte timestamp header)")
 	}
 
 	return cfg, nil
@@ -886,11 +931,17 @@ func (s *serverConnectionStats) recordStreamCompleted() {
 	s.bins.addStreamsCompleted(time.Since(s.startedAt), 1)
 }
 
-func (s *serverConnectionStats) recordObjectDelivery(delayNS int64) {
+func (s *serverConnectionStats) recordObjectDeliveries(delaysNS []int64) {
+	if len(delaysNS) == 0 {
+		return
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.objectDelivery.record(delayNS)
+	for _, delayNS := range delaysNS {
+		s.objectDelivery.record(delayNS)
+	}
 }
 
 func (s *serverConnectionStats) recordStreamReceiveError(err error) {
@@ -950,6 +1001,8 @@ func (s *serverConnectionStats) snapshot() serverConnectionStatsSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	objectDelivery := s.objectDelivery.summary()
+
 	return serverConnectionStatsSnapshot{
 		startedAt:                 s.startedAt,
 		finishedAt:                s.finishedAt,
@@ -982,22 +1035,14 @@ func (s *serverConnectionStats) snapshot() serverConnectionStatsSnapshot {
 		lastDatagramAt:            s.lastDatagramAt,
 		intervalBinWidth:          s.bins.width,
 		intervalBins:              s.bins.snapshot(),
-		objectDeliveryCount:       s.objectDelivery.count,
-		objectDelayMinMS:          objectDelayMin(s.objectDelivery),
-		objectDelayP50MS:          s.objectDelivery.percentileMS(0.5),
-		objectDelayP90MS:          s.objectDelivery.percentileMS(0.9),
-		objectDelayP99MS:          s.objectDelivery.percentileMS(0.99),
+		objectDeliveryCount:       objectDelivery.count,
+		objectDelayMinMS:          objectDelivery.minMS,
+		objectDelayP50MS:          objectDelivery.p50MS,
+		objectDelayP90MS:          objectDelivery.p90MS,
+		objectDelayP99MS:          objectDelivery.p99MS,
 		experimentLeaseOwner:      s.experimentLeaseOwner,
 		experimentLeaseToken:      s.experimentLeaseToken,
 	}
-}
-
-func objectDelayMin(d deliveryDelayStats) int64 {
-	if d.count == 0 {
-		return 0
-	}
-
-	return d.minMS
 }
 
 func handleDatagrams(ctx context.Context, conn datagramConn, semantics string, sink *serverConnectionStats) datagramEchoStats {
@@ -1122,7 +1167,7 @@ func drainUniStream(stream quic.ReceiveStream, stats *serverConnectionStats) {
 			stats.recordStreamBytesReceived(int64(n))
 			if chunker != nil {
 				now := time.Now().UnixNano()
-				chunker.feed(buffer[:n], now, stats.recordObjectDelivery)
+				stats.recordObjectDeliveries(chunker.feed(buffer[:n], now))
 			}
 		}
 		if err == io.EOF {

@@ -273,6 +273,7 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
       |> source_metadata()
       |> Map.put(:raw, record)
       |> Map.put(:receiver_interval, receiver_interval(record))
+      |> Map.put(:object_delivery, object_delivery(record))
 
     Evidence.from_observed(receipt, observed_counters(record),
       source: :quicprobe,
@@ -330,6 +331,29 @@ defmodule MOQXProbe.Benchee.Adapters.Quicprobe do
   end
 
   defp normalize_interval_bins(_other), do: []
+
+  defp object_delivery(record) do
+    case Map.get(record, "object_delivery") do
+      %{} = object ->
+        if object_delivery_present?(object) do
+          %{
+            count: Map.get(object, "count"),
+            min_ms: Map.get(object, "min_ms"),
+            p50_ms: Map.get(object, "p50_ms"),
+            p90_ms: Map.get(object, "p90_ms"),
+            p99_ms: Map.get(object, "p99_ms")
+          }
+        end
+
+      _other ->
+        nil
+    end
+  end
+
+  defp object_delivery_present?(object) do
+    count = Map.get(object, "count")
+    is_number(count) and count > 0
+  end
 
   defp evidence_complete?(receipt, record) do
     if expected_receiver_complete?(receipt) do

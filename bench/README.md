@@ -2,49 +2,67 @@
 
 Benchmark-related projects live under `bench/`.
 
-Active layout:
+## Layout
 
-- `moqxprobe/` is the Elixir benchmark project for caller-side transport
-  clients, Benchee stream/DATAGRAM scripts, local telemetry summaries, and
-  target adapters.
-- `quicprobe/` is the repo-owned Go/quic-go reference QUIC peer used as a
-  local or remote target.
+- `moqxprobe/`: Elixir benchmark project for caller-side transport clients,
+  Benchee stream/DATAGRAM scripts, open-loop paced streams, local telemetry
+  summaries, manifests, reports, and target adapters.
+- `quicprobe/`: repo-owned Go/quic-go reference peer used locally or remotely.
 
-Benchmark commands accept explicit target data such as host, QUIC port,
-certificate path, and workload shape. They do not create cloud resources,
-deploy artifacts, start Terraform, or infer state from a previous lab run.
+Benchmark commands accept explicit target data: host, QUIC port, certificate,
+server name, evidence URL/path, workload shape, and output paths. They do not
+create cloud resources, deploy artifacts, start Terraform, or infer state from
+old lab runs.
 
-The current performance loop is intentionally small:
+## Active loop
 
 1. Keep a target machine running `iperf3` and `quicprobe`, or run `quicprobe`
    locally.
-2. Run `iperf3` manually as a preflight/path baseline for that target.
-3. Run `bench/moqxprobe` Benchee scripts against either a fake transport target
-   for process-model isolation or a real `quicprobe` target for QUIC behavior.
-4. Save Benchee output plus optional sidecar notes for target metadata,
-   `iperf3` baselines, `quicprobe` receiver evidence, telemetry summaries, and
-   packet captures.
+2. Run `iperf3` manually as a same-path preflight.
+3. Run `bench/moqxprobe` against `--target fake` for process-model calibration
+   or `--target quicprobe` for QUIC behavior.
+4. Save Benchee/open-loop output plus optional sidecars: manifest,
+   delivery evidence, host samples, paced stream rows, iperf3 baselines,
+   target metadata, captures, and flamegraphs.
+5. Generate `report.md` from the run manifest when a derived summary is needed.
+
+See `bench/moqxprobe/README.md` for commands and `docs/adr/0009-*` for the
+evidence contract.
+
+## quicprobe evidence
 
 `quicprobe server` emits one `quicprobe-server-run-evidence-v1`
-`server_run_evidence` JSON record for each completed connection. The record is
-written to server stdout and, when configured, to `--stats-output` as JSONL.
-Those records are the receiver-side truth for stream bytes, stream echo bytes,
-DATAGRAM receive counts, optional DATAGRAM echo counts, and error counters.
-Server DATAGRAM behavior is explicit: `--datagram-semantics drain` is the
-publish-only receiver-evidence mode, while `--datagram-semantics echo` is for
-round-trip/reference-client checks.
-The same records are also available through the server's always-on evidence
-HTTP API, defaulting to `:55434`, so local and remote `moqxprobe` runs can
-scrape evidence through the same adapter.
+`server_run_evidence` JSON record per completed connection. It writes to stdout
+and, when configured, `--stats-output` as JSONL.
 
-Do not run parallel benchmark suites against the same `quicprobe` target.
-Receiver evidence is connection-sequence based, and concurrent experiments
-would contaminate both timing and evidence attribution. `moqxprobe` acquires an
-exclusive experiment lease from the target HTTP API before each `quicprobe`
-suite and releases it after the suite; a second suite receives a conflict
-instead of running.
+The record is receiver-side truth for stream bytes, stream echo bytes, DATAGRAM
+receive counts, optional DATAGRAM echo counts, interval bins, lifecycle
+timestamps, lease owner/token, and error counters.
+
+Server DATAGRAM behavior is explicit:
+
+- `--datagram-semantics drain`: publish-only receiver-evidence mode for
+  `moqxprobe`.
+- `--datagram-semantics echo`: round-trip/reference-client checks.
+
+The server exposes the evidence and experiment lease HTTP API on
+`--evidence-http-addr` (default `:55434`). Do not run parallel benchmark suites
+against one `quicprobe` target; `moqxprobe` acquires an exclusive lease before
+real-target suites and fails fast when the target is busy.
+
+## Transport status
+
+Transport benchmarking is parked. The evidence loop lives in `bench/` and is
+ready to support MOQ protocol work.
+
+Parked follow-ups:
+
+- deterministic transport failure injection;
+- QUIC priority, flow-control, and stats surfaces;
+- deeper client pressure work only if protocol runs expose a real bottleneck;
+- shared bench-script helper extraction for lease/evidence/sidecar plumbing;
+- multi-Gbps/path or parallel-receiver studies only for a concrete need.
 
 Historical Terraform, `probed`, release-deploy, ledger, and
-`transport-bench-v1` JSONL tooling has been removed from the active benchmark
-surface. Old issue comments and archived result directories may still mention
-those names as historical evidence.
+`transport-bench-v1` tooling are retired. Preserve old result artifacts as
+history; do not add new work to those paths.

@@ -313,7 +313,7 @@ defmodule MOQXProbe.Bench.PacedStream do
       next_cursor = rem(loop_state.cursor + 1, tuple_size(loop_state.stream_vec))
       loop_state = %{loop_state | cursor: next_cursor}
 
-      payload = <<System.os_time(:nanosecond)::unsigned-big-64, loop_state.filler::binary>>
+      payload = [<<System.os_time(:nanosecond)::unsigned-big-64>>, loop_state.filler]
 
       case Transport.send_stream(loop_state.ctx, stream, payload, []) do
         {:ok, _send, ctx} ->

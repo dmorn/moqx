@@ -191,8 +191,7 @@ Follow-up integration work:
 
 - <https://datatracker.ietf.org/doc/html/draft-lcurley-moq-lite-04>
 - <https://datatracker.ietf.org/doc/draft-ietf-moq-transport/14/>
-- `docs/adr/0001-transport-boundary-support-transport-and-benchmark-harness.md`
-- `docs/adr/0002-native-quic-first-webtransport-out-of-scope.md`
-- `docs/adr/0003-validated-endpoints-above-raw-transport.md`
+- Transport boundary, native-QUIC-first scope, and endpoint validation: done,
+  see `CONTEXT.md` and git history.
 - `docs/adr/0006-protocol-variants-own-session-state-codec-stays-generic.md`
 - `docs/adr/0007-protocol-sessions-are-pure-reducers.md`

@@ -25,7 +25,7 @@ func TestObjectChunkerRecordsDelayPerObject(t *testing.T) {
 	// Feed in awkward splits, including one that lands inside the second
 	// object's header, to prove the header survives across reads.
 	for _, cut := range [][]byte{stream[:5], stream[5:20], stream[20:]} {
-		chunker.feed(cut, nowNS, func(delayNS int64) { delays = append(delays, delayNS) })
+		delays = append(delays, chunker.feed(cut, nowNS)...)
 	}
 
 	if len(delays) != 2 {
@@ -44,12 +44,11 @@ func TestObjectChunkerIgnoresTrailingPartialObject(t *testing.T) {
 	const objectSize = 16
 	stream := append(object(0, objectSize), make([]byte, 7)...) // one whole + partial
 
-	var count int
 	chunker := &objectChunker{objectSize: objectSize}
-	chunker.feed(stream, int64(time.Millisecond), func(int64) { count++ })
+	delays := chunker.feed(stream, int64(time.Millisecond))
 
-	if count != 1 {
-		t.Fatalf("delivered %d objects, want 1 (partial trailing object ignored)", count)
+	if len(delays) != 1 {
+		t.Fatalf("delivered %d objects, want 1 (partial trailing object ignored)", len(delays))
 	}
 }
 
@@ -65,20 +64,28 @@ func TestDeliveryDelayStatsMinAndPercentiles(t *testing.T) {
 	if d.minMS != 1 {
 		t.Errorf("minMS = %d, want 1", d.minMS)
 	}
-	if p := d.percentileMS(0.5); p < 45 || p > 55 {
-		t.Errorf("p50 = %d ms, want ~50", p)
+	summary := d.summary()
+	if summary.count != 100 {
+		t.Fatalf("count = %d, want 100", summary.count)
 	}
-	if p := d.percentileMS(0.99); p < 95 || p > 100 {
-		t.Errorf("p99 = %d ms, want ~99", p)
+	if summary.minMS != 1 {
+		t.Errorf("minMS = %d, want 1", summary.minMS)
+	}
+	if summary.p50MS < 45 || summary.p50MS > 55 {
+		t.Errorf("p50 = %d ms, want ~50", summary.p50MS)
+	}
+	if summary.p99MS < 95 || summary.p99MS > 100 {
+		t.Errorf("p99 = %d ms, want ~99", summary.p99MS)
 	}
 }
 
 func TestDeliveryDelayStatsEmpty(t *testing.T) {
 	d := newDeliveryDelayStats()
-	if d.percentileMS(0.5) != 0 {
-		t.Errorf("empty p50 = %d, want 0", d.percentileMS(0.5))
+	summary := d.summary()
+	if summary.p50MS != 0 {
+		t.Errorf("empty p50 = %d, want 0", summary.p50MS)
 	}
-	if objectDelayMin(d) != 0 {
-		t.Errorf("empty min = %d, want 0", objectDelayMin(d))
+	if summary.minMS != 0 {
+		t.Errorf("empty min = %d, want 0", summary.minMS)
 	}
 }

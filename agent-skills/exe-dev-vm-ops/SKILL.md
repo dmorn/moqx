@@ -81,6 +81,9 @@ like `55202` are examples only; rediscover current state every time.
   client smoke, and a local-to-VM Tailscale smoke before claiming QUIC works.
   On Tailscale paths with a 1280 route MTU, run both quicprobe server and
   client with `--initial-packet-size 1200`; see [OPS.md](OPS.md).
+- Do not run parallel `moqxprobe` benchmark suites against one persistent
+  `quicprobe`. The target exposes an experiment lease on its HTTP API; a second
+  suite must fail fast instead of sharing target evidence.
 - Run short smoke tests sequentially; one `iperf3` server handles only one active
   test at a time:
   ```bash

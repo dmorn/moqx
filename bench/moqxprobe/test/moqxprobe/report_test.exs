@@ -300,14 +300,12 @@ defmodule MOQXProbe.ReportTest do
         "valid" => false,
         "observed" => %{},
         "metadata" => %{
-          "raw" => %{
-            "object_delivery" => %{
-              "count" => 1000,
-              "min_ms" => 5,
-              "p50_ms" => 7,
-              "p90_ms" => 40,
-              "p99_ms" => 905
-            }
+          "object_delivery" => %{
+            "count" => 1000,
+            "min_ms" => 5,
+            "p50_ms" => 7,
+            "p90_ms" => 40,
+            "p99_ms" => 905
           }
         }
       }

@@ -280,6 +280,47 @@ defmodule MOQXProbe.Benchee.EvidenceCollectorTest do
     assert interval.bins == []
   end
 
+  test "quicprobe adapter normalizes object delivery evidence" do
+    path = temp_jsonl_path()
+    on_exit(fn -> File.rm(path) end)
+
+    write_jsonl!(path, [
+      %{
+        record_type: "server_run_evidence",
+        run_sequence: 1,
+        stream_bytes_received: 384,
+        streams_completed: 1,
+        receiver_evidence_complete: true,
+        object_delivery: %{
+          count: 1000,
+          min_ms: 5,
+          p50_ms: 7,
+          p90_ms: 40,
+          p99_ms: 905
+        }
+      }
+    ])
+
+    receipt =
+      RunReceipt.new!(
+        id: :quicprobe_object_delivery_run,
+        target: :quicprobe,
+        match: %{run_sequence: 1},
+        expected: %{receiver_evidence_complete: true}
+      )
+
+    assert {:ok, %Evidence{source: :quicprobe} = evidence} =
+             Quicprobe.collect(receipt, path: path, timeout_ms: 10, poll_ms: 1)
+
+    assert evidence.metadata.object_delivery == %{
+             count: 1000,
+             min_ms: 5,
+             p50_ms: 7,
+             p90_ms: 40,
+             p99_ms: 905
+           }
+  end
+
   test "quicprobe adapter matches the first evidence record after a cursor" do
     path = temp_jsonl_path()
     on_exit(fn -> File.rm(path) end)

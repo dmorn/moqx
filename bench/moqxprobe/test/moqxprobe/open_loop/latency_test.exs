@@ -25,9 +25,10 @@ defmodule MOQXProbe.OpenLoop.LatencyTest do
       |> Latency.on_complete(:s1, 10)
       |> Latency.on_complete(:s1, 21)
 
-    assert Latency.pending_count(lat) == 0
     summary = Latency.summary(lat)
     # first completion matches (0,0) => corrected 10; second matches (1,1) => 20.
+    assert summary.corrected.count == 2
+    assert summary.uncorrected.count == 2
     assert summary.corrected.min == 10.0
     assert summary.corrected.max == 20.0
   end
@@ -39,8 +40,6 @@ defmodule MOQXProbe.OpenLoop.LatencyTest do
       |> Latency.on_send(:s1, 5, 5)
       |> Latency.on_complete(:s1, 10)
 
-    assert Latency.pending_count(lat) == 1
-
     lat = Latency.finalize(lat, 100)
     summary = Latency.summary(lat)
 
@@ -49,7 +48,9 @@ defmodule MOQXProbe.OpenLoop.LatencyTest do
     assert summary.corrected.max == 95.0
     # uncorrected only ever saw the one completed send.
     assert summary.uncorrected.count == 1
-    assert Latency.pending_count(lat) == 0
+
+    lat = Latency.on_complete(lat, :s1, 200)
+    assert Latency.summary(lat).corrected.count == 2
   end
 
   test "a completion with no pending intent is ignored" do

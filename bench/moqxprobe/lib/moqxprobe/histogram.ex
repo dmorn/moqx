@@ -1,25 +1,23 @@
 defmodule MOQXProbe.Histogram do
   @moduledoc """
-  A bounded, mergeable log-linear latency histogram (HdrHistogram-style), used
-  by the open-loop paced sender to summarize send-completion latency without
-  storing every sample (issue 56).
+  A bounded log-linear latency histogram (HdrHistogram-style), used by the
+  open-loop paced sender to summarize send-completion latency without storing
+  every sample (issue 56).
 
   Values are non-negative numbers (milliseconds). Resolution is linear at
-  1-unit buckets below `sub_buckets`, then log-linear above it: each power-of-two
-  octave is divided into `sub_buckets` linear sub-buckets, giving a constant
-  ~`1 / sub_buckets` relative error at higher magnitudes. Bucket count grows only
-  logarithmically with the largest value, so memory is bounded and the counts map
-  holds only populated buckets.
+  1-unit buckets below 16, then log-linear above it: each power-of-two octave is
+  divided into 16 linear sub-buckets, giving a constant ~1/16 relative error at
+  higher magnitudes. Bucket count grows only logarithmically with the largest
+  value, so memory is bounded and the counts map holds only populated buckets.
 
-  Pure: no IO, no `Application` env. `merge/2` combines two histograms with the
-  same `sub_buckets` (e.g. per-shard), so callers can accumulate independently.
+  Pure: no IO, no `Application` env.
   """
 
-  @enforce_keys [:sub_buckets]
-  defstruct sub_buckets: 16, counts: %{}, total: 0, min: nil, max: nil, sum: 0.0
+  @sub_buckets 16
+
+  defstruct counts: %{}, total: 0, min: nil, max: nil, sum: 0.0
 
   @type t :: %__MODULE__{
-          sub_buckets: pos_integer(),
           counts: %{optional(non_neg_integer()) => pos_integer()},
           total: non_neg_integer(),
           min: number() | nil,
@@ -29,26 +27,15 @@ defmodule MOQXProbe.Histogram do
 
   @default_quantiles [0.5, 0.9, 0.99, 0.999]
 
-  @doc """
-  Builds an empty histogram. `:sub_buckets` (a positive integer, default `16`)
-  sets the linear sub-divisions per octave — higher means finer resolution.
-  """
-  @spec new(keyword()) :: t()
-  def new(opts \\ []) do
-    sub = Keyword.get(opts, :sub_buckets, 16)
-
-    unless is_integer(sub) and sub > 0 do
-      raise ArgumentError, "sub_buckets must be a positive integer"
-    end
-
-    %__MODULE__{sub_buckets: sub}
-  end
+  @doc "Builds an empty histogram."
+  @spec new() :: t()
+  def new, do: %__MODULE__{}
 
   @doc "Records one non-negative value (negatives are clamped to 0)."
   @spec record(t(), number()) :: t()
   def record(%__MODULE__{} = h, value) when is_number(value) do
     v = max(value, 0) * 1.0
-    index = index_for(v, h.sub_buckets)
+    index = index_for(v)
 
     %{
       h
@@ -57,19 +44,6 @@ defmodule MOQXProbe.Histogram do
         min: min_nil(h.min, v),
         max: max_nil(h.max, v),
         sum: h.sum + v
-    }
-  end
-
-  @doc "Merges two histograms (same `sub_buckets`)."
-  @spec merge(t(), t()) :: t()
-  def merge(%__MODULE__{sub_buckets: sub} = a, %__MODULE__{sub_buckets: sub} = b) do
-    %{
-      a
-      | counts: Map.merge(a.counts, b.counts, fn _index, x, y -> x + y end),
-        total: a.total + b.total,
-        min: min_nil(a.min, b.min),
-        max: max_nil(a.max, b.max),
-        sum: a.sum + b.sum
     }
   end
 
@@ -87,7 +61,7 @@ defmodule MOQXProbe.Histogram do
     h.counts
     |> Enum.sort_by(fn {index, _count} -> index end)
     |> rank_index(rank)
-    |> value_for(h.sub_buckets)
+    |> value_for()
   end
 
   @doc """
@@ -107,24 +81,24 @@ defmodule MOQXProbe.Histogram do
 
   # --- bucket math -----------------------------------------------------------
 
-  defp index_for(v, sub) when v < sub, do: trunc(v)
+  defp index_for(v) when v < @sub_buckets, do: trunc(v)
 
-  defp index_for(v, sub) do
-    octave = trunc(:math.log2(v / sub))
-    base = sub * :math.pow(2, octave)
-    step = base / sub
+  defp index_for(v) do
+    octave = trunc(:math.log2(v / @sub_buckets))
+    base = @sub_buckets * :math.pow(2, octave)
+    step = base / @sub_buckets
     sub_index = trunc((v - base) / step)
-    sub + octave * sub + sub_index
+    @sub_buckets + octave * @sub_buckets + sub_index
   end
 
-  defp value_for(index, sub) when index < sub, do: index + 0.5
+  defp value_for(index) when index < @sub_buckets, do: index + 0.5
 
-  defp value_for(index, sub) do
-    rel = index - sub
-    octave = div(rel, sub)
-    sub_index = rem(rel, sub)
-    base = sub * :math.pow(2, octave)
-    step = base / sub
+  defp value_for(index) do
+    rel = index - @sub_buckets
+    octave = div(rel, @sub_buckets)
+    sub_index = rem(rel, @sub_buckets)
+    base = @sub_buckets * :math.pow(2, octave)
+    step = base / @sub_buckets
     base + (sub_index + 0.5) * step
   end
 

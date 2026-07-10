@@ -42,11 +42,11 @@ Use the repo-built `quicprobe` binary at
 installed, which is useful for emergency remote builds when source is present,
 but the normal path is to deploy a built artifact from the repo.
 
-The server needs a cert/key and should write stats JSONL:
+The server needs a cert/key and should write receiver-evidence JSONL:
 
 ```ini
 [Service]
-ExecStart=/opt/moqx-bench/quicprobe/current/bin/quicprobe server --addr :<quic-port> --cert /opt/moqx-bench/quicprobe/tls/server.pem --key /opt/moqx-bench/quicprobe/tls/server-key.pem --stats-output /var/lib/moqx-quicprobe/quicprobe-stats.jsonl --initial-packet-size 1200
+ExecStart=/opt/moqx-bench/quicprobe/current/bin/quicprobe server --addr :<quic-port> --cert /opt/moqx-bench/quicprobe/tls/server.pem --key /opt/moqx-bench/quicprobe/tls/server-key.pem --stats-output /var/lib/moqx-quicprobe/quicprobe-evidence.jsonl --datagram-semantics drain --initial-packet-size 1200 --evidence-http-addr :55434
 Restart=always
 ReadWritePaths=/var/lib/moqx-quicprobe
 ```
@@ -68,6 +68,13 @@ sysctl net.core.rmem_max net.core.wmem_max'
 
 Restart `moqx-quicprobe.service` after changing the caps and rerun the
 VM-local smoke to confirm the warning is gone.
+Use `--datagram-semantics drain` for the persistent publish-only target used by
+`moqxprobe`; switch to `echo` only for explicit round-trip DATAGRAM checks.
+Do not run parallel benchmark suites against the same persistent quicprobe.
+`moqxprobe` acquires an exclusive experiment lease from `:55434` before a
+suite starts and releases it after the suite. A second suite must fail fast
+instead of sharing the target, because shared target evidence would contaminate
+both timing and receiver-evidence attribution.
 
 If the tailnet IP or DNS names change, rotate the cert so its SANs match the
 current endpoint used by clients. Keep `ca.pem` available for clients.
@@ -114,6 +121,7 @@ Verify the remote service:
 ssh <vm>.exe.xyz 'systemctl is-enabled moqx-quicprobe.service; systemctl is-active moqx-quicprobe.service; ss -lunp | grep <quic-port>'
 ssh <vm>.exe.xyz '/opt/moqx-bench/quicprobe/current/bin/quicprobe client --addr 127.0.0.1:<quic-port> --ca /opt/moqx-bench/quicprobe/tls/ca.pem --servername <server-name> --initial-packet-size 1200 --bidi-echo smoke --timeout 5s'
 ssh <vm>.exe.xyz 'TS_IP=$(tailscale ip -4 | head -1); /opt/moqx-bench/quicprobe/current/bin/quicprobe client --addr ${TS_IP}:<quic-port> --ca /opt/moqx-bench/quicprobe/tls/ca.pem --servername <server-name> --initial-packet-size 1200 --bidi-echo tailnet-self --timeout 5s'
+ssh <vm>.exe.xyz 'sudo tail -n 3 /var/lib/moqx-quicprobe/quicprobe-evidence.jsonl'
 ```
 
 For local-to-remote client verification:
@@ -121,10 +129,17 @@ For local-to-remote client verification:
 ```bash
 scp <vm>.exe.xyz:/opt/moqx-bench/quicprobe/tls/ca.pem /private/tmp/quicprobe-ca.pem
 /path/to/quicprobe client --addr <tailnet-ip>:<quic-port> --ca /private/tmp/quicprobe-ca.pem --servername <server-name> --initial-packet-size 1200 --bidi-echo smoke --timeout 10s
-/path/to/quicprobe client --addr <tailnet-ip>:<quic-port> --ca /private/tmp/quicprobe-ca.pem --servername <server-name> --initial-packet-size 1200 --json --workload datagram_pressure --datagram-size 64 --datagram-count 5 --timeout 10s
+curl -sS "http://<tailnet-ip>:55434/evidence/latest"
+curl -sS "http://<tailnet-ip>:55434/experiment/lease"
 ```
+
+The persistent service runs DATAGRAM drain mode. Do not use
+`quicprobe client --workload datagram_pressure` against it unless the service
+has been deliberately switched to `--datagram-semantics echo` for a round-trip
+DATAGRAM check.
 
 If local-to-remote quicprobe times out while `iperf3 --udp` works over
 Tailscale, first verify both sides are using `--initial-packet-size 1200` and
 that the local client is a build with that flag. Then check route MTU, local
-Tailscale status, service logs, and server stats before blaming firewall rules.
+Tailscale status, service logs, and server run evidence before blaming firewall
+rules.

@@ -33,10 +33,10 @@ defmodule MOQXProbe.OpenLoop.Latency do
           pending: %{optional(stream_key()) => :queue.queue({number(), number()})}
         }
 
-  @doc "Builds an empty latency collector. Options are passed to `Histogram.new/1`."
-  @spec new(keyword()) :: t()
-  def new(opts \\ []) do
-    %__MODULE__{corrected: Histogram.new(opts), uncorrected: Histogram.new(opts), pending: %{}}
+  @doc "Builds an empty latency collector."
+  @spec new() :: t()
+  def new do
+    %__MODULE__{corrected: Histogram.new(), uncorrected: Histogram.new(), pending: %{}}
   end
 
   @doc """
@@ -110,18 +110,16 @@ defmodule MOQXProbe.OpenLoop.Latency do
   def finalize(%__MODULE__{} = lat, end_ms) do
     corrected =
       Enum.reduce(lat.pending, lat.corrected, fn {_stream, queue}, hist ->
-        Enum.reduce(:queue.to_list(queue), hist, fn {scheduled_ms, _sent_ms}, hist ->
-          Histogram.record(hist, end_ms - scheduled_ms)
-        end)
+        :queue.fold(
+          fn {scheduled_ms, _sent_ms}, hist ->
+            Histogram.record(hist, end_ms - scheduled_ms)
+          end,
+          hist,
+          queue
+        )
       end)
 
     %{lat | corrected: corrected, pending: %{}}
-  end
-
-  @doc "Number of intents still awaiting completion."
-  @spec pending_count(t()) :: non_neg_integer()
-  def pending_count(%__MODULE__{pending: pending}) do
-    Enum.reduce(pending, 0, fn {_stream, queue}, acc -> acc + :queue.len(queue) end)
   end
 
   @doc "Corrected and uncorrected latency summaries (ms)."

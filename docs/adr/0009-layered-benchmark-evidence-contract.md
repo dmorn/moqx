@@ -3,9 +3,7 @@
 - Status: Accepted
 - Date: 2026-06-30
 
-Implements the contract requested in
-`.scratch/transport-layer-foundation/issues/54-add-layered-benchmark-evidence-contract.md`.
-Builds on ADR-0005 (telemetry event bus and handler discipline) and ADR-0008
+Current benchmark evidence contract. Builds on ADR-0008
 (functional `Conn`/`Stream` ownership and the send-completion-as-credit model).
 
 ## Context
@@ -16,7 +14,7 @@ client implementations with Benchee, fake targets isolate process-model
 effects, `quicprobe` targets give receiver-side delivery evidence, and `iperf3`
 gives a path baseline. The plumbing is already disciplined: timed functions
 return receipts, receiver evidence is collected in unmeasured post-run hooks,
-and telemetry handlers follow ADR-0005's bounded-handler rules.
+and telemetry handlers stay bounded and cheap.
 
 The problem is interpretation, not plumbing. The current output makes it too
 easy to collapse several different questions into one ambiguous number:
@@ -105,7 +103,7 @@ Reports must refuse or warn on a forbidden name rather than render it.
 
 A run bundle models these layers, each answering a distinct question. Each
 layer is collected by the mechanism noted; none may run inside a timed Benchee
-function or inside a hot-path telemetry handler (ADR-0005).
+function or inside a hot-path telemetry handler.
 
 - **Experiment lifecycle** — a stable run id and manifest tying every artifact
   together (see Run Manifest). Owned by the script.
@@ -115,13 +113,13 @@ function or inside a hot-path telemetry handler (ADR-0005).
   errors, send-completion credits, per-stream/shard in-flight counts, queue
   depth/demand/backlog, tick lag and burst shape for paced clients, sender-side
   interval bins. Answers whether the client can feed the transport without
-  collapsing. Cheap counters per ADR-0005.
+  collapsing. Cheap counters only.
 - **Transport/NIF telemetry** — the stable `MOQX.Transport` events from
-  ADR-0005 (stream send, DATAGRAM send, receive-event call durations and
-  results, send completions/cancellations), plus counts of slow calls above a
-  configured threshold near the 1 ms scheduler-risk boundary. Answers whether
-  transport/`quicer` admission and completion handling is the bottleneck. Not
-  peer-delivery evidence.
+  the transport facade (stream send, DATAGRAM send, receive-event call
+  durations and results, send completions/cancellations), plus counts of slow
+  calls above a configured threshold near the 1 ms scheduler-risk boundary.
+  Answers whether transport/`quicer` admission and completion handling is the
+  bottleneck. Not peer-delivery evidence.
 - **Receiver evidence** — `quicprobe` aggregate truth (first/last byte and
   DATAGRAM timestamps, bytes received, streams accepted/completed, DATAGRAMs
   received, receive errors) plus interval bins for bytes/DATAGRAMs/streams over
@@ -205,8 +203,8 @@ Positive:
   work targets the real bottleneck instead of ranking by an ambiguous average.
 - Coordinated omission becomes detectable (offered-vs-accepted) and then
   avoidable (open-loop mode).
-- Evidence layers reuse ADR-0005 events and handler discipline rather than
-  inventing new hot-path work.
+- Evidence layers reuse transport-facade events and bounded handler discipline
+  rather than inventing new hot-path work.
 
 Tradeoffs:
 
@@ -221,8 +219,7 @@ Tradeoffs:
 - Mandatory packet capture or flame graphs for normal runs.
 - Receiver evidence inside the timed Benchee function.
 - Treating local/fake/loopback results as real-network claims.
-- High-cardinality labels (payload sequence number, raw stream id, raw
-  connection handle, per-event peer address, exception text, payload bytes) —
-  ADR-0005 cardinality rules still apply.
+- High-cardinality labels: payload sequence number, raw stream id, raw
+  connection handle, per-event peer address, exception text, payload bytes.
 - `Application` environment as mutable benchmark configuration; runs are
   configured by explicit flags.

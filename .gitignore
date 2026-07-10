@@ -30,6 +30,7 @@ moqx-*.tar
 /target/
 priv/native
 .moq-dev/
+.agents/
 .tmp
 .dexter*
 bench/moqxprobe/results/

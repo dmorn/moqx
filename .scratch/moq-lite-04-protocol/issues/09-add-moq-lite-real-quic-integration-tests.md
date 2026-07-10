@@ -38,8 +38,7 @@ raw `quicer` messages in protocol assertions.
       flow over a real local `MOQX.Transport.Quicer` pair.
 - [ ] The test module is tagged `:integration` and remains excluded by default.
 - [ ] The test reuses the caller-managed integration harness conventions from
-      `docs/adr/0004-docker-compose-driven-quic-integration-harness.md` and
-      does not start Docker from ExUnit.
+      `README.md` Development and does not start Docker from ExUnit.
 - [ ] Certificate, ALPN, host, and port inputs come from explicit test config or
       helper arguments; the test does not mutate `Application` env.
 - [ ] The subscriber side uses `MOQX.MOQLite04.connect/2` with
@@ -72,4 +71,4 @@ raw `quicer` messages in protocol assertions.
 
 ## Blocked by
 
-- `.scratch/moq-lite-04-protocol/issues/08-add-role-neutral-moq-lite-publisher-operations.md`
+- Done, see git history.

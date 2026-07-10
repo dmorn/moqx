@@ -86,9 +86,9 @@ defmodule MOQXProbe.Report do
     # objects that DID arrive were still timestamped — that is exactly when the
     # delivery delay matters most.
     delivery
-    |> Enum.map(&get_in_ev(&1, ["metadata", "raw", "object_delivery"]))
+    |> Enum.map(&get_in_ev(&1, ["metadata", "object_delivery"]))
     |> Enum.filter(
-      &(is_map(&1) and is_number(num(Map.get(&1, "count"))) and Map.get(&1, "count") > 0)
+      &(is_map(&1) and is_number(num(Map.get(&1, "count"))) and num(Map.get(&1, "count")) > 0)
     )
     |> pick_delivery_delay()
   end

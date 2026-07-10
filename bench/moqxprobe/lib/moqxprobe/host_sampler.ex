@@ -3,8 +3,8 @@ defmodule MOQXProbe.HostSampler do
   Out-of-band BEAM/host saturation sampler for the benchmark evidence contract.
 
   Implements the "Host and BEAM samples" evidence layer of
-  ADR-0009 (`docs/adr/0009-layered-benchmark-evidence-contract.md`) under the
-  handler discipline of ADR-0005.
+  ADR-0009 (`docs/adr/0009-layered-benchmark-evidence-contract.md`) and its
+  observer-effect rules.
 
   ## Observer-effect rules
 
