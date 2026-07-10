@@ -503,7 +503,8 @@ defmodule MOQXProbe.Report do
     Corrected measures from each intent's scheduled time and back-fills
     never-completed intents (coordinated-omission-corrected); uncorrected omits
     the stalls. A large gap means the offered rate outran what the path could
-    complete. True end-to-end delivery latency is deferred to issue 59.
+    complete. This is sender-side completion latency; true end-to-end delivery
+    delay is the separate section below.
 
     | series | p50 | p90 | p99 | p99.9 | max | count |
     | --- | --- | --- | --- | --- | --- | --- |
