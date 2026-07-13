@@ -19,7 +19,8 @@ The first integration slice should use a local real-QUIC self-pair: one endpoint
 acts as the subscriber, the other as the publisher, and the test exercises the
 same public API flow covered by the Support-transport smoke test:
 
-1. subscriber connects with `MOQX.MOQLite04.connect/2`;
+1. subscriber connects through `MOQX.connect/2` with an explicit
+   `protocol: :moq_lite_04` selection;
 2. subscriber opens a Subscribe transaction stream;
 3. publisher accepts the peer-opened Subscribe stream;
 4. publisher receives `Subscribe`;
@@ -29,8 +30,8 @@ same public API flow covered by the Support-transport smoke test:
 8. subscriber accepts the Group stream and receives the original Frame payload.
 
 The test must run against `MOQX.Transport.Quicer` through the
-`MOQX.Transport` facade and public `MOQX.MOQLite04` APIs. It should not match
-raw `quicer` messages in protocol assertions.
+`MOQX.Transport` facade, `MOQX.Runtime.ConnectionDriver`, and stable public
+`MOQX` APIs. It should not match raw `quicer` messages in protocol assertions.
 
 ## Acceptance criteria
 
@@ -41,14 +42,14 @@ raw `quicer` messages in protocol assertions.
       `README.md` Development and does not start Docker from ExUnit.
 - [ ] Certificate, ALPN, host, and port inputs come from explicit test config or
       helper arguments; the test does not mutate `Application` env.
-- [ ] The subscriber side uses `MOQX.MOQLite04.connect/2` with
-      `transport: {MOQX.Transport.Quicer, opts}`.
+- [ ] The subscriber side uses `MOQX.connect/2` with
+      `protocol: :moq_lite_04` and explicit Quicer transport options.
 - [ ] The publisher side uses `MOQX.Transport` listener/accept/handshake APIs and
-      wraps the accepted connection in a `MOQX.MOQLite04.Client` with a fresh
-      `MOQX.MOQLite04.Session`.
-- [ ] The protocol flow uses public MOQ Lite APIs:
-      `subscribe/2`, `accept_stream/2`, `recv/2`, `subscribe_ok/3`, and
-      `publish_group/3`.
+      attaches the accepted connection to the common connection driver with an
+      explicit MOQ Lite implementation.
+- [ ] The protocol flow uses stable public operations for subscribe and event
+      delivery; provider/version wire structs stay inside
+      `MOQX.Protocol.MOQLite04`.
 - [ ] The final assertion proves the subscriber receives the exact original
       `Frame.payload` sent by the publisher.
 - [ ] Default `mix test` remains fast and hermetic.
@@ -71,4 +72,4 @@ raw `quicer` messages in protocol assertions.
 
 ## Blocked by
 
-- Done, see git history.
+- Issue 10: migrate MOQ Lite 04 to the multi-protocol runtime.

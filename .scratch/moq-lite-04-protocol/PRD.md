@@ -182,10 +182,26 @@ Delivered so far:
   stream lifecycle, support transport normalized events, and the
   reference-style subscribe/group/frame smoke flow
 
+## Architecture alignment
+
+ADR-0010 supersedes the earlier permanent module and public API assumptions in
+this completed PRD. The delivered `MOQX.MOQLite04` implementation remains useful
+migration input, but the target architecture is now:
+
+- `MOQX.Protocol.MOQLite04` owns MOQ Lite wire messages, codecs, lifecycle,
+  operations, events, and errors;
+- `MOQX.Runtime.ConnectionDriver` owns the transport context and applies
+  protocol transitions;
+- callers connect through the stable public API with an explicit
+  `protocol: :moq_lite_04` selection;
+- issue 10 tracks migration of the completed implementation into those
+  boundaries before issue 09 adds real-QUIC proof.
+
 Follow-up integration work:
 
+- issue 10: migrate MOQ Lite 04 to the multi-protocol runtime
 - issue 09: real QUIC MOQ Lite 04 integration tests over
-  `MOQX.Transport.Quicer`
+  `MOQX.Transport.Quicer` after that migration
 
 ## References
 
@@ -195,3 +211,4 @@ Follow-up integration work:
   see `CONTEXT.md` and git history.
 - `docs/adr/0006-protocol-variants-own-session-state-codec-stays-generic.md`
 - `docs/adr/0007-protocol-sessions-are-pure-reducers.md`
+- `docs/adr/0010-compose-versioned-wire-packages-into-explicit-protocol-implementations.md`

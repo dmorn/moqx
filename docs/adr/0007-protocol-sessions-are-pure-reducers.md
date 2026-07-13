@@ -1,6 +1,6 @@
 # ADR-0007: Protocol sessions are pure reducers
 
-- Status: Accepted
+- Status: Superseded by ADR-0010
 - Date: 2026-06-05
 
 ## Context
@@ -120,3 +120,4 @@ This ADR does not decide:
 - <https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-14>
 - <https://github.com/elixir-mint/mint>
 - <https://github.com/elixir-mint/mint_web_socket>
+- `docs/adr/0010-compose-versioned-wire-packages-into-explicit-protocol-implementations.md`

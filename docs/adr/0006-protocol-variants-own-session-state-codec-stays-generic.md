@@ -1,6 +1,6 @@
 # ADR-0006: Protocol variants own session state; codec stays generic
 
-- Status: Accepted
+- Status: Superseded by ADR-0010
 - Date: 2026-06-05
 
 ## Context
@@ -90,3 +90,4 @@ This ADR does not decide:
 ## References
 
 - `docs/adr/0007-protocol-sessions-are-pure-reducers.md`
+- `docs/adr/0010-compose-versioned-wire-packages-into-explicit-protocol-implementations.md`
