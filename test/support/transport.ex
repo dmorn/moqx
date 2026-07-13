@@ -30,8 +30,8 @@ defmodule MOQX.Transport.Support do
 
   defmodule Stream do
     @moduledoc false
-    @opaque t :: %__MODULE__{pid: pid()}
-    defstruct [:pid]
+    @opaque t :: %__MODULE__{pid: pid(), stream_id: non_neg_integer(), direction: atom()}
+    defstruct [:pid, :stream_id, :direction]
   end
 
   @impl true
@@ -66,8 +66,8 @@ defmodule MOQX.Transport.Support do
          {:ok, requested_capabilities} <- profile_capabilities(option(opts, :profile, :draft_14)),
          {:ok, listener} <- lookup_listener(network, port, timeout),
          :ok <- compatible_capabilities(listener.capabilities, requested_capabilities) do
-      client = start_connection(requested_capabilities, self())
-      server = start_connection(listener.capabilities, nil)
+      client = start_connection(requested_capabilities, self(), :client)
+      server = start_connection(listener.capabilities, nil, :server)
       pair_connections(client, server)
 
       ref = make_ref()
@@ -141,6 +141,22 @@ defmodule MOQX.Transport.Support do
   @impl true
   def normalize_message({:moqx_transport, event}), do: event
   def normalize_message(_message), do: :unknown
+
+  @impl true
+  def stream_info(%Stream{} = stream, local_role, initiator) do
+    initiator_role = if initiator == :local, do: local_role, else: peer_role(local_role)
+
+    {:ok,
+     %MOQX.Transport.Conn.Stream.Info{
+       stream_id: stream.stream_id,
+       direction: stream.direction,
+       initiator: initiator,
+       initiator_role: initiator_role,
+       local_role: local_role,
+       send_side?: stream.direction == :bidirectional or initiator == :local,
+       receive_side?: stream.direction == :bidirectional or initiator == :peer
+     }}
+  end
 
   @impl true
   def open_stream(%Connection{} = connection, opts) do
@@ -282,14 +298,16 @@ defmodule MOQX.Transport.Support do
 
   def port(%Listener{port: port}), do: port
 
-  defp start_connection(capabilities, owner) do
+  defp start_connection(capabilities, owner, local_role) do
     state = %{
       capabilities: capabilities,
       handshaken?: false,
+      local_role: local_role,
       owner: owner,
       peer: nil,
       pending_streams: :queue.new(),
-      stream_acceptors: :queue.new()
+      stream_acceptors: :queue.new(),
+      stream_counters: %{}
     }
 
     %Connection{pid: spawn(fn -> connection_loop(state) end)}
@@ -435,8 +453,9 @@ defmodule MOQX.Transport.Support do
         connection_loop(state)
 
       {:open_stream, caller, ref, direction} ->
-        local_stream = start_stream(caller)
-        remote_stream = start_stream(nil)
+        {stream_id, state} = allocate_stream_id(state, direction)
+        local_stream = start_stream(caller, stream_id, direction)
+        remote_stream = start_stream(nil, stream_id, direction)
         pair_streams(local_stream, remote_stream)
 
         send(state.peer.pid, {:incoming_stream, remote_stream, direction})
@@ -494,9 +513,11 @@ defmodule MOQX.Transport.Support do
     end
   end
 
-  defp start_stream(owner) do
+  defp start_stream(owner, stream_id, direction) do
     state = %{
       owner: owner,
+      stream_id: stream_id,
+      direction: direction,
       peer: nil,
       buffer: <<>>,
       recvs: :queue.new(),
@@ -504,7 +525,11 @@ defmodule MOQX.Transport.Support do
       send_finished?: false
     }
 
-    %Stream{pid: spawn(fn -> stream_loop(state) end)}
+    %Stream{
+      pid: spawn(fn -> stream_loop(state) end),
+      stream_id: stream_id,
+      direction: direction
+    }
   end
 
   defp pair_streams(%Stream{} = left, %Stream{} = right) do
@@ -543,14 +568,14 @@ defmodule MOQX.Transport.Support do
 
         send(
           caller,
-          {:moqx_transport, {:stream_event, %Stream{pid: self()}, :send_complete, false}}
+          {:moqx_transport, {:stream_event, self_stream(state), :send_complete, false}}
         )
 
         stream_loop(%{state | send_finished?: finish?})
 
       {:incoming_data, data} ->
         if active_delivery?(state.active) && state.owner do
-          send(state.owner, {:moqx_transport, {:stream_data, %Stream{pid: self()}, data, %{}}})
+          send(state.owner, {:moqx_transport, {:stream_data, self_stream(state), data, %{}}})
           stream_loop(%{state | active: next_active(state.active)})
         else
           stream_loop(deliver_passive_data(%{state | buffer: state.buffer <> data}))
@@ -615,10 +640,27 @@ defmodule MOQX.Transport.Support do
   defp next_active(count) when is_integer(count) and count > 0, do: count - 1
   defp next_active(active), do: active
 
+  defp peer_role(:client), do: :server
+  defp peer_role(:server), do: :client
+
+  defp allocate_stream_id(state, direction) do
+    sequence = Map.get(state.stream_counters, direction, 0)
+    role_bit = if state.local_role == :client, do: 0, else: 1
+    direction_bit = if direction == :bidirectional, do: 0, else: 2
+    stream_id = role_bit + direction_bit + sequence * 4
+
+    {stream_id,
+     %{state | stream_counters: Map.put(state.stream_counters, direction, sequence + 1)}}
+  end
+
+  defp self_stream(state) do
+    %Stream{pid: self(), stream_id: state.stream_id, direction: state.direction}
+  end
+
   defp deliver_active_data(%{owner: owner, buffer: buffer} = state)
        when is_pid(owner) and byte_size(buffer) > 0 do
     if active_delivery?(state.active) do
-      send(owner, {:moqx_transport, {:stream_data, %Stream{pid: self()}, buffer, %{}}})
+      send(owner, {:moqx_transport, {:stream_data, self_stream(state), buffer, %{}}})
       %{state | active: next_active(state.active), buffer: <<>>}
     else
       state
@@ -629,7 +671,7 @@ defmodule MOQX.Transport.Support do
 
   defp send_stream_event(state, event, metadata) do
     if state.owner do
-      send(state.owner, {:moqx_transport, {:stream_event, %Stream{pid: self()}, event, metadata}})
+      send(state.owner, {:moqx_transport, {:stream_event, self_stream(state), event, metadata}})
     end
   end
 

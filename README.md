@@ -27,6 +27,71 @@ Core references:
 {:moqx, "~> 0.7.1"}
 ```
 
+## Cloudflare draft-14 subscriber
+
+Protocol selection is explicit; the endpoint never selects an implementation
+implicitly. Cloudflare's public Big Buck Bunny catalog can be requested with:
+
+```elixir
+{:ok, client} =
+  MOQX.connect("moqt://draft-14.cloudflare.mediaoverquic.com:443",
+    protocol: :cloudflare_draft_14
+  )
+
+catalog_track = %MOQX.TrackRef{namespace: ["bbb"], track: ".catalog"}
+{:ok, subscription} = MOQX.subscribe(client, catalog_track)
+
+receive do
+  {:moqx, ^client, {:catalog, %MOQX.Catalog{} = catalog}} ->
+    catalog.tracks
+end
+```
+
+This path uses native QUIC with ALPN `moq-00`, negotiates MOQT draft-14,
+subscribes with `LargestObject`, and decodes the CMSF catalog delivered on a
+subgroup stream. It does not use `FETCH`.
+
+Catalog tracks can be subscribed directly. Delivered objects retain their
+subscription, group, subgroup, object, and priority coordinates:
+
+```elixir
+{:ok, video} = MOQX.Catalog.select_h264(catalog)
+{:ok, subscription} = MOQX.subscribe(client, MOQX.Catalog.Track.track_ref(video))
+
+receive do
+  {:moqx, ^client, {:object, %MOQX.Object{subscription: ^subscription} = object}} ->
+    object.payload
+end
+```
+
+For CMAF H.264, `MOQX.CMAF.capture/4` subscribes to the advertised
+initialization and media tracks, orders received objects by their protocol
+coordinates, writes a fragmented MP4 atomically, and unsubscribes its temporary
+subscriptions:
+
+```elixir
+{:ok, report} =
+  MOQX.CMAF.capture(client, catalog, "/tmp/cloudflare-bbb.mp4",
+    objects: 120,
+    timeout: 30_000
+  )
+```
+
+The runnable external example performs the complete flow:
+
+```bash
+mix run scripts/cloudflare_h264_capture.exs /tmp/cloudflare-bbb.mp4 120
+
+ffprobe -v error -show_streams /tmp/cloudflare-bbb.mp4
+ffmpeg -y -i /tmp/cloudflare-bbb.mp4 -map 0:v:0 -c:v copy \
+  -bsf:v h264_mp4toannexb -an -f h264 /tmp/cloudflare-bbb.h264
+ffmpeg -v error -f h264 -i /tmp/cloudflare-bbb.h264 -f null -
+```
+
+`MOQX.unsubscribe/2` sends the selected protocol's unsubscribe message;
+`MOQX.close/2` closes the connection. Relay rejections are delivered as
+`{:subscription_error, subscription, %MOQX.ProtocolError{}}`.
+
 ## Development
 
 ```bash
@@ -37,6 +102,13 @@ mix ci
 
 Default tests are fast and hermetic. Real QUIC checks are tagged as ExUnit
 integration tests and are excluded by default.
+
+The public Cloudflare interop check is independently selectable and depends on
+the availability of an external service:
+
+```bash
+mix test --only integration test/integration/cloudflare_catalog_test.exs
+```
 
 To run the caller-managed QUIC integration harness:
 

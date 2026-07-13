@@ -10,7 +10,3 @@ end
 defmodule MOQX.Protocol.MOQTDraft14.Messages do
   @moduledoc "Namespace for semantic IETF MOQT draft-14 wire message structs."
 end
-
-defmodule MOQX.Protocol.MOQTDraft14.Codec do
-  @moduledoc "Namespace for IETF MOQT draft-14 wire codecs and framing state."
-end

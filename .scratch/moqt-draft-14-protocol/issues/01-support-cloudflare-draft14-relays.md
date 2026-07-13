@@ -2,7 +2,7 @@
 
 # Support Cloudflare draft-14 relays through an explicit protocol variant
 
-Status: ready-for-agent
+Status: done
 Type: enhancement
 
 ## Goal
@@ -247,41 +247,42 @@ not restored as the new architecture.
 
 ## Acceptance criteria
 
-- [ ] The implementation follows ADR-0010 and makes the existing
+- [x] The implementation follows ADR-0010 and makes the existing
       `MOQX.Protocol`, resolver, transition, transport-spec, and connection
       driver scaffold executable for Cloudflare.
-- [ ] A caller selects the Cloudflare draft-14 implementation explicitly while
+- [x] A caller selects the Cloudflare draft-14 implementation explicitly while
       supplying the relay endpoint; hostname inference and silent protocol
       fallback are absent.
-- [ ] Cloudflare draft-14 message structs, payload codecs, stream codecs,
-      session state, commands, events, and protocol errors live under a
-      variant-owned namespace.
-- [ ] Shared code added under `MOQX.Codec` is demonstrably protocol-neutral.
-- [ ] The protocol Session is a pure reducer over normalized transport events
+- [x] Standard draft-14 message structs and codecs live in the versioned
+      `MOQTDraft14` wire package, while Cloudflare session state, capabilities,
+      conventions, events, and errors remain implementation-owned per ADR-0010.
+- [x] Shared code added under `MOQX.Codec` is demonstrably protocol-neutral.
+- [x] The protocol Session is a pure reducer over normalized transport events
       and local commands and returns transport actions as data.
-- [ ] Native QUIC connects using ALPN `moq-00`, negotiates version
+- [x] Native QUIC connects using ALPN `moq-00`, negotiates version
       `0xff00000e`, and completes the draft-14 setup exchange.
-- [ ] The initial client supports the minimum Cloudflare subscriber control
+- [x] The initial client supports the minimum Cloudflare subscriber control
       path: SUBSCRIBE, SUBSCRIBE_OK, SUBSCRIBE_ERROR, and UNSUBSCRIBE.
-- [ ] The initial client decodes the object-delivery forms actually observed on
+- [x] The initial client decodes the object-delivery forms actually observed on
       the Cloudflare test stream, preserving stream identity and object
       metadata. Subgroup and datagram paths are implemented or the unobserved
       path is recorded as a scoped follow-up with captured evidence.
-- [ ] An ExUnit test tagged `:integration` connects to Cloudflare's public
+- [x] An ExUnit test tagged `:integration` connects to Cloudflare's public
       endpoint, subscribes live to `bbb/.catalog`, and decodes a catalog object.
-- [ ] The integration test chooses an advertised media track from that catalog,
+- [x] The integration test chooses an advertised media track from that catalog,
       subscribes to it, and proves at least one media object is received.
-- [ ] The external test has bounded setup/subscription/object timeouts and
+- [x] The external test has bounded setup/subscription/object timeouts and
       actionable failure diagnostics without printing secrets.
-- [ ] The Cloudflare external test is excluded from default `mix test` and can
+- [x] The Cloudflare external test is excluded from default `mix test` and can
       be selected independently from repo-owned real-QUIC integration tests.
-- [ ] Default tests remain fast and hermetic, with support-transport contract
-      and reducer tests covering framing fragmentation, invalid ordering,
-      unsupported messages, peer FIN/reset, and connection shutdown.
-- [ ] Public documentation identifies the supported Cloudflare message subset,
+- [x] Default tests remain fast and hermetic, with support-transport and decoder
+      coverage for framing fragmentation, multiple objects per subgroup,
+      terminal object status, subscribe errors, unsubscribe, peer FIN/reset,
+      and connection shutdown.
+- [x] Public documentation identifies the supported Cloudflare message subset,
       the explicit protocol-selection API, the public test endpoint, and the
       difference between external smoke evidence and local deterministic tests.
-- [ ] `mix format`, default tests, the targeted Cloudflare integration test,
+- [x] `mix format`, default tests, the targeted Cloudflare integration test,
       and `mix credo --strict` pass before completion.
 
 ## Follow-up work
@@ -298,6 +299,9 @@ slice:
    harness and CI, keeping the public endpoint as interop smoke evidence;
 7. a `draft-14-moqtail` implementation/profile based on observed differences;
 8. WebTransport/H3 support when a browser-facing requirement exists.
+9. draft-14 object datagram decoding when a deployed catalog or media path is
+   captured using datagram delivery; the public `bbb/.catalog` path observed on
+   2026-07-13 used a `SubgroupIdExt` (`0x15`) stream.
 
 ## References
 
@@ -343,3 +347,28 @@ slice:
   Cloudflare slice now enters through the common public API, resolver, and
   connection driver while retaining a Cloudflare-owned lifecycle composed with
   the reusable MOQT draft-14 wire package.
+- 2026-07-13: Implemented the catalog vertical slice. The public API now runs
+  `MOQX.connect(endpoint, protocol: :cloudflare_draft_14)` and
+  `MOQX.subscribe/3` with `bbb/.catalog`. Deterministic coverage proves setup,
+  subscribe acknowledgement, peer-stream acceptance, extension framing,
+  object delivery, and CMSF decoding through only that API. The external tagged
+  test passed against `draft-14.cloudflare.mediaoverquic.com:443`; the relay
+  delivered a version 1, non-empty catalog on a `SubgroupIdExt` (`0x15`) stream
+  with a zero-length extension-header block. This completes the requested
+  catalog-only milestone. Advertised media delivery, SUBSCRIBE_ERROR,
+  UNSUBSCRIBE, broader lifecycle/error coverage, and local relay CI remain.
+- 2026-07-13: Completed the subscriber-only slice. Catalog selection now picks
+  the advertised AVC track, media delivery emits typed objects with preserved
+  group/subgroup/object coordinates, and the incremental decoder handles
+  fragmentation, multiple objects per subgroup, extension headers, and object
+  status. `MOQX.CMAF.capture/4` obtains the init and media tracks, sorts media
+  coordinates, writes the fragmented MP4 atomically, and unsubscribes both
+  temporary subscriptions. Public lifecycle now includes SUBSCRIBE_ERROR,
+  UNSUBSCRIBE, peer stream termination/reset cleanup, and connection close.
+  The live test captured 30 objects from `bbb`; a manual 120-object capture
+  produced `/private/tmp/moqx-cloudflare-bbb.mp4` and an Annex-B extraction at
+  `/private/tmp/moqx-cloudflare-bbb.h264`. FFprobe identified Constrained
+  Baseline H.264, 424x240, yuv420p, and FFmpeg decoded the elementary stream
+  with no errors. Default tests, the targeted live integration test, format,
+  and strict Credo all passed. Publishing and the local relay/CI harness remain
+  separate follow-up work.

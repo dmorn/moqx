@@ -6,9 +6,51 @@ defmodule MOQX do
   native QUIC and deterministic support transports can share the same contract.
   """
 
+  alias MOQX.Protocol.Resolver
+  alias MOQX.Runtime.ConnectionDriver
+
   @doc "Returns the default native QUIC transport implementation."
   @spec transport() :: module()
   def transport do
     MOQX.Transport.Quicer
+  end
+
+  @doc "Connects to an endpoint using one explicitly selected protocol implementation."
+  @spec connect(binary() | URI.t(), keyword()) :: {:ok, MOQX.Client.t()} | {:error, term()}
+  def connect(endpoint, options) when is_binary(endpoint) or is_struct(endpoint, URI) do
+    with {:ok, endpoint} <- parse_endpoint(endpoint),
+         {:ok, protocol} <- Resolver.fetch(Keyword.fetch!(options, :protocol)) do
+      ConnectionDriver.start(endpoint, protocol, options, self())
+    end
+  rescue
+    KeyError -> {:error, :protocol_required}
+  end
+
+  @doc "Subscribes to a protocol-neutral track address."
+  @spec subscribe(MOQX.Client.t(), MOQX.TrackRef.t(), keyword()) ::
+          {:ok, MOQX.Subscription.t()} | {:error, term()}
+  def subscribe(client, track, options \\ []) do
+    ConnectionDriver.subscribe(client, track, options)
+  end
+
+  @doc "Ends an active subscription and sends the selected protocol's unsubscribe message."
+  @spec unsubscribe(MOQX.Client.t(), MOQX.Subscription.t()) :: :ok | {:error, term()}
+  def unsubscribe(client, subscription) do
+    ConnectionDriver.unsubscribe(client, subscription)
+  end
+
+  @doc "Gracefully closes the selected protocol connection."
+  @spec close(MOQX.Client.t(), keyword()) :: :ok | {:error, term()}
+  def close(client, options \\ []) do
+    ConnectionDriver.close(client, Keyword.get(options, :reason))
+  end
+
+  defp parse_endpoint(%URI{host: host} = endpoint) when is_binary(host), do: {:ok, endpoint}
+
+  defp parse_endpoint(endpoint) when is_binary(endpoint) do
+    case URI.parse(endpoint) do
+      %URI{host: host} = uri when is_binary(host) -> {:ok, uri}
+      _uri -> {:error, :invalid_endpoint}
+    end
   end
 end

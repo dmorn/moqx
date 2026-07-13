@@ -556,6 +556,36 @@ defmodule MOQX.Transport do
     result
   end
 
+  @doc """
+  Normalizes one already-received backend message through a caller-owned context.
+
+  This is the non-blocking counterpart to `receive_event/2` for process runtimes
+  whose receive loop already removed the message from the mailbox.
+  """
+  @spec normalize_event(Context.t(), term()) ::
+          {:ok, event(), Context.t()}
+          | {:error, term(), Context.t()}
+          | {:unknown, term(), Context.t()}
+  def normalize_event(%Context{} = ctx, message), do: normalize_context_message(ctx, message)
+
+  @doc """
+  Normalizes a message for a known connection, adopting a peer-created stream
+  when an active backend reports `:new_stream` before `accept_stream/4` runs.
+  """
+  @spec normalize_event(Context.t(), Conn.t(), term()) ::
+          {:ok, event(), Context.t()}
+          | {:error, term(), Context.t()}
+          | {:unknown, term(), Context.t()}
+  def normalize_event(%Context{} = ctx, %Conn{} = connection, message) do
+    case normalize_context_message(ctx, message) do
+      {:error, {:unknown_transport_handle, raw_stream}, ^ctx} ->
+        adopt_peer_stream_event(ctx, connection, message, raw_stream)
+
+      result ->
+        result
+    end
+  end
+
   defp timeout_value(:infinity), do: :infinity
   defp timeout_value(timeout), do: timeout
 
@@ -563,9 +593,7 @@ defmodule MOQX.Transport do
     {stream_id, ctx} = allocate_stream_id(ctx, connection.local_role, direction)
 
     info =
-      stream_info_for_backend(
-        backend,
-        raw_stream,
+      stream_info_from_parts(
         stream_id,
         direction,
         :local,
@@ -586,13 +614,50 @@ defmodule MOQX.Transport do
   defp accept_stream_result(ctx, backend, connection, raw_stream) do
     case dequeue_pending_peer_stream(ctx, peer_role(connection.local_role)) do
       {:ok, {stream_id, direction, initiator_role}, ctx} ->
-        stream =
-          accepted_stream(backend, raw_stream, stream_id, direction, initiator_role, connection)
+        case backend_stream_direction(backend, raw_stream, connection.local_role) do
+          {:ok, ^direction} ->
+            stream =
+              accepted_stream(
+                backend,
+                raw_stream,
+                stream_id,
+                direction,
+                initiator_role,
+                connection
+              )
 
-        {:ok, stream, put_resource(ctx, :streams, raw_stream, stream)}
+            {:ok, stream, put_resource(ctx, :streams, raw_stream, stream)}
+
+          {:ok, _other_direction} ->
+            accept_stream_from_backend_info(ctx, backend, connection, raw_stream)
+
+          :unavailable ->
+            stream =
+              accepted_stream(
+                backend,
+                raw_stream,
+                stream_id,
+                direction,
+                initiator_role,
+                connection
+              )
+
+            {:ok, stream, put_resource(ctx, :streams, raw_stream, stream)}
+        end
 
       {:error, _reason, ctx} ->
         accept_stream_from_backend_info(ctx, backend, connection, raw_stream)
+    end
+  end
+
+  defp backend_stream_direction(backend, raw_stream, local_role) do
+    if function_exported?(backend, :stream_info, 3) do
+      case backend.stream_info(raw_stream, local_role, :peer) do
+        {:ok, %Info{direction: direction}} -> {:ok, direction}
+        {:error, _reason} -> :unavailable
+      end
+    else
+      :unavailable
     end
   end
 
@@ -751,6 +816,19 @@ defmodule MOQX.Transport do
           {:ok, event, ctx} -> {:ok, event, ctx}
           {:error, reason} -> {:error, reason, ctx}
         end
+    end
+  end
+
+  defp adopt_peer_stream_event(ctx, connection, message, raw_stream) do
+    case ctx.backend.module.normalize_message(message) do
+      {:stream_event, ^raw_stream, :new_stream, metadata} ->
+        case accept_stream_result(ctx, ctx.backend.module, connection, raw_stream) do
+          {:ok, stream, ctx} -> {:ok, {:stream_event, stream, :new_stream, metadata}, ctx}
+          {:error, reason, ctx} -> {:error, reason, ctx}
+        end
+
+      _event ->
+        {:error, {:unknown_transport_handle, raw_stream}, ctx}
     end
   end
 

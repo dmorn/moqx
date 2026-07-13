@@ -173,9 +173,9 @@ Endpoint, protocol implementation, transport backend, credentials, and
 implementation options are explicit inputs. Mutable `Application` environment
 is not used as protocol selection, a lifecycle seam, or test configuration.
 
-## Initial scaffold
+## Initial implementation
 
-The architectural scaffold introduces:
+The architectural scaffold introduced:
 
 - `MOQX.Protocol`;
 - `MOQX.Protocol.TransportSpec`;
@@ -186,9 +186,19 @@ The architectural scaffold introduces:
 - implementation and wire-package namespace anchors;
 - `MOQX.Runtime.ConnectionDriver` as the documented ownership boundary.
 
-The namespace anchors are not runnable protocol implementations. The first
-vertical slice will make `MOQX.Protocol.CloudflareDraft14` executable through
-the public subscriber path.
+The first runnable vertical slice makes
+`MOQX.Protocol.CloudflareDraft14` executable through the public subscriber
+path. The driver owns a dedicated process and normalizes already-received
+backend messages through `MOQX.Transport.normalize_event/2`. Logical stream
+keys in transport actions let implementations request IO without owning raw
+transport handles.
+
+The subscriber slice completes draft-14 setup, sends live catalog and media
+subscriptions, incrementally decodes the observed `SubgroupIdExt` object
+streams, and publishes decoded `%MOQX.Catalog{}` and typed `%MOQX.Object{}`
+events. It also handles subscribe errors, unsubscribe, connection close, and
+catalog-driven CMAF capture. Datagram delivery, publishing, and other protocol
+implementations remain incremental work behind the same boundaries.
 
 ## Consequences
 
