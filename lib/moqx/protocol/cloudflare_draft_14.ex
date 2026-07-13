@@ -452,7 +452,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
         events: [%PublicationCancelled{publication: publication, error: error}]
       )
     else
-      nil -> Transition.error(state, :unknown_published_namespace)
+      nil -> Transition.ok(state)
       {:error, reason} -> Transition.error(state, reason)
     end
   end

@@ -214,6 +214,28 @@ the availability of an external service:
 mix test --only integration test/integration/cloudflare_catalog_test.exs
 ```
 
+The repo-owned Cloudflare draft-14 roundtrip runs both MOQX and a real relay in
+Docker. It publishes a catalog and media object through the public API,
+subscribes through a second public client, verifies delivery, and exercises
+graceful publication completion:
+
+```bash
+scripts/run_moq_rs_integration.sh
+```
+
+The harness builds Cloudflare's `moq-rs` `draft-ietf-moq-transport-14` branch at
+the immutable revision `69302d3dc2422e93b8a1d62f853a6759aa9e5468`. Do not
+replace that pin with `main`: upstream `main` has moved to a later MOQT draft
+and no longer negotiates the draft-14 `moq-00` ALPN. The MOQX test runner joins
+the Compose network directly so the QUIC path is identical on Docker Desktop
+and Linux CI rather than depending on host UDP forwarding.
+
+ExUnit never starts Docker. The script owns Compose startup and cleanup, and
+the same script is the `Cloudflare draft-14 relay roundtrip` CI job. Future
+Moqtail and MOQ Lite relay checks should add separately pinned Compose services,
+tagged public-API tests, and runner scripts following this boundary; they must
+not add an implicit protocol fallback or overload this Cloudflare test.
+
 To run the caller-managed QUIC integration harness:
 
 ```bash

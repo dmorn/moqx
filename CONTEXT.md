@@ -62,6 +62,12 @@ errors, and conversion between public intent and wire messages.
 connection, and selected protocol state. It applies protocol-requested
 transport actions and publishes protocol-produced public events.
 
+**Relay Integration Harness**: caller-managed Docker Compose deployment of one
+pinned relay implementation plus a containerized MOQX public-API test runner.
+It is functional interop evidence, not transport benchmark evidence. Each relay
+variant owns a separate service, test tag, and runner while sharing certificate
+provisioning and the Compose lifecycle boundary.
+
 **Protocol Session**: implementation-owned state machine for one protocol
 relationship over one transport connection. It owns stream state, role rules,
 protocol events, and transport actions.
@@ -109,6 +115,8 @@ receiving.
   not resolve protocol identifiers or enforce provider stream rules.
 - Multiple Protocol Implementations may compose one Versioned Wire Package
   without sharing lifecycle state.
+- Relay Integration Harnesses select the protocol and relay explicitly. They do
+  not infer a protocol from the service hostname or start Docker from ExUnit.
 - A Protocol Implementation consumes transport input through
   `handle_transport/2` and public intent through `handle_operation/2`.
 - A Protocol Session returns Transport Actions as data. Runners apply them.

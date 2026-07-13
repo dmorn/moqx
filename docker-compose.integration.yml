@@ -56,3 +56,52 @@ services:
       timeout: 10s
       retries: 30
       start_period: 5s
+
+  moq-rs-relay:
+    build:
+      context: .
+      dockerfile: docker/relays/moq-rs/Dockerfile
+      args:
+        MOQ_RS_REF: 69302d3dc2422e93b8a1d62f853a6759aa9e5468
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    environment:
+      RUST_LOG: info,quinn=warn
+    command:
+      - --bind
+      - "0.0.0.0:443"
+      - --tls-cert
+      - /certs/server.pem
+      - --tls-key
+      - /certs/server-key.pem
+      - --dev
+    volumes:
+      - ./.tmp/integration-certs:/certs:ro
+    ports:
+      - "4443:443/tcp"
+      - "4443:443/udp"
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - --cacert
+        - /certs/ca.pem
+        - https://localhost/fingerprint
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  moqx-moq-rs-test:
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    depends_on:
+      moq-rs-relay:
+        condition: service_healthy
+    volumes:
+      - ./.tmp/integration-certs:/certs:ro

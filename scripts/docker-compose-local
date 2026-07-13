@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+docker_bin=${DOCKER_BIN:-docker}
+
+exec "$docker_bin" compose --project-directory "$repo_root" \
+  --file "$repo_root/docker-compose.integration.yml" "$@"

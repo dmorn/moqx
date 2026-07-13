@@ -7,8 +7,17 @@
 !mix.exs
 !mix.lock
 
+!config
+!config/**
+
+!test
+!test/**
+
 !lib
 !lib/**
+
+!docker
+!docker/**
 
 !bench
 !bench/moqxprobe

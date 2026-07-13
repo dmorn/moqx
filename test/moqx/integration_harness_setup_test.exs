@@ -38,10 +38,24 @@ defmodule MOQX.IntegrationHarnessSetupTest do
     assert compose =~ "gen-loopback-certs.sh"
   end
 
+  test "Cloudflare relay integration is pinned and externally orchestrated in Docker and CI" do
+    compose = File.read!("docker-compose.integration.yml")
+    runner = File.read!("scripts/run_moq_rs_integration.sh")
+    workflow = File.read!(".github/workflows/ci.yml")
+
+    assert compose =~ "moq-rs-relay:"
+    assert compose =~ "69302d3dc2422e93b8a1d62f853a6759aa9e5468"
+    assert compose =~ "docker/integration/Dockerfile"
+    assert runner =~ "up --build --wait moq-rs-relay"
+    assert runner =~ "run --rm moqx-moq-rs-test"
+    assert workflow =~ "scripts/run_moq_rs_integration.sh"
+  end
+
   test "loopback cert generator covers localhost SANs with a long validity" do
     script = File.read!("scripts/gen-loopback-certs.sh")
 
     assert script =~ "DNS.1 = localhost"
+    assert script =~ "DNS.4 = moq-rs-relay"
     assert script =~ "IP.1 = 127.0.0.1"
     # ~100 years so routine expiry never breaks local runs (issue 55).
     assert script =~ "36500"

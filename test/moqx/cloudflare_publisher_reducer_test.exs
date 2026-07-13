@@ -1,7 +1,7 @@
 defmodule MOQX.CloudflarePublisherReducerTest do
   use ExUnit.Case, async: true
 
-  alias MOQX.Operation.Publish
+  alias MOQX.Operation.{FinishPublication, Publish}
   alias MOQX.Protocol.CloudflareDraft14
   alias MOQX.Protocol.CloudflareDraft14.State
   alias MOQX.Protocol.MOQTDraft14.Codec
@@ -82,6 +82,31 @@ defmodule MOQX.CloudflarePublisherReducerTest do
                error: %MOQX.ProtocolError{code: 1, reason: "expired"}
              }
            ] = result.events
+  end
+
+  test "a relay cancellation arriving after local namespace completion is idempotent" do
+    {:ok, transition} =
+      CloudflareDraft14.handle_operation(%State{phase: :ready}, %Publish{
+        namespace: ["live", "camera"]
+      })
+
+    {:publication_started, publication} = List.first(transition.events)
+
+    assert {:ok, finished} =
+             CloudflareDraft14.handle_operation(transition.state, %FinishPublication{
+               publication: publication
+             })
+
+    cancel_payload = <<2, 4, "live", 6, "camera", 2, 6, "closed">>
+
+    assert {:ok, result} =
+             CloudflareDraft14.handle_transport(
+               finished.state,
+               {:stream_data, control_stream(), frame(0x0C, cancel_payload), %{}}
+             )
+
+    assert result.events == []
+    assert result.state.publications == %{}
   end
 
   test "unknown inbound tracks receive SUBSCRIBE_ERROR" do
