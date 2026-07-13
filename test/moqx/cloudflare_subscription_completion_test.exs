@@ -2,7 +2,7 @@ defmodule MOQX.CloudflareSubscriptionCompletionTest do
   use ExUnit.Case, async: true
 
   alias MOQX.Event.{ObjectReceived, SubscriptionDone}
-  alias MOQX.Operation.Subscribe
+  alias MOQX.Operation.{Subscribe, Unsubscribe}
   alias MOQX.Protocol.CloudflareDraft14
   alias MOQX.Protocol.CloudflareDraft14.State
   alias MOQX.Protocol.CloudflareDraft14.SubscriptionState
@@ -86,6 +86,94 @@ defmodule MOQX.CloudflareSubscriptionCompletionTest do
            ] = completed.events
 
     assert [{:cancel_timer, {:subscription_delivery, 0}}] = completed.actions
+  end
+
+  test "local unsubscribe retains completion state until PUBLISH_DONE and stream drain" do
+    track = %MOQX.TrackRef{namespace: ["bbb"], track: "video.m4s"}
+
+    {:ok, subscribed} =
+      CloudflareDraft14.handle_operation(%State{phase: :ready}, %Subscribe{
+        track: track,
+        options: [delivery_timeout: 250]
+      })
+
+    subscription = subscribed.events |> List.first() |> elem(1)
+
+    {:ok, accepted} =
+      CloudflareDraft14.handle_transport(
+        subscribed.state,
+        {:stream_data, control_stream(),
+         Codec.encode(%Messages.SubscribeOk{
+           request_id: subscription.id,
+           track_alias: 7,
+           expires: 0,
+           group_order: :ascending,
+           largest_location: nil
+         }), %{}}
+      )
+
+    bytes =
+      Codec.encode_subgroup(7, %MOQX.Object{
+        group_id: 3,
+        subgroup_id: 0,
+        object_id: 0,
+        payload: "fragment"
+      })
+
+    {:ok, received} =
+      CloudflareDraft14.handle_transport(
+        accepted.state,
+        {:stream_data, subgroup_stream(3), bytes, %{}}
+      )
+
+    assert [%ObjectReceived{}] = received.events
+
+    {:ok, unsubscribed} =
+      CloudflareDraft14.handle_operation(received.state, %Unsubscribe{
+        subscription: subscription
+      })
+
+    assert unsubscribed.events == [{:subscription_ended, subscription}]
+
+    assert unsubscribed.actions == [
+             {:send_stream, :control, Codec.unsubscribe(subscription.id), []}
+           ]
+
+    {:ok, draining} =
+      CloudflareDraft14.handle_transport(
+        unsubscribed.state,
+        {:stream_data, control_stream(),
+         Codec.encode(%Messages.PublishDone{
+           request_id: subscription.id,
+           status_code: 3,
+           stream_count: 1,
+           reason_phrase: "unsubscribed"
+         }), %{}}
+      )
+
+    assert draining.events == []
+
+    {:ok, completed} =
+      CloudflareDraft14.handle_transport(
+        draining.state,
+        {:stream_event, subgroup_stream(3), :peer_finished_sending, %{}}
+      )
+
+    assert [
+             %SubscriptionDone{
+               subscription: ^subscription,
+               completion: %MOQX.Subscription.Completion{
+                 status: :subscription_ended,
+                 expected_streams: 1,
+                 processed_streams: 1,
+                 timed_out?: false
+               }
+             }
+           ] = completed.events
+
+    refute Map.has_key?(completed.state.subscriptions, subscription.id)
+    refute Map.has_key?(completed.state.subscription_lifecycles, subscription.id)
+    refute Map.has_key?(completed.state.aliases, 7)
   end
 
   test "delivery timeout completes with the number of processed streams" do

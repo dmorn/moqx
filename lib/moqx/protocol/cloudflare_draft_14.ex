@@ -146,14 +146,9 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
 
   def handle_operation(%State{phase: :ready} = state, %Unsubscribe{subscription: subscription}) do
     if Map.has_key?(state.subscriptions, subscription.id) do
-      aliases =
-        Map.reject(state.aliases, fn {_alias_id, candidate} -> candidate.id == subscription.id end)
-
       next_state = %{
         state
-        | subscriptions: Map.delete(state.subscriptions, subscription.id),
-          subscription_lifecycles: Map.delete(state.subscription_lifecycles, subscription.id),
-          aliases: aliases
+        | subscriptions: Map.delete(state.subscriptions, subscription.id)
       }
 
       Transition.ok(next_state,
