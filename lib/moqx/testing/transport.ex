@@ -1,5 +1,10 @@
-defmodule MOQX.Transport.Support do
-  @moduledoc false
+defmodule MOQX.Testing.Transport do
+  @moduledoc """
+  Deterministic in-memory transport for downstream MOQX tests.
+
+  Pass `{MOQX.Testing.Transport, network: network, profile: profile}` as the
+  explicit `:transport` option. Production code never selects this transport.
+  """
 
   @behaviour MOQX.Transport
 

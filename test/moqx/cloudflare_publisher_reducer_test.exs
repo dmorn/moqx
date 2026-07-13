@@ -47,12 +47,14 @@ defmodule MOQX.CloudflarePublisherReducerTest do
     assert result.state.publications == %{}
 
     assert [
-             {:publication_error, ^publication,
-              %MOQX.ProtocolError{
-                operation: :publish,
-                code: 1,
-                reason: "unauthorized"
-              }}
+             %MOQX.Event.PublicationFailed{
+               publication: ^publication,
+               error: %MOQX.ProtocolError{
+                 operation: :publish,
+                 code: 1,
+                 reason: "unauthorized"
+               }
+             }
            ] = result.events
   end
 
@@ -75,8 +77,10 @@ defmodule MOQX.CloudflarePublisherReducerTest do
     assert result.state.publications == %{}
 
     assert [
-             {:publication_cancelled, ^publication,
-              %MOQX.ProtocolError{code: 1, reason: "expired"}}
+             %MOQX.Event.PublicationCancelled{
+               publication: ^publication,
+               error: %MOQX.ProtocolError{code: 1, reason: "expired"}
+             }
            ] = result.events
   end
 

@@ -91,7 +91,8 @@ implementation.
 - feeding normalized transport events and public operations to the selected
   protocol implementation;
 - applying returned transport actions;
-- publishing returned public events;
+- publishing typed `MOQX.Event.*` values in a stable client envelope to the
+  caller-selected event recipient;
 - runtime process ownership, timeouts, and shutdown coordination.
 
 The driver does not decode protocol bytes, know message identifiers, classify
@@ -198,6 +199,21 @@ subscriptions, incrementally decodes the observed `SubgroupIdExt` object
 streams, and publishes decoded `%MOQX.Catalog{}` and typed `%MOQX.Object{}`
 events. It also handles subscribe errors, unsubscribe, connection close, and
 catalog-driven CMAF capture.
+
+The completed subscriber lifecycle decodes `PUBLISH_DONE` without treating it
+as immediate end-of-stream. The protocol reducer associates subgroup streams
+with subscriptions and requests a driver-owned delivery timer. A typed
+`MOQX.Event.SubscriptionDone` is emitted after the advertised stream count has
+been processed, or with explicit timeout metadata when the delivery timer
+expires. Timer scheduling remains a runtime action, not a process side effect
+inside protocol code.
+
+Public events use typed structs inside `{:moqx, client, event}`. Connections
+default event ownership to the connecting process and accept an explicit
+`events_to: pid` router for shared sessions. `MOQX.Testing.Transport` packages
+the deterministic transport for downstream integration tests; it remains an
+explicit caller-selected test dependency and is never constructed by the
+production facade.
 
 The Cloudflare publisher slice extends that same implementation with
 protocol-neutral publication and track handles. Applications register content;

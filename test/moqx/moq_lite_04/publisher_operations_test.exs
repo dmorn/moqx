@@ -4,8 +4,8 @@ defmodule MOQX.MOQLite04.PublisherOperationsTest do
   alias MOQX.MOQLite04
   alias MOQX.MOQLite04.Client
   alias MOQX.MOQLite04.Session
+  alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
-  alias MOQX.Transport.Support
 
   test "publisher accepts a subscription and publishes a group frame" do
     %{subscriber: subscriber, publisher: publisher} = connected_clients()

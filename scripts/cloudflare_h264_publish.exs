@@ -80,10 +80,17 @@ defmodule MOQX.Scripts.CloudflareH264Publish do
 
   defp await_publication(client, publication, timeout) do
     receive do
-      {:moqx, ^client, {:publication_ready, ^publication}} -> :ok
-      {:moqx, ^client, {:publication_error, ^publication, error}} -> {:error, error}
-      {:moqx, ^client, {:publication_cancelled, ^publication, error}} -> {:error, error}
-      {:moqx, ^client, {:error, reason}} -> {:error, reason}
+      {:moqx, ^client, %MOQX.Event.PublicationReady{publication: ^publication}} -> :ok
+
+      {:moqx, ^client,
+       %MOQX.Event.PublicationFailed{publication: ^publication, error: error}} ->
+        {:error, error}
+
+      {:moqx, ^client,
+       %MOQX.Event.PublicationCancelled{publication: ^publication, error: error}} ->
+        {:error, error}
+
+      {:moqx, ^client, %MOQX.Event.ProtocolFailed{reason: reason}} -> {:error, reason}
     after
       timeout -> {:error, :publication_timeout}
     end
@@ -94,14 +101,15 @@ defmodule MOQX.Scripts.CloudflareH264Publish do
 
     with {:ok, subscription} <- MOQX.subscribe(client, track) do
       receive do
-        {:moqx, ^client, {:catalog, catalog}} ->
+        {:moqx, ^client, %MOQX.Event.CatalogReceived{catalog: catalog}} ->
           _result = MOQX.unsubscribe(client, subscription)
           {:ok, catalog}
 
-        {:moqx, ^client, {:subscription_error, ^subscription, error}} ->
+        {:moqx, ^client,
+         %MOQX.Event.SubscriptionFailed{subscription: ^subscription, error: error}} ->
           {:error, error}
 
-        {:moqx, ^client, {:error, reason}} ->
+        {:moqx, ^client, %MOQX.Event.ProtocolFailed{reason: reason}} ->
           {:error, reason}
       after
         timeout -> {:error, :catalog_timeout}

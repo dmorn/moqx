@@ -5,7 +5,8 @@ defmodule MOQX.MOQLite04.SessionTest do
   alias MOQX.MOQLite04.Error
   alias MOQX.MOQLite04.Session
   alias MOQX.MOQLite04.StreamCodec
-  alias MOQX.Transport.{BackendRef, Conn, Support}
+  alias MOQX.Testing.Transport, as: Support
+  alias MOQX.Transport.{BackendRef, Conn}
   alias MOQX.Transport.Conn.Stream
   alias MOQX.Transport.Conn.Stream.Info
 
@@ -415,7 +416,7 @@ defmodule MOQX.MOQLite04.SessionTest do
   end
 
   describe "support transport integration" do
-    test "handles normalized stream data emitted by MOQX.Transport.Support" do
+    test "handles normalized stream data emitted by MOQX.Testing.Transport" do
       {ctx, client, server} = support_pair()
 
       assert {:ok, client_stream, ctx} =

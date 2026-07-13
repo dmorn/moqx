@@ -18,12 +18,20 @@ defmodule MOQX do
   @doc "Connects to an endpoint using one explicitly selected protocol implementation."
   @spec connect(binary() | URI.t(), keyword()) :: {:ok, MOQX.Client.t()} | {:error, term()}
   def connect(endpoint, options) when is_binary(endpoint) or is_struct(endpoint, URI) do
-    with {:ok, endpoint} <- parse_endpoint(endpoint),
+    with {:ok, event_recipient} <- event_recipient(options),
+         {:ok, endpoint} <- parse_endpoint(endpoint),
          {:ok, protocol} <- Resolver.fetch(Keyword.fetch!(options, :protocol)) do
-      ConnectionDriver.start(endpoint, protocol, options, self())
+      ConnectionDriver.start(endpoint, protocol, options, event_recipient)
     end
   rescue
     KeyError -> {:error, :protocol_required}
+  end
+
+  defp event_recipient(options) do
+    case Keyword.get(options, :events_to, self()) do
+      pid when is_pid(pid) -> {:ok, pid}
+      _other -> {:error, :events_to_must_be_a_pid}
+    end
   end
 
   @doc "Subscribes to a protocol-neutral track address."

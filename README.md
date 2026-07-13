@@ -42,7 +42,8 @@ catalog_track = %MOQX.TrackRef{namespace: ["bbb"], track: ".catalog"}
 {:ok, subscription} = MOQX.subscribe(client, catalog_track)
 
 receive do
-  {:moqx, ^client, {:catalog, %MOQX.Catalog{} = catalog}} ->
+  {:moqx, ^client,
+   %MOQX.Event.CatalogReceived{catalog: %MOQX.Catalog{} = catalog}} ->
     catalog.tracks
 end
 ```
@@ -59,7 +60,10 @@ subscription, group, subgroup, object, and priority coordinates:
 {:ok, subscription} = MOQX.subscribe(client, MOQX.Catalog.Track.track_ref(video))
 
 receive do
-  {:moqx, ^client, {:object, %MOQX.Object{subscription: ^subscription} = object}} ->
+  {:moqx, ^client,
+   %MOQX.Event.ObjectReceived{
+     object: %MOQX.Object{subscription: ^subscription} = object
+   }} ->
     object.payload
 end
 ```
@@ -90,7 +94,34 @@ ffmpeg -v error -f h264 -i /tmp/cloudflare-bbb.h264 -f null -
 
 `MOQX.unsubscribe/2` sends the selected protocol's unsubscribe message;
 `MOQX.close/2` closes the connection. Relay rejections are delivered as
-`{:subscription_error, subscription, %MOQX.ProtocolError{}}`.
+`MOQX.Event.SubscriptionFailed`, while `MOQX.Event.SubscriptionDone` is emitted
+only after every stream advertised by `PUBLISH_DONE` has been processed or the
+subscription's `:delivery_timeout` has elapsed.
+
+All application-facing output uses typed `MOQX.Event.*` structs inside the
+stable `{:moqx, client, event}` envelope. By default events go to the process
+that calls `MOQX.connect/2`; shared connection owners can choose a router:
+
+```elixir
+{:ok, client} =
+  MOQX.connect(endpoint,
+    protocol: :cloudflare_draft_14,
+    events_to: router_pid
+  )
+```
+
+Downstream projects can run hermetic protocol tests with the packaged in-memory
+transport. It must be selected explicitly and is never chosen by production
+facade code:
+
+```elixir
+{:ok, network} = MOQX.Testing.Transport.start_network()
+
+MOQX.connect("moqt://localhost:443",
+  protocol: :cloudflare_draft_14,
+  transport: {MOQX.Testing.Transport, network: network, profile: :draft_14}
+)
+```
 
 ## Cloudflare draft-14 publisher
 

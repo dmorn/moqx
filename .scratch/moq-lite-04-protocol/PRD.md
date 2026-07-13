@@ -48,7 +48,7 @@ The implementation should proceed in narrow slices:
 8. Add subscriber-style client operations, with role implied by each operation
    rather than by a whole-connection mode.
 9. Add publisher-style client operations and a client-level
-   subscribe/group/frame smoke flow over `MOQX.Transport.Support`.
+   subscribe/group/frame smoke flow over `MOQX.Testing.Transport`.
 
 ## User Stories
 

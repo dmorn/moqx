@@ -3,8 +3,8 @@ defmodule MOQX.CloudflarePublisherTest do
 
   alias MOQX.Protocol.MOQTDraft14.Codec
   alias MOQX.Protocol.MOQTDraft14.Messages
+  alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
-  alias MOQX.Transport.Support
 
   test "publishes retained subgroup data and completes the Cloudflare lifecycle" do
     {:ok, network} = Support.start_network()
@@ -152,8 +152,13 @@ defmodule MOQX.CloudflarePublisherTest do
     assert :ok = MOQX.publish_object(client, track, object)
     send(relay.pid, :track_ready)
 
-    assert_receive {:moqx, ^client, {:publication_ready, ^publication}}, 1_000
-    assert_receive {:moqx, ^client, {:publication_subscribed, ^track, 1}}, 1_000
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationReady{publication: ^publication}},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 1}},
+                   1_000
+
     assert_receive :subscriber_finished, 1_000
 
     assert :ok = MOQX.finish_publication(client, publication)

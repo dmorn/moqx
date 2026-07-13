@@ -3,8 +3,8 @@ defmodule MOQX.CloudflareCatalogTest do
 
   import Bitwise
 
+  alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
-  alias MOQX.Transport.Support
 
   @tag :tmp_dir
   test "obtains Cloudflare's catalog and captures ordered H.264 CMAF", %{tmp_dir: tmp_dir} do
@@ -114,20 +114,26 @@ defmodule MOQX.CloudflareCatalogTest do
     track = %MOQX.TrackRef{namespace: ["bbb"], track: ".catalog"}
     assert {:ok, %MOQX.Subscription{track: ^track}} = MOQX.subscribe(client, track)
 
-    assert_receive {:moqx, ^client, {:catalog, %MOQX.Catalog{version: 1} = decoded}}, 1_000
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.CatalogReceived{
+                      catalog: %MOQX.Catalog{version: 1} = decoded
+                    }},
+                   1_000
+
     assert [%MOQX.Catalog.Track{name: "video.m4s"}] = decoded.tracks
 
     media = %MOQX.TrackRef{namespace: ["bbb"], track: "1.m4s"}
     assert {:ok, %MOQX.Subscription{} = media_subscription} = MOQX.subscribe(client, media)
 
     assert_receive {:moqx, ^client,
-                    {:object,
-                     %MOQX.Object{
-                       subscription: ^media_subscription,
-                       group_id: 10,
-                       object_id: 0,
-                       payload: "fragment-10a"
-                     }}},
+                    %MOQX.Event.ObjectReceived{
+                      object: %MOQX.Object{
+                        subscription: ^media_subscription,
+                        group_id: 10,
+                        object_id: 0,
+                        payload: "fragment-10a"
+                      }
+                    }},
                    1_000
 
     path = Path.join(tmp_dir, "capture.mp4")
@@ -147,33 +153,37 @@ defmodule MOQX.CloudflareCatalogTest do
     assert {:ok, missing_subscription} = MOQX.subscribe(client, missing)
 
     assert_receive {:moqx, ^client,
-                    {:subscription_error, ^missing_subscription,
-                     %MOQX.ProtocolError{
-                       protocol: :cloudflare_draft_14,
-                       operation: :subscribe,
-                       code: 4,
-                       reason: "not found"
-                     }}},
+                    %MOQX.Event.SubscriptionFailed{
+                      subscription: ^missing_subscription,
+                      error: %MOQX.ProtocolError{
+                        protocol: :cloudflare_draft_14,
+                        operation: :subscribe,
+                        code: 4,
+                        reason: "not found"
+                      }
+                    }},
                    1_000
 
     assert_receive {:moqx, ^client,
-                    {:object,
-                     %MOQX.Object{
-                       subscription: ^media_subscription,
-                       group_id: 10,
-                       object_id: 1,
-                       payload: "fragment-10b"
-                     }}},
+                    %MOQX.Event.ObjectReceived{
+                      object: %MOQX.Object{
+                        subscription: ^media_subscription,
+                        group_id: 10,
+                        object_id: 1,
+                        payload: "fragment-10b"
+                      }
+                    }},
                    1_000
 
     assert_receive {:moqx, ^client,
-                    {:object,
-                     %MOQX.Object{
-                       subscription: ^media_subscription,
-                       group_id: 11,
-                       object_id: 0,
-                       payload: "fragment-11"
-                     }}},
+                    %MOQX.Event.ObjectReceived{
+                      object: %MOQX.Object{
+                        subscription: ^media_subscription,
+                        group_id: 11,
+                        object_id: 0,
+                        payload: "fragment-11"
+                      }
+                    }},
                    1_000
 
     assert :ok = MOQX.close(client)

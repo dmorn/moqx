@@ -197,16 +197,20 @@ defmodule MOQX.CMAF do
     timeout = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:moqx, ^client, {:object, %Object{subscription: ^subscription} = object}} ->
+      {:moqx, ^client,
+       %MOQX.Event.ObjectReceived{
+         object: %Object{subscription: ^subscription} = object
+       }} ->
         await_objects(client, subscription, remaining - 1, deadline, [object | objects])
 
-      {:moqx, ^client, {:subscription_error, ^subscription, reason}} ->
+      {:moqx, ^client, %MOQX.Event.SubscriptionFailed{subscription: ^subscription, error: reason}} ->
         {:error, {:subscription_error, reason}}
 
-      {:moqx, ^client, {:object_status, %Object{subscription: ^subscription} = object}} ->
+      {:moqx, ^client,
+       %MOQX.Event.ObjectStatus{object: %Object{subscription: ^subscription} = object}} ->
         {:error, {:object_status, object.status}}
 
-      {:moqx, ^client, {:error, reason}} ->
+      {:moqx, ^client, %MOQX.Event.ProtocolFailed{reason: reason}} ->
         {:error, reason}
     after
       timeout -> {:error, {:object_timeout, subscription.track}}

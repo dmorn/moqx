@@ -193,6 +193,25 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
     end
   end
 
+  @spec decode_publish_done(binary()) :: {:ok, struct()} | {:error, term()}
+  def decode_publish_done(payload) do
+    with {:ok, request_id, rest} <- decode_varint(payload),
+         {:ok, status_code, rest} <- decode_varint(rest),
+         {:ok, stream_count, rest} <- decode_varint(rest),
+         {:ok, reason_length, rest} <- decode_varint(rest),
+         true <- byte_size(rest) == reason_length do
+      {:ok,
+       %Messages.PublishDone{
+         request_id: request_id,
+         status_code: status_code,
+         stream_count: stream_count,
+         reason_phrase: rest
+       }}
+    else
+      _other -> {:error, :invalid_publish_done}
+    end
+  end
+
   @spec decode_subscribe(binary()) :: {:ok, struct()} | {:error, term()}
   def decode_subscribe(payload) do
     with {:ok, request_id, rest} <- decode_varint(payload),

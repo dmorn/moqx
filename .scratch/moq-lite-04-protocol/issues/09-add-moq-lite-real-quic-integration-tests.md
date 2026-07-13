@@ -13,7 +13,7 @@ Type: enhancement
 
 Add explicit integration coverage proving the completed MOQ Lite 04 client APIs
 work over the real `MOQX.Transport.Quicer` backend, not only the deterministic
-`MOQX.Transport.Support` backend.
+`MOQX.Testing.Transport` backend.
 
 The first integration slice should use a local real-QUIC self-pair: one endpoint
 acts as the subscriber, the other as the publisher, and the test exercises the

@@ -12,25 +12,29 @@ defmodule MOQX.Runtime.ConnectionDriver do
   alias MOQX.Transport
 
   defstruct [
-    :owner,
+    :event_recipient,
+    :event_recipient_monitor,
     :client,
     :protocol,
     :protocol_state,
     :context,
     :connection,
-    streams: %{}
+    streams: %{},
+    timers: %{}
   ]
 
   @type state :: %__MODULE__{}
 
   @spec start(URI.t(), module(), keyword(), pid()) :: {:ok, MOQX.Client.t()} | {:error, term()}
-  def start(endpoint, protocol, options, owner) do
+  def start(endpoint, protocol, options, event_recipient) do
     timeout = Keyword.get(options, :timeout, 5_000)
     caller = self()
     ref = make_ref()
 
     {pid, monitor} =
-      spawn_monitor(fn -> initialize(caller, ref, owner, endpoint, protocol, options) end)
+      spawn_monitor(fn ->
+        initialize(caller, ref, event_recipient, endpoint, protocol, options)
+      end)
 
     receive do
       {^ref, {:ok, %MOQX.Client{} = client}} ->
@@ -115,7 +119,7 @@ defmodule MOQX.Runtime.ConnectionDriver do
     end
   end
 
-  defp initialize(caller, ref, owner, endpoint, protocol, options) do
+  defp initialize(caller, ref, event_recipient, endpoint, protocol, options) do
     with {:ok, transport_spec} <- protocol.transport_spec(endpoint, options),
          {backend, backend_options} <- transport_selection(options),
          {:ok, context} <- Transport.new(backend, backend_options),
@@ -137,7 +141,8 @@ defmodule MOQX.Runtime.ConnectionDriver do
       client = %MOQX.Client{pid: self(), protocol: protocol.id()}
 
       state = %__MODULE__{
-        owner: owner,
+        event_recipient: event_recipient,
+        event_recipient_monitor: Process.monitor(event_recipient),
         client: client,
         protocol: protocol,
         protocol_state: protocol_state,
@@ -184,6 +189,27 @@ defmodule MOQX.Runtime.ConnectionDriver do
     end
   end
 
+  defp handle_message(
+         %{event_recipient_monitor: monitor} = state,
+         waiter,
+         {:DOWN, monitor, :process, _pid, _reason}
+       ) do
+    _result = Transport.close_connection(state.context, state.connection, 0)
+    exit(:normal)
+    {state, waiter}
+  end
+
+  defp handle_message(state, waiter, {:moqx_runtime_timeout, key, token}) do
+    case state.timers[key] do
+      {_timer, ^token} ->
+        state = %{state | timers: Map.delete(state.timers, key)}
+        handle_protocol_runtime_event(state, waiter, {:runtime_timeout, key})
+
+      _other ->
+        {state, waiter}
+    end
+  end
+
   defp handle_message(state, waiter, message) do
     case Transport.normalize_event(state.context, state.connection, message) do
       {:ok, event, context} -> handle_transport_event(%{state | context: context}, waiter, event)
@@ -219,6 +245,13 @@ defmodule MOQX.Runtime.ConnectionDriver do
 
     case transition(state, result) do
       {:ok, state} -> maybe_stop_after_transport(state, waiter, event)
+      {:error, reason, state} -> fail_waiter_or_owner(state, waiter, reason)
+    end
+  end
+
+  defp handle_protocol_runtime_event(state, waiter, event) do
+    case transition(state, state.protocol.handle_transport(state.protocol_state, event)) do
+      {:ok, state} -> {state, waiter}
       {:error, reason, state} -> fail_waiter_or_owner(state, waiter, reason)
     end
   end
@@ -313,6 +346,29 @@ defmodule MOQX.Runtime.ConnectionDriver do
     end
   end
 
+  defp apply_action(state, {:start_timer, key, timeout})
+       when is_integer(timeout) and timeout >= 0 do
+    state = cancel_timer(state, key)
+    token = make_ref()
+    timer = Process.send_after(self(), {:moqx_runtime_timeout, key, token}, timeout)
+    {:ok, %{state | timers: Map.put(state.timers, key, {timer, token})}}
+  end
+
+  defp apply_action(state, {:cancel_timer, key}) do
+    {:ok, cancel_timer(state, key)}
+  end
+
+  defp cancel_timer(state, key) do
+    case Map.pop(state.timers, key) do
+      {nil, _timers} ->
+        state
+
+      {{timer, _token}, timers} ->
+        _result = Process.cancel_timer(timer)
+        %{state | timers: timers}
+    end
+  end
+
   defp maybe_set_active(context, _stream, false), do: {:ok, context}
 
   defp maybe_set_active(context, stream, active),
@@ -341,7 +397,7 @@ defmodule MOQX.Runtime.ConnectionDriver do
     Enum.each(events, fn
       :ready -> :ok
       {:subscription_started, _subscription} -> :ok
-      event -> send(state.owner, {:moqx, state.client, event})
+      event -> send(state.event_recipient, {:moqx, state.client, event})
     end)
   end
 
@@ -397,7 +453,12 @@ defmodule MOQX.Runtime.ConnectionDriver do
   end
 
   defp fail_waiter_or_owner(state, nil, reason) do
-    send(state.owner, {:moqx, state.client, {:error, reason}})
+    send(state.event_recipient, {
+      :moqx,
+      state.client,
+      %MOQX.Event.ProtocolFailed{reason: reason}
+    })
+
     exit({:protocol_error, reason})
   end
 

@@ -4,8 +4,8 @@ defmodule MOQX.MOQLite04.ClientTest do
   alias MOQX.MOQLite04
   alias MOQX.MOQLite04.{Client, Session}
   alias MOQX.MOQLite04.StreamCodec
+  alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
-  alias MOQX.Transport.Support
 
   test "connects with a URI string over the support transport" do
     %{network: network, listener: listener, listener_ctx: listener_ctx, port: port} =

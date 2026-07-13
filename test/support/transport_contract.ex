@@ -637,8 +637,8 @@ end
 defmodule MOQX.TransportContract.SupportFixture do
   @moduledoc false
 
+  alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
-  alias MOQX.Transport.Support
 
   def connect_pair(profile) do
     {:ok, network} = Support.start_network()

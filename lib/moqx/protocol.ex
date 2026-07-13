@@ -24,7 +24,10 @@ defmodule MOQX.Protocol do
 
   @callback handle_operation(state(), MOQX.Operation.t()) :: Transition.result()
 
-  @callback handle_transport(state(), MOQX.Transport.event()) :: Transition.result()
+  @type runtime_event :: {:runtime_timeout, term()}
+
+  @callback handle_transport(state(), MOQX.Transport.event() | runtime_event()) ::
+              Transition.result()
 
   @callback capabilities(state()) :: Capabilities.t()
 

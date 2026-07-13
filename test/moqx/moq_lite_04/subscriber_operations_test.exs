@@ -5,8 +5,8 @@ defmodule MOQX.MOQLite04.SubscriberOperationsTest do
   alias MOQX.MOQLite04.Client
   alias MOQX.MOQLite04.Session
   alias MOQX.MOQLite04.StreamCodec
+  alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
-  alias MOQX.Transport.Support
 
   test "subscribe opens a subscriber transaction stream and receives SubscribeOk" do
     %{client: client, server: server} = connected_pair()

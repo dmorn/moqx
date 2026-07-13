@@ -1,7 +1,8 @@
-defmodule MOQX.Transport.SupportTest do
+defmodule MOQX.Testing.TransportTest do
   use ExUnit.Case, async: true
 
-  alias MOQX.Transport.{Profile, Support}
+  alias MOQX.Testing.Transport, as: Support
+  alias MOQX.Transport.Profile
 
   test "establishes a deterministic client/server connection lifecycle" do
     {:ok, network} = Support.start_network()

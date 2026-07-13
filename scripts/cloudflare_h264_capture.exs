@@ -21,7 +21,7 @@ try do
 
   catalog =
     receive do
-      {:moqx, ^client, {:catalog, %Catalog{} = catalog}} -> catalog
+      {:moqx, ^client, %MOQX.Event.CatalogReceived{catalog: %Catalog{} = catalog}} -> catalog
     after
       10_000 -> raise "timed out waiting for Cloudflare catalog"
     end

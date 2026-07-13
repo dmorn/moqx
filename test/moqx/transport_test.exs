@@ -1,10 +1,10 @@
 defmodule MOQX.TransportTest do
   use ExUnit.Case, async: true
 
+  alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport.Conn.Stream
   alias MOQX.Transport.Conn.Stream.Sender
   alias MOQX.Transport.Profile
-  alias MOQX.Transport.Support
 
   describe "context API" do
     test "creates caller-owned context and opens support transport connection pair through facade" do
@@ -377,7 +377,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "receive_event distinguishes unknown messages and timeout" do
-      {:ok, ctx} = MOQX.Transport.new(MOQX.Transport.Support)
+      {:ok, ctx} = MOQX.Transport.new(MOQX.Testing.Transport)
       send(self(), {:not_transport, :message})
 
       assert {:unknown, {:not_transport, :message}, ctx} == MOQX.Transport.receive_event(ctx, 0)
@@ -385,8 +385,8 @@ defmodule MOQX.TransportTest do
     end
 
     test "receive_event fails loudly for transport event with unknown handle" do
-      {:ok, ctx} = MOQX.Transport.new(MOQX.Transport.Support)
-      unknown_stream = %MOQX.Transport.Support.Stream{pid: self()}
+      {:ok, ctx} = MOQX.Transport.new(MOQX.Testing.Transport)
+      unknown_stream = %MOQX.Testing.Transport.Stream{pid: self()}
 
       send(
         self(),

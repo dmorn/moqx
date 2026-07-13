@@ -14,7 +14,10 @@ defmodule MOQX.Integration.CloudflareCatalogTest do
     track = %MOQX.TrackRef{namespace: ["bbb"], track: ".catalog"}
     assert {:ok, %MOQX.Subscription{track: ^track}} = MOQX.subscribe(client, track)
 
-    assert_receive {:moqx, ^client, {:catalog, %MOQX.Catalog{} = catalog}}, 10_000
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.CatalogReceived{catalog: %MOQX.Catalog{} = catalog}},
+                   10_000
+
     assert catalog.version == 1
     assert catalog.tracks != []
 

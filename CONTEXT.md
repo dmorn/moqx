@@ -10,7 +10,7 @@ over native QUIC.
 - Protocol code depends on `MOQX.Transport`, not raw `:quicer` messages.
 - `MOQX.Transport` exposes generic QUIC streams, DATAGRAMs, capabilities, and
   shutdown semantics. Draft-specific stream policy lives above it.
-- `MOQX.Transport.Support` is for deterministic tests. Production facade code
+- `MOQX.Testing.Transport` is the packaged deterministic test seam. Production facade code
   must not name or construct support-transport state.
 - Send APIs return backend-admission credit. Peer delivery is proven later by
   normalized events or receiver evidence.
