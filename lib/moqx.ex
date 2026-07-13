@@ -39,6 +39,34 @@ defmodule MOQX do
     ConnectionDriver.unsubscribe(client, subscription)
   end
 
+  @doc "Advertises a namespace through the selected protocol implementation."
+  @spec publish(MOQX.Client.t(), [binary()], keyword()) ::
+          {:ok, MOQX.Publication.t()} | {:error, term()}
+  def publish(client, namespace, options \\ []) when is_list(namespace) do
+    ConnectionDriver.publish(client, namespace, options)
+  end
+
+  @doc "Registers a track under an active publication."
+  @spec add_track(MOQX.Client.t(), MOQX.Publication.t(), binary(), keyword()) ::
+          {:ok, MOQX.PublishedTrack.t()} | {:error, term()}
+  def add_track(client, publication, track, options \\ []) when is_binary(track) do
+    ConnectionDriver.add_track(client, publication, track, options)
+  end
+
+  @doc "Publishes one object on a registered track."
+  @spec publish_object(MOQX.Client.t(), MOQX.PublishedTrack.t(), MOQX.Object.t()) ::
+          :ok | {:error, term()}
+  def publish_object(client, track, object) do
+    ConnectionDriver.publish_object(client, track, object)
+  end
+
+  @doc "Finishes every active delivery and withdraws a namespace publication."
+  @spec finish_publication(MOQX.Client.t(), MOQX.Publication.t(), keyword()) ::
+          :ok | {:error, term()}
+  def finish_publication(client, publication, options \\ []) do
+    ConnectionDriver.finish_publication(client, publication, options)
+  end
+
   @doc "Gracefully closes the selected protocol connection."
   @spec close(MOQX.Client.t(), keyword()) :: :ok | {:error, term()}
   def close(client, options \\ []) do

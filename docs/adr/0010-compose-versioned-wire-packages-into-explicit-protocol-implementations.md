@@ -197,8 +197,26 @@ The subscriber slice completes draft-14 setup, sends live catalog and media
 subscriptions, incrementally decodes the observed `SubgroupIdExt` object
 streams, and publishes decoded `%MOQX.Catalog{}` and typed `%MOQX.Object{}`
 events. It also handles subscribe errors, unsubscribe, connection close, and
-catalog-driven CMAF capture. Datagram delivery, publishing, and other protocol
-implementations remain incremental work behind the same boundaries.
+catalog-driven CMAF capture.
+
+The Cloudflare publisher slice extends that same implementation with
+protocol-neutral publication and track handles. Applications register content;
+the concrete implementation advertises PUBLISH_NAMESPACE, handles inbound
+SUBSCRIBE and UNSUBSCRIBE, assigns aliases, emits SUBSCRIBE_OK or ERROR, sends
+subgroup streams, reports PUBLISH_DONE, and withdraws the namespace with
+PUBLISH_NAMESPACE_DONE. Publisher-initiated PUBLISH/PUBLISH_OK remains a
+separate future capability rather than a prerequisite for this demonstrated
+announce-and-serve lifecycle.
+
+Authorization preserves the same ownership boundary. The shared draft-14 wire
+package encodes the standard AUTHORIZATION TOKEN structure. The Cloudflare
+implementation attaches an explicitly supplied credential to setup and
+namespace publication. Secret lookup, issuance, permission, and rotation stay
+outside the library. Secret values and sensitive encoded actions have redacted
+inspection and are unwrapped only at the driver's transport-send boundary.
+
+Datagram delivery and other protocol implementations remain incremental work
+behind the same boundaries.
 
 ## Consequences
 

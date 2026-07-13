@@ -62,6 +62,32 @@ defmodule MOQX.Runtime.ConnectionDriver do
     call(pid, {:operation, %Operation.Unsubscribe{subscription: subscription}}, 5_000)
   end
 
+  @spec publish(MOQX.Client.t(), [binary()], keyword()) ::
+          {:ok, MOQX.Publication.t()} | {:error, term()}
+  def publish(%MOQX.Client{pid: pid}, namespace, options) do
+    call(pid, {:operation, %Operation.Publish{namespace: namespace, options: options}}, 5_000)
+  end
+
+  @spec add_track(MOQX.Client.t(), MOQX.Publication.t(), binary(), keyword()) ::
+          {:ok, MOQX.PublishedTrack.t()} | {:error, term()}
+  def add_track(%MOQX.Client{pid: pid}, publication, track, options) do
+    operation = %Operation.AddTrack{publication: publication, track: track, options: options}
+    call(pid, {:operation, operation}, 5_000)
+  end
+
+  @spec publish_object(MOQX.Client.t(), MOQX.PublishedTrack.t(), MOQX.Object.t()) ::
+          :ok | {:error, term()}
+  def publish_object(%MOQX.Client{pid: pid}, track, object) do
+    call(pid, {:operation, %Operation.PublishObject{track: track, object: object}}, 5_000)
+  end
+
+  @spec finish_publication(MOQX.Client.t(), MOQX.Publication.t(), keyword()) ::
+          :ok | {:error, term()}
+  def finish_publication(%MOQX.Client{pid: pid}, publication, options) do
+    operation = %Operation.FinishPublication{publication: publication, options: options}
+    call(pid, {:operation, operation}, 5_000)
+  end
+
   @spec close(MOQX.Client.t(), term()) :: :ok | {:error, term()}
   def close(%MOQX.Client{pid: pid}, reason) do
     case call(pid, {:operation, %Operation.Close{reason: reason}}, 5_000) do
@@ -246,12 +272,24 @@ defmodule MOQX.Runtime.ConnectionDriver do
   end
 
   defp apply_action(state, {:open_stream, key, options, initial_data}) do
+    apply_action(state, {:open_stream, key, options, initial_data, []})
+  end
+
+  defp apply_action(state, {:open_stream, key, options, initial_data, send_options}) do
     active = Keyword.get(options, :active, false)
 
     with {:ok, stream, context} <- Transport.open_stream(state.context, state.connection, options),
          {:ok, context} <- maybe_set_active(context, stream, active),
-         {:ok, _send, context} <- Transport.send_stream(context, stream, initial_data) do
-      {:ok, %{state | context: context, streams: Map.put(state.streams, key, stream)}}
+         {:ok, _send, context} <-
+           Transport.send_stream(context, stream, transport_data(initial_data), send_options) do
+      streams =
+        if Keyword.get(send_options, :finish, false) do
+          state.streams
+        else
+          Map.put(state.streams, key, stream)
+        end
+
+      {:ok, %{state | context: context, streams: streams}}
     else
       {:error, reason, context} -> {:error, reason, %{state | context: context}}
     end
@@ -259,7 +297,8 @@ defmodule MOQX.Runtime.ConnectionDriver do
 
   defp apply_action(state, {:send_stream, key, data, options}) do
     with {:ok, stream} <- Map.fetch(state.streams, key),
-         {:ok, _send, context} <- Transport.send_stream(state.context, stream, data, options) do
+         {:ok, _send, context} <-
+           Transport.send_stream(state.context, stream, transport_data(data), options) do
       {:ok, %{state | context: context}}
     else
       :error -> {:error, {:unknown_stream_key, key}, state}
@@ -278,6 +317,9 @@ defmodule MOQX.Runtime.ConnectionDriver do
 
   defp maybe_set_active(context, stream, active),
     do: Transport.set_active(context, stream, active)
+
+  defp transport_data(%MOQX.Sensitive{} = sensitive), do: MOQX.Sensitive.reveal(sensitive)
+  defp transport_data(data), do: data
 
   defp accept_peer_stream(state) do
     case Transport.accept_stream(state.context, state.connection, [], 10) do
@@ -311,6 +353,18 @@ defmodule MOQX.Runtime.ConnectionDriver do
       {:subscription_ended, _subscription} ->
         {:ok, Enum.reject(events, &match?({:subscription_ended, _}, &1))}
 
+      {:publication_started, publication} ->
+        {{:ok, publication}, Enum.reject(events, &match?({:publication_started, _}, &1))}
+
+      {:track_added, track} ->
+        {{:ok, track}, Enum.reject(events, &match?({:track_added, _}, &1))}
+
+      {:object_published, _track} ->
+        {:ok, Enum.reject(events, &match?({:object_published, _}, &1))}
+
+      {:publication_finished, _publication} ->
+        {:ok, Enum.reject(events, &match?({:publication_finished, _}, &1))}
+
       :connection_ended ->
         {:ok, Enum.reject(events, &(&1 == :connection_ended))}
 
@@ -321,6 +375,10 @@ defmodule MOQX.Runtime.ConnectionDriver do
 
   defp operation_reply_event?({:subscription_started, _subscription}), do: true
   defp operation_reply_event?({:subscription_ended, _subscription}), do: true
+  defp operation_reply_event?({:publication_started, _publication}), do: true
+  defp operation_reply_event?({:track_added, _track}), do: true
+  defp operation_reply_event?({:object_published, _track}), do: true
+  defp operation_reply_event?({:publication_finished, _publication}), do: true
   defp operation_reply_event?(:connection_ended), do: true
   defp operation_reply_event?(_event), do: false
 

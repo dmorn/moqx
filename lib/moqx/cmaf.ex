@@ -1,5 +1,5 @@
 defmodule MOQX.CMAF do
-  @moduledoc "Helpers for capturing catalog-advertised CMAF tracks."
+  @moduledoc "Helpers for capturing and publishing catalog-advertised CMAF tracks."
 
   alias MOQX.{Catalog, Client, Object}
   alias MOQX.Catalog.Track
@@ -27,6 +27,104 @@ defmodule MOQX.CMAF do
             first_group_id: non_neg_integer(),
             last_group_id: non_neg_integer()
           }
+  end
+
+  defmodule Publication do
+    @moduledoc "Handles and counts for one prepared CMAF file publication."
+
+    @enforce_keys [
+      :publication,
+      :catalog_track,
+      :init_track,
+      :media_track,
+      :fragment_count,
+      :init_bytes,
+      :media_bytes
+    ]
+
+    defstruct [
+      :publication,
+      :catalog_track,
+      :init_track,
+      :media_track,
+      :fragment_count,
+      :init_bytes,
+      :media_bytes
+    ]
+
+    @type t :: %__MODULE__{
+            publication: MOQX.Publication.t(),
+            catalog_track: MOQX.PublishedTrack.t(),
+            init_track: MOQX.PublishedTrack.t(),
+            media_track: MOQX.PublishedTrack.t(),
+            fragment_count: pos_integer(),
+            init_bytes: pos_integer(),
+            media_bytes: pos_integer()
+          }
+  end
+
+  @doc """
+  Publishes a fragmented MP4 as catalog, initialization, and media tracks.
+
+  The file is prepared as retained content so a subscriber may arrive after
+  namespace registration. The caller remains responsible for finishing the
+  returned namespace publication.
+  """
+  @spec publish_file(Client.t(), Path.t(), keyword()) ::
+          {:ok, Publication.t()} | {:error, term()}
+  def publish_file(%Client{} = client, path, options) do
+    namespace = Keyword.fetch!(options, :namespace)
+    catalog_name = Keyword.get(options, :catalog_track, ".catalog")
+    init_name = Keyword.get(options, :init_track, "init.mp4")
+    media_name = Keyword.get(options, :media_track, "video.m4s")
+    codec = Keyword.get(options, :codec, "avc1.42C01F")
+
+    with {:ok, init, fragments} <- read_fragments(path),
+         {:ok, publication} <- MOQX.publish(client, namespace),
+         {:ok, catalog_track} <-
+           MOQX.add_track(client, publication, catalog_name, retention: :latest),
+         {:ok, init_track} <-
+           MOQX.add_track(client, publication, init_name, retention: :latest),
+         {:ok, media_track} <-
+           MOQX.add_track(client, publication, media_name, retention: :all),
+         :ok <-
+           publish_payload(
+             client,
+             catalog_track,
+             catalog_payload(namespace, init_name, media_name, codec),
+             0
+           ),
+         :ok <- publish_payload(client, init_track, init, 0),
+         :ok <- publish_fragments(client, media_track, fragments) do
+      {:ok,
+       %Publication{
+         publication: publication,
+         catalog_track: catalog_track,
+         init_track: init_track,
+         media_track: media_track,
+         fragment_count: length(fragments),
+         init_bytes: byte_size(init),
+         media_bytes: Enum.reduce(fragments, 0, &(byte_size(&1) + &2))
+       }}
+    end
+  rescue
+    KeyError -> {:error, :namespace_required}
+  end
+
+  @doc "Splits a fragmented MP4 into its initialization bytes and `moof` fragments."
+  @spec read_fragments(Path.t()) :: {:ok, binary(), [binary()]} | {:error, term()}
+  def read_fragments(path) do
+    with {:ok, bytes} <- File.read(path),
+         {:ok, boxes} <- decode_boxes(bytes),
+         {:ok, init, fragments} <- partition_fragments(boxes) do
+      {:ok, init, fragments}
+    else
+      {:error, reason} when reason in [:enoent, :eacces, :eisdir] ->
+        {:error, {:file_error, reason}}
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @doc """
@@ -145,4 +243,91 @@ defmodule MOQX.CMAF do
   defp object_coordinates(%Object{} = object) do
     {object.group_id, object.subgroup_id || 0, object.object_id}
   end
+
+  defp publish_payload(client, track, payload, group_id) do
+    MOQX.publish_object(client, track, %Object{
+      group_id: group_id,
+      subgroup_id: 0,
+      object_id: 0,
+      publisher_priority: 127,
+      payload: payload
+    })
+  end
+
+  defp publish_fragments(client, track, fragments) do
+    fragments
+    |> Enum.with_index()
+    |> Enum.reduce_while(:ok, fn {fragment, group_id}, :ok ->
+      case publish_payload(client, track, fragment, group_id) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp catalog_payload(namespace, init_name, media_name, codec) do
+    JSON.encode!(%{
+      "version" => 1,
+      "streamingFormat" => 1,
+      "streamingFormatVersion" => "0.2",
+      "supportsDeltaUpdates" => false,
+      "commonTrackFields" => %{
+        "namespace" => Enum.join(namespace, "/"),
+        "packaging" => "cmaf"
+      },
+      "tracks" => [
+        %{
+          "name" => media_name,
+          "initTrack" => init_name,
+          "selectionParams" => %{"codec" => codec}
+        }
+      ]
+    })
+  end
+
+  defp decode_boxes(bytes), do: decode_boxes(bytes, [])
+  defp decode_boxes(<<>>, boxes), do: {:ok, Enum.reverse(boxes)}
+
+  defp decode_boxes(<<1::32, type::binary-size(4), size::64, _rest::binary>> = bytes, boxes)
+       when size >= 16 and byte_size(bytes) >= size do
+    <<box::binary-size(^size), rest::binary>> = bytes
+    decode_boxes(rest, [{type, box} | boxes])
+  end
+
+  defp decode_boxes(<<0::32, type::binary-size(4), _rest::binary>> = bytes, boxes) do
+    {:ok, Enum.reverse([{type, bytes} | boxes])}
+  end
+
+  defp decode_boxes(<<size::32, type::binary-size(4), _rest::binary>> = bytes, boxes)
+       when size >= 8 and byte_size(bytes) >= size do
+    <<box::binary-size(^size), rest::binary>> = bytes
+    decode_boxes(rest, [{type, box} | boxes])
+  end
+
+  defp decode_boxes(_bytes, _boxes), do: {:error, :invalid_iso_bmff}
+
+  defp partition_fragments(boxes) do
+    {init_boxes, media_boxes} = Enum.split_while(boxes, fn {type, _box} -> type != "moof" end)
+
+    with false <- init_boxes == [],
+         false <- media_boxes == [] do
+      fragments =
+        media_boxes
+        |> Enum.chunk_while([], &fragment_chunk/2, &fragment_after/1)
+        |> Enum.map(fn fragment ->
+          fragment |> Enum.map(&elem(&1, 1)) |> IO.iodata_to_binary()
+        end)
+
+      {:ok, init_boxes |> Enum.map(&elem(&1, 1)) |> IO.iodata_to_binary(), fragments}
+    else
+      true -> {:error, :not_fragmented_mp4}
+    end
+  end
+
+  defp fragment_chunk({"moof", _box} = box, []), do: {:cont, [box]}
+  defp fragment_chunk({"moof", _box} = box, chunk), do: {:cont, Enum.reverse(chunk), [box]}
+  defp fragment_chunk(box, chunk), do: {:cont, [box | chunk]}
+
+  defp fragment_after([]), do: {:cont, []}
+  defp fragment_after(chunk), do: {:cont, Enum.reverse(chunk), []}
 end

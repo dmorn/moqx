@@ -7,9 +7,15 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
 
   @draft_14 0xFF00000E
 
-  @spec client_setup() :: binary()
-  def client_setup do
-    encode(%Messages.ClientSetup{versions: [@draft_14], params: %{2 => 100}})
+  @spec client_setup(map()) :: binary()
+  def client_setup(params \\ %{}) do
+    encode(%Messages.ClientSetup{versions: [@draft_14], params: Map.put_new(params, 2, 100)})
+  end
+
+  @doc "Encodes a draft-14 AUTHORIZATION TOKEN using Alias Type USE_VALUE."
+  @spec authorization_token(binary(), non_neg_integer()) :: binary()
+  def authorization_token(token, token_type \\ 0) when is_binary(token) do
+    IO.iodata_to_binary([encode_varint(0x03), encode_varint(token_type), token])
   end
 
   @spec subscribe(non_neg_integer(), MOQX.TrackRef.t(), keyword()) :: binary()
@@ -56,8 +62,67 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
     frame(0x0A, encode_varint(request_id))
   end
 
+  def encode(%Messages.PublishNamespace{} = publish) do
+    frame(0x06, [
+      encode_varint(publish.request_id),
+      encode_namespace(publish.track_namespace),
+      encode_params(publish.params)
+    ])
+  end
+
+  def encode(%Messages.SubscribeOk{} = subscribe) do
+    {content_exists, location} = encode_optional_location(subscribe.largest_location)
+
+    frame(0x04, [
+      encode_varint(subscribe.request_id),
+      encode_varint(subscribe.track_alias),
+      encode_varint(subscribe.expires || 0),
+      <<encode_group_order(subscribe.group_order), content_exists>>,
+      location,
+      encode_params(subscribe.params)
+    ])
+  end
+
+  def encode(%Messages.SubscribeError{} = error) do
+    frame(0x05, [
+      encode_varint(error.request_id),
+      encode_varint(error.error_code),
+      encode_reason(error.reason_phrase)
+    ])
+  end
+
+  def encode(%Messages.PublishDone{} = done) do
+    frame(0x0B, [
+      encode_varint(done.request_id),
+      encode_varint(done.status_code),
+      encode_varint(done.stream_count),
+      encode_reason(done.reason_phrase)
+    ])
+  end
+
+  def encode(%Messages.PublishNamespaceDone{} = done) do
+    frame(0x09, encode_namespace(done.track_namespace))
+  end
+
   @spec unsubscribe(non_neg_integer()) :: binary()
   def unsubscribe(request_id), do: encode(%Messages.Unsubscribe{request_id: request_id})
+
+  @spec encode_subgroup(non_neg_integer(), MOQX.Object.t()) :: binary()
+  def encode_subgroup(track_alias, %MOQX.Object{} = object) do
+    subgroup_id = object.subgroup_id || 0
+    priority = object.publisher_priority || 127
+
+    IO.iodata_to_binary([
+      encode_varint(0x15),
+      encode_varint(track_alias),
+      encode_varint(object.group_id),
+      encode_varint(subgroup_id),
+      <<priority>>,
+      encode_varint(object.object_id),
+      encode_varint(0),
+      encode_object_payload(object)
+    ])
+  end
 
   @spec decode_control(binary()) ::
           {:ok, [{non_neg_integer(), binary()}], binary()} | {:error, term()}
@@ -125,6 +190,79 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
        }}
     else
       _other -> {:error, :invalid_subscribe_error}
+    end
+  end
+
+  @spec decode_subscribe(binary()) :: {:ok, struct()} | {:error, term()}
+  def decode_subscribe(payload) do
+    with {:ok, request_id, rest} <- decode_varint(payload),
+         {:ok, namespace, rest} <- decode_namespace(rest),
+         {:ok, track_name, rest} <- decode_bytes(rest),
+         <<priority, group_order, forward, rest::binary>> <- rest,
+         {:ok, filter_type, rest} <- decode_varint(rest),
+         {:ok, _filter, rest} <- skip_filter(filter_type, rest),
+         {:ok, params, <<>>} <- decode_params(rest) do
+      {:ok,
+       %Messages.Subscribe{
+         request_id: request_id,
+         track_namespace: namespace,
+         track_name: track_name,
+         subscriber_priority: priority,
+         group_order: decode_group_order(group_order),
+         forward: forward == 1,
+         filter_type: decode_filter_type(filter_type),
+         params: params
+       }}
+    else
+      _other -> {:error, :invalid_subscribe}
+    end
+  end
+
+  @spec decode_unsubscribe(binary()) :: {:ok, struct()} | {:error, term()}
+  def decode_unsubscribe(payload) do
+    case decode_varint(payload) do
+      {:ok, request_id, <<>>} -> {:ok, %Messages.Unsubscribe{request_id: request_id}}
+      _other -> {:error, :invalid_unsubscribe}
+    end
+  end
+
+  @spec decode_publish_namespace_ok(binary()) :: {:ok, struct()} | {:error, term()}
+  def decode_publish_namespace_ok(payload) do
+    case decode_varint(payload) do
+      {:ok, request_id, <<>>} -> {:ok, %Messages.PublishNamespaceOk{request_id: request_id}}
+      _other -> {:error, :invalid_publish_namespace_ok}
+    end
+  end
+
+  @spec decode_publish_namespace_error(binary()) :: {:ok, struct()} | {:error, term()}
+  def decode_publish_namespace_error(payload) do
+    with {:ok, request_id, rest} <- decode_varint(payload),
+         {:ok, error_code, rest} <- decode_varint(rest),
+         {:ok, reason, <<>>} <- decode_bytes(rest) do
+      {:ok,
+       %Messages.PublishNamespaceError{
+         request_id: request_id,
+         error_code: error_code,
+         reason_phrase: reason
+       }}
+    else
+      _other -> {:error, :invalid_publish_namespace_error}
+    end
+  end
+
+  @spec decode_publish_namespace_cancel(binary()) :: {:ok, struct()} | {:error, term()}
+  def decode_publish_namespace_cancel(payload) do
+    with {:ok, namespace, rest} <- decode_namespace(payload),
+         {:ok, error_code, rest} <- decode_varint(rest),
+         {:ok, reason, <<>>} <- decode_bytes(rest) do
+      {:ok,
+       %Messages.PublishNamespaceCancel{
+         track_namespace: namespace,
+         error_code: error_code,
+         reason_phrase: reason
+       }}
+    else
+      _other -> {:error, :invalid_publish_namespace_cancel}
     end
   end
 
@@ -211,7 +349,9 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
 
   defp encode_params(params) do
     encoded =
-      Enum.map(params, fn
+      params
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.map(fn
         {key, value} when rem(key, 2) == 0 ->
           [encode_varint(key), encode_varint(value)]
 
@@ -222,15 +362,52 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
     [encode_varint(map_size(params)), encoded]
   end
 
+  defp encode_namespace(namespace) do
+    [
+      encode_varint(length(namespace))
+      | Enum.flat_map(namespace, fn component ->
+          [encode_varint(byte_size(component)), component]
+        end)
+    ]
+  end
+
+  defp encode_reason(reason), do: [encode_varint(byte_size(reason)), reason]
+
+  defp encode_optional_location(nil), do: {0, <<>>}
+
+  defp encode_optional_location({group_id, object_id}) do
+    {1, [encode_varint(group_id), encode_varint(object_id)]}
+  end
+
+  defp encode_object_payload(%MOQX.Object{status: nil, payload: payload}) do
+    [encode_varint(byte_size(payload)), payload]
+  end
+
+  defp encode_object_payload(%MOQX.Object{status: status}) do
+    [encode_varint(0), encode_varint(encode_object_status(status))]
+  end
+
   defp encode_group_order(:publisher), do: 0
   defp encode_group_order(:ascending), do: 1
   defp encode_group_order(:descending), do: 2
+
+  defp decode_group_order(0), do: :publisher
+  defp decode_group_order(1), do: :ascending
+  defp decode_group_order(2), do: :descending
+  defp decode_group_order(other), do: {:unknown, other}
 
   defp encode_bool(true), do: 1
   defp encode_bool(false), do: 0
 
   defp encode_filter(:next_group_start), do: encode_varint(1)
   defp encode_filter(:largest_object), do: encode_varint(2)
+
+  defp decode_filter_type(1), do: :next_group_start
+  defp decode_filter_type(2), do: :largest_object
+  defp decode_filter_type(other), do: {:unknown, other}
+
+  defp skip_filter(filter, rest) when filter in [1, 2], do: {:ok, nil, rest}
+  defp skip_filter(_filter, _rest), do: {:error, :unsupported_filter}
 
   defp decode_location(0, rest), do: {:ok, nil, rest}
 
@@ -282,6 +459,49 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
   defp decode_object_status(3), do: {:ok, :end_of_group}
   defp decode_object_status(4), do: {:ok, :end_of_track}
   defp decode_object_status(status), do: {:error, {:invalid_object_status, status}}
+
+  defp encode_object_status(:object_does_not_exist), do: 1
+  defp encode_object_status(:end_of_group), do: 3
+  defp encode_object_status(:end_of_track), do: 4
+
+  defp decode_namespace(binary) do
+    with {:ok, count, rest} <- decode_varint(binary) do
+      decode_namespace(count, rest, [])
+    end
+  end
+
+  defp decode_namespace(0, rest, components), do: {:ok, Enum.reverse(components), rest}
+
+  defp decode_namespace(count, binary, components) do
+    with {:ok, component, rest} <- decode_bytes(binary) do
+      decode_namespace(count - 1, rest, [component | components])
+    end
+  end
+
+  defp decode_bytes(binary) do
+    with {:ok, length, rest} <- decode_varint(binary),
+         true <- byte_size(rest) >= length do
+      <<value::binary-size(^length), trailing::binary>> = rest
+      {:ok, value, trailing}
+    else
+      _other -> :more
+    end
+  end
+
+  defp decode_params(binary) do
+    with {:ok, count, rest} <- decode_varint(binary) do
+      decode_params(count, rest, %{})
+    end
+  end
+
+  defp decode_params(0, rest, params), do: {:ok, params, rest}
+
+  defp decode_params(count, binary, params) do
+    with {:ok, key, rest} <- decode_varint(binary),
+         {:ok, value, rest} <- skip_param_value(key, rest) do
+      decode_params(count - 1, rest, Map.put(params, key, value))
+    end
+  end
 
   defp skip_params(binary) do
     with {:ok, count, rest} <- decode_varint(binary) do

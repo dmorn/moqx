@@ -92,6 +92,79 @@ ffmpeg -v error -f h264 -i /tmp/cloudflare-bbb.h264 -f null -
 `MOQX.close/2` closes the connection. Relay rejections are delivered as
 `{:subscription_error, subscription, %MOQX.ProtocolError{}}`.
 
+## Cloudflare draft-14 publisher
+
+Publishing uses the same explicitly selected client. Applications declare a
+namespace and tracks, then supply protocol-neutral objects; Cloudflare request
+IDs, track aliases, and inbound relay subscriptions remain implementation
+details:
+
+```elixir
+{:ok, publication} = MOQX.publish(client, ["live", "camera-1"])
+
+{:ok, video} =
+  MOQX.add_track(client, publication, "video.m4s", retention: :live)
+
+:ok =
+  MOQX.publish_object(client, video, %MOQX.Object{
+    group_id: 42,
+    subgroup_id: 0,
+    object_id: 0,
+    publisher_priority: 127,
+    payload: fragment
+  })
+
+:ok = MOQX.finish_publication(client, publication)
+```
+
+Retention is application policy: `:live` discards objects when no subscriber
+is active, `:latest` retains one object for catalog or initialization tracks,
+and `:all` replays bounded static content.
+
+`MOQX.CMAF.publish_file/3` prepares a fragmented MP4 as a CMSF `.catalog`, an
+initialization track, and retained media fragments:
+
+```elixir
+{:ok, published} =
+  MOQX.CMAF.publish_file(client, "/tmp/input.mp4",
+    namespace: ["live", "camera-1"]
+  )
+```
+
+Managed relay credentials are explicit caller input. The credential value is
+wrapped so both its value and the resulting sensitive wire actions have
+redacted inspection:
+
+```elixir
+{:ok, client} =
+  MOQX.connect(endpoint,
+    protocol: :cloudflare_draft_14,
+    authorization: MOQX.Secret.new(token)
+  )
+```
+
+MOQX encodes that value using draft-14's standard AUTHORIZATION TOKEN
+parameter. Token acquisition, permissions, storage, and rotation remain relay
+and application concerns; MOQX does not read process or application
+configuration for credentials.
+
+The manual publisher/subscriber roundtrip accepts a token file so the token is
+not placed in shell history. Omit it for Cloudflare's public relay:
+
+```bash
+mix run scripts/cloudflare_h264_publish.exs /tmp/input.mp4 \
+  --endpoint moqt://draft-14.cloudflare.mediaoverquic.com:443 \
+  --namespace moqx-test/unique-publisher \
+  --output /tmp/roundtrip.mp4 \
+  --timeout 120000
+
+# For a managed relay, additionally pass:
+# --authorization-file /path/to/temporarily-mounted-token
+
+ffprobe -v error -show_streams /tmp/roundtrip.mp4
+ffmpeg -v error -i /tmp/roundtrip.mp4 -map 0:v:0 -f null -
+```
+
 ## Development
 
 ```bash

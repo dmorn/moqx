@@ -5,7 +5,14 @@ defmodule MOQX.Operation do
   Wire messages are intentionally excluded from this namespace.
   """
 
-  @type t :: Subscribe.t() | Unsubscribe.t() | Close.t()
+  @type t ::
+          Subscribe.t()
+          | Unsubscribe.t()
+          | Publish.t()
+          | AddTrack.t()
+          | PublishObject.t()
+          | FinishPublication.t()
+          | Close.t()
 
   defmodule Subscribe do
     @moduledoc "Subscribes to one application-level track address."
@@ -23,6 +30,46 @@ defmodule MOQX.Operation do
     defstruct [:subscription]
 
     @type t :: %__MODULE__{subscription: term()}
+  end
+
+  defmodule Publish do
+    @moduledoc "Advertises one application-level track namespace."
+
+    @enforce_keys [:namespace]
+    defstruct [:namespace, options: []]
+
+    @type t :: %__MODULE__{namespace: [binary()], options: keyword()}
+  end
+
+  defmodule AddTrack do
+    @moduledoc "Registers one track under an active publication."
+
+    @enforce_keys [:publication, :track]
+    defstruct [:publication, :track, options: []]
+
+    @type t :: %__MODULE__{
+            publication: MOQX.Publication.t(),
+            track: binary(),
+            options: keyword()
+          }
+  end
+
+  defmodule PublishObject do
+    @moduledoc "Publishes one protocol-neutral object on a registered track."
+
+    @enforce_keys [:track, :object]
+    defstruct [:track, :object]
+
+    @type t :: %__MODULE__{track: MOQX.PublishedTrack.t(), object: MOQX.Object.t()}
+  end
+
+  defmodule FinishPublication do
+    @moduledoc "Gracefully withdraws a namespace publication."
+
+    @enforce_keys [:publication]
+    defstruct [:publication, options: []]
+
+    @type t :: %__MODULE__{publication: MOQX.Publication.t(), options: keyword()}
   end
 
   defmodule Close do

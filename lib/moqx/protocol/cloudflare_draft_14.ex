@@ -8,9 +8,19 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
 
   @behaviour MOQX.Protocol
 
-  alias MOQX.Operation.{Close, Subscribe, Unsubscribe}
+  alias MOQX.Operation.{
+    AddTrack,
+    Close,
+    FinishPublication,
+    Publish,
+    PublishObject,
+    Subscribe,
+    Unsubscribe
+  }
+
   alias MOQX.Protocol.{Capabilities, Transition, TransportSpec}
   alias MOQX.Protocol.MOQTDraft14.Codec
+  alias MOQX.Protocol.MOQTDraft14.Messages
   alias MOQX.Protocol.MOQTDraft14.SubgroupDecoder
 
   defmodule State do
@@ -20,7 +30,11 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
               stream_decoders: %{},
               next_request_id: 0,
               subscriptions: %{},
-              aliases: %{}
+              aliases: %{},
+              authorization: nil,
+              publications: %{},
+              publisher_subscriptions: %{},
+              next_publication_stream: 0
   end
 
   @impl true
@@ -42,13 +56,23 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   end
 
   @impl true
-  def init(_endpoint, _options), do: {:ok, %State{}}
+  def init(_endpoint, options) do
+    case Keyword.get(options, :authorization) do
+      nil -> {:ok, %State{}}
+      %MOQX.Secret{} = authorization -> {:ok, %State{authorization: authorization}}
+      _other -> {:error, :authorization_must_be_an_moqx_secret}
+    end
+  end
 
   @impl true
   def handle_transport(%State{phase: :starting} = state, {:connection_event, _conn, :ready, _}) do
     Transition.ok(%{state | phase: :setup},
       actions: [
-        {:open_stream, :control, [direction: :bidirectional, active: true], Codec.client_setup()}
+        {:open_stream, :control, [direction: :bidirectional, active: true],
+         sensitive_bytes(
+           Codec.client_setup(authorization_params(state.authorization)),
+           state.authorization
+         )}
       ]
     )
   end
@@ -119,6 +143,111 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     end
   end
 
+  def handle_operation(%State{phase: :ready} = state, %Publish{
+        namespace: namespace,
+        options: options
+      }) do
+    with :ok <- validate_namespace(namespace),
+         false <- publication_namespace?(state, namespace) do
+      request_id = state.next_request_id
+      publication = %MOQX.Publication{id: request_id, namespace: namespace}
+
+      entry = %{
+        publication: publication,
+        status: :pending,
+        tracks: %{},
+        options: options
+      }
+
+      next_state = %{
+        state
+        | next_request_id: request_id + 2,
+          publications: Map.put(state.publications, request_id, entry)
+      }
+
+      message = %Messages.PublishNamespace{
+        request_id: request_id,
+        track_namespace: namespace,
+        params: authorization_params(state.authorization)
+      }
+
+      Transition.ok(next_state,
+        events: [{:publication_started, publication}],
+        actions: [
+          {:send_stream, :control, sensitive_bytes(Codec.encode(message), state.authorization),
+           []}
+        ]
+      )
+    else
+      true -> Transition.error(state, :namespace_already_published)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  def handle_operation(%State{phase: :ready} = state, %AddTrack{} = operation) do
+    with {:ok, entry} <- fetch_publication(state, operation.publication),
+         :ok <- validate_track_name(operation.track),
+         false <- Map.has_key?(entry.tracks, operation.track),
+         {:ok, retention} <- validate_retention(Keyword.get(operation.options, :retention, :live)) do
+      track_ref = %MOQX.TrackRef{
+        namespace: operation.publication.namespace,
+        track: operation.track
+      }
+
+      published_track = %MOQX.PublishedTrack{
+        publication: operation.publication,
+        track: track_ref,
+        retention: retention
+      }
+
+      track_entry = %{track: published_track, retained: []}
+      entry = %{entry | tracks: Map.put(entry.tracks, operation.track, track_entry)}
+
+      next_state = %{
+        state
+        | publications: Map.put(state.publications, operation.publication.id, entry)
+      }
+
+      Transition.ok(next_state, events: [{:track_added, published_track}])
+    else
+      true -> Transition.error(state, :track_already_registered)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  def handle_operation(%State{phase: :ready} = state, %PublishObject{} = operation) do
+    published_track = operation.track
+
+    with {:ok, entry} <- fetch_publication(state, operation.track.publication),
+         :ok <- validate_object(operation.object),
+         %{track: ^published_track} = track_entry <- entry.tracks[operation.track.track.track] do
+      track_entry = retain_object(track_entry, operation.object)
+      entry = %{entry | tracks: Map.put(entry.tracks, operation.track.track.track, track_entry)}
+
+      state = %{
+        state
+        | publications: Map.put(state.publications, operation.track.publication.id, entry)
+      }
+
+      {state, actions} = object_actions(state, operation.track, operation.object)
+
+      Transition.ok(state,
+        events: [{:object_published, operation.track}],
+        actions: actions
+      )
+    else
+      nil -> Transition.error(state, :unknown_published_track)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  def handle_operation(%State{phase: :ready} = state, %FinishPublication{} = operation) do
+    case fetch_publication(state, operation.publication) do
+      {:ok, _entry} -> finish_known_publication(state, operation)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
   def handle_operation(%State{phase: :ready} = state, %Close{}) do
     Transition.ok(%{state | phase: :closed},
       events: [:connection_ended],
@@ -129,13 +258,18 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   def handle_operation(%State{} = state, %Subscribe{}),
     do: Transition.error(state, :connection_not_ready)
 
+  def handle_operation(%State{} = state, operation)
+      when is_struct(operation, Publish) or is_struct(operation, AddTrack) or
+             is_struct(operation, PublishObject) or is_struct(operation, FinishPublication),
+      do: Transition.error(state, :connection_not_ready)
+
   def handle_operation(%State{} = state, _operation),
     do: Transition.error(state, :unsupported_operation)
 
   @impl true
   def capabilities(_state) do
     %Capabilities{
-      operations: MapSet.new([:subscribe]),
+      operations: MapSet.new([:subscribe, :publish]),
       delivery_modes: MapSet.new([:subgroup]),
       metadata: %{catalog_track: ".catalog"}
     }
@@ -209,6 +343,72 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     end
   end
 
+  defp handle_control_frame(%State{} = state, {0x07, payload}) do
+    with {:ok, message} <- Codec.decode_publish_namespace_ok(payload),
+         %{publication: publication} = entry <- state.publications[message.request_id] do
+      entry = %{entry | status: :active}
+
+      next_state = %{
+        state
+        | publications: Map.put(state.publications, publication.id, entry)
+      }
+
+      Transition.ok(next_state, events: [{:publication_ready, publication}])
+    else
+      nil -> Transition.error(state, :unknown_publish_namespace_request)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  defp handle_control_frame(%State{} = state, {0x08, payload}) do
+    with {:ok, message} <- Codec.decode_publish_namespace_error(payload),
+         %{publication: publication} <- state.publications[message.request_id] do
+      error = %MOQX.ProtocolError{
+        protocol: id(),
+        operation: :publish,
+        code: message.error_code,
+        reason: message.reason_phrase
+      }
+
+      next_state = %{state | publications: Map.delete(state.publications, publication.id)}
+      Transition.ok(next_state, events: [{:publication_error, publication, error}])
+    else
+      nil -> Transition.error(state, :unknown_publish_namespace_request)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  defp handle_control_frame(%State{} = state, {0x0C, payload}) do
+    with {:ok, message} <- Codec.decode_publish_namespace_cancel(payload),
+         {_id, %{publication: publication}} <-
+           publication_by_namespace(state, message.track_namespace) do
+      error = %MOQX.ProtocolError{
+        protocol: id(),
+        operation: :publish,
+        code: message.error_code,
+        reason: message.reason_phrase
+      }
+
+      next_state = drop_publication(state, publication.id)
+      Transition.ok(next_state, events: [{:publication_cancelled, publication, error}])
+    else
+      nil -> Transition.error(state, :unknown_published_namespace)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  defp handle_control_frame(%State{} = state, {0x03, payload}) do
+    with {:ok, subscribe} <- Codec.decode_subscribe(payload) do
+      handle_inbound_subscribe(state, subscribe)
+    end
+  end
+
+  defp handle_control_frame(%State{} = state, {0x0A, payload}) do
+    with {:ok, unsubscribe} <- Codec.decode_unsubscribe(payload) do
+      handle_inbound_unsubscribe(state, unsubscribe)
+    end
+  end
+
   defp handle_control_frame(%State{} = state, {_type, _payload}), do: Transition.ok(state)
 
   defp handle_subgroup_data(state, stream_id, data) do
@@ -265,6 +465,247 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
       payload: decoded.payload
     }
   end
+
+  defp handle_inbound_subscribe(state, subscribe) do
+    with {_publication_id, entry} <- publication_by_namespace(state, subscribe.track_namespace),
+         %{track: published_track} = track_entry <- entry.tracks[subscribe.track_name] do
+      largest_location = largest_location(track_entry.retained)
+
+      subscription = %{
+        request_id: subscribe.request_id,
+        publication_id: published_track.publication.id,
+        track: published_track,
+        track_alias: subscribe.request_id,
+        forward: subscribe.forward,
+        stream_count: 0
+      }
+
+      state = %{
+        state
+        | publisher_subscriptions:
+            Map.put(state.publisher_subscriptions, subscribe.request_id, subscription)
+      }
+
+      ok = %Messages.SubscribeOk{
+        request_id: subscribe.request_id,
+        track_alias: subscribe.request_id,
+        expires: 0,
+        group_order: :ascending,
+        largest_location: largest_location,
+        params: %{}
+      }
+
+      {state, replay_actions} = replay_actions(state, subscription, track_entry.retained)
+
+      Transition.ok(state,
+        events: [{:publication_subscribed, published_track, subscribe.request_id}],
+        actions: [{:send_stream, :control, Codec.encode(ok), []} | replay_actions]
+      )
+    else
+      nil ->
+        error = %Messages.SubscribeError{
+          request_id: subscribe.request_id,
+          error_code: 4,
+          reason_phrase: "track not found"
+        }
+
+        Transition.ok(state,
+          actions: [{:send_stream, :control, Codec.encode(error), []}]
+        )
+    end
+  end
+
+  defp handle_inbound_unsubscribe(state, unsubscribe) do
+    case Map.pop(state.publisher_subscriptions, unsubscribe.request_id) do
+      {nil, _subscriptions} ->
+        Transition.ok(state)
+
+      {subscription, subscriptions} ->
+        done = publish_done(subscription, 3, "subscription ended")
+
+        Transition.ok(%{state | publisher_subscriptions: subscriptions},
+          events: [
+            {:publication_unsubscribed, subscription.track, subscription.request_id}
+          ],
+          actions: [{:send_stream, :control, Codec.encode(done), []}]
+        )
+    end
+  end
+
+  defp object_actions(state, track, object) do
+    state.publisher_subscriptions
+    |> Enum.filter(fn {_id, subscription} ->
+      subscription.track == track and subscription.forward
+    end)
+    |> Enum.reduce({state, []}, fn {_id, subscription}, {state, actions} ->
+      {state, action} = subgroup_action(state, subscription, object)
+      {state, actions ++ [action]}
+    end)
+  end
+
+  defp replay_actions(state, _subscription, []), do: {state, []}
+  defp replay_actions(state, %{forward: false}, _objects), do: {state, []}
+
+  defp replay_actions(state, subscription, objects) do
+    Enum.reduce(objects, {state, []}, fn object, {state, actions} ->
+      current = state.publisher_subscriptions[subscription.request_id]
+      {state, action} = subgroup_action(state, current, object)
+      {state, actions ++ [action]}
+    end)
+  end
+
+  defp subgroup_action(state, subscription, object) do
+    stream_number = state.next_publication_stream
+    key = {:publication, subscription.request_id, stream_number}
+    bytes = Codec.encode_subgroup(subscription.track_alias, object)
+    subscription = %{subscription | stream_count: subscription.stream_count + 1}
+
+    state = %{
+      state
+      | next_publication_stream: stream_number + 1,
+        publisher_subscriptions:
+          Map.put(state.publisher_subscriptions, subscription.request_id, subscription)
+    }
+
+    action =
+      {:open_stream, key, [direction: :unidirectional], bytes, [finish: true]}
+
+    {state, action}
+  end
+
+  defp retain_object(%{track: %{retention: :live}} = entry, _object), do: entry
+
+  defp retain_object(%{track: %{retention: :latest}} = entry, object),
+    do: %{entry | retained: [object]}
+
+  defp retain_object(%{track: %{retention: :all}} = entry, object),
+    do: %{entry | retained: entry.retained ++ [object]}
+
+  defp finish_publication_subscriptions(state, publication_id, options) do
+    status = Keyword.get(options, :status, 2)
+    reason = Keyword.get(options, :reason, "track ended")
+
+    Enum.reduce(state.publisher_subscriptions, {%{}, []}, fn {id, subscription},
+                                                             {remaining, actions} ->
+      if subscription.publication_id == publication_id do
+        done = publish_done(subscription, status, reason)
+        {remaining, actions ++ [{:send_stream, :control, Codec.encode(done), []}]}
+      else
+        {Map.put(remaining, id, subscription), actions}
+      end
+    end)
+  end
+
+  defp finish_known_publication(state, operation) do
+    {subscriptions, done_actions} =
+      finish_publication_subscriptions(state, operation.publication.id, operation.options)
+
+    namespace_done = %Messages.PublishNamespaceDone{
+      track_namespace: operation.publication.namespace
+    }
+
+    next_state = %{
+      state
+      | publications: Map.delete(state.publications, operation.publication.id),
+        publisher_subscriptions: subscriptions
+    }
+
+    Transition.ok(next_state,
+      events: [{:publication_finished, operation.publication}],
+      actions: done_actions ++ [{:send_stream, :control, Codec.encode(namespace_done), []}]
+    )
+  end
+
+  defp publish_done(subscription, status, reason) do
+    %Messages.PublishDone{
+      request_id: subscription.request_id,
+      status_code: status,
+      stream_count: subscription.stream_count,
+      reason_phrase: reason
+    }
+  end
+
+  defp largest_location([]), do: nil
+
+  defp largest_location(objects) do
+    objects
+    |> Enum.map(&{&1.group_id, &1.object_id})
+    |> Enum.max()
+  end
+
+  defp fetch_publication(state, %MOQX.Publication{id: id, namespace: namespace}) do
+    case state.publications[id] do
+      %{publication: %{namespace: ^namespace}} = entry -> {:ok, entry}
+      _other -> {:error, :unknown_publication}
+    end
+  end
+
+  defp publication_namespace?(state, namespace),
+    do: not is_nil(publication_by_namespace(state, namespace))
+
+  defp publication_by_namespace(state, namespace) do
+    Enum.find(state.publications, fn {_id, entry} ->
+      entry.publication.namespace == namespace
+    end)
+  end
+
+  defp drop_publication(state, publication_id) do
+    subscriptions =
+      Map.reject(state.publisher_subscriptions, fn {_id, subscription} ->
+        subscription.publication_id == publication_id
+      end)
+
+    %{
+      state
+      | publications: Map.delete(state.publications, publication_id),
+        publisher_subscriptions: subscriptions
+    }
+  end
+
+  defp validate_namespace(namespace) do
+    if namespace != [] and Enum.all?(namespace, &(is_binary(&1) and byte_size(&1) > 0)) do
+      :ok
+    else
+      {:error, :invalid_namespace}
+    end
+  end
+
+  defp validate_retention(retention) when retention in [:live, :latest, :all],
+    do: {:ok, retention}
+
+  defp validate_retention(_retention), do: {:error, :invalid_retention}
+
+  defp validate_track_name(track) when is_binary(track) and byte_size(track) > 0, do: :ok
+  defp validate_track_name(_track), do: {:error, :invalid_track_name}
+
+  defp validate_object(%MOQX.Object{} = object) do
+    valid? =
+      non_negative_integer?(object.group_id) and
+        optional_non_negative_integer?(object.subgroup_id) and
+        non_negative_integer?(object.object_id) and
+        valid_priority?(object.publisher_priority) and valid_status?(object.status) and
+        is_binary(object.payload)
+
+    if valid?, do: :ok, else: {:error, :invalid_object}
+  end
+
+  defp non_negative_integer?(value), do: is_integer(value) and value >= 0
+  defp optional_non_negative_integer?(nil), do: true
+  defp optional_non_negative_integer?(value), do: non_negative_integer?(value)
+  defp valid_priority?(nil), do: true
+  defp valid_priority?(value), do: value in 0..255
+
+  defp valid_status?(status),
+    do: status in [nil, :object_does_not_exist, :end_of_group, :end_of_track]
+
+  defp authorization_params(nil), do: %{}
+
+  defp authorization_params(%MOQX.Secret{} = secret) do
+    %{3 => Codec.authorization_token(MOQX.Secret.reveal(secret))}
+  end
+
+  defp sensitive_bytes(bytes, nil), do: bytes
+  defp sensitive_bytes(bytes, %MOQX.Secret{}), do: MOQX.Sensitive.new(bytes)
 end
 
 defmodule MOQX.Protocol.CloudflareDraft14.Session do

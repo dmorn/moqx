@@ -38,6 +38,36 @@ defmodule MOQX.Protocol.MOQTDraft14.Messages.Unsubscribe do
   defstruct [:request_id]
 end
 
+defmodule MOQX.Protocol.MOQTDraft14.Messages.PublishNamespace do
+  @moduledoc "MOQT draft-14 PUBLISH_NAMESPACE message."
+  defstruct [:request_id, track_namespace: [], params: %{}]
+end
+
+defmodule MOQX.Protocol.MOQTDraft14.Messages.PublishNamespaceOk do
+  @moduledoc "MOQT draft-14 PUBLISH_NAMESPACE_OK message."
+  defstruct [:request_id]
+end
+
+defmodule MOQX.Protocol.MOQTDraft14.Messages.PublishNamespaceError do
+  @moduledoc "MOQT draft-14 PUBLISH_NAMESPACE_ERROR message."
+  defstruct [:request_id, :error_code, :reason_phrase]
+end
+
+defmodule MOQX.Protocol.MOQTDraft14.Messages.PublishNamespaceCancel do
+  @moduledoc "MOQT draft-14 PUBLISH_NAMESPACE_CANCEL message."
+  defstruct track_namespace: [], error_code: 0, reason_phrase: <<>>
+end
+
+defmodule MOQX.Protocol.MOQTDraft14.Messages.PublishNamespaceDone do
+  @moduledoc "MOQT draft-14 PUBLISH_NAMESPACE_DONE message."
+  defstruct track_namespace: []
+end
+
+defmodule MOQX.Protocol.MOQTDraft14.Messages.PublishDone do
+  @moduledoc "MOQT draft-14 PUBLISH_DONE message."
+  defstruct [:request_id, :status_code, :stream_count, reason_phrase: <<>>]
+end
+
 defmodule MOQX.Protocol.MOQTDraft14.Messages.SubgroupObject do
   @moduledoc "One object decoded from a MOQT draft-14 subgroup stream."
 

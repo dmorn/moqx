@@ -1,12 +1,13 @@
 defmodule MOQX.Object do
   @moduledoc """
-  One protocol-neutral media object delivered for a subscription.
+  One protocol-neutral media object.
 
-  Stream and object coordinates are preserved so callers can order, deduplicate
-  and inspect delivery without depending on wire-specific message structs.
+  Stream and object coordinates are shared by publication and subscription.
+  `subscription` is populated on inbound delivery and remains `nil` for an
+  outbound object supplied to a published track.
   """
 
-  @enforce_keys [:subscription, :group_id, :object_id, :payload]
+  @enforce_keys [:group_id, :object_id, :payload]
   defstruct [
     :subscription,
     :group_id,
@@ -18,11 +19,11 @@ defmodule MOQX.Object do
   ]
 
   @type t :: %__MODULE__{
-          subscription: MOQX.Subscription.t(),
+          subscription: MOQX.Subscription.t() | nil,
           group_id: non_neg_integer(),
           subgroup_id: non_neg_integer() | nil,
           object_id: non_neg_integer(),
-          publisher_priority: 0..255,
+          publisher_priority: 0..255 | nil,
           status: :object_does_not_exist | :end_of_group | :end_of_track | nil,
           payload: binary()
         }
