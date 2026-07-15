@@ -7,23 +7,26 @@
 
 ### Issue tracker
 
-- Local issues and PRDs live under `.scratch/<feature-slug>/`.
-- PRD path: `.scratch/<feature-slug>/PRD.md`.
-- Issue path: `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`.
-- Each issue carries a `Status:` line near the top.
-- Append conversation/progress under `## Comments`.
-- "Publish to the issue tracker" means create the appropriate `.scratch/<feature-slug>/...` file.
-- "Fetch the relevant ticket" means read the referenced path or issue number.
-
-### Triage labels
-
-- `needs-triage`: not yet evaluated.
-- `needs-info`: blocked waiting on information.
-- `ready-for-agent`: fully specified for an AFK agent.
-- `ready-for-human`: needs judgement, access, or risk acceptance.
-- `done`: implemented and verified.
-- `wontfix`: will not be actioned.
-- Record follow-up work as a new issue rather than reopening `done`.
+- GitHub Issues in `dmorn/moqx` are the only issue tracker and source of truth.
+- Do not create local issue, PRD, backlog, or status files under `.scratch` or
+  another repository directory.
+- Prefer the GitHub app for issue reads and writes; use authenticated `gh` as a
+  fallback when the app is unavailable for the repository.
+- Before creating an issue, search both open and closed GitHub issues for
+  duplicates or superseded work.
+- "Publish to the issue tracker" means create or update a GitHub issue in
+  `dmorn/moqx` and return its URL.
+- "Fetch the relevant ticket" means read the referenced GitHub issue, including
+  its current body, labels, state, and relevant comments.
+- Use GitHub issue state and repository labels rather than a parallel local
+  status vocabulary. Record blockers, dependencies, and deferrals in the issue
+  body or comments and link related issue numbers explicitly.
+- Close an issue only after its acceptance criteria are implemented and
+  verified. Record follow-up work as a new linked GitHub issue rather than
+  reopening completed work.
+- Durable architecture decisions belong in `docs/adr/`; durable operating or
+  development guidance belongs in the relevant tracked documentation, not in
+  an issue-tracker mirror.
 
 ### Domain docs
 
