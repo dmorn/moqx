@@ -239,17 +239,17 @@ defmodule MOQX.TransportContract do
             cleanup_pair(draft14_pair)
           end
 
-          moq_lite_pair = connect_pair(fixture, :moq_lite_04)
+          streams_only_pair = connect_pair(fixture, :streams_only)
 
           try do
-            %{ctx: ctx, client: client} = moq_lite_pair
+            %{ctx: ctx, client: client} = streams_only_pair
 
             assert %MOQX.Transport.Capabilities{datagrams: false, max_datagram_size: max_size} =
                      MOQX.Transport.capabilities(ctx, client)
 
             assert max_size in [:unknown, :unsupported]
           after
-            cleanup_pair(moq_lite_pair)
+            cleanup_pair(streams_only_pair)
           end
         end
 
@@ -270,13 +270,13 @@ defmodule MOQX.TransportContract do
         end
 
         test "rejects datagrams when profile disables them", %{fixture: fixture} do
-          pair = connect_pair(fixture, :moq_lite_04)
+          pair = connect_pair(fixture, :streams_only)
 
           try do
             %{ctx: ctx, client: client} = pair
 
             assert {:error, :datagrams_unavailable, ctx} =
-                     MOQX.Transport.send_datagram(ctx, client, "moq-lite")
+                     MOQX.Transport.send_datagram(ctx, client, "stream-data")
 
             assert {:timeout, _ctx} = MOQX.Transport.receive_event(ctx, 0)
           after
@@ -310,7 +310,7 @@ defmodule MOQX.TransportContract do
   defp finish_sending_event_test do
     quote do
       test "finish_sending emits normalized peer event", %{fixture: fixture} do
-        pair = connect_pair(fixture, :moq_lite_04)
+        pair = connect_pair(fixture, :streams_only)
 
         try do
           %{ctx: ctx, client: client, server: server} = pair
@@ -338,7 +338,7 @@ defmodule MOQX.TransportContract do
   defp finish_sending_order_test do
     quote do
       test "finish_sending is ordered after accepted stream payloads", %{fixture: fixture} do
-        pair = connect_pair(fixture, :moq_lite_04)
+        pair = connect_pair(fixture, :streams_only)
 
         try do
           %{ctx: ctx, client: client, server: server} = pair
@@ -367,7 +367,7 @@ defmodule MOQX.TransportContract do
   defp send_stream_finish_test do
     quote do
       test "send_stream can attach FIN to the final accepted payload", %{fixture: fixture} do
-        pair = connect_pair(fixture, :moq_lite_04)
+        pair = connect_pair(fixture, :streams_only)
 
         try do
           %{ctx: ctx, client: client, server: server} = pair
@@ -401,7 +401,7 @@ defmodule MOQX.TransportContract do
         alias MOQX.Transport.Conn.Stream
         alias MOQX.Transport.Conn.Stream.Sender
 
-        pair = connect_pair(fixture, :moq_lite_04)
+        pair = connect_pair(fixture, :streams_only)
 
         try do
           %{ctx: ctx, client: client, server: server} = pair
@@ -432,7 +432,7 @@ defmodule MOQX.TransportContract do
   defp abort_sending_event_test do
     quote do
       test "abort_sending preserves application error code in peer event", %{fixture: fixture} do
-        pair = connect_pair(fixture, :moq_lite_04)
+        pair = connect_pair(fixture, :streams_only)
 
         try do
           %{ctx: ctx, client: client, server: server} = pair
@@ -463,7 +463,7 @@ defmodule MOQX.TransportContract do
   defp abort_receiving_event_test do
     quote do
       test "abort_receiving preserves application error code in peer event", %{fixture: fixture} do
-        pair = connect_pair(fixture, :moq_lite_04)
+        pair = connect_pair(fixture, :streams_only)
 
         try do
           %{ctx: ctx, client: client, server: server} = pair
@@ -494,7 +494,7 @@ defmodule MOQX.TransportContract do
   defp connection_close_event_test do
     quote do
       test "close_connection emits normalized peer close event", %{fixture: fixture} do
-        pair = connect_pair(fixture, :moq_lite_04)
+        pair = connect_pair(fixture, :streams_only)
 
         try do
           %{ctx: ctx, client: client, server: server} = pair
@@ -515,7 +515,7 @@ defmodule MOQX.TransportContract do
     if :self_pair in contracts do
       quote do
         test "opens and accepts a bidirectional stream with metadata", %{fixture: fixture} do
-          pair = connect_pair(fixture, :moq_lite_04)
+          pair = connect_pair(fixture, :streams_only)
 
           try do
             %{ctx: ctx, client: client, server: server} = pair
@@ -557,7 +557,7 @@ defmodule MOQX.TransportContract do
         end
 
         test "supports many concurrent bidirectional streams", %{fixture: fixture} do
-          pair = connect_pair(fixture, :moq_lite_04)
+          pair = connect_pair(fixture, :streams_only)
 
           try do
             %{ctx: ctx, client: client, server: server} = pair
@@ -584,7 +584,7 @@ defmodule MOQX.TransportContract do
         end
 
         test "sends stream data to passive receive in order", %{fixture: fixture} do
-          pair = connect_pair(fixture, :moq_lite_04)
+          pair = connect_pair(fixture, :streams_only)
 
           try do
             %{ctx: ctx, client: client, server: server} = pair
@@ -608,7 +608,7 @@ defmodule MOQX.TransportContract do
         end
 
         test "delivers active stream data as normalized events", %{fixture: fixture} do
-          pair = connect_pair(fixture, :moq_lite_04)
+          pair = connect_pair(fixture, :streams_only)
 
           try do
             %{ctx: ctx, client: client, server: server} = pair
@@ -659,14 +659,14 @@ defmodule MOQX.TransportContract.SupportFixture do
   end
 
   def connect_client_echo_peer(_payload) do
-    {:ok, %{ctx: ctx, client: client, server: server}} = connect_pair(:moq_lite_04)
+    {:ok, %{ctx: ctx, client: client, server: server}} = connect_pair(:streams_only)
 
     {:ok,
      %{
        ctx: ctx,
        connection: client,
        server: server,
-       expected_alpn: "moq-lite-04",
+       expected_alpn: "moqx-streams",
        cleanup: fn -> :ok end
      }}
   end

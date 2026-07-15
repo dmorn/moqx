@@ -18,10 +18,10 @@ defmodule MOQX.Transport.CapabilitiesTest do
 
     test "reports datagrams unavailable if either direction is disabled" do
       assert %Capabilities{datagrams: false} =
-               Capabilities.from_quicer({:ok, "moq-lite-04"}, {:ok, false}, {:ok, true})
+               Capabilities.from_quicer({:ok, "moqx-streams"}, {:ok, false}, {:ok, true})
 
       assert %Capabilities{datagrams: false} =
-               Capabilities.from_quicer({:ok, "moq-lite-04"}, {:ok, true}, {:ok, false})
+               Capabilities.from_quicer({:ok, "moqx-streams"}, {:ok, true}, {:ok, false})
     end
 
     test "reports unknown values when quicer cannot provide them" do

@@ -4,6 +4,20 @@
 - Date: 2026-07-13
 - Supersedes: ADR-0006 and ADR-0007
 
+## Scope update: 2026-07-14
+
+The multi-protocol boundaries remain accepted, but the active product scope is
+Cloudflare draft-14. The legacy parallel `MOQX.MOQLite04` implementation and
+empty future-protocol namespace placeholders were removed rather than carried
+as unsupported public surfaces. MOQ Lite and Moqtail work are deferred; any
+future implementation starts directly behind `MOQX.Protocol` and
+`MOQX.Runtime.ConnectionDriver`, without a compatibility facade.
+
+The protocol-neutral transport coverage previously using a MOQ Lite profile is
+retained as the `:streams_only` test fixture. This narrows the supported
+protocol set without weakening the transport abstraction or changing the
+explicit protocol-selection decision.
+
 ## Context
 
 `moqx` needs to support multiple deployed MOQT-family protocols over the
@@ -113,14 +127,15 @@ Each deployed implementation owns:
 - authentication and relay-specific conventions;
 - interpretation of peer FIN, reset, stop-sending, and connection close.
 
-Initial implementation namespaces are:
+Implementation namespaces follow this shape:
 
 - `MOQX.Protocol.CloudflareDraft14`;
-- `MOQX.Protocol.MoqtailDraft14`;
-- `MOQX.Protocol.MOQLite04`.
+- a future Moqtail implementation under `MOQX.Protocol.MoqtailDraft14`;
+- a future MOQ Lite implementation under `MOQX.Protocol.MOQLite04`.
 
-They are independent implementations. Provider differences must not accumulate
-as conditionals in one global draft-14 state machine.
+Only Cloudflare draft-14 is currently complete. Concrete implementations are
+independent; provider differences must not accumulate as conditionals in one
+global draft-14 state machine.
 
 ### Versioned wire packages
 
@@ -254,8 +269,8 @@ Tradeoffs:
   provider/version-specific wire messages.
 - Shared wire packages need disciplined boundaries to avoid provider policy
   leaking into nominally standard modules.
-- Existing `MOQX.MOQLite04` code must be migrated rather than treated as the
-  permanent public architecture.
+- A future MOQ Lite implementation must enter through the shared protocol and
+  runtime boundaries rather than recreating a parallel public facade.
 
 ## Rejected alternatives
 

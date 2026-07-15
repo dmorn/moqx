@@ -16,7 +16,7 @@ defmodule MOQX.Transport.Profile do
   @enforce_keys [:name, :alpn, :capabilities, :stream_expectations]
   defstruct [:name, :alpn, :capabilities, :stream_expectations]
 
-  @type name :: :draft_14 | :moq_lite_04
+  @type name :: :draft_14 | :streams_only
 
   @type t :: %__MODULE__{
           name: name(),
@@ -29,7 +29,7 @@ defmodule MOQX.Transport.Profile do
   Returns canonical profile names.
   """
   @spec names() :: [name()]
-  def names, do: [:draft_14, :moq_lite_04]
+  def names, do: [:draft_14, :streams_only]
 
   @doc """
   Fetches a profile by canonical name or profile struct.
@@ -40,7 +40,7 @@ defmodule MOQX.Transport.Profile do
   def fetch(name) when is_atom(name) do
     case name do
       :draft_14 -> {:ok, draft_14()}
-      :moq_lite_04 -> {:ok, moq_lite_04()}
+      :streams_only -> {:ok, streams_only()}
       _unknown -> {:error, :unknown_profile}
     end
   end
@@ -105,12 +105,12 @@ defmodule MOQX.Transport.Profile do
     }
   end
 
-  defp moq_lite_04 do
+  defp streams_only do
     %__MODULE__{
-      name: :moq_lite_04,
-      alpn: "moq-lite-04",
+      name: :streams_only,
+      alpn: "moqx-streams",
       capabilities: %Capabilities{
-        alpn: "moq-lite-04",
+        alpn: "moqx-streams",
         datagrams: false,
         max_datagram_size: :unsupported,
         stream_directions: [:bidirectional, :unidirectional],
@@ -118,12 +118,12 @@ defmodule MOQX.Transport.Profile do
         transport_stats: :unsupported
       },
       stream_expectations: %{
-        transaction_streams: %{
+        bidirectional_streams: %{
           direction: :bidirectional,
           count: :many,
-          roles: [:announce, :subscribe, :fetch, :probe, :goaway]
+          role: :application_defined
         },
-        group_streams: %{direction: :unidirectional, initiator: :publisher, role: :group_data},
+        data_streams: %{direction: :unidirectional, role: :application_defined},
         datagrams: %{available: false, role: :none}
       }
     }

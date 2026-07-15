@@ -61,8 +61,8 @@ defmodule MOQX.Transport.Quicer.OptionsTest do
 
   describe "normalize_opts/1" do
     test "converts Elixir ALPN strings to quicer charlists" do
-      assert Options.normalize_opts(%{alpn: ["moq-00", "moq-lite-04"]}) == %{
-               alpn: [~c"moq-00", ~c"moq-lite-04"]
+      assert Options.normalize_opts(%{alpn: ["moq-00", "moqx-streams"]}) == %{
+               alpn: [~c"moq-00", ~c"moqx-streams"]
              }
     end
 

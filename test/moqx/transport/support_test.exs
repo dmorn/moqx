@@ -87,19 +87,19 @@ defmodule MOQX.Testing.TransportTest do
     assert Support.capabilities(client) == profile.capabilities
   end
 
-  test "reports moq_lite_04 negotiated capabilities" do
+  test "reports streams-only negotiated capabilities" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :moq_lite_04)
+    {:ok, listener} = Support.listen(0, network: network, profile: :streams_only)
 
     {:ok, client} =
       Support.connect(
         "localhost",
         Support.port(listener),
-        [network: network, profile: :moq_lite_04],
+        [network: network, profile: :streams_only],
         100
       )
 
-    assert Support.capabilities(client) == Profile.capabilities!(:moq_lite_04)
+    assert Support.capabilities(client) == Profile.capabilities!(:streams_only)
   end
 
   test "accept times out deterministically when no peer connects" do
@@ -116,7 +116,7 @@ defmodule MOQX.Testing.TransportTest do
     assert Support.connect(
              "localhost",
              Support.port(listener),
-             [network: network, profile: :moq_lite_04],
+             [network: network, profile: :streams_only],
              100
            ) ==
              {:error, :alpn_mismatch}

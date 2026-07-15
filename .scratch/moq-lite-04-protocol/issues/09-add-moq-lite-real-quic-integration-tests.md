@@ -2,7 +2,7 @@
 
 # Add MOQ Lite 04 real QUIC integration tests
 
-Status: ready-for-agent
+Status: needs-info
 Type: enhancement
 
 ## Parent
@@ -72,4 +72,10 @@ The test must run against `MOQX.Transport.Quicer` through the
 
 ## Blocked by
 
-- Issue 10: migrate MOQ Lite 04 to the multi-protocol runtime.
+- Issue 10: implement MOQ Lite 04 in the multi-protocol runtime.
+
+## Comments
+
+- 2026-07-14: Postponed with issue 10 while Cloudflare draft-14 and its
+  Membrane-facing building blocks are prioritized. This remains blocked until
+  a future MOQ Lite implementation exists behind the common runtime.

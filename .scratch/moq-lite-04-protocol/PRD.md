@@ -2,6 +2,18 @@
 
 Status: done
 
+## Current direction
+
+The implementation described by this completed historical PRD was removed on
+2026-07-14. Its standalone `MOQX.MOQLite04` facade and parallel runtime no
+longer match ADR-0010, and carrying them would imply support the project does
+not currently intend to provide.
+
+MOQ Lite is postponed while the Cloudflare draft-14 path is prepared for
+Membrane consumers. Future work starts directly under `MOQX.Protocol.MOQLite04`
+and the common connection driver; there is no compatibility facade to migrate.
+Issues 10 and 09 retain the deferred design and integration requirements.
+
 ## Problem Statement
 
 `moqx` has a protocol-neutral QUIC transport foundation and now has initial MOQ
@@ -199,7 +211,7 @@ migration input, but the target architecture is now:
 
 Follow-up integration work:
 
-- issue 10: migrate MOQ Lite 04 to the multi-protocol runtime
+- issue 10: implement MOQ Lite 04 in the multi-protocol runtime
 - issue 09: real QUIC MOQ Lite 04 integration tests over
   `MOQX.Transport.Quicer` after that migration
 

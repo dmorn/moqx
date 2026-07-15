@@ -26,14 +26,14 @@ defmodule MOQX.Transport.ProfileTest do
              }
     end
 
-    test "returns the moq_lite_04 transport fixture" do
-      assert {:ok, %Profile{} = profile} = Profile.fetch(:moq_lite_04)
+    test "returns the streams-only transport fixture" do
+      assert {:ok, %Profile{} = profile} = Profile.fetch(:streams_only)
 
-      assert profile.name == :moq_lite_04
-      assert profile.alpn == "moq-lite-04"
+      assert profile.name == :streams_only
+      assert profile.alpn == "moqx-streams"
 
       assert profile.capabilities == %Capabilities{
-               alpn: "moq-lite-04",
+               alpn: "moqx-streams",
                datagrams: false,
                max_datagram_size: :unsupported,
                stream_directions: [:bidirectional, :unidirectional],
@@ -42,22 +42,18 @@ defmodule MOQX.Transport.ProfileTest do
              }
 
       assert profile.stream_expectations == %{
-               transaction_streams: %{
+               bidirectional_streams: %{
                  direction: :bidirectional,
                  count: :many,
-                 roles: [:announce, :subscribe, :fetch, :probe, :goaway]
+                 role: :application_defined
                },
-               group_streams: %{
-                 direction: :unidirectional,
-                 initiator: :publisher,
-                 role: :group_data
-               },
+               data_streams: %{direction: :unidirectional, role: :application_defined},
                datagrams: %{available: false, role: :none}
              }
     end
 
     test "lists canonical profile names" do
-      assert Profile.names() == [:draft_14, :moq_lite_04]
+      assert Profile.names() == [:draft_14, :streams_only]
     end
 
     test "rejects unknown profiles" do
@@ -68,7 +64,7 @@ defmodule MOQX.Transport.ProfileTest do
   describe "helpers" do
     test "expose capabilities and ALPN from canonical names" do
       assert {:ok, "moq-00"} = Profile.alpn(:draft_14)
-      assert {:ok, %Capabilities{datagrams: false}} = Profile.capabilities(:moq_lite_04)
+      assert {:ok, %Capabilities{datagrams: false}} = Profile.capabilities(:streams_only)
     end
   end
 end

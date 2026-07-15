@@ -6,7 +6,9 @@ It provides a QUIC transport boundary backed by [`quicer`](https://github.com/dm
 
 ## Protocol documents
 
-`moqx` currently targets MOQT draft-14 and is expected to grow support for MOQ Lite.
+`moqx` currently implements Cloudflare's deployed MOQT draft-14 protocol over
+native QUIC. Additional protocol implementations are deferred until this path
+is ready for production consumers such as Membrane plugins.
 
 Core references:
 
@@ -18,7 +20,6 @@ Core references:
 - [RFC 9297 — HTTP Datagrams and the Capsule Protocol](https://www.rfc-editor.org/rfc/rfc9297)
 - [draft-ietf-webtrans-http3-14 — WebTransport over HTTP/3](https://www.ietf.org/archive/id/draft-ietf-webtrans-http3-14.txt)
 - [draft-ietf-moq-transport-14 — Media over QUIC Transport](https://www.ietf.org/archive/id/draft-ietf-moq-transport-14.txt)
-- [draft-lcurley-moq-lite — MOQ Lite](https://datatracker.ietf.org/doc/draft-lcurley-moq-lite/)
 
 ## Installation
 
@@ -232,7 +233,7 @@ and Linux CI rather than depending on host UDP forwarding.
 
 ExUnit never starts Docker. The script owns Compose startup and cleanup, and
 the same script is the `Cloudflare draft-14 relay roundtrip` CI job. Future
-Moqtail and MOQ Lite relay checks should add separately pinned Compose services,
+relay variants should add separately pinned Compose services,
 tagged public-API tests, and runner scripts following this boundary; they must
 not add an implicit protocol fallback or overload this Cloudflare test.
 

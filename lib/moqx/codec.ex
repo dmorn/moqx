@@ -3,8 +3,8 @@ defmodule MOQX.Codec do
   Shared codec namespace for MOQT-family protocol implementations.
 
   Protocol-specific modules own their wire formats. This namespace holds the
-  generic encoder/decoder contracts and will host binary helpers shared by
-  draft-14, MOQ Lite, and future protocol variants.
+  generic encoder/decoder contracts and binary helpers shared by protocol
+  variants.
   """
 
   @max_varint 4_611_686_018_427_387_903

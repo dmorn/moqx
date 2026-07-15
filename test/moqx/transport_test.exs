@@ -8,7 +8,7 @@ defmodule MOQX.TransportTest do
 
   describe "context API" do
     test "creates caller-owned context and opens support transport connection pair through facade" do
-      {_ctx, _client, _server} = support_pair(:moq_lite_04)
+      {_ctx, _client, _server} = support_pair(:streams_only)
     end
 
     test "returns capabilities through context connection" do
@@ -18,31 +18,31 @@ defmodule MOQX.TransportTest do
     end
 
     test "applies backend defaults from context to listener and client calls" do
-      {ctx, client, server} = support_pair_from_defaults(:moq_lite_04)
+      {ctx, client, server} = support_pair_from_defaults(:streams_only)
 
-      assert Profile.capabilities!(:moq_lite_04) == MOQX.Transport.capabilities(ctx, client)
-      assert Profile.capabilities!(:moq_lite_04) == MOQX.Transport.capabilities(ctx, server)
+      assert Profile.capabilities!(:streams_only) == MOQX.Transport.capabilities(ctx, client)
+      assert Profile.capabilities!(:streams_only) == MOQX.Transport.capabilities(ctx, server)
     end
 
     test "per-call backend options override context defaults" do
       assert {:ok, network} = Support.start_network()
       assert {:ok, ctx} = MOQX.Transport.new(Support, network: network, profile: :draft_14)
 
-      assert {:ok, listener, ctx} = MOQX.Transport.listen(ctx, 0, profile: :moq_lite_04)
+      assert {:ok, listener, ctx} = MOQX.Transport.listen(ctx, 0, profile: :streams_only)
       assert {:ok, {_ip, port}} = MOQX.Transport.local_address(ctx, listener)
 
       assert {:error, :alpn_mismatch, ^ctx} =
                MOQX.Transport.connect(ctx, "localhost", port, [], 100)
 
       assert {:ok, client, ctx} =
-               MOQX.Transport.connect(ctx, "localhost", port, [profile: :moq_lite_04], 100)
+               MOQX.Transport.connect(ctx, "localhost", port, [profile: :streams_only], 100)
 
       assert {:ok, server, ctx} = MOQX.Transport.accept(ctx, listener, [], 100)
       assert {:ok, client, ctx} = MOQX.Transport.handshake(ctx, client, 100)
       assert {:ok, server, ctx} = MOQX.Transport.handshake(ctx, server, 100)
 
-      assert Profile.capabilities!(:moq_lite_04) == MOQX.Transport.capabilities(ctx, client)
-      assert Profile.capabilities!(:moq_lite_04) == MOQX.Transport.capabilities(ctx, server)
+      assert Profile.capabilities!(:streams_only) == MOQX.Transport.capabilities(ctx, client)
+      assert Profile.capabilities!(:streams_only) == MOQX.Transport.capabilities(ctx, server)
     end
 
     test "does not enforce draft-14 control-stream count in the transport layer" do
@@ -67,7 +67,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "returns exact stream info for support bidirectional streams" do
-      {ctx, client, server} = support_pair(:moq_lite_04)
+      {ctx, client, server} = support_pair(:streams_only)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -98,7 +98,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "finish_sending emits normalized peer event with wrapped stream" do
-      {ctx, client, server} = support_pair(:moq_lite_04)
+      {ctx, client, server} = support_pair(:streams_only)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -113,7 +113,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "abort_sending and abort_receiving preserve app error codes in peer events" do
-      {ctx, client, server} = support_pair(:moq_lite_04)
+      {ctx, client, server} = support_pair(:streams_only)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -152,7 +152,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "sends stream data through facade and wraps active receive event" do
-      {ctx, client, server} = support_pair(:moq_lite_04)
+      {ctx, client, server} = support_pair(:streams_only)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -168,7 +168,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "stream sender owns send completion credit independently from context" do
-      {ctx, client, server} = support_pair(:moq_lite_04)
+      {ctx, client, server} = support_pair(:streams_only)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -202,7 +202,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "emits telemetry for stream sends and normalized receive events" do
-      {ctx, client, server} = support_pair(:moq_lite_04)
+      {ctx, client, server} = support_pair(:streams_only)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -258,7 +258,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "emits telemetry for passive stream receives" do
-      {ctx, client, server} = support_pair(:moq_lite_04)
+      {ctx, client, server} = support_pair(:streams_only)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :bidirectional)
@@ -360,13 +360,13 @@ defmodule MOQX.TransportTest do
     end
 
     test "controlling_process transfers whole context handles" do
-      {ctx, _client, _server} = support_pair(:moq_lite_04)
+      {ctx, _client, _server} = support_pair(:streams_only)
 
       assert {:ok, ^ctx} = MOQX.Transport.controlling_process(ctx, self())
     end
 
     test "close_connection emits normalized peer close event" do
-      {ctx, client, server} = support_pair(:moq_lite_04)
+      {ctx, client, server} = support_pair(:streams_only)
       ctx = flush_context_events(ctx)
 
       assert {:ok, ctx} = MOQX.Transport.close_connection(ctx, client, 3)

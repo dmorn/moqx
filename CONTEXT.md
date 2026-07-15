@@ -43,20 +43,21 @@ application error code where the backend supports it.
 carried by QUIC stream or connection shutdown.
 
 **Transport Profile**: named fixture for protocol-selected ALPN, transport
-capabilities, and stream expectations. Current profiles: `:draft_14`,
-`:moq_lite_04`.
+capabilities, and stream expectations. Current profiles: `:draft_14` and the
+protocol-neutral `:streams_only` test fixture.
 
 **Protocol Variant**: concrete MOQT-family protocol version with its own
-message model and session rules, e.g. MOQ Lite draft-04 or MOQT draft-14.
+message model and session rules, e.g. MOQT draft-14 or a future incompatible
+wire version.
 
 **Versioned Wire Package**: reusable message structs, numeric registries, and
 framing codecs for one published wire specification, such as IETF MOQT
 draft-14. It does not own provider lifecycle or relay policy.
 
 **Protocol Implementation**: executable composition selected explicitly by a
-caller, such as Cloudflare draft-14, Moqtail draft-14, or MOQ Lite draft-04. It
-owns lifecycle, supported operations, authentication, conventions, events,
-errors, and conversion between public intent and wire messages.
+caller, such as Cloudflare draft-14 or Moqtail draft-14. It owns lifecycle,
+supported operations, authentication, conventions, events, errors, and
+conversion between public intent and wire messages.
 
 **Connection Driver**: protocol-neutral runtime owner of one transport context,
 connection, and selected protocol state. It applies protocol-requested
@@ -92,12 +93,6 @@ stream framing removed length/type context.
 **Stream Codec**: protocol-specific framing and buffering before complete
 payloads are dispatched.
 
-**Transaction Stream**: MOQ Lite bidirectional stream whose first byte names an
-Announce, Subscribe, Fetch, Probe, or Goaway transaction.
-
-**Group Stream**: MOQ Lite publisher-created unidirectional stream that starts
-with GROUP and then carries FRAME messages.
-
 **Stream Side**: one directional half of a stream: local sending or local
 receiving.
 
@@ -122,5 +117,3 @@ receiving.
 - A Protocol Session returns Transport Actions as data. Runners apply them.
 - Stream Codecs are per transport stream. Bytes from different streams are
   never muxed together before decoding.
-- MOQ Lite Transaction Streams and Group Streams are protocol rules, not
-  transport-layer stream types.
