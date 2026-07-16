@@ -178,21 +178,38 @@ defmodule MOQX.TransportTest do
 
       assert {:ok, ctx} = MOQX.Transport.set_active(ctx, server_stream, true)
 
+      parent = self()
+
       task =
         Task.async(fn ->
+          send(parent, {:sender_ready, self()})
+
+          receive do
+            :send -> :ok
+          end
+
           assert {:ok, sender} = Stream.sender(client_stream)
           assert {:ok, send, sender} = Sender.send(sender, "hello", [])
 
           assert {:ok, {:stream_event, ^client_stream, :send_completed, metadata}, _sender} =
-                   Sender.receive_event(sender, 1_000)
+                   Sender.receive_event(sender, :infinity)
 
-          {send, metadata}
+          result = {send, metadata}
+
+          receive do
+            :return_result -> result
+          end
         end)
+
+      assert_receive {:sender_ready, sender_pid}, 5_000
+      send(self(), :unrelated_context_message)
+      Process.send_after(sender_pid, :send, 10)
 
       assert {:ok, {:stream_data, ^server_stream, "hello", %{}}, ctx} =
                receive_context_stream_data(ctx, server_stream, "hello", 100)
 
-      {send, metadata} = Task.await(task, 1_000)
+      send(sender_pid, :return_result)
+      {send, metadata} = Task.await(task, 5_000)
 
       assert metadata.send == send
       assert metadata.byte_size == 5
@@ -407,11 +424,25 @@ defmodule MOQX.TransportTest do
   end
 
   defp receive_context_stream_data(ctx, stream, payload, timeout) do
-    case MOQX.Transport.receive_event(ctx, timeout) do
-      {:ok, {:stream_data, ^stream, ^payload, _metadata} = event, ctx} -> {:ok, event, ctx}
-      {:ok, _event, ctx} -> receive_context_stream_data(ctx, stream, payload, 0)
-      {:unknown, _message, ctx} -> receive_context_stream_data(ctx, stream, payload, 0)
-      {:timeout, ctx} -> {:timeout, ctx}
+    deadline = System.monotonic_time(:millisecond) + timeout
+    receive_context_stream_data_until(ctx, stream, payload, deadline)
+  end
+
+  defp receive_context_stream_data_until(ctx, stream, payload, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    case MOQX.Transport.receive_event(ctx, remaining) do
+      {:ok, {:stream_data, ^stream, ^payload, _metadata} = event, ctx} ->
+        {:ok, event, ctx}
+
+      {:ok, _event, ctx} ->
+        receive_context_stream_data_until(ctx, stream, payload, deadline)
+
+      {:unknown, _message, ctx} ->
+        receive_context_stream_data_until(ctx, stream, payload, deadline)
+
+      {:timeout, ctx} ->
+        {:timeout, ctx}
     end
   end
 
