@@ -10,6 +10,8 @@ defmodule MOQX.Operation do
           | Unsubscribe.t()
           | Publish.t()
           | AddTrack.t()
+          | AcceptPublicationSubscription.t()
+          | RejectPublicationSubscription.t()
           | PublishObject.t()
           | FinishPublication.t()
           | Close.t()
@@ -51,6 +53,31 @@ defmodule MOQX.Operation do
             publication: MOQX.Publication.t(),
             track: binary(),
             options: keyword()
+          }
+  end
+
+  defmodule AcceptPublicationSubscription do
+    @moduledoc "Accepts one pending inbound publisher subscription."
+
+    @enforce_keys [:request, :published_track]
+    defstruct [:request, :published_track, options: []]
+
+    @type t :: %__MODULE__{
+            request: MOQX.PublicationSubscriptionRequest.t(),
+            published_track: MOQX.PublishedTrack.t(),
+            options: keyword()
+          }
+  end
+
+  defmodule RejectPublicationSubscription do
+    @moduledoc "Rejects one pending inbound publisher subscription."
+
+    @enforce_keys [:request, :rejection]
+    defstruct [:request, :rejection]
+
+    @type t :: %__MODULE__{
+            request: MOQX.PublicationSubscriptionRequest.t(),
+            rejection: MOQX.SubscriptionRejection.t()
           }
   end
 

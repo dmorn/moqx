@@ -239,6 +239,13 @@ PUBLISH_NAMESPACE_DONE. Publisher-initiated PUBLISH/PUBLISH_OK remains a
 separate future capability rather than a prerequisite for this demonstrated
 announce-and-serve lifecycle.
 
+Publications may opt into controlled inbound subscriptions. The Cloudflare
+implementation retains pending request identity, decoded delivery semantics,
+decision state, and wire response ownership; the connection driver only
+executes the implementation's keyed timer actions. Applications receive typed
+protocol-neutral request events and decide them through public accept/reject
+operations. Automatic acceptance remains the default publication policy.
+
 Authorization preserves the same ownership boundary. The shared draft-14 wire
 package encodes the standard AUTHORIZATION TOKEN structure. The Cloudflare
 implementation attaches an explicitly supplied credential to setup and

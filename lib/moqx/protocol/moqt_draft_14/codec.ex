@@ -53,7 +53,7 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
       subscribe.track_name,
       <<subscribe.subscriber_priority, encode_group_order(subscribe.group_order),
         encode_bool(subscribe.forward)>>,
-      encode_filter(subscribe.filter_type),
+      encode_filter(subscribe),
       encode_params(subscribe.params)
     ])
   end
@@ -217,9 +217,10 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
     with {:ok, request_id, rest} <- decode_varint(payload),
          {:ok, namespace, rest} <- decode_namespace(rest),
          {:ok, track_name, rest} <- decode_bytes(rest),
-         <<priority, group_order, forward, rest::binary>> <- rest,
+         <<priority, group_order, forward, rest::binary>>
+         when group_order in 0..2 and forward in 0..1 <- rest,
          {:ok, filter_type, rest} <- decode_varint(rest),
-         {:ok, _filter, rest} <- skip_filter(filter_type, rest),
+         {:ok, filter_type, start_location, end_group, rest} <- decode_filter(filter_type, rest),
          {:ok, params, <<>>} <- decode_params(rest) do
       {:ok,
        %Messages.Subscribe{
@@ -229,7 +230,9 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
          subscriber_priority: priority,
          group_order: decode_group_order(group_order),
          forward: forward == 1,
-         filter_type: decode_filter_type(filter_type),
+         filter_type: filter_type,
+         start_location: start_location,
+         end_group: end_group,
          params: params
        }}
     else
@@ -367,10 +370,10 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
   end
 
   defp encode_params(params) do
+    entries = if is_map(params), do: Enum.sort_by(params, &elem(&1, 0)), else: params
+
     encoded =
-      params
-      |> Enum.sort_by(&elem(&1, 0))
-      |> Enum.map(fn
+      Enum.map(entries, fn
         {key, value} when rem(key, 2) == 0 ->
           [encode_varint(key), encode_varint(value)]
 
@@ -378,7 +381,7 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
           [encode_varint(key), encode_varint(byte_size(value)), value]
       end)
 
-    [encode_varint(map_size(params)), encoded]
+    [encode_varint(Enum.count(entries)), encoded]
   end
 
   defp encode_namespace(namespace) do
@@ -418,15 +421,53 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
   defp encode_bool(true), do: 1
   defp encode_bool(false), do: 0
 
-  defp encode_filter(:next_group_start), do: encode_varint(1)
-  defp encode_filter(:largest_object), do: encode_varint(2)
+  defp encode_filter(%Messages.Subscribe{filter_type: :next_group_start}),
+    do: encode_varint(1)
 
-  defp decode_filter_type(1), do: :next_group_start
-  defp decode_filter_type(2), do: :largest_object
-  defp decode_filter_type(other), do: {:unknown, other}
+  defp encode_filter(%Messages.Subscribe{filter_type: :largest_object}),
+    do: encode_varint(2)
 
-  defp skip_filter(filter, rest) when filter in [1, 2], do: {:ok, nil, rest}
-  defp skip_filter(_filter, _rest), do: {:error, :unsupported_filter}
+  defp encode_filter(%Messages.Subscribe{
+         filter_type: :absolute_start,
+         start_location: {group_id, object_id}
+       }) do
+    [encode_varint(3), encode_varint(group_id), encode_varint(object_id)]
+  end
+
+  defp encode_filter(%Messages.Subscribe{
+         filter_type: :absolute_range,
+         start_location: {group_id, object_id},
+         end_group: end_group
+       }) do
+    [
+      encode_varint(4),
+      encode_varint(group_id),
+      encode_varint(object_id),
+      encode_varint(end_group)
+    ]
+  end
+
+  defp decode_filter(1, rest), do: {:ok, :next_group_start, nil, nil, rest}
+  defp decode_filter(2, rest), do: {:ok, :largest_object, nil, nil, rest}
+
+  defp decode_filter(3, rest) do
+    with {:ok, group_id, rest} <- decode_varint(rest),
+         {:ok, object_id, rest} <- decode_varint(rest) do
+      {:ok, :absolute_start, {group_id, object_id}, nil, rest}
+    end
+  end
+
+  defp decode_filter(4, rest) do
+    with {:ok, group_id, rest} <- decode_varint(rest),
+         {:ok, object_id, rest} <- decode_varint(rest),
+         {:ok, end_group, rest} when end_group >= group_id <- decode_varint(rest) do
+      {:ok, :absolute_range, {group_id, object_id}, end_group, rest}
+    else
+      _other -> {:error, :invalid_range}
+    end
+  end
+
+  defp decode_filter(_filter, _rest), do: {:error, :unsupported_filter}
 
   defp decode_location(0, rest), do: {:ok, nil, rest}
 
@@ -509,16 +550,16 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
 
   defp decode_params(binary) do
     with {:ok, count, rest} <- decode_varint(binary) do
-      decode_params(count, rest, %{})
+      decode_params(count, rest, [])
     end
   end
 
-  defp decode_params(0, rest, params), do: {:ok, params, rest}
+  defp decode_params(0, rest, params), do: {:ok, Enum.reverse(params), rest}
 
   defp decode_params(count, binary, params) do
     with {:ok, key, rest} <- decode_varint(binary),
          {:ok, value, rest} <- skip_param_value(key, rest) do
-      decode_params(count - 1, rest, Map.put(params, key, value))
+      decode_params(count - 1, rest, [{key, value} | params])
     end
   end
 

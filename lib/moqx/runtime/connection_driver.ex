@@ -79,6 +79,36 @@ defmodule MOQX.Runtime.ConnectionDriver do
     call(pid, {:operation, operation}, 5_000)
   end
 
+  @spec accept_subscription(
+          MOQX.Client.t(),
+          MOQX.PublicationSubscriptionRequest.t(),
+          MOQX.PublishedTrack.t(),
+          keyword()
+        ) :: :ok | {:error, term()}
+  def accept_subscription(%MOQX.Client{pid: pid}, request, published_track, options) do
+    operation = %Operation.AcceptPublicationSubscription{
+      request: request,
+      published_track: published_track,
+      options: options
+    }
+
+    call(pid, {:operation, operation}, 5_000)
+  end
+
+  @spec reject_subscription(
+          MOQX.Client.t(),
+          MOQX.PublicationSubscriptionRequest.t(),
+          MOQX.SubscriptionRejection.t()
+        ) :: :ok | {:error, term()}
+  def reject_subscription(%MOQX.Client{pid: pid}, request, rejection) do
+    operation = %Operation.RejectPublicationSubscription{
+      request: request,
+      rejection: rejection
+    }
+
+    call(pid, {:operation, operation}, 5_000)
+  end
+
   @spec publish_object(MOQX.Client.t(), MOQX.PublishedTrack.t(), MOQX.Object.t()) ::
           :ok | {:error, term()}
   def publish_object(%MOQX.Client{pid: pid}, track, object) do

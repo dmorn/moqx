@@ -75,4 +75,58 @@ defmodule MOQX.Protocol.MOQTDraft14.PublisherCodecTest do
     assert decoded.object_id == 3
     assert decoded.payload == "fragment"
   end
+
+  test "decodes the complete absolute-range subscription request without losing parameters" do
+    payload =
+      <<1, 1, 4, "live", 5, "video", 10, 2, 1, 4, 7, 3, 9, 2, 3, 1, "a", 3, 1, "b">>
+
+    assert {:ok,
+            %Messages.Subscribe{
+              request_id: 1,
+              track_namespace: ["live"],
+              track_name: "video",
+              subscriber_priority: 10,
+              group_order: :descending,
+              forward: true,
+              filter_type: :absolute_range,
+              start_location: {7, 3},
+              end_group: 9,
+              params: [{3, "a"}, {3, "b"}]
+            }} = Codec.decode_subscribe(payload)
+  end
+
+  test "round trips every draft-14 subscription filter" do
+    filters = [
+      {:next_group_start, nil, nil},
+      {:largest_object, nil, nil},
+      {:absolute_start, {5, 2}, nil},
+      {:absolute_range, {5, 2}, 8}
+    ]
+
+    for {filter_type, start_location, end_group} <- filters do
+      subscribe = %Messages.Subscribe{
+        request_id: 1,
+        track_namespace: ["live"],
+        track_name: "video",
+        filter_type: filter_type,
+        start_location: start_location,
+        end_group: end_group,
+        params: [{3, "token"}]
+      }
+
+      assert {:ok, [{0x03, payload}], <<>>} =
+               subscribe |> Codec.encode() |> Codec.decode_control()
+
+      assert {:ok, ^subscribe} = Codec.decode_subscribe(payload)
+    end
+  end
+
+  test "rejects malformed subscription delivery semantics at the codec boundary" do
+    base = <<1, 1, 4, "live", 5, "video", 10>>
+
+    assert {:error, :invalid_subscribe} = Codec.decode_subscribe(base <> <<3, 1, 2, 0>>)
+    assert {:error, :invalid_subscribe} = Codec.decode_subscribe(base <> <<1, 2, 2, 0>>)
+    assert {:error, :invalid_subscribe} = Codec.decode_subscribe(base <> <<1, 1, 5, 0>>)
+    assert {:error, :invalid_subscribe} = Codec.decode_subscribe(base <> <<1, 1, 4, 9, 0, 8, 0>>)
+  end
 end

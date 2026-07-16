@@ -9,11 +9,13 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   @behaviour MOQX.Protocol
 
   alias MOQX.Operation.{
+    AcceptPublicationSubscription,
     AddTrack,
     Close,
     FinishPublication,
     Publish,
     PublishObject,
+    RejectPublicationSubscription,
     Subscribe,
     Unsubscribe
   }
@@ -33,6 +35,8 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     PublicationReady,
     PublicationSubscriberJoined,
     PublicationSubscriberLeft,
+    PublicationSubscriptionCancelled,
+    PublicationSubscriptionRequested,
     SubscriptionAccepted,
     SubscriptionDone,
     SubscriptionFailed
@@ -49,7 +53,9 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
               subscription_lifecycles: %{},
               aliases: %{},
               authorization: nil,
+              handle_scope: :uninitialized,
               publications: %{},
+              pending_publisher_subscriptions: %{},
               publisher_subscriptions: %{},
               next_publication_stream: 0
   end
@@ -87,9 +93,14 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   @impl true
   def init(_endpoint, options) do
     case Keyword.get(options, :authorization) do
-      nil -> {:ok, %State{}}
-      %MOQX.Secret{} = authorization -> {:ok, %State{authorization: authorization}}
-      _other -> {:error, :authorization_must_be_an_moqx_secret}
+      nil ->
+        {:ok, %State{handle_scope: make_ref()}}
+
+      %MOQX.Secret{} = authorization ->
+        {:ok, %State{authorization: authorization, handle_scope: make_ref()}}
+
+      _other ->
+        {:error, :authorization_must_be_an_moqx_secret}
     end
   end
 
@@ -124,6 +135,36 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   end
 
   def handle_transport(
+        %State{} = state,
+        {:runtime_timeout, {:publisher_subscription_decision, handle}}
+      ) do
+    case state.pending_publisher_subscriptions[handle.request_id] do
+      %{request: %{handle: ^handle} = request} ->
+        state = %{
+          state
+          | pending_publisher_subscriptions:
+              Map.delete(state.pending_publisher_subscriptions, handle.request_id)
+        }
+
+        error = %Messages.SubscribeError{
+          request_id: handle.request_id,
+          error_code: 2,
+          reason_phrase: "subscription decision timed out"
+        }
+
+        Transition.ok(state,
+          events: [
+            %PublicationSubscriptionCancelled{request: request, reason: :decision_timeout}
+          ],
+          actions: [{:send_stream, :control, Codec.encode(error), []}]
+        )
+
+      _other ->
+        Transition.ok(state)
+    end
+  end
+
+  def handle_transport(
         %State{phase: :setup} = state,
         {:connection_event, _conn, :closed, metadata}
       ) do
@@ -131,7 +172,10 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   end
 
   def handle_transport(%State{} = state, {:connection_event, _conn, :closed, metadata}) do
-    Transition.ok(%{state | phase: :closed}, events: [%ConnectionClosed{metadata: metadata}])
+    Transition.ok(
+      %{state | phase: :closed, pending_publisher_subscriptions: %{}},
+      events: [%ConnectionClosed{metadata: metadata}]
+    )
   end
 
   def handle_transport(%State{} = state, _event), do: Transition.ok(state)
@@ -165,6 +209,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
         options: options
       }) do
     with :ok <- validate_namespace(namespace),
+         {:ok, inbound_subscriptions} <- inbound_subscription_options(options),
          false <- publication_namespace?(state, namespace) do
       request_id = state.next_request_id
       publication = %MOQX.Publication{id: request_id, namespace: namespace}
@@ -173,6 +218,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
         publication: publication,
         status: :pending,
         tracks: %{},
+        inbound_subscriptions: inbound_subscriptions,
         options: options
       }
 
@@ -217,7 +263,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
         retention: retention
       }
 
-      track_entry = %{track: published_track, retained: []}
+      track_entry = %{track: published_track, retained: [], largest_location: nil}
       entry = %{entry | tracks: Map.put(entry.tracks, operation.track, track_entry)}
 
       next_state = %{
@@ -232,13 +278,31 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     end
   end
 
+  def handle_operation(
+        %State{phase: :ready} = state,
+        %AcceptPublicationSubscription{} = operation
+      ) do
+    accept_publication_subscription(state, operation)
+  end
+
+  def handle_operation(
+        %State{phase: :ready} = state,
+        %RejectPublicationSubscription{} = operation
+      ) do
+    reject_publication_subscription(state, operation)
+  end
+
   def handle_operation(%State{phase: :ready} = state, %PublishObject{} = operation) do
     published_track = operation.track
 
     with {:ok, entry} <- fetch_publication(state, operation.track.publication),
          :ok <- validate_object(operation.object),
          %{track: ^published_track} = track_entry <- entry.tracks[operation.track.track.track] do
-      track_entry = retain_object(track_entry, operation.object)
+      track_entry =
+        track_entry
+        |> remember_largest_location(operation.object)
+        |> retain_object(operation.object)
+
       entry = %{entry | tracks: Map.put(entry.tracks, operation.track.track.track, track_entry)}
 
       state = %{
@@ -277,6 +341,8 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
 
   def handle_operation(%State{} = state, operation)
       when is_struct(operation, Publish) or is_struct(operation, AddTrack) or
+             is_struct(operation, AcceptPublicationSubscription) or
+             is_struct(operation, RejectPublicationSubscription) or
              is_struct(operation, PublishObject) or is_struct(operation, FinishPublication),
       do: Transition.error(state, :connection_not_ready)
 
@@ -315,7 +381,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   @impl true
   def capabilities(_state) do
     %Capabilities{
-      operations: MapSet.new([:subscribe, :publish]),
+      operations: MapSet.new([:subscribe, :publish, :accept_subscription, :reject_subscription]),
       delivery_modes: MapSet.new([:subgroup]),
       metadata: %{catalog_track: ".catalog"}
     }
@@ -441,10 +507,22 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
         reason: message.reason_phrase
       }
 
-      next_state = drop_publication(state, publication.id)
+      {pending, pending_events, pending_actions} =
+        finish_pending_publication_subscriptions(
+          state,
+          publication.id,
+          :publication_cancelled,
+          "publication cancelled"
+        )
+
+      next_state =
+        state
+        |> drop_publication(publication.id)
+        |> Map.put(:pending_publisher_subscriptions, pending)
 
       Transition.ok(next_state,
-        events: [%PublicationCancelled{publication: publication, error: error}]
+        events: [%PublicationCancelled{publication: publication, error: error} | pending_events],
+        actions: pending_actions
       )
     else
       nil -> Transition.ok(state)
@@ -675,31 +753,170 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   defp expected_stream_count(count), do: count
 
   defp handle_inbound_subscribe(state, subscribe) do
-    with {_publication_id, entry} <- publication_by_namespace(state, subscribe.track_namespace),
-         %{track: published_track} = track_entry <- entry.tracks[subscribe.track_name] do
-      largest_location = largest_location(track_entry.retained)
+    if Map.has_key?(state.pending_publisher_subscriptions, subscribe.request_id) or
+         Map.has_key?(state.publisher_subscriptions, subscribe.request_id) do
+      Transition.error(state, :duplicate_subscribe_request)
+    else
+      case publication_by_namespace(state, subscribe.track_namespace) do
+        {_publication_id, %{inbound_subscriptions: %{mode: :controlled}} = entry} ->
+          pend_inbound_subscription(state, entry, subscribe)
 
+        {_publication_id, entry} ->
+          automatically_handle_inbound_subscription(state, entry, subscribe)
+
+        nil ->
+          reject_missing_track(state, subscribe.request_id)
+      end
+    end
+  end
+
+  defp automatically_handle_inbound_subscription(state, entry, subscribe) do
+    case entry.tracks[subscribe.track_name] do
+      %{track: published_track} = track_entry ->
+        largest_location = track_entry.largest_location
+
+        subscription = %{
+          request_id: subscribe.request_id,
+          publication_id: published_track.publication.id,
+          track: published_track,
+          track_alias: subscribe.request_id,
+          subscriber_priority: subscribe.subscriber_priority,
+          group_order: :ascending,
+          forward: subscribe.forward,
+          filter: %MOQX.SubscriptionFilter{type: :absolute_start, start_location: {0, 0}},
+          stream_count: 0
+        }
+
+        state = %{
+          state
+          | publisher_subscriptions:
+              Map.put(state.publisher_subscriptions, subscribe.request_id, subscription)
+        }
+
+        ok = %Messages.SubscribeOk{
+          request_id: subscribe.request_id,
+          track_alias: subscribe.request_id,
+          expires: 0,
+          group_order: :ascending,
+          largest_location: largest_location,
+          params: %{}
+        }
+
+        {state, replay_actions} = replay_actions(state, subscription, track_entry.retained)
+
+        Transition.ok(state,
+          events: [
+            %PublicationSubscriberJoined{
+              track: published_track,
+              request_id: subscribe.request_id
+            }
+          ],
+          actions: [{:send_stream, :control, Codec.encode(ok), []} | replay_actions]
+        )
+
+      nil ->
+        reject_missing_track(state, subscribe.request_id)
+    end
+  end
+
+  defp pend_inbound_subscription(state, entry, subscribe) do
+    policy = entry.inbound_subscriptions
+
+    pending_count =
+      Enum.count(state.pending_publisher_subscriptions, fn {_request_id, pending} ->
+        pending.publication_id == entry.publication.id
+      end)
+
+    if pending_count >= policy.max_pending do
+      reject_subscription(state, subscribe.request_id, 0, "pending subscription limit exceeded")
+    else
+      handle = %MOQX.PublicationSubscriptionRequest.Handle{
+        scope: state.handle_scope,
+        request_id: subscribe.request_id
+      }
+
+      request = %MOQX.PublicationSubscriptionRequest{
+        handle: handle,
+        publication: entry.publication,
+        track: %MOQX.TrackRef{
+          namespace: subscribe.track_namespace,
+          track: subscribe.track_name
+        },
+        subscriber_priority: subscribe.subscriber_priority,
+        group_order: subscribe.group_order,
+        forward: subscribe.forward,
+        filter: %MOQX.SubscriptionFilter{
+          type: subscribe.filter_type,
+          start_location: subscribe.start_location,
+          end_group: subscribe.end_group
+        },
+        parameters: public_subscription_parameters(subscribe.params)
+      }
+
+      largest_location = pending_largest_location(entry, subscribe.track_name)
+
+      pending = %{
+        request: request,
+        publication_id: entry.publication.id,
+        effective_filter: effective_subscription_filter(request.filter, largest_location),
+        largest_location: largest_location
+      }
+
+      state = %{
+        state
+        | pending_publisher_subscriptions:
+            Map.put(state.pending_publisher_subscriptions, subscribe.request_id, pending)
+      }
+
+      Transition.ok(state,
+        events: [%PublicationSubscriptionRequested{request: request}],
+        actions: [
+          {:start_timer, {:publisher_subscription_decision, handle}, policy.timeout}
+        ]
+      )
+    end
+  end
+
+  defp accept_publication_subscription(state, operation) do
+    request = operation.request
+    handle = request.handle
+
+    with :ok <- validate_request_scope(state, handle),
+         %{request: ^request} = pending <-
+           state.pending_publisher_subscriptions[handle.request_id],
+         {:ok, entry} <- fetch_publication(state, operation.published_track.publication),
+         %{track: published_track} = track_entry <-
+           entry.tracks[operation.published_track.track.track],
+         true <-
+           published_track == operation.published_track and published_track.track == request.track,
+         {:ok, group_order} <- accepted_group_order(request.group_order, operation.options),
+         {:ok, expires} <- subscription_expiry(operation.options) do
       subscription = %{
-        request_id: subscribe.request_id,
+        request_id: handle.request_id,
         publication_id: published_track.publication.id,
         track: published_track,
-        track_alias: subscribe.request_id,
-        forward: subscribe.forward,
+        track_alias: handle.request_id,
+        subscriber_priority: request.subscriber_priority,
+        group_order: group_order,
+        forward: request.forward,
+        filter: pending.effective_filter,
         stream_count: 0
       }
 
       state = %{
         state
-        | publisher_subscriptions:
-            Map.put(state.publisher_subscriptions, subscribe.request_id, subscription)
+        | pending_publisher_subscriptions:
+            Map.delete(state.pending_publisher_subscriptions, handle.request_id),
+          publisher_subscriptions:
+            Map.put(state.publisher_subscriptions, handle.request_id, subscription)
       }
 
       ok = %Messages.SubscribeOk{
-        request_id: subscribe.request_id,
-        track_alias: subscribe.request_id,
-        expires: 0,
-        group_order: :ascending,
-        largest_location: largest_location,
+        request_id: handle.request_id,
+        track_alias: handle.request_id,
+        expires: expires,
+        group_order: group_order,
+        largest_location: pending.largest_location,
         params: %{}
       }
 
@@ -707,28 +924,170 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
 
       Transition.ok(state,
         events: [
-          %PublicationSubscriberJoined{
-            track: published_track,
-            request_id: subscribe.request_id
-          }
+          %PublicationSubscriberJoined{track: published_track, request_id: handle.request_id}
         ],
-        actions: [{:send_stream, :control, Codec.encode(ok), []} | replay_actions]
+        actions: [
+          {:cancel_timer, {:publisher_subscription_decision, handle}},
+          {:send_stream, :control, Codec.encode(ok), []}
+          | replay_actions
+        ]
       )
     else
-      nil ->
-        error = %Messages.SubscribeError{
-          request_id: subscribe.request_id,
-          error_code: 4,
-          reason_phrase: "track not found"
-        }
-
-        Transition.ok(state,
-          actions: [{:send_stream, :control, Codec.encode(error), []}]
-        )
+      nil -> Transition.error(state, :stale_subscription_request)
+      false -> Transition.error(state, :subscription_request_track_mismatch)
+      {:error, reason} -> Transition.error(state, reason)
+      _other -> Transition.error(state, :stale_subscription_request)
     end
   end
 
+  defp reject_publication_subscription(state, operation) do
+    request = operation.request
+    handle = request.handle
+
+    with :ok <- validate_request_scope(state, handle),
+         %{request: ^request} <- state.pending_publisher_subscriptions[handle.request_id],
+         {:ok, error_code} <- subscription_error_code(operation.rejection.code) do
+      state = %{
+        state
+        | pending_publisher_subscriptions:
+            Map.delete(state.pending_publisher_subscriptions, handle.request_id)
+      }
+
+      error = %Messages.SubscribeError{
+        request_id: handle.request_id,
+        error_code: error_code,
+        reason_phrase: operation.rejection.reason || Atom.to_string(operation.rejection.code)
+      }
+
+      Transition.ok(state,
+        actions: [
+          {:cancel_timer, {:publisher_subscription_decision, handle}},
+          {:send_stream, :control, Codec.encode(error), []}
+        ]
+      )
+    else
+      nil -> Transition.error(state, :stale_subscription_request)
+      {:error, reason} -> Transition.error(state, reason)
+      _other -> Transition.error(state, :stale_subscription_request)
+    end
+  end
+
+  defp validate_request_scope(%State{handle_scope: scope}, %{scope: scope}), do: :ok
+  defp validate_request_scope(_state, _handle), do: {:error, :wrong_client_subscription_request}
+
+  defp accepted_group_order(:ascending, _options), do: {:ok, :ascending}
+
+  defp accepted_group_order(:publisher, options) do
+    case Keyword.get(options, :group_order, :ascending) do
+      :ascending -> {:ok, :ascending}
+      :descending -> {:error, :unsupported_group_order}
+      _other -> {:error, :invalid_group_order}
+    end
+  end
+
+  defp accepted_group_order(:descending, _options), do: {:error, :unsupported_group_order}
+
+  defp subscription_expiry(options) do
+    case Keyword.get(options, :expires, 0) do
+      expires when is_integer(expires) and expires >= 0 -> {:ok, expires}
+      _other -> {:error, :invalid_subscription_expiry}
+    end
+  end
+
+  defp pending_largest_location(entry, track_name) do
+    case entry.tracks[track_name] do
+      %{largest_location: largest_location} -> largest_location
+      nil -> nil
+    end
+  end
+
+  defp effective_subscription_filter(
+         %MOQX.SubscriptionFilter{type: :largest_object},
+         nil
+       ),
+       do: %MOQX.SubscriptionFilter{type: :absolute_start, start_location: {0, 0}}
+
+  defp effective_subscription_filter(
+         %MOQX.SubscriptionFilter{type: :largest_object},
+         {group_id, object_id}
+       ),
+       do: %MOQX.SubscriptionFilter{
+         type: :absolute_start,
+         start_location: {group_id, object_id + 1}
+       }
+
+  defp effective_subscription_filter(
+         %MOQX.SubscriptionFilter{type: :next_group_start},
+         nil
+       ),
+       do: %MOQX.SubscriptionFilter{type: :absolute_start, start_location: {0, 0}}
+
+  defp effective_subscription_filter(
+         %MOQX.SubscriptionFilter{type: :next_group_start},
+         {group_id, _object_id}
+       ),
+       do: %MOQX.SubscriptionFilter{type: :absolute_start, start_location: {group_id + 1, 0}}
+
+  defp effective_subscription_filter(filter, _largest_location), do: filter
+
+  defp subscription_error_code(:internal_error), do: {:ok, 0}
+  defp subscription_error_code(:unauthorized), do: {:ok, 1}
+  defp subscription_error_code(:timeout), do: {:ok, 2}
+  defp subscription_error_code(:not_supported), do: {:ok, 3}
+  defp subscription_error_code(:track_does_not_exist), do: {:ok, 4}
+  defp subscription_error_code(:invalid_range), do: {:ok, 5}
+  defp subscription_error_code(:malformed_auth_token), do: {:ok, 0x10}
+  defp subscription_error_code(:expired_auth_token), do: {:ok, 0x12}
+  defp subscription_error_code(_other), do: {:error, :invalid_subscription_rejection}
+
+  defp public_subscription_parameters(params) do
+    Enum.map(params, fn
+      {3, value} ->
+        %MOQX.SubscriptionParameter.Authorization{value: value}
+
+      {2, milliseconds} ->
+        %MOQX.SubscriptionParameter.DeliveryTimeout{milliseconds: milliseconds}
+
+      {identifier, value} ->
+        %MOQX.SubscriptionParameter.Extension{
+          protocol: id(),
+          identifier: identifier,
+          value: value
+        }
+    end)
+  end
+
+  defp reject_missing_track(state, request_id),
+    do: reject_subscription(state, request_id, 4, "track not found")
+
+  defp reject_subscription(state, request_id, error_code, reason_phrase) do
+    error = %Messages.SubscribeError{
+      request_id: request_id,
+      error_code: error_code,
+      reason_phrase: reason_phrase
+    }
+
+    Transition.ok(state, actions: [{:send_stream, :control, Codec.encode(error), []}])
+  end
+
   defp handle_inbound_unsubscribe(state, unsubscribe) do
+    case Map.pop(state.pending_publisher_subscriptions, unsubscribe.request_id) do
+      {%{request: request}, pending} ->
+        Transition.ok(%{state | pending_publisher_subscriptions: pending},
+          events: [
+            %PublicationSubscriptionCancelled{request: request, reason: :unsubscribed}
+          ],
+          actions: [
+            {:cancel_timer, {:publisher_subscription_decision, request.handle}}
+          ]
+        )
+
+      {nil, _pending} ->
+        handle_active_inbound_unsubscribe(state, unsubscribe)
+    end
+  end
+
+  defp handle_active_inbound_unsubscribe(state, unsubscribe) do
     case Map.pop(state.publisher_subscriptions, unsubscribe.request_id) do
       {nil, _subscriptions} ->
         Transition.ok(state)
@@ -751,7 +1110,8 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   defp object_actions(state, track, object) do
     state.publisher_subscriptions
     |> Enum.filter(fn {_id, subscription} ->
-      subscription.track == track and subscription.forward
+      subscription.track == track and subscription.forward and
+        object_matches_filter?(subscription.filter, object)
     end)
     |> Enum.reduce({state, []}, fn {_id, subscription}, {state, actions} ->
       {state, action} = subgroup_action(state, subscription, object)
@@ -763,12 +1123,27 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   defp replay_actions(state, %{forward: false}, _objects), do: {state, []}
 
   defp replay_actions(state, subscription, objects) do
-    Enum.reduce(objects, {state, []}, fn object, {state, actions} ->
+    objects
+    |> Enum.filter(&object_matches_filter?(subscription.filter, &1))
+    |> Enum.reduce({state, []}, fn object, {state, actions} ->
       current = state.publisher_subscriptions[subscription.request_id]
       {state, action} = subgroup_action(state, current, object)
       {state, actions ++ [action]}
     end)
   end
+
+  defp object_matches_filter?(%MOQX.SubscriptionFilter{type: :absolute_start} = filter, object),
+    do: {object.group_id, object.object_id} >= filter.start_location
+
+  defp object_matches_filter?(%MOQX.SubscriptionFilter{type: :absolute_range} = filter, object),
+    do:
+      {object.group_id, object.object_id} >= filter.start_location and
+        object.group_id <= filter.end_group
+
+  defp object_matches_filter?(%MOQX.SubscriptionFilter{type: :largest_object}, _object), do: true
+
+  defp object_matches_filter?(%MOQX.SubscriptionFilter{type: :next_group_start}, _object),
+    do: true
 
   defp subgroup_action(state, subscription, object) do
     stream_number = state.next_publication_stream
@@ -797,6 +1172,16 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   defp retain_object(%{track: %{retention: :all}} = entry, object),
     do: %{entry | retained: entry.retained ++ [object]}
 
+  defp remember_largest_location(entry, object) do
+    location = {object.group_id, object.object_id}
+
+    case entry.largest_location do
+      nil -> %{entry | largest_location: location}
+      current when location > current -> %{entry | largest_location: location}
+      _current -> entry
+    end
+  end
+
   defp finish_publication_subscriptions(state, publication_id, options) do
     status = Keyword.get(options, :status, 2)
     reason = Keyword.get(options, :reason, "track ended")
@@ -813,6 +1198,14 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   end
 
   defp finish_known_publication(state, operation) do
+    {pending, pending_events, pending_actions} =
+      finish_pending_publication_subscriptions(
+        state,
+        operation.publication.id,
+        :publication_finished,
+        "publication finished"
+      )
+
     {subscriptions, done_actions} =
       finish_publication_subscriptions(state, operation.publication.id, operation.options)
 
@@ -823,12 +1216,46 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     next_state = %{
       state
       | publications: Map.delete(state.publications, operation.publication.id),
+        pending_publisher_subscriptions: pending,
         publisher_subscriptions: subscriptions
     }
 
     Transition.ok(next_state,
-      events: [{:publication_finished, operation.publication}],
-      actions: done_actions ++ [{:send_stream, :control, Codec.encode(namespace_done), []}]
+      events: [{:publication_finished, operation.publication} | pending_events],
+      actions:
+        pending_actions ++
+          done_actions ++
+          [{:send_stream, :control, Codec.encode(namespace_done), []}]
+    )
+  end
+
+  defp finish_pending_publication_subscriptions(state, publication_id, reason, error_reason) do
+    Enum.reduce(
+      state.pending_publisher_subscriptions,
+      {%{}, [], []},
+      fn {request_id, pending}, {remaining, events, actions} ->
+        if pending.publication_id == publication_id do
+          error = %Messages.SubscribeError{
+            request_id: request_id,
+            error_code: 4,
+            reason_phrase: error_reason
+          }
+
+          next_actions = [
+            {:cancel_timer, {:publisher_subscription_decision, pending.request.handle}},
+            {:send_stream, :control, Codec.encode(error), []}
+          ]
+
+          next_event = %PublicationSubscriptionCancelled{
+            request: pending.request,
+            reason: reason
+          }
+
+          {remaining, events ++ [next_event], actions ++ next_actions}
+        else
+          {Map.put(remaining, request_id, pending), events, actions}
+        end
+      end
     )
   end
 
@@ -839,14 +1266,6 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
       stream_count: subscription.stream_count,
       reason_phrase: reason
     }
-  end
-
-  defp largest_location([]), do: nil
-
-  defp largest_location(objects) do
-    objects
-    |> Enum.map(&{&1.group_id, &1.object_id})
-    |> Enum.max()
   end
 
   defp fetch_publication(state, %MOQX.Publication{id: id, namespace: namespace}) do
@@ -883,6 +1302,26 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
       :ok
     else
       {:error, :invalid_namespace}
+    end
+  end
+
+  defp inbound_subscription_options(options) do
+    case Keyword.get(options, :inbound_subscriptions, :automatic) do
+      :automatic ->
+        {:ok, %{mode: :automatic}}
+
+      :controlled ->
+        timeout = Keyword.get(options, :subscription_decision_timeout, 5_000)
+        max_pending = Keyword.get(options, :max_pending_subscriptions, 128)
+
+        if is_integer(timeout) and timeout >= 0 and is_integer(max_pending) and max_pending > 0 do
+          {:ok, %{mode: :controlled, timeout: timeout, max_pending: max_pending}}
+        else
+          {:error, :invalid_inbound_subscription_options}
+        end
+
+      _other ->
+        {:error, :invalid_inbound_subscription_options}
     end
   end
 

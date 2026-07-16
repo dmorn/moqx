@@ -61,6 +61,27 @@ defmodule MOQX do
     ConnectionDriver.add_track(client, publication, track, options)
   end
 
+  @doc "Accepts one pending inbound publisher subscription."
+  @spec accept_subscription(
+          MOQX.Client.t(),
+          MOQX.PublicationSubscriptionRequest.t(),
+          MOQX.PublishedTrack.t(),
+          keyword()
+        ) :: :ok | {:error, term()}
+  def accept_subscription(client, request, published_track, options \\ []) do
+    ConnectionDriver.accept_subscription(client, request, published_track, options)
+  end
+
+  @doc "Rejects one pending inbound publisher subscription."
+  @spec reject_subscription(
+          MOQX.Client.t(),
+          MOQX.PublicationSubscriptionRequest.t(),
+          MOQX.SubscriptionRejection.t()
+        ) :: :ok | {:error, term()}
+  def reject_subscription(client, request, rejection) do
+    ConnectionDriver.reject_subscription(client, request, rejection)
+  end
+
   @doc "Publishes one object on a registered track."
   @spec publish_object(MOQX.Client.t(), MOQX.PublishedTrack.t(), MOQX.Object.t()) ::
           :ok | {:error, term()}

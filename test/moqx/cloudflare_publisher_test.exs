@@ -166,6 +166,116 @@ defmodule MOQX.CloudflarePublisherTest do
     assert :ok = Task.await(relay, 1_000)
   end
 
+  test "application accepts an inbound subscription after provisioning its track" do
+    {:ok, network} = Support.start_network()
+    parent = self()
+
+    relay =
+      Task.async(fn ->
+        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_14)
+        {:ok, listener, ctx} = Transport.listen(ctx, 0)
+        {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
+        send(parent, {:controlled_relay_ready, port})
+
+        {:ok, conn, ctx} = Transport.accept(ctx, listener, [], 1_000)
+        {:ok, conn, ctx} = Transport.handshake(ctx, conn, 1_000)
+        {:ok, control, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
+
+        setup = Codec.client_setup()
+        assert {:ok, ^setup, ctx} = Transport.recv_stream(ctx, control, byte_size(setup))
+
+        server_setup = <<0x21, 0, 9, 0xC0000000FF00000E::64, 0>>
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, server_setup)
+
+        publish_namespace =
+          Codec.encode(%Messages.PublishNamespace{
+            request_id: 0,
+            track_namespace: ["live", "controlled"]
+          })
+
+        assert {:ok, ^publish_namespace, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(publish_namespace))
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x07, 0, 1, 0>>)
+
+        subscribe =
+          Codec.encode(%Messages.Subscribe{
+            request_id: 1,
+            track_namespace: ["live", "controlled"],
+            track_name: "video",
+            group_order: :ascending
+          })
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, subscribe)
+
+        subscribe_ok =
+          Codec.encode(%Messages.SubscribeOk{
+            request_id: 1,
+            track_alias: 1,
+            expires: 0,
+            group_order: :ascending,
+            largest_location: nil,
+            params: %{}
+          })
+
+        assert {:ok, ^subscribe_ok, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(subscribe_ok))
+
+        {:ok, subgroup, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
+
+        object = %MOQX.Object{
+          group_id: 1,
+          object_id: 0,
+          publisher_priority: 10,
+          payload: "controlled-object"
+        }
+
+        subgroup_bytes = Codec.encode_subgroup(1, object)
+
+        assert {:ok, ^subgroup_bytes, _ctx} =
+                 Transport.recv_stream(ctx, subgroup, byte_size(subgroup_bytes))
+
+        :ok
+      end)
+
+    assert_receive {:controlled_relay_ready, port}, 1_000
+
+    assert {:ok, client} =
+             MOQX.connect("moqt://localhost:#{port}",
+               protocol: :cloudflare_draft_14,
+               transport: {Support, network: network, profile: :draft_14},
+               timeout: 1_000
+             )
+
+    assert {:ok, publication} =
+             MOQX.publish(client, ["live", "controlled"],
+               inbound_subscriptions: :controlled,
+               subscription_decision_timeout: 1_000
+             )
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriptionRequested{request: request}},
+                   1_000
+
+    assert {:ok, track} = MOQX.add_track(client, publication, "video")
+    assert :ok = MOQX.accept_subscription(client, request, track)
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 1}},
+                   1_000
+
+    assert :ok =
+             MOQX.publish_object(client, track, %MOQX.Object{
+               group_id: 1,
+               object_id: 0,
+               publisher_priority: 10,
+               payload: "controlled-object"
+             })
+
+    assert :ok = Task.await(relay, 1_000)
+    assert :ok = MOQX.close(client)
+  end
+
   defp receive_closed(ctx, conn, timeout) do
     case Transport.receive_event(ctx, timeout) do
       {:ok, {:connection_event, ^conn, :closed, _metadata} = event, ctx} ->

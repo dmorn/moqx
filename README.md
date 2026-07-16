@@ -153,6 +153,40 @@ Retention is application policy: `:live` discards objects when no subscriber
 is active, `:latest` retains one object for catalog or initialization tracks,
 and `:all` replays bounded static content.
 
+Inbound subscriptions are accepted automatically by default. A publisher can
+instead inspect, authorize, and provision each request before deciding it:
+
+```elixir
+{:ok, publication} =
+  MOQX.publish(client, ["live", "camera-1"],
+    inbound_subscriptions: :controlled,
+    subscription_decision_timeout: 5_000,
+    max_pending_subscriptions: 128
+  )
+
+receive do
+  {:moqx, ^client,
+   %MOQX.Event.PublicationSubscriptionRequested{request: request}} ->
+    {:ok, video} =
+      MOQX.add_track(client, publication, request.track.track, retention: :live)
+
+    :ok = MOQX.accept_subscription(client, request, video)
+end
+```
+
+`MOQX.reject_subscription/3` accepts a protocol-neutral
+`MOQX.SubscriptionRejection`. Pending requests are connection-scoped, bounded
+by the configured count and timeout, and are invalidated by unsubscribe,
+publication termination, or connection closure. Request events preserve
+priority, forward state, group order, all four draft-14 filters, repeated
+authorization parameters, delivery timeout, and unknown extensions.
+
+Controlled acceptance supports ascending delivery. A request for descending
+delivery remains pending and `accept_subscription/4` returns
+`{:error, :unsupported_group_order}`; the application should reject it with
+`:not_supported`. Publisher-selected order defaults to ascending and can be
+confirmed explicitly with `group_order: :ascending` in the acceptance options.
+
 `MOQX.CMAF.publish_file/3` prepares a fragmented MP4 as a CMSF `.catalog`, an
 initialization track, and retained media fragments:
 

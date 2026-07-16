@@ -11,10 +11,31 @@ defmodule MOQX.Event do
           | MOQX.Event.PublicationReady.t()
           | MOQX.Event.PublicationFailed.t()
           | MOQX.Event.PublicationCancelled.t()
+          | MOQX.Event.PublicationSubscriptionRequested.t()
+          | MOQX.Event.PublicationSubscriptionCancelled.t()
           | MOQX.Event.PublicationSubscriberJoined.t()
           | MOQX.Event.PublicationSubscriberLeft.t()
           | MOQX.Event.ConnectionClosed.t()
           | MOQX.Event.ProtocolFailed.t()
+end
+
+defmodule MOQX.Event.PublicationSubscriptionRequested do
+  @moduledoc "An inbound publisher subscription is waiting for an application decision."
+  @enforce_keys [:request]
+  defstruct [:request]
+  @type t :: %__MODULE__{request: MOQX.PublicationSubscriptionRequest.t()}
+end
+
+defmodule MOQX.Event.PublicationSubscriptionCancelled do
+  @moduledoc "A pending inbound publisher subscription can no longer be decided."
+  @enforce_keys [:request, :reason]
+  defstruct [:request, :reason]
+
+  @type t :: %__MODULE__{
+          request: MOQX.PublicationSubscriptionRequest.t(),
+          reason:
+            :unsubscribed | :decision_timeout | :publication_finished | :publication_cancelled
+        }
 end
 
 defmodule MOQX.Event.SubscriptionAccepted do

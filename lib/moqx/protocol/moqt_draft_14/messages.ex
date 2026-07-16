@@ -19,7 +19,9 @@ defmodule MOQX.Protocol.MOQTDraft14.Messages.Subscribe do
     group_order: :publisher,
     forward: true,
     filter_type: :largest_object,
-    params: %{}
+    start_location: nil,
+    end_group: nil,
+    params: []
   ]
 end
 

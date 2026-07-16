@@ -4,6 +4,21 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in application-controlled inbound publisher subscriptions with
+  typed request and cancellation events, explicit accept/reject operations,
+  bounded decision timers, and deterministic stale/wrong-client handling.
+- Added lossless draft-14 SUBSCRIBE decoding for all four filter forms and
+  repeated parameters, including protocol-neutral authorization and delivery
+  timeout request parameters.
+
+### Changed
+
+- Publisher delivery now applies controlled subscription filters to retained
+  replay and future objects. Automatic inbound subscription behavior remains
+  the default for backwards compatibility.
+
 ## [0.7.1] - 2026-04-23
 
 ### Fixed
