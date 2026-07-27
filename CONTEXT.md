@@ -22,9 +22,11 @@ native QUIC.
   capabilities, wire packages, lifecycle, and relay-specific behavior.
 - Standard draft-16 subscriber support includes all four subscription filters,
   request updates, subgroup and datagram delivery, accepted parameter and
-  extension preservation, and `PUBLISH_DONE` delivery draining. Independent
-  subgroup streams are emitted in transport arrival order until #29 defines a
-  stronger public ordering contract.
+  extension preservation, and `PUBLISH_DONE` delivery draining.
+- Objects are emitted in normalized transport arrival order. Each subgroup
+  preserves stream-local order and ends with a typed complete/reset/closed
+  boundary; no global coordinate ordering or implicit reorder buffer is
+  provided.
 - The protocol-neutral connection driver owns the transport context, feeds
   normalized events to the selected implementation, and applies returned
   transport actions.

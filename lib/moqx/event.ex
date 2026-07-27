@@ -9,6 +9,7 @@ defmodule MOQX.Event do
           | MOQX.Event.SubscriptionDone.t()
           | MOQX.Event.ObjectReceived.t()
           | MOQX.Event.ObjectStatus.t()
+          | MOQX.Event.SubgroupEnded.t()
           | MOQX.Event.CatalogReceived.t()
           | MOQX.Event.PublicationReady.t()
           | MOQX.Event.PublicationFailed.t()
@@ -100,6 +101,30 @@ defmodule MOQX.Event.ObjectStatus do
   @enforce_keys [:object]
   defstruct [:object]
   @type t :: %__MODULE__{object: MOQX.Object.t()}
+end
+
+defmodule MOQX.Event.SubgroupEnded do
+  @moduledoc """
+  One subscribed subgroup stream ended after all preceding object events.
+
+  A `:complete` outcome means the peer sent FIN and every object in that
+  subgroup from the subscription start was received. Other outcomes do not
+  imply that the subgroup is complete.
+  """
+
+  @enforce_keys [:subscription, :group_id, :subgroup_id, :outcome]
+  defstruct [:subscription, :group_id, :subgroup_id, :outcome, :error_code, end_of_group?: false]
+
+  @type outcome :: :complete | :reset | :closed
+
+  @type t :: %__MODULE__{
+          subscription: MOQX.Subscription.t(),
+          group_id: non_neg_integer(),
+          subgroup_id: non_neg_integer() | nil,
+          outcome: outcome(),
+          error_code: non_neg_integer() | nil,
+          end_of_group?: boolean()
+        }
 end
 
 defmodule MOQX.Event.CatalogReceived do

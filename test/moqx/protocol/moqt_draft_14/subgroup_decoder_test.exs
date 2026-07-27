@@ -34,4 +34,20 @@ defmodule MOQX.Protocol.MOQTDraft14.SubgroupDecoderTest do
              }
            ] = objects
   end
+
+  test "graceful completion rejects a partial subgroup object" do
+    assert {:ok, decoder, []} =
+             SubgroupDecoder.push(%SubgroupDecoder{}, <<0x15, 2, 5, 0, 7, 0, 0, 3, "a">>)
+
+    assert {:error, {:incomplete_subgroup_stream, %{header_decoded?: true, buffered_bytes: 4}}} =
+             SubgroupDecoder.complete(decoder)
+  end
+
+  test "graceful completion rejects a header-only subgroup" do
+    assert {:ok, decoder, []} =
+             SubgroupDecoder.push(%SubgroupDecoder{}, <<0x15, 2, 5, 0, 7>>)
+
+    assert {:error, {:incomplete_subgroup_stream, %{header_decoded?: true, buffered_bytes: 0}}} =
+             SubgroupDecoder.complete(decoder)
+  end
 end

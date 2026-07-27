@@ -188,9 +188,31 @@ ffmpeg -v error -f h264 -i /tmp/cloudflare-bbb.h264 -f null -
 only after every stream advertised by `PUBLISH_DONE` has been processed or the
 subscription's `:delivery_timeout` has elapsed.
 
-Objects are emitted in transport arrival order. No global ordering across
-independent subgroup streams is claimed until
-[issue #29](https://github.com/dmorn/moqx/issues/29) records that policy.
+Objects are emitted in normalized transport arrival order. Objects within one
+subgroup preserve their stream order, but no global coordinate or group order
+is manufactured across independent subgroup streams.
+
+Each subgroup stream emits a typed boundary after all preceding object/status
+events:
+
+```elixir
+receive do
+  {:moqx, ^client,
+   %MOQX.Event.SubgroupEnded{
+     subscription: ^subscription,
+     group_id: group_id,
+     subgroup_id: subgroup_id,
+     outcome: :complete
+   }} ->
+    {group_id, subgroup_id}
+end
+```
+
+`:complete` means FIN proved the subgroup complete. `:reset` means more objects
+may exist and does not end the subscription; `:closed` means completeness is
+unknown. `SubscriptionDone` never overtakes an accepted subgroup boundary.
+Datagrams have no subgroup boundary. Applications requiring stronger ordering
+own and bound their reorder buffer and gap policy; see ADR-0011.
 
 All application-facing output uses typed `MOQX.Event.*` structs inside the
 stable `{:moqx, client, event}` envelope. By default events go to the process

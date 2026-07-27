@@ -180,5 +180,11 @@ defmodule MOQX.Protocol.MOQTDraft16.CodecTest do
 
     assert {:error, {:incomplete_subgroup_stream, %{header_decoded?: true, buffered_bytes: 4}}} =
              SubgroupDecoder.complete(truncated)
+
+    assert {:ok, header_only, []} =
+             SubgroupDecoder.push(%SubgroupDecoder{}, <<0x34, 7, 9, 3>>)
+
+    assert {:error, {:incomplete_subgroup_stream, %{header_decoded?: true, buffered_bytes: 0}}} =
+             SubgroupDecoder.complete(header_only)
   end
 end

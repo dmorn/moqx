@@ -154,6 +154,12 @@ defmodule MOQX.Draft16SubscriberReducerTest do
             %Transition{
               state: state,
               events: [
+                %MOQX.Event.SubgroupEnded{
+                  subscription: ^subscription,
+                  group_id: 9,
+                  subgroup_id: 3,
+                  outcome: :complete
+                },
                 %MOQX.Event.SubscriptionDone{
                   subscription: ^subscription,
                   completion: %MOQX.Subscription.Completion{
@@ -179,7 +185,7 @@ defmodule MOQX.Draft16SubscriberReducerTest do
     refute Map.has_key?(state.stream_decoders, 4)
   end
 
-  test "partial subgroup reset is a failure and releases decoder ownership" do
+  test "partial subgroup reset marks the subgroup incomplete without ending the subscription" do
     subscription = subscription()
 
     state = %State{
@@ -199,15 +205,111 @@ defmodule MOQX.Draft16SubscriberReducerTest do
 
     assert state.stream_subscriptions == %{4 => 0}
 
-    assert {:error, {:incomplete_subgroup_stream, %{header_decoded?: true, buffered_bytes: 4}},
-            %Transition{state: failed_state}} =
+    assert {:ok,
+            %Transition{
+              state: reset_state,
+              events: [
+                %MOQX.Event.SubgroupEnded{
+                  subscription: ^subscription,
+                  group_id: 9,
+                  subgroup_id: 3,
+                  outcome: :reset,
+                  error_code: 7,
+                  end_of_group?: false
+                }
+              ]
+            }} =
              Draft16.handle_transport(
                state,
                {:stream_event, subgroup_stream(4), :peer_aborted_sending, %{error_code: 7}}
              )
 
-    assert failed_state.stream_decoders == %{}
-    assert failed_state.stream_subscriptions == %{}
+    assert reset_state.stream_decoders == %{}
+    assert reset_state.stream_subscriptions == %{}
+    assert reset_state.subscriptions[0] == subscription
+    assert MapSet.member?(reset_state.subscription_lifecycles[0].processed_streams, 4)
+  end
+
+  test "subgroup completion resolves an implicit subgroup id from its first object" do
+    subscription = subscription()
+
+    state = %State{
+      phase: :ready,
+      subscriptions: %{0 => subscription},
+      aliases: %{7 => subscription},
+      subscription_lifecycles: %{
+        0 => %Draft16.SubscriptionState{subscription: subscription, delivery_timeout: 50}
+      }
+    }
+
+    assert {:ok, %Transition{state: state, events: [%MOQX.Event.ObjectReceived{}]}} =
+             Draft16.handle_transport(
+               state,
+               {:stream_data, subgroup_stream(4), <<0x1A, 7, 9, 5, 4, 1, "x">>, %{}}
+             )
+
+    assert {:ok,
+            %Transition{
+              events: [
+                %MOQX.Event.SubgroupEnded{
+                  subscription: ^subscription,
+                  group_id: 9,
+                  subgroup_id: 4,
+                  outcome: :complete,
+                  end_of_group?: true
+                }
+              ]
+            }} =
+             Draft16.handle_transport(
+               state,
+               {:stream_event, subgroup_stream(4), :peer_finished_sending, %{}}
+             )
+  end
+
+  test "reset boundary precedes terminal subscription completion" do
+    subscription = subscription()
+
+    state = %State{
+      phase: :ready,
+      subscriptions: %{0 => subscription},
+      aliases: %{7 => subscription},
+      subscription_lifecycles: %{
+        0 => %Draft16.SubscriptionState{subscription: subscription, delivery_timeout: 50}
+      }
+    }
+
+    state =
+      state
+      |> Draft16.handle_transport(
+        {:stream_data, subgroup_stream(4), <<0x34, 7, 9, 3, 0, 1, "x">>, %{}}
+      )
+      |> transition_state()
+      |> Draft16.handle_transport(
+        {:stream_data, control_stream(), <<0x0B, 0, 4, 0, 2, 1, 0>>, %{}}
+      )
+      |> transition_state()
+
+    assert {:ok,
+            %Transition{
+              events: [
+                %MOQX.Event.SubgroupEnded{
+                  subscription: ^subscription,
+                  outcome: :reset,
+                  error_code: 2
+                },
+                %MOQX.Event.SubscriptionDone{
+                  subscription: ^subscription,
+                  completion: %MOQX.Subscription.Completion{
+                    processed_streams: 1,
+                    timed_out?: false
+                  }
+                }
+              ]
+            }} =
+             Draft16.handle_transport(
+               state,
+               {:stream_event, subgroup_stream(4), :peer_aborted_sending, %{error_code: 2}}
+             )
   end
 
   test "encodes every public subscription filter and validates request credit" do

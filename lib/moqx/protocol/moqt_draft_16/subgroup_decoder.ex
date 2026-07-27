@@ -5,12 +5,13 @@ defmodule MOQX.Protocol.MOQTDraft16.SubgroupDecoder do
 
   alias MOQX.Protocol.MOQTDraft16.Codec
 
-  defstruct header: nil, buffer: <<>>, previous_object_id: nil
+  defstruct header: nil, buffer: <<>>, previous_object_id: nil, subgroup_id: nil
 
   @type t :: %__MODULE__{
           header: map() | nil,
           buffer: binary(),
-          previous_object_id: non_neg_integer() | nil
+          previous_object_id: non_neg_integer() | nil,
+          subgroup_id: non_neg_integer() | nil
         }
 
   @spec push(t(), binary()) :: {:ok, t(), [map()]} | {:error, term()}
@@ -22,7 +23,9 @@ defmodule MOQX.Protocol.MOQTDraft16.SubgroupDecoder do
   end
 
   @spec complete(t()) :: :ok | {:error, {:incomplete_subgroup_stream, map()}}
-  def complete(%__MODULE__{header: header, buffer: <<>>}) when not is_nil(header), do: :ok
+  def complete(%__MODULE__{header: header, buffer: <<>>, previous_object_id: object_id})
+      when not is_nil(header) and not is_nil(object_id),
+      do: :ok
 
   def complete(%__MODULE__{header: header, buffer: buffer}) do
     {:error,
@@ -62,7 +65,15 @@ defmodule MOQX.Protocol.MOQTDraft16.SubgroupDecoder do
   defp decode_objects(%__MODULE__{} = decoder, objects) do
     case decode_object(decoder) do
       {:ok, object, rest} ->
-        next = %{decoder | buffer: rest, previous_object_id: object.object_id}
+        subgroup_id = decoder.subgroup_id || decoder.header.subgroup_id || object.object_id
+
+        next = %{
+          decoder
+          | buffer: rest,
+            previous_object_id: object.object_id,
+            subgroup_id: subgroup_id
+        }
+
         decode_objects(next, [object | objects])
 
       :more ->

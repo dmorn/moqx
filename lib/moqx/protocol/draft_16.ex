@@ -13,6 +13,7 @@ defmodule MOQX.Protocol.Draft16 do
     ConnectionClosed,
     ObjectReceived,
     ObjectStatus,
+    SubgroupEnded,
     SubscriptionAccepted,
     SubscriptionDone,
     SubscriptionFailed,
@@ -101,12 +102,12 @@ defmodule MOQX.Protocol.Draft16 do
     end
   end
 
-  def handle_transport(%State{} = state, {:stream_event, stream, event, _metadata})
+  def handle_transport(%State{} = state, {:stream_event, stream, event, metadata})
       when event in [:peer_finished_sending, :peer_aborted_sending, :closed] do
     if stream.info.direction == :bidirectional and stream.info.initiator == :local do
       Transition.error(close_state(state), control_stream_termination_reason(state, event))
     else
-      finish_subgroup_stream(state, stream.info.stream_id)
+      finish_subgroup_stream(state, stream.info.stream_id, event, metadata)
     end
   end
 
@@ -655,19 +656,46 @@ defmodule MOQX.Protocol.Draft16 do
 
   defp associate_stream(state, %{header: nil}, _stream_id), do: state.stream_subscriptions
 
-  defp finish_subgroup_stream(state, stream_id) do
+  defp finish_subgroup_stream(
+         state,
+         stream_id,
+         :peer_finished_sending,
+         _metadata
+       ) do
     request_id = state.stream_subscriptions[stream_id]
 
     with %SubgroupDecoder{} = decoder <- state.stream_decoders[stream_id],
          :ok <- SubgroupDecoder.complete(decoder) do
-      finish_complete_subgroup_stream(state, stream_id, request_id)
+      finish_ended_subgroup(state, stream_id, request_id, decoder, :complete, nil)
     else
       nil -> Transition.ok(state)
       {:error, reason} -> Transition.error(drop_stream(state, stream_id), reason)
     end
   end
 
-  defp finish_complete_subgroup_stream(state, stream_id, request_id) do
+  defp finish_subgroup_stream(state, stream_id, event, metadata)
+       when event in [:peer_aborted_sending, :closed] do
+    request_id = state.stream_subscriptions[stream_id]
+
+    case state.stream_decoders[stream_id] do
+      %SubgroupDecoder{} = decoder ->
+        outcome = if event == :peer_aborted_sending, do: :reset, else: :closed
+
+        finish_ended_subgroup(
+          state,
+          stream_id,
+          request_id,
+          decoder,
+          outcome,
+          metadata[:error_code]
+        )
+
+      nil ->
+        Transition.ok(drop_stream(state, stream_id))
+    end
+  end
+
+  defp finish_ended_subgroup(state, stream_id, request_id, decoder, outcome, error_code) do
     state = drop_stream(state, stream_id)
 
     case state.subscription_lifecycles[request_id] do
@@ -679,11 +707,29 @@ defmodule MOQX.Protocol.Draft16 do
           | subscription_lifecycles: Map.put(state.subscription_lifecycles, request_id, lifecycle)
         }
 
-        maybe_complete_subscription(state, request_id)
+        prepend_event(
+          maybe_complete_subscription(state, request_id),
+          subgroup_ended(lifecycle.subscription, decoder, outcome, error_code)
+        )
 
       nil ->
         Transition.ok(state)
     end
+  end
+
+  defp subgroup_ended(subscription, decoder, outcome, error_code) do
+    %SubgroupEnded{
+      subscription: subscription,
+      group_id: decoder.header.group_id,
+      subgroup_id: decoder.subgroup_id || decoder.header.subgroup_id,
+      outcome: outcome,
+      error_code: error_code,
+      end_of_group?: outcome == :complete and decoder.header.end_of_group?
+    }
+  end
+
+  defp prepend_event({:ok, %Transition{} = transition}, event) do
+    {:ok, %{transition | events: [event | transition.events]}}
   end
 
   defp maybe_complete_subscription(state, request_id) do

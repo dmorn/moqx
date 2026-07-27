@@ -31,6 +31,14 @@ defmodule MOQX.Integration.MoqtailDraft16RelayTest do
                      5_000
 
       assert byte_size(payload) == 64
+
+      assert_receive {:moqx, ^client,
+                      %MOQX.Event.SubgroupEnded{
+                        subscription: ^subscription,
+                        group_id: 0,
+                        outcome: :complete
+                      }},
+                     5_000
     after
       _result = MOQX.close(client)
     end

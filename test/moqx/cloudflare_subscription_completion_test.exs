@@ -1,7 +1,7 @@
 defmodule MOQX.CloudflareSubscriptionCompletionTest do
   use ExUnit.Case, async: true
 
-  alias MOQX.Event.{ObjectReceived, SubscriptionDone}
+  alias MOQX.Event.{ObjectReceived, SubgroupEnded, SubscriptionDone}
   alias MOQX.Operation.{Subscribe, Unsubscribe}
   alias MOQX.Protocol.CloudflareDraft14
   alias MOQX.Protocol.CloudflareDraft14.State
@@ -121,6 +121,13 @@ defmodule MOQX.CloudflareSubscriptionCompletionTest do
       )
 
     assert [
+             %SubgroupEnded{
+               subscription: ^subscription,
+               group_id: 3,
+               subgroup_id: 0,
+               outcome: :complete,
+               end_of_group?: false
+             },
              %SubscriptionDone{
                subscription: ^subscription,
                completion: %MOQX.Subscription.Completion{
@@ -207,6 +214,12 @@ defmodule MOQX.CloudflareSubscriptionCompletionTest do
       )
 
     assert [
+             %SubgroupEnded{
+               subscription: ^subscription,
+               group_id: 3,
+               subgroup_id: 0,
+               outcome: :complete
+             },
              %SubscriptionDone{
                subscription: ^subscription,
                completion: %MOQX.Subscription.Completion{
@@ -258,6 +271,97 @@ defmodule MOQX.CloudflareSubscriptionCompletionTest do
     assert completion.status == :too_far_behind
     assert completion.processed_streams == 0
     assert completion.timed_out?
+  end
+
+  test "Cloudflare reset marks one subgroup incomplete and a later close is idempotent" do
+    subscription = %MOQX.Subscription{
+      id: 4,
+      track: %MOQX.TrackRef{namespace: ["bbb"], track: "video.m4s"}
+    }
+
+    state = %State{
+      phase: :ready,
+      subscriptions: %{4 => subscription},
+      aliases: %{7 => subscription},
+      subscription_lifecycles: %{
+        4 => %SubscriptionState{subscription: subscription, delivery_timeout: 250}
+      }
+    }
+
+    bytes =
+      Codec.encode_subgroup(7, %MOQX.Object{
+        group_id: 3,
+        subgroup_id: 0,
+        object_id: 0,
+        payload: "fragment"
+      })
+
+    assert {:ok, received} =
+             CloudflareDraft14.handle_transport(
+               state,
+               {:stream_data, subgroup_stream(9), bytes, %{}}
+             )
+
+    assert {:ok,
+            %MOQX.Protocol.Transition{
+              state: reset_state,
+              events: [
+                %SubgroupEnded{
+                  subscription: ^subscription,
+                  group_id: 3,
+                  subgroup_id: 0,
+                  outcome: :reset,
+                  error_code: 2
+                }
+              ]
+            }} =
+             CloudflareDraft14.handle_transport(
+               received.state,
+               {:stream_event, subgroup_stream(9), :peer_aborted_sending, %{error_code: 2}}
+             )
+
+    assert reset_state.subscriptions[4] == subscription
+    assert MapSet.member?(reset_state.subscription_lifecycles[4].processed_streams, 9)
+
+    assert {:ok, %MOQX.Protocol.Transition{state: ^reset_state, events: []}} =
+             CloudflareDraft14.handle_transport(
+               reset_state,
+               {:stream_event, subgroup_stream(9), :closed, %{}}
+             )
+  end
+
+  test "Cloudflare FIN in a partial object is a protocol failure and releases stream state" do
+    subscription = %MOQX.Subscription{
+      id: 4,
+      track: %MOQX.TrackRef{namespace: ["bbb"], track: "video.m4s"}
+    }
+
+    state = %State{
+      phase: :ready,
+      subscriptions: %{4 => subscription},
+      aliases: %{7 => subscription},
+      subscription_lifecycles: %{
+        4 => %SubscriptionState{subscription: subscription, delivery_timeout: 250}
+      }
+    }
+
+    partial = <<0x15, 7, 3, 0, 0, 0, 0, 3, "a">>
+
+    assert {:ok, received} =
+             CloudflareDraft14.handle_transport(
+               state,
+               {:stream_data, subgroup_stream(9), partial, %{}}
+             )
+
+    assert {:error, {:incomplete_subgroup_stream, %{header_decoded?: true, buffered_bytes: 4}},
+            %MOQX.Protocol.Transition{state: failed_state}} =
+             CloudflareDraft14.handle_transport(
+               received.state,
+               {:stream_event, subgroup_stream(9), :peer_finished_sending, %{}}
+             )
+
+    assert failed_state.stream_decoders == %{}
+    assert failed_state.stream_subscriptions == %{}
   end
 
   test "delivery timeout must be a non-negative integer" do

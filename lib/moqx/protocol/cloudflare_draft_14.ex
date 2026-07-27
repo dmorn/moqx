@@ -37,6 +37,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     PublicationSubscriberLeft,
     PublicationSubscriptionCancelled,
     PublicationSubscriptionRequested,
+    SubgroupEnded,
     SubscriptionAccepted,
     SubscriptionDone,
     SubscriptionFailed
@@ -125,9 +126,9 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     end
   end
 
-  def handle_transport(%State{} = state, {:stream_event, stream, event, _metadata})
+  def handle_transport(%State{} = state, {:stream_event, stream, event, metadata})
       when event in [:peer_finished_sending, :peer_aborted_sending, :closed] do
-    finish_subgroup_stream(state, stream.info.stream_id)
+    finish_subgroup_stream(state, stream.info.stream_id, event, metadata)
   end
 
   def handle_transport(%State{} = state, {:runtime_timeout, {:subscription_delivery, request_id}}) do
@@ -654,9 +655,30 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     }
   end
 
-  defp finish_subgroup_stream(state, stream_id) do
+  defp finish_subgroup_stream(state, stream_id, event, metadata) do
     request_id = state.stream_subscriptions[stream_id]
-    state = %{state | stream_decoders: Map.delete(state.stream_decoders, stream_id)}
+    decoder = state.stream_decoders[stream_id]
+
+    case {event, decoder} do
+      {:peer_finished_sending, %SubgroupDecoder{} = decoder} ->
+        case SubgroupDecoder.complete(decoder) do
+          :ok ->
+            finish_known_subgroup(state, stream_id, request_id, decoder, event, metadata)
+
+          {:error, reason} ->
+            Transition.error(drop_subgroup_stream(state, stream_id), reason)
+        end
+
+      {_event, %SubgroupDecoder{} = decoder} ->
+        finish_known_subgroup(state, stream_id, request_id, decoder, event, metadata)
+
+      {_event, nil} ->
+        Transition.ok(drop_subgroup_stream(state, stream_id))
+    end
+  end
+
+  defp finish_known_subgroup(state, stream_id, request_id, decoder, event, metadata) do
+    state = drop_subgroup_stream(state, stream_id)
 
     case state.subscription_lifecycles[request_id] do
       %{processed_streams: processed} = lifecycle ->
@@ -667,11 +689,44 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
           | subscription_lifecycles: Map.put(state.subscription_lifecycles, request_id, lifecycle)
         }
 
-        maybe_complete_subscription(state, request_id)
+        prepend_event(
+          maybe_complete_subscription(state, request_id),
+          subgroup_ended(lifecycle.subscription, decoder, event, metadata)
+        )
 
       nil ->
         Transition.ok(state)
     end
+  end
+
+  defp drop_subgroup_stream(state, stream_id) do
+    %{
+      state
+      | stream_decoders: Map.delete(state.stream_decoders, stream_id),
+        stream_subscriptions: Map.delete(state.stream_subscriptions, stream_id)
+    }
+  end
+
+  defp subgroup_ended(subscription, decoder, event, metadata) do
+    outcome =
+      case event do
+        :peer_finished_sending -> :complete
+        :peer_aborted_sending -> :reset
+        :closed -> :closed
+      end
+
+    %SubgroupEnded{
+      subscription: subscription,
+      group_id: decoder.header.group_id,
+      subgroup_id: decoder.header.subgroup_id,
+      outcome: outcome,
+      error_code: metadata[:error_code],
+      end_of_group?: outcome == :complete and Bitwise.band(decoder.header.type, 0x08) != 0
+    }
+  end
+
+  defp prepend_event({:ok, %Transition{} = transition}, event) do
+    {:ok, %{transition | events: [event | transition.events]}}
   end
 
   defp maybe_complete_subscription(state, request_id) do

@@ -6,7 +6,7 @@ defmodule MOQX.Draft16CatalogTest do
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
 
-  test "subscribes to a draft-16 catalog track and emits a typed object" do
+  test "emits draft-16 objects in transport arrival order with subgroup boundaries" do
     {:ok, network} = Support.start_network()
     parent = self()
 
@@ -51,12 +51,26 @@ defmodule MOQX.Draft16CatalogTest do
 
         {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x04, 0, 3, 0, 7, 0>>)
         {:ok, ctx} = Transport.send_datagram(ctx, conn, <<0x06, 7, 8, 17, "dgram">>)
-        {:ok, subgroup, ctx} = Transport.open_stream(ctx, conn, direction: :unidirectional)
+
+        assert_receive :send_subgroups, 1_000
+
+        {:ok, later, ctx} = Transport.open_stream(ctx, conn, direction: :unidirectional)
 
         {:ok, _send, ctx} =
-          Transport.send_stream(ctx, subgroup, <<0x34, 7, 9, 3, 0, 5, "hello">>)
+          Transport.send_stream(ctx, later, <<0x34, 7, 10, 1, 0, 5, "later">>)
 
-        {:ok, _ctx} = Transport.finish_sending(ctx, subgroup)
+        assert_receive :send_earlier_subgroup, 1_000
+
+        {:ok, earlier, ctx} = Transport.open_stream(ctx, conn, direction: :unidirectional)
+
+        {:ok, _send, ctx} =
+          Transport.send_stream(ctx, earlier, <<0x34, 7, 9, 3, 0, 7, "earlier">>)
+
+        assert_receive :finish_earlier_subgroup, 1_000
+        {:ok, ctx} = Transport.finish_sending(ctx, earlier)
+
+        assert_receive :finish_later_subgroup, 1_000
+        {:ok, _ctx} = Transport.finish_sending(ctx, later)
         :ok
       end)
 
@@ -91,16 +105,53 @@ defmodule MOQX.Draft16CatalogTest do
                     }},
                    1_000
 
+    send(relay.pid, :send_subgroups)
+
+    assert_receive {:moqx, ^client, %MOQX.Event.ObjectReceived{object: first}}, 1_000
+
+    assert %MOQX.Object{
+             subscription: ^subscription,
+             group_id: 10,
+             subgroup_id: 1,
+             object_id: 0,
+             publisher_priority: nil,
+             payload: "later"
+           } = first
+
+    send(relay.pid, :send_earlier_subgroup)
+
+    assert_receive {:moqx, ^client, %MOQX.Event.ObjectReceived{object: second}}, 1_000
+
+    assert %MOQX.Object{
+             subscription: ^subscription,
+             group_id: 9,
+             subgroup_id: 3,
+             object_id: 0,
+             publisher_priority: nil,
+             payload: "earlier"
+           } = second
+
+    send(relay.pid, :finish_earlier_subgroup)
+
     assert_receive {:moqx, ^client,
-                    %MOQX.Event.ObjectReceived{
-                      object: %MOQX.Object{
-                        subscription: ^subscription,
-                        group_id: 9,
-                        subgroup_id: 3,
-                        object_id: 0,
-                        publisher_priority: nil,
-                        payload: "hello"
-                      }
+                    %MOQX.Event.SubgroupEnded{
+                      subscription: ^subscription,
+                      group_id: 9,
+                      subgroup_id: 3,
+                      outcome: :complete,
+                      end_of_group?: false
+                    }},
+                   1_000
+
+    send(relay.pid, :finish_later_subgroup)
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.SubgroupEnded{
+                      subscription: ^subscription,
+                      group_id: 10,
+                      subgroup_id: 1,
+                      outcome: :complete,
+                      end_of_group?: false
                     }},
                    1_000
 
