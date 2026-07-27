@@ -10,7 +10,8 @@ defmodule MOQX.Protocol.Resolver do
   alias MOQX.Protocol
 
   @built_ins %{
-    cloudflare_draft_14: MOQX.Protocol.CloudflareDraft14
+    cloudflare_draft_14: MOQX.Protocol.CloudflareDraft14,
+    draft_16: MOQX.Protocol.Draft16
   }
 
   @doc "Returns the built-in protocol identifiers."

@@ -11,7 +11,7 @@ defmodule MOQX.Protocol do
 
   alias MOQX.Protocol.{Capabilities, Transition, TransportSpec}
 
-  @type id :: :cloudflare_draft_14
+  @type id :: :cloudflare_draft_14 | :draft_16
   @type state :: term()
 
   @callback id() :: id() | atom()

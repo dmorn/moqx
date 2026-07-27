@@ -6,9 +6,9 @@ It provides a QUIC transport boundary backed by [`quicer`](https://github.com/dm
 
 ## Protocol documents
 
-`moqx` currently implements Cloudflare's deployed MOQT draft-14 protocol over
-native QUIC. Additional protocol implementations are deferred until this path
-is ready for production consumers such as Membrane plugins.
+`moqx` implements independent Cloudflare draft-14 and standard MOQT draft-16
+subscriber protocols over native QUIC. Protocol selection is explicit, so both
+implementations coexist without hostname inference or fallback.
 
 Core references:
 
@@ -20,6 +20,11 @@ Core references:
 - [RFC 9297 — HTTP Datagrams and the Capsule Protocol](https://www.rfc-editor.org/rfc/rfc9297)
 - [draft-ietf-webtrans-http3-14 — WebTransport over HTTP/3](https://www.ietf.org/archive/id/draft-ietf-webtrans-http3-14.txt)
 - [draft-ietf-moq-transport-14 — Media over QUIC Transport](https://www.ietf.org/archive/id/draft-ietf-moq-transport-14.txt)
+- [draft-ietf-moq-transport-16 — Media over QUIC Transport](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-16)
+
+The draft-16 interoperability reference is Moqtail's `draft-16` branch pinned
+at commit
+[`c2ff7253479c6a0d7c8282a1cad289d591ebc302`](https://github.com/moqtail/moqtail/commit/c2ff7253479c6a0d7c8282a1cad289d591ebc302).
 
 ## Installation
 
@@ -67,6 +72,43 @@ Subscriptions accept a protocol-neutral relative start policy:
 that cannot represent a requested policy returns
 `{:error, {:unsupported_subscription_start, policy}}` instead of silently
 substituting another boundary.
+
+## Standard draft-16 subscriber
+
+Moqtail's public relay can be reached through the independent `:draft_16`
+implementation:
+
+```elixir
+{:ok, client} =
+  MOQX.connect("moqt://relay.moqtail.dev:443",
+    protocol: :draft_16
+  )
+
+catalog_track =
+  %MOQX.TrackRef{
+    namespace: ["moqtail", "testsrc"],
+    track: "catalog"
+  }
+
+{:ok, subscription} =
+  MOQX.subscribe(client, catalog_track,
+    start: :next_group,
+    priority: 127
+  )
+
+receive do
+  {:moqx, ^client,
+   %MOQX.Event.ObjectReceived{
+     object: %MOQX.Object{subscription: ^subscription} = object
+   }} ->
+    object.payload
+end
+```
+
+This path negotiates ALPN `moqt-16`, sends native-QUIC `PATH` and `AUTHORITY`
+setup parameters, and decodes draft-16 subgroup objects. The catalog payload is
+currently delivered as `ObjectReceived`; CMSF catalog parsing is tracked
+separately.
 
 Catalog tracks can be subscribed directly. Delivered objects retain their
 subscription, group, subgroup, object, and priority coordinates:
@@ -256,6 +298,13 @@ mix ci
 
 Default tests are fast and hermetic. Real QUIC checks are tagged as ExUnit
 integration tests and are excluded by default.
+
+The public Moqtail draft-16 subscriber smoke is independently selectable:
+
+```bash
+mix test --only integration \
+  test/integration/moqtail_draft_16_catalog_test.exs
+```
 
 The self-contained public Cloudflare subscription-start check publishes a
 unique namespace, subscribes with `:next_group`, and records the deployed

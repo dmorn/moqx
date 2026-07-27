@@ -1,7 +1,8 @@
 # MOQX Context
 
-Transport performance work is parked. Next work is MOQT draft-14 protocol code
-over native QUIC.
+Transport performance work is parked. Current protocol work extends the
+subscriber surface across Cloudflare draft-14 and standard MOQT draft-16 over
+native QUIC.
 
 ## Decisions
 
@@ -43,19 +44,18 @@ application error code where the backend supports it.
 carried by QUIC stream or connection shutdown.
 
 **Transport Profile**: named fixture for protocol-selected ALPN, transport
-capabilities, and stream expectations. Current profiles: `:draft_14` and the
-protocol-neutral `:streams_only` test fixture.
+capabilities, and stream expectations. Current profiles: `:draft_14`,
+`:draft_16`, and the protocol-neutral `:streams_only` test fixture.
 
 **Protocol Variant**: concrete MOQT-family protocol version with its own
-message model and session rules, e.g. MOQT draft-14 or a future incompatible
-wire version.
+message model and session rules, e.g. MOQT draft-14 or MOQT draft-16.
 
 **Versioned Wire Package**: reusable message structs, numeric registries, and
 framing codecs for one published wire specification, such as IETF MOQT
-draft-14. It does not own provider lifecycle or relay policy.
+draft-14 or draft-16. It does not own provider lifecycle or relay policy.
 
 **Protocol Implementation**: executable composition selected explicitly by a
-caller, such as Cloudflare draft-14 or Moqtail draft-14. It owns lifecycle,
+caller, such as Cloudflare draft-14 or standard draft-16. It owns lifecycle,
 supported operations, authentication, conventions, events, errors, and
 conversion between public intent and wire messages.
 

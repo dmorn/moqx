@@ -18,13 +18,29 @@ retained as the `:streams_only` test fixture. This narrows the supported
 protocol set without weakening the transport abstraction or changing the
 explicit protocol-selection decision.
 
+## Scope update: 2026-07-27
+
+The second active implementation is standard MOQT draft-16, selected as
+`:draft_16` and implemented by `MOQX.Protocol.Draft16`. It coexists with
+Cloudflare draft-14 rather than replacing it. The first landed slice covers
+native QUIC ALPN `moqt-16`, draft-16 setup with `PATH` and `AUTHORITY`,
+subscription using relative start policies, subscription acceptance/error, and
+subgroup object delivery through the existing typed public API.
+
+The normative wire reference is
+`draft-ietf-moq-transport-16`. Interoperability behavior is checked against
+Moqtail's `draft-16` branch pinned at
+`c2ff7253479c6a0d7c8282a1cad289d591ebc302` and its public
+`relay.moqtail.dev` endpoint. CMSF catalog decoding and draft-16 publication
+remain separate incremental work.
+
 ## Context
 
 `moqx` needs to support multiple deployed MOQT-family protocols over the
 existing `MOQX.Transport` abstraction. Initial targets include:
 
 - Cloudflare's deployed subset and lifecycle for MOQT draft-14;
-- Moqtail's deployed MOQT draft-14 behavior;
+- standard MOQT draft-16, including Moqtail relay interoperability;
 - MOQ Lite draft-04.
 
 There are two different axes of variation:
@@ -35,8 +51,8 @@ There are two different axes of variation:
    its supported subset, lifecycle, authentication, catalog conventions,
    extensions, and relay behavior.
 
-Cloudflare draft-14 and Moqtail draft-14 can reuse standard draft-14 message
-structs and codecs without sharing one state machine. MOQ Lite draft-04 has a
+Cloudflare draft-14 and standard draft-16 use independent versioned wire
+packages and state machines behind one public API. MOQ Lite draft-04 has a
 different wire and stream model altogether.
 
 Only `MOQX.Transport` is treated as an existing architectural foundation for
@@ -130,12 +146,13 @@ Each deployed implementation owns:
 Implementation namespaces follow this shape:
 
 - `MOQX.Protocol.CloudflareDraft14`;
-- a future Moqtail implementation under `MOQX.Protocol.MoqtailDraft14`;
+- `MOQX.Protocol.Draft16`;
 - a future MOQ Lite implementation under `MOQX.Protocol.MOQLite04`.
 
-Only Cloudflare draft-14 is currently complete. Concrete implementations are
-independent; provider differences must not accumulate as conditionals in one
-global draft-14 state machine.
+Cloudflare draft-14 has subscriber and publisher support. Standard draft-16
+currently has its first subscriber slice. Concrete implementations are
+independent; version and deployment differences must not accumulate as
+conditionals in one global state machine.
 
 ### Versioned wire packages
 
@@ -149,9 +166,9 @@ may contain:
 - object datagram encoding and decoding;
 - standard numeric registries and error-code mappings.
 
-Cloudflare and Moqtail implementations compose this package where their wire
-behavior matches the draft. Provider extensions stay in the provider
-implementation unless they are standardized and reusable.
+`MOQX.Protocol.MOQTDraft16` independently owns standard draft-16 wire behavior.
+Provider extensions stay in a concrete implementation unless they are
+standardized and reusable.
 
 MOQ Lite draft-04 owns its own messages and codecs under
 `MOQX.Protocol.MOQLite04` because it does not use the draft-14 operating model.
@@ -262,8 +279,8 @@ Positive:
 
 - Applications get one explicit connection API without coupling to provider
   wire structs.
-- Cloudflare and Moqtail can reuse draft-14 encoding without sharing lifecycle
-  state or provider conditionals.
+- Cloudflare draft-14 and standard draft-16 coexist without sharing lifecycle
+  state or version conditionals.
 - MOQ Lite can keep its different stream model.
 - Protocol implementations can be tested as deterministic state transitions.
 - Custom implementations can integrate through the same runtime contract.

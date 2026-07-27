@@ -52,8 +52,17 @@ defmodule MOQX.Transport.ProfileTest do
              }
     end
 
+    test "returns the draft-16 transport fixture" do
+      assert {:ok, %Profile{} = profile} = Profile.fetch(:draft_16)
+
+      assert profile.name == :draft_16
+      assert profile.alpn == "moqt-16"
+      assert profile.capabilities.alpn == "moqt-16"
+      assert profile.stream_expectations.control_stream.count == :one
+    end
+
     test "lists canonical profile names" do
-      assert Profile.names() == [:draft_14, :streams_only]
+      assert Profile.names() == [:draft_14, :draft_16, :streams_only]
     end
 
     test "rejects unknown profiles" do
