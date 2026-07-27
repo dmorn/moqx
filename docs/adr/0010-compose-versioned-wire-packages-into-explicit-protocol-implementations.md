@@ -22,17 +22,18 @@ explicit protocol-selection decision.
 
 The second active implementation is standard MOQT draft-16, selected as
 `:draft_16` and implemented by `MOQX.Protocol.Draft16`. It coexists with
-Cloudflare draft-14 rather than replacing it. The first landed slice covers
-native QUIC ALPN `moqt-16`, draft-16 setup with `PATH` and `AUTHORITY`,
-subscription using relative start policies, subscription acceptance/error, and
-subgroup object delivery through the existing typed public API.
+Cloudflare draft-14 rather than replacing it. Its subscriber path covers native
+QUIC ALPN `moqt-16`, strict draft-16 setup and request credit, all four
+protocol-neutral subscription filters, request updates, subscription
+acceptance/error/completion, subgroup streams, object datagrams, extension
+preservation, and stream draining through the existing typed public API.
 
 The normative wire reference is
 `draft-ietf-moq-transport-16`. Interoperability behavior is checked against
 Moqtail's `draft-16` branch pinned at
 `c2ff7253479c6a0d7c8282a1cad289d591ebc302` and its public
-`relay.moqtail.dev` endpoint. CMSF catalog decoding and draft-16 publication
-remain separate incremental work.
+`relay.moqtail.dev` endpoint. CMSF catalog decoding, cross-stream ordering
+policy, and draft-16 publication remain separate incremental work.
 
 ## Context
 
@@ -150,9 +151,10 @@ Implementation namespaces follow this shape:
 - a future MOQ Lite implementation under `MOQX.Protocol.MOQLite04`.
 
 Cloudflare draft-14 has subscriber and publisher support. Standard draft-16
-currently has its first subscriber slice. Concrete implementations are
-independent; version and deployment differences must not accumulate as
-conditionals in one global state machine.
+has a complete subscriber lifecycle, subject to the separate cross-stream
+ordering decision. Concrete implementations are independent; version and
+deployment differences must not accumulate as conditionals in one global state
+machine.
 
 ### Versioned wire packages
 
@@ -270,8 +272,8 @@ namespace publication. Secret lookup, issuance, permission, and rotation stay
 outside the library. Secret values and sensitive encoded actions have redacted
 inspection and are unwrapped only at the driver's transport-send boundary.
 
-Datagram delivery and other protocol implementations remain incremental work
-behind the same boundaries.
+Other protocol implementations remain incremental work behind the same
+boundaries.
 
 ## Consequences
 

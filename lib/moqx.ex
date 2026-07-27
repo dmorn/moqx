@@ -22,8 +22,21 @@ defmodule MOQX do
   @typedoc "Option accepted by `subscribe/3`."
   @type subscription_option ::
           {:start, subscription_start()}
+          | {:filter, MOQX.SubscriptionFilter.t()}
           | {:priority, 0..255}
-          | {:delivery_timeout, non_neg_integer()}
+          | {:group_order, :ascending | :descending}
+          | {:delivery_timeout, pos_integer()}
+          | {:parameters, [MOQX.SubscriptionParameter.t()]}
+
+  @typedoc "Option accepted by `update_subscription/3`."
+  @type subscription_update_option ::
+          {:start, subscription_start()}
+          | {:filter, MOQX.SubscriptionFilter.t()}
+          | {:priority, 0..255}
+          | {:delivery_timeout, pos_integer()}
+          | {:forward, boolean()}
+          | {:new_group, non_neg_integer()}
+          | {:parameters, [MOQX.SubscriptionParameter.t()]}
 
   @doc "Returns the default native QUIC transport implementation."
   @spec transport() :: module()
@@ -61,6 +74,17 @@ defmodule MOQX do
           {:ok, MOQX.Subscription.t()} | {:error, term()}
   def subscribe(client, track, options \\ []) do
     ConnectionDriver.subscribe(client, track, options)
+  end
+
+  @doc "Updates an active subscription's draft-neutral filter and delivery parameters."
+  @spec update_subscription(
+          MOQX.Client.t(),
+          MOQX.Subscription.t(),
+          [subscription_update_option()]
+        ) ::
+          :ok | {:error, term()}
+  def update_subscription(client, subscription, options) do
+    ConnectionDriver.update_subscription(client, subscription, options)
   end
 
   @doc "Ends an active subscription and sends the selected protocol's unsubscribe message."

@@ -15,6 +15,8 @@ defmodule MOQX.Object do
     :object_id,
     :publisher_priority,
     :status,
+    :extensions,
+    :end_of_group?,
     :payload
   ]
 
@@ -25,6 +27,8 @@ defmodule MOQX.Object do
           object_id: non_neg_integer(),
           publisher_priority: 0..255 | nil,
           status: :object_does_not_exist | :end_of_group | :end_of_track | nil,
+          extensions: [MOQX.Extension.t()] | nil,
+          end_of_group?: boolean() | nil,
           payload: binary()
         }
 end

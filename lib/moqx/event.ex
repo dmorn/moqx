@@ -3,6 +3,8 @@ defmodule MOQX.Event do
 
   @type t ::
           MOQX.Event.SubscriptionAccepted.t()
+          | MOQX.Event.SubscriptionUpdated.t()
+          | MOQX.Event.SubscriptionUpdateFailed.t()
           | MOQX.Event.SubscriptionFailed.t()
           | MOQX.Event.SubscriptionDone.t()
           | MOQX.Event.ObjectReceived.t()
@@ -17,6 +19,24 @@ defmodule MOQX.Event do
           | MOQX.Event.PublicationSubscriberLeft.t()
           | MOQX.Event.ConnectionClosed.t()
           | MOQX.Event.ProtocolFailed.t()
+end
+
+defmodule MOQX.Event.SubscriptionUpdated do
+  @moduledoc "The relay accepted a subscription parameter update."
+  @enforce_keys [:subscription]
+  defstruct [:subscription, parameters: []]
+
+  @type t :: %__MODULE__{
+          subscription: MOQX.Subscription.t(),
+          parameters: [MOQX.SubscriptionParameter.t()]
+        }
+end
+
+defmodule MOQX.Event.SubscriptionUpdateFailed do
+  @moduledoc "The relay rejected a subscription update while leaving the subscription active."
+  @enforce_keys [:subscription, :error]
+  defstruct [:subscription, :error]
+  @type t :: %__MODULE__{subscription: MOQX.Subscription.t(), error: MOQX.ProtocolError.t()}
 end
 
 defmodule MOQX.Event.PublicationSubscriptionRequested do
@@ -41,8 +61,13 @@ end
 defmodule MOQX.Event.SubscriptionAccepted do
   @moduledoc "The relay accepted a subscription."
   @enforce_keys [:subscription]
-  defstruct [:subscription]
-  @type t :: %__MODULE__{subscription: MOQX.Subscription.t()}
+  defstruct [:subscription, parameters: [], track_extensions: []]
+
+  @type t :: %__MODULE__{
+          subscription: MOQX.Subscription.t(),
+          parameters: [MOQX.SubscriptionParameter.t()],
+          track_extensions: [MOQX.Extension.t()]
+        }
 end
 
 defmodule MOQX.Event.SubscriptionFailed do

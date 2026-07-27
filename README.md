@@ -106,9 +106,41 @@ end
 ```
 
 This path negotiates ALPN `moqt-16`, sends native-QUIC `PATH` and `AUTHORITY`
-setup parameters, and decodes draft-16 subgroup objects. The catalog payload is
-currently delivered as `ObjectReceived`; CMSF catalog parsing is tracked
-separately.
+setup parameters, and decodes draft-16 subgroup streams and object datagrams.
+Objects preserve extension headers and end-of-group metadata. The catalog
+payload is currently delivered as `ObjectReceived`; CMSF catalog parsing is
+tracked separately.
+
+Draft-16 also accepts the complete protocol-neutral filter model:
+
+```elixir
+filter = %MOQX.SubscriptionFilter{
+  type: :absolute_range,
+  start_location: {12, 4},
+  end_group: 20
+}
+
+{:ok, subscription} =
+  MOQX.subscribe(client, track,
+    filter: filter,
+    priority: 127,
+    group_order: :ascending,
+    delivery_timeout: 5_000
+  )
+
+:ok =
+  MOQX.update_subscription(client, subscription,
+    start: :next_group,
+    priority: 64
+  )
+```
+
+The relative `:start` policies remain the portable API shared with Cloudflare.
+Absolute start/range filters, request updates, datagrams, and accepted
+subscription parameters are currently implemented by `:draft_16`. Update
+success and rejection arrive as `SubscriptionUpdated` and
+`SubscriptionUpdateFailed`; an update rejection leaves the subscription
+active.
 
 Catalog tracks can be subscribed directly. Delivered objects retain their
 subscription, group, subgroup, object, and priority coordinates:
@@ -155,6 +187,10 @@ ffmpeg -v error -f h264 -i /tmp/cloudflare-bbb.h264 -f null -
 `MOQX.Event.SubscriptionFailed`, while `MOQX.Event.SubscriptionDone` is emitted
 only after every stream advertised by `PUBLISH_DONE` has been processed or the
 subscription's `:delivery_timeout` has elapsed.
+
+Objects are emitted in transport arrival order. No global ordering across
+independent subgroup streams is claimed until
+[issue #29](https://github.com/dmorn/moqx/issues/29) records that policy.
 
 All application-facing output uses typed `MOQX.Event.*` structs inside the
 stable `{:moqx, client, event}` envelope. By default events go to the process

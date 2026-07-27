@@ -7,6 +7,7 @@ defmodule MOQX.Operation do
 
   @type t ::
           Subscribe.t()
+          | UpdateSubscription.t()
           | Unsubscribe.t()
           | Publish.t()
           | AddTrack.t()
@@ -32,6 +33,15 @@ defmodule MOQX.Operation do
     defstruct [:subscription]
 
     @type t :: %__MODULE__{subscription: term()}
+  end
+
+  defmodule UpdateSubscription do
+    @moduledoc "Updates the parameters or object boundary of an active subscription."
+
+    @enforce_keys [:subscription]
+    defstruct [:subscription, options: []]
+
+    @type t :: %__MODULE__{subscription: MOQX.Subscription.t(), options: keyword()}
   end
 
   defmodule Publish do

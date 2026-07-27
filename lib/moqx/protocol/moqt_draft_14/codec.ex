@@ -402,11 +402,20 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
     {1, [encode_varint(group_id), encode_varint(object_id)]}
   end
 
-  defp encode_object_payload(%MOQX.Object{status: nil, payload: payload}) do
+  defp encode_object_payload(%MOQX.Object{
+         status: nil,
+         extensions: _extensions,
+         end_of_group?: _end_of_group?,
+         payload: payload
+       }) do
     [encode_varint(byte_size(payload)), payload]
   end
 
-  defp encode_object_payload(%MOQX.Object{status: status}) do
+  defp encode_object_payload(%MOQX.Object{
+         status: status,
+         extensions: _extensions,
+         end_of_group?: _end_of_group?
+       }) do
     [encode_varint(0), encode_varint(encode_object_status(status))]
   end
 

@@ -50,11 +50,13 @@ defmodule MOQX.Draft16CatalogTest do
                  Transport.recv_stream(ctx, control, byte_size(subscribe))
 
         {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x04, 0, 3, 0, 7, 0>>)
+        {:ok, ctx} = Transport.send_datagram(ctx, conn, <<0x06, 7, 8, 17, "dgram">>)
         {:ok, subgroup, ctx} = Transport.open_stream(ctx, conn, direction: :unidirectional)
 
-        {:ok, _send, _ctx} =
-          Transport.send_stream(ctx, subgroup, <<0x34, 7, 9, 3, 0, 5, "hello">>, finish: true)
+        {:ok, _send, ctx} =
+          Transport.send_stream(ctx, subgroup, <<0x34, 7, 9, 3, 0, 5, "hello">>)
 
+        {:ok, _ctx} = Transport.finish_sending(ctx, subgroup)
         :ok
       end)
 
@@ -74,6 +76,19 @@ defmodule MOQX.Draft16CatalogTest do
 
     assert_receive {:moqx, ^client,
                     %MOQX.Event.SubscriptionAccepted{subscription: ^subscription}},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.ObjectReceived{
+                      object: %MOQX.Object{
+                        subscription: ^subscription,
+                        group_id: 8,
+                        object_id: 0,
+                        publisher_priority: 17,
+                        end_of_group?: true,
+                        payload: "dgram"
+                      }
+                    }},
                    1_000
 
     assert_receive {:moqx, ^client,

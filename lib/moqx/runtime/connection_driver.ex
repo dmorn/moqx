@@ -61,6 +61,13 @@ defmodule MOQX.Runtime.ConnectionDriver do
     call(pid, {:operation, %Operation.Subscribe{track: track, options: options}}, 5_000)
   end
 
+  @spec update_subscription(MOQX.Client.t(), MOQX.Subscription.t(), keyword()) ::
+          :ok | {:error, term()}
+  def update_subscription(%MOQX.Client{pid: pid}, subscription, options) do
+    operation = %Operation.UpdateSubscription{subscription: subscription, options: options}
+    call(pid, {:operation, operation}, 5_000)
+  end
+
   @spec unsubscribe(MOQX.Client.t(), MOQX.Subscription.t()) :: :ok | {:error, term()}
   def unsubscribe(%MOQX.Client{pid: pid}, subscription) do
     call(pid, {:operation, %Operation.Unsubscribe{subscription: subscription}}, 5_000)
@@ -432,35 +439,28 @@ defmodule MOQX.Runtime.ConnectionDriver do
   end
 
   defp operation_reply(events) do
-    case Enum.find(events, &operation_reply_event?/1) do
-      {:subscription_started, subscription} ->
-        {{:ok, subscription}, Enum.reject(events, &match?({:subscription_started, _}, &1))}
-
-      {:subscription_ended, _subscription} ->
-        {:ok, Enum.reject(events, &match?({:subscription_ended, _}, &1))}
-
-      {:publication_started, publication} ->
-        {{:ok, publication}, Enum.reject(events, &match?({:publication_started, _}, &1))}
-
-      {:track_added, track} ->
-        {{:ok, track}, Enum.reject(events, &match?({:track_added, _}, &1))}
-
-      {:object_published, _track} ->
-        {:ok, Enum.reject(events, &match?({:object_published, _}, &1))}
-
-      {:publication_finished, _publication} ->
-        {:ok, Enum.reject(events, &match?({:publication_finished, _}, &1))}
-
-      :connection_ended ->
-        {:ok, Enum.reject(events, &(&1 == :connection_ended))}
-
-      nil ->
-        {:ok, events}
-    end
+    events
+    |> Enum.find(&operation_reply_event?/1)
+    |> operation_reply(events)
   end
+
+  defp operation_reply({:subscription_started, subscription} = event, events),
+    do: {{:ok, subscription}, List.delete(events, event)}
+
+  defp operation_reply({:publication_started, publication} = event, events),
+    do: {{:ok, publication}, List.delete(events, event)}
+
+  defp operation_reply({:track_added, track} = event, events),
+    do: {{:ok, track}, List.delete(events, event)}
+
+  defp operation_reply(event, events) when not is_nil(event),
+    do: {:ok, List.delete(events, event)}
+
+  defp operation_reply(nil, events), do: {:ok, events}
 
   defp operation_reply_event?({:subscription_started, _subscription}), do: true
   defp operation_reply_event?({:subscription_ended, _subscription}), do: true
+  defp operation_reply_event?({:subscription_updated, _subscription}), do: true
   defp operation_reply_event?({:publication_started, _publication}), do: true
   defp operation_reply_event?({:track_added, _track}), do: true
   defp operation_reply_event?({:object_published, _track}), do: true

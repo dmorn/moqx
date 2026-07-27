@@ -20,6 +20,12 @@ defmodule MOQX.Integration.MoqtailDraft16CatalogTest do
                       %MOQX.Event.SubscriptionAccepted{subscription: ^subscription}},
                      10_000
 
+      assert :ok = MOQX.update_subscription(client, subscription, priority: 126)
+
+      assert_receive {:moqx, ^client,
+                      %MOQX.Event.SubscriptionUpdated{subscription: ^subscription}},
+                     10_000
+
       assert_receive {:moqx, ^client,
                       %MOQX.Event.ObjectReceived{
                         object: %MOQX.Object{

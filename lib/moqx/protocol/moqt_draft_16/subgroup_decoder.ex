@@ -21,6 +21,15 @@ defmodule MOQX.Protocol.MOQTDraft16.SubgroupDecoder do
     |> decode_objects([])
   end
 
+  @spec complete(t()) :: :ok | {:error, {:incomplete_subgroup_stream, map()}}
+  def complete(%__MODULE__{header: header, buffer: <<>>}) when not is_nil(header), do: :ok
+
+  def complete(%__MODULE__{header: header, buffer: buffer}) do
+    {:error,
+     {:incomplete_subgroup_stream,
+      %{header_decoded?: not is_nil(header), buffered_bytes: byte_size(buffer)}}}
+  end
+
   defp ensure_header(%__MODULE__{header: nil, buffer: buffer} = decoder) do
     with {:ok, type, rest} <- Codec.decode_varint(buffer),
          :ok <- valid_header_type(type),
@@ -34,7 +43,8 @@ defmodule MOQX.Protocol.MOQTDraft16.SubgroupDecoder do
         group_id: group_id,
         subgroup_id: subgroup_id,
         priority: priority,
-        extensions?: (type &&& 0x01) != 0
+        extensions?: (type &&& 0x01) != 0,
+        end_of_group?: (type &&& 0x08) != 0
       }
 
       %{decoder | header: header, buffer: rest}
@@ -65,7 +75,7 @@ defmodule MOQX.Protocol.MOQTDraft16.SubgroupDecoder do
 
   defp decode_object(%__MODULE__{header: header, buffer: buffer} = decoder) do
     with {:ok, delta, rest} <- Codec.decode_varint(buffer),
-         {:ok, rest} <- skip_extensions(header.extensions?, rest),
+         {:ok, extensions, rest} <- decode_extensions(header.extensions?, rest),
          {:ok, payload_length, rest} <- Codec.decode_varint(rest) do
       object_id =
         case decoder.previous_object_id do
@@ -73,25 +83,26 @@ defmodule MOQX.Protocol.MOQTDraft16.SubgroupDecoder do
           previous -> previous + delta + 1
         end
 
-      decode_object_payload(header, object_id, payload_length, rest)
+      decode_object_payload(header, object_id, extensions, payload_length, rest)
     end
   end
 
-  defp decode_object_payload(header, object_id, 0, rest) do
+  defp decode_object_payload(header, object_id, extensions, 0, rest) do
     with {:ok, status, rest} <- Codec.decode_varint(rest),
          {:ok, status} <- decode_object_status(status) do
-      {:ok, public_object(header, object_id, status, ""), rest}
+      {:ok, public_object(header, object_id, extensions, status, ""), rest}
     end
   end
 
-  defp decode_object_payload(header, object_id, length, rest) when byte_size(rest) >= length do
+  defp decode_object_payload(header, object_id, extensions, length, rest)
+       when byte_size(rest) >= length do
     <<payload::binary-size(^length), rest::binary>> = rest
-    {:ok, public_object(header, object_id, nil, payload), rest}
+    {:ok, public_object(header, object_id, extensions, nil, payload), rest}
   end
 
-  defp decode_object_payload(_header, _object_id, _length, _rest), do: :more
+  defp decode_object_payload(_header, _object_id, _extensions, _length, _rest), do: :more
 
-  defp public_object(header, object_id, status, payload) do
+  defp public_object(header, object_id, extensions, status, payload) do
     %{
       track_alias: header.track_alias,
       group_id: header.group_id,
@@ -99,17 +110,20 @@ defmodule MOQX.Protocol.MOQTDraft16.SubgroupDecoder do
       priority: header.priority,
       object_id: object_id,
       status: status,
+      extensions: extensions,
+      end_of_group?: header.end_of_group?,
       payload: payload
     }
   end
 
-  defp skip_extensions(false, rest), do: {:ok, rest}
+  defp decode_extensions(false, rest), do: {:ok, [], rest}
 
-  defp skip_extensions(true, rest) do
+  defp decode_extensions(true, rest) do
     with {:ok, length, rest} <- Codec.decode_varint(rest),
-         true <- byte_size(rest) >= length do
-      <<_extensions::binary-size(^length), rest::binary>> = rest
-      {:ok, rest}
+         true <- byte_size(rest) >= length,
+         <<encoded::binary-size(^length), rest::binary>> <- rest,
+         {:ok, extensions} <- Codec.decode_extensions(encoded) do
+      {:ok, extensions, rest}
     else
       _other -> :more
     end

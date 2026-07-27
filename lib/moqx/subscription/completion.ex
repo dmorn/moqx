@@ -19,6 +19,7 @@ defmodule MOQX.Subscription.Completion do
           | :going_away
           | :expired
           | :too_far_behind
+          | :update_failed
           | :malformed_track
           | {:unknown, non_neg_integer()}
 
