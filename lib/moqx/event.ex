@@ -130,8 +130,12 @@ end
 defmodule MOQX.Event.CatalogReceived do
   @moduledoc "A catalog object was decoded."
   @enforce_keys [:catalog]
-  defstruct [:catalog]
-  @type t :: %__MODULE__{catalog: MOQX.Catalog.t()}
+  defstruct [:catalog, :subscription]
+
+  @type t :: %__MODULE__{
+          catalog: MOQX.Catalog.t(),
+          subscription: MOQX.Subscription.t() | nil
+        }
 end
 
 defmodule MOQX.Event.PublicationReady do

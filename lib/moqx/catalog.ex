@@ -10,6 +10,8 @@ defmodule MOQX.Catalog do
 
   @enforce_keys [:tracks, :raw]
   defstruct [
+    :format,
+    :namespace,
     :version,
     :streaming_format,
     :streaming_format_version,
@@ -20,6 +22,8 @@ defmodule MOQX.Catalog do
   ]
 
   @type t :: %__MODULE__{
+          format: :cloudflare | :moqtail_cmsf,
+          namespace: [binary()] | nil,
           version: non_neg_integer() | nil,
           streaming_format: non_neg_integer() | nil,
           streaming_format_version: binary() | nil,
@@ -29,13 +33,29 @@ defmodule MOQX.Catalog do
           raw: map()
         }
 
-  @spec decode(binary()) :: {:ok, t()} | {:error, term()}
-  def decode(payload) when is_binary(payload) do
+  @type decode_option ::
+          {:format, :cloudflare | :moqtail_cmsf}
+          | {:namespace, [binary()]}
+
+  @doc """
+  Decodes one supported catalog into protocol-neutral values.
+
+  Protocol implementations pass their expected `:format` explicitly.
+  Standalone callers may omit it and use shape inference.
+  """
+  @spec decode(binary(), [decode_option()]) :: {:ok, t()} | {:error, MOQX.Catalog.Error.t()}
+  def decode(payload, options \\ []) when is_binary(payload) do
     with {:ok, %{"tracks" => tracks} = decoded} when is_list(tracks) <- JSON.decode(payload),
          common when is_map(common) <- Map.get(decoded, "commonTrackFields", %{}),
-         {:ok, tracks} <- decode_tracks(tracks, common) do
+         format = Keyword.get(options, :format) || catalog_format(decoded, tracks),
+         :ok <- validate_format(format),
+         :ok <- validate_version(decoded["version"]),
+         namespace = Keyword.get(options, :namespace),
+         {:ok, tracks} <- decode_tracks(tracks, common, format, namespace) do
       {:ok,
        %__MODULE__{
+         format: format,
+         namespace: namespace,
          version: decoded["version"],
          streaming_format: decoded["streamingFormat"],
          streaming_format_version: decoded["streamingFormatVersion"],
@@ -45,9 +65,17 @@ defmodule MOQX.Catalog do
          raw: decoded
        }}
     else
-      {:ok, _decoded} -> {:error, :invalid_catalog_shape}
-      {:error, _reason} -> {:error, :invalid_catalog_json}
-      _other -> {:error, :invalid_catalog_shape}
+      {:ok, _decoded} ->
+        {:error, %MOQX.Catalog.Error{path: [], reason: :invalid_shape}}
+
+      {:error, %MOQX.Catalog.Error{} = error} ->
+        {:error, error}
+
+      {:error, _reason} ->
+        {:error, %MOQX.Catalog.Error{path: [], reason: :invalid_json}}
+
+      _other ->
+        {:error, %MOQX.Catalog.Error{path: [], reason: :invalid_shape}}
     end
   end
 
@@ -56,7 +84,9 @@ defmodule MOQX.Catalog do
   def h264_tracks(%__MODULE__{tracks: tracks}) do
     tracks
     |> Enum.filter(&avc_track?/1)
-    |> Enum.sort_by(&resolution_area/1, :desc)
+    |> Enum.sort_by(fn track ->
+      {-resolution_area(track), -numeric_or_zero(track.bitrate), track.name}
+    end)
   end
 
   @doc "Selects the highest-resolution advertised H.264/AVC track."
@@ -68,12 +98,26 @@ defmodule MOQX.Catalog do
     end
   end
 
-  defp decode_tracks(tracks, common) do
+  @doc "Builds the protocol-neutral address of one track in this catalog."
+  @spec track_ref(t(), Track.t()) :: MOQX.TrackRef.t()
+  def track_ref(%__MODULE__{} = catalog, %Track{} = track) do
+    Track.track_ref(track, catalog.namespace)
+  end
+
+  defp decode_tracks(tracks, common, format, namespace) do
     tracks
-    |> Enum.reduce_while({:ok, []}, fn raw, {:ok, decoded} ->
-      case Track.from_map(raw, common) do
-        {:ok, track} -> {:cont, {:ok, [track | decoded]}}
-        {:error, reason} -> {:halt, {:error, reason}}
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {raw, index}, {:ok, decoded} ->
+      case Track.from_map(raw, common, format: format, namespace: namespace) do
+        {:ok, track} ->
+          {:cont, {:ok, [track | decoded]}}
+
+        {:error, %MOQX.Catalog.Error{} = error} ->
+          error = %{error | path: [:tracks, index | error.path]}
+          {:halt, {:error, error}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
     |> case do
@@ -82,14 +126,64 @@ defmodule MOQX.Catalog do
     end
   end
 
-  defp avc_track?(%Track{codec: codec}) when is_binary(codec),
-    do: String.starts_with?(String.downcase(codec), ["avc1", "avc3"])
+  defp catalog_format(decoded, tracks) do
+    if Map.has_key?(decoded, "streamingFormat") or
+         Enum.any?(tracks, &(is_map(&1) and Map.has_key?(&1, "selectionParams"))) do
+      :cloudflare
+    else
+      :moqtail_cmsf
+    end
+  end
+
+  defp validate_version(1), do: :ok
+
+  defp validate_version(nil) do
+    {:error, %MOQX.Catalog.Error{path: [:version], reason: :required, value: nil}}
+  end
+
+  defp validate_version(version) when not is_integer(version) do
+    {:error, %MOQX.Catalog.Error{path: [:version], reason: :invalid_type, value: version}}
+  end
+
+  defp validate_version(version) do
+    {:error,
+     %MOQX.Catalog.Error{
+       path: [:version],
+       reason: :unsupported,
+       value: version
+     }}
+  end
+
+  defp validate_format(format) when format in [:cloudflare, :moqtail_cmsf], do: :ok
+
+  defp validate_format(format) do
+    {:error, %MOQX.Catalog.Error{path: [:format], reason: :unsupported, value: format}}
+  end
+
+  defp avc_track?(%Track{codec: codec, packaging: "cmaf"} = track) when is_binary(codec),
+    do:
+      video_role?(track) and initializable?(track) and
+        String.starts_with?(String.downcase(codec), ["avc1", "avc3"])
+
+  defp avc_track?(%Track{codec: codec, packaging: "chunk-per-object"} = track)
+       when is_binary(codec),
+       do:
+         video_role?(track) and initializable?(track) and
+           String.starts_with?(String.downcase(codec), ["avc1", "avc3"])
 
   defp avc_track?(_track), do: false
+
+  defp video_role?(%Track{role: role}), do: role in [nil, "video"]
+
+  defp initializable?(%Track{init_data: init_data, init_track: init_track}),
+    do: is_binary(init_data) or is_binary(init_track)
 
   defp resolution_area(%Track{width: width, height: height})
        when is_integer(width) and is_integer(height),
        do: width * height
 
   defp resolution_area(_track), do: 0
+
+  defp numeric_or_zero(value) when is_number(value), do: value
+  defp numeric_or_zero(_value), do: 0
 end

@@ -627,10 +627,18 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
           events: [%ObjectStatus{object: public_object(subscription, decoded)}]
         )
 
-      %MOQX.Subscription{track: %{track: ".catalog"}} ->
-        case MOQX.Catalog.decode(payload) do
-          {:ok, catalog} -> Transition.ok(state, events: [%CatalogReceived{catalog: catalog}])
-          {:error, reason} -> Transition.error(state, {:invalid_catalog, reason})
+      %MOQX.Subscription{track: %{track: ".catalog"}} = subscription ->
+        case MOQX.Catalog.decode(payload,
+               format: :cloudflare,
+               namespace: subscription.track.namespace
+             ) do
+          {:ok, catalog} ->
+            Transition.ok(state,
+              events: [%CatalogReceived{catalog: catalog, subscription: subscription}]
+            )
+
+          {:error, reason} ->
+            Transition.error(state, {:invalid_catalog, reason})
         end
 
       %MOQX.Subscription{} = subscription ->

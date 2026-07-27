@@ -98,18 +98,19 @@ catalog_track =
 
 receive do
   {:moqx, ^client,
-   %MOQX.Event.ObjectReceived{
-     object: %MOQX.Object{subscription: ^subscription} = object
+   %MOQX.Event.CatalogReceived{
+     subscription: ^subscription,
+     catalog: %MOQX.Catalog{} = catalog
    }} ->
-    object.payload
+    catalog
 end
 ```
 
 This path negotiates ALPN `moqt-16`, sends native-QUIC `PATH` and `AUTHORITY`
 setup parameters, and decodes draft-16 subgroup streams and object datagrams.
-Objects preserve extension headers and end-of-group metadata. The catalog
-payload is currently delivered as `ObjectReceived`; CMSF catalog parsing is
-tracked separately.
+Objects preserve extension headers and end-of-group metadata. Objects on the
+`catalog` track are decoded as current Moqtail CMSF values. Other tracks remain
+ordinary `ObjectReceived` events.
 
 Draft-16 also accepts the complete protocol-neutral filter model:
 
@@ -142,12 +143,15 @@ success and rejection arrive as `SubscriptionUpdated` and
 `SubscriptionUpdateFailed`; an update rejection leaves the subscription
 active.
 
-Catalog tracks can be subscribed directly. Delivered objects retain their
-subscription, group, subgroup, object, and priority coordinates:
+Current Moqtail catalogs use top-level `role`, `packaging`, `codec`, dimensions,
+bitrate, and timescale fields. Per-track base64 `initData` is validated and
+decoded into `track.init_data`. The catalog subscription namespace is retained
+when track entries omit one, so the selected address is exact:
 
 ```elixir
 {:ok, video} = MOQX.Catalog.select_h264(catalog)
-{:ok, subscription} = MOQX.subscribe(client, MOQX.Catalog.Track.track_ref(video))
+media_ref = MOQX.Catalog.track_ref(catalog, video)
+{:ok, subscription} = MOQX.subscribe(client, media_ref)
 
 receive do
   {:moqx, ^client,
@@ -158,10 +162,15 @@ receive do
 end
 ```
 
-For CMAF H.264, `MOQX.CMAF.capture/4` subscribes to the advertised
-initialization and media tracks, orders received objects by their protocol
-coordinates, writes a fragmented MP4 atomically, and unsubscribes its temporary
-subscriptions:
+H.264 selection is deterministic: compatible initialized tracks are ordered by
+resolution, bitrate, then track name. Invalid versions, field types, supported
+values, and base64 return `%MOQX.Catalog.Error{path: path, reason: reason}`.
+
+For CMAF H.264, `MOQX.CMAF.capture/4` uses Moqtail inline initialization bytes
+or subscribes to Cloudflare's separately advertised initialization track. It
+then subscribes to the exact media address, orders received objects by their
+protocol coordinates, writes a fragmented MP4 atomically, and unsubscribes its
+temporary subscriptions:
 
 ```elixir
 {:ok, report} =
@@ -207,6 +216,12 @@ receive do
     {group_id, subgroup_id}
 end
 ```
+
+Cloudflare's catalog convention remains separate: `.catalog`,
+`commonTrackFields`, codec values under `selectionParams`, and `initTrack`.
+Both shapes normalize into `%MOQX.Catalog{}` without changing their
+initialization lifecycle; `catalog.format` is `:cloudflare` or
+`:moqtail_cmsf`.
 
 `:complete` means FIN proved the subgroup complete. `:reset` means more objects
 may exist and does not end the subscription; `:closed` means completeness is

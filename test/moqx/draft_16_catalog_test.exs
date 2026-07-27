@@ -6,6 +6,142 @@ defmodule MOQX.Draft16CatalogTest do
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
 
+  @tag :tmp_dir
+  test "decodes a current CMSF catalog and captures its exact advertised track", %{
+    tmp_dir: tmp_dir
+  } do
+    {:ok, network} = Support.start_network()
+    parent = self()
+    init = "inline-init"
+
+    catalog =
+      JSON.encode!(%{
+        "version" => 1,
+        "tracks" => [
+          %{
+            "name" => "video",
+            "packaging" => "cmaf",
+            "role" => "video",
+            "codec" => "avc1.42C01F",
+            "width" => 1280,
+            "height" => 720,
+            "bitrate" => 2_000_000,
+            "timescale" => 30,
+            "initData" => Base.encode64(init)
+          }
+        ]
+      })
+
+    relay =
+      Task.async(fn ->
+        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_16)
+        {:ok, listener, ctx} = Transport.listen(ctx, 0)
+        {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
+        send(parent, {:relay_ready, port})
+
+        {:ok, conn, ctx} = Transport.accept(ctx, listener, [], 1_000)
+        {:ok, conn, ctx} = Transport.handshake(ctx, conn, 1_000)
+        {:ok, control, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
+
+        authority = "localhost:#{port}"
+
+        client_setup =
+          frame(0x20, [
+            encode_varint(3),
+            encode_bytes_parameter(1, ""),
+            encode_integer_parameter(1, 100),
+            encode_bytes_parameter(3, authority)
+          ])
+
+        assert {:ok, ^client_setup, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(client_setup))
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x21, 0, 1, 0>>)
+
+        catalog_subscribe = subscribe_frame(0, "catalog")
+
+        assert {:ok, ^catalog_subscribe, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(catalog_subscribe))
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x04, 0, 3, 0, 7, 0>>)
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x15, 0, 1, 2>>)
+        {:ok, stream, ctx} = Transport.open_stream(ctx, conn, direction: :unidirectional)
+
+        catalog_stream =
+          IO.iodata_to_binary([
+            <<0x34, 7, 0, 0, 0>>,
+            encode_varint(byte_size(catalog)),
+            catalog
+          ])
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, stream, catalog_stream)
+
+        media_subscribe = subscribe_frame(2, "video", 128, 2)
+
+        assert {:ok, ^media_subscribe, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(media_subscribe))
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x04, 0, 3, 2, 8, 0>>)
+        {:ok, media, ctx} = Transport.open_stream(ctx, conn, direction: :unidirectional)
+        {:ok, _send, ctx} = Transport.send_stream(ctx, media, <<0x34, 8, 1, 0, 0, 8, "fragment">>)
+        {:ok, ctx} = Transport.finish_sending(ctx, media)
+
+        assert {:ok, <<0x0A, 0, 1, 2>>, ctx} = Transport.recv_stream(ctx, control, 4)
+        {:ok, _ctx} = Transport.finish_sending(ctx, stream)
+        :ok
+      end)
+
+    assert_receive {:relay_ready, port}, 1_000
+
+    assert {:ok, client} =
+             MOQX.connect("moqt://localhost:#{port}",
+               protocol: :draft_16,
+               transport: {Support, network: network, profile: :draft_16},
+               timeout: 1_000
+             )
+
+    catalog_track = %MOQX.TrackRef{
+      namespace: ["moqtail", "testsrc"],
+      track: "catalog"
+    }
+
+    assert {:ok, catalog_subscription} =
+             MOQX.subscribe(client, catalog_track, start: :next_group, priority: 127)
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.SubscriptionAccepted{
+                      subscription: ^catalog_subscription
+                    }},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.CatalogReceived{
+                      subscription: ^catalog_subscription,
+                      catalog: %MOQX.Catalog{format: :moqtail_cmsf} = decoded
+                    }},
+                   1_000
+
+    assert {:ok, %MOQX.Catalog.Track{init_data: ^init}} =
+             MOQX.Catalog.select_h264(decoded)
+
+    path = Path.join(tmp_dir, "moqtail.mp4")
+
+    assert {:ok,
+            %MOQX.CMAF.Capture{
+              path: ^path,
+              track: %MOQX.Catalog.Track{name: "video"},
+              object_count: 1,
+              init_bytes: 11,
+              media_bytes: 8,
+              first_group_id: 1,
+              last_group_id: 1
+            }} = MOQX.CMAF.capture(client, decoded, path, objects: 1, timeout: 1_000)
+
+    assert File.read!(path) == "inline-initfragment"
+
+    assert :ok = Task.await(relay, 1_000)
+  end
+
   test "emits draft-16 objects in transport arrival order with subgroup boundaries" do
     {:ok, network} = Support.start_network()
     parent = self()
@@ -40,7 +176,7 @@ defmodule MOQX.Draft16CatalogTest do
           frame(0x03, [
             encode_varint(0),
             encode_tuple(["moqtail", "testsrc"]),
-            encode_bytes("catalog"),
+            encode_bytes("video"),
             encode_varint(2),
             encode_integer_parameter(0x20, 127),
             encode_bytes_parameter(1, encode_varint(1))
@@ -83,7 +219,7 @@ defmodule MOQX.Draft16CatalogTest do
                timeout: 1_000
              )
 
-    track = %MOQX.TrackRef{namespace: ["moqtail", "testsrc"], track: "catalog"}
+    track = %MOQX.TrackRef{namespace: ["moqtail", "testsrc"], track: "video"}
 
     assert {:ok, %MOQX.Subscription{} = subscription} =
              MOQX.subscribe(client, track, start: :next_group, priority: 127)
@@ -161,6 +297,17 @@ defmodule MOQX.Draft16CatalogTest do
   defp frame(type, payload) do
     payload = IO.iodata_to_binary(payload)
     IO.iodata_to_binary([encode_varint(type), <<byte_size(payload)::16>>, payload])
+  end
+
+  defp subscribe_frame(request_id, track, priority \\ 127, filter \\ 1) do
+    frame(0x03, [
+      encode_varint(request_id),
+      encode_tuple(["moqtail", "testsrc"]),
+      encode_bytes(track),
+      encode_varint(2),
+      encode_integer_parameter(0x20, priority),
+      encode_bytes_parameter(1, encode_varint(filter))
+    ])
   end
 
   defp encode_tuple(fields),

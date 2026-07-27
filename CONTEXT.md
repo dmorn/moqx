@@ -27,6 +27,11 @@ native QUIC.
   preserves stream-local order and ends with a typed complete/reset/closed
   boundary; no global coordinate ordering or implicit reorder buffer is
   provided.
+- Catalogs are normalized without merging deployment conventions. Cloudflare
+  draft-14 keeps its `.catalog`, `selectionParams`, and separate `initTrack`
+  shape; draft-16 decodes Moqtail's current `catalog` shape with top-level
+  media fields and inline `initData`. The catalog subscription namespace is
+  retained for exact media-track addressing.
 - The protocol-neutral connection driver owns the transport context, feeds
   normalized events to the selected implementation, and applies returned
   transport actions.

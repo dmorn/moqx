@@ -32,10 +32,12 @@ The normative wire reference is
 `draft-ietf-moq-transport-16`. Interoperability behavior is checked against
 Moqtail's `draft-16` branch pinned at
 `c2ff7253479c6a0d7c8282a1cad289d591ebc302` and its public
-`relay.moqtail.dev` endpoint. CMSF catalog decoding and draft-16 publication
-remain separate incremental work. ADR-0011 defines cross-stream delivery as
+`relay.moqtail.dev` endpoint. ADR-0011 defines cross-stream delivery as
 immediate arrival order with explicit subgroup boundaries and no global reorder
-buffer.
+buffer. ADR-0012 defines typed current-Moqtail CMSF decoding, deterministic
+media selection, inline initialization, and coexistence with Cloudflare's
+separate-init-track catalog. Draft-16 publication remains separate incremental
+work.
 
 The pin is also executable through
 `scripts/run_moqtail_draft16_integration.sh`: Docker builds the Moqtail relay
@@ -338,4 +340,5 @@ version/provider-owned.
 - `CONTEXT.md`
 - `docs/adr/0006-protocol-variants-own-session-state-codec-stays-generic.md`
 - `docs/adr/0007-protocol-sessions-are-pure-reducers.md`
+- `docs/adr/0012-normalize-catalog-values-without-merging-deployment-conventions.md`
 - `MOQX.Transport`

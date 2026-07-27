@@ -143,8 +143,8 @@ defmodule MOQX.CMAF do
     with true <- is_integer(object_count) and object_count > 0,
          {:ok, track} <- Catalog.select_h264(catalog),
          :ok <- validate_track(track),
-         {:ok, init_payload} <- capture_init(client, track, timeout),
-         {:ok, objects} <- capture_media(client, track, object_count, timeout),
+         {:ok, init_payload} <- capture_init(client, catalog, track, timeout),
+         {:ok, objects} <- capture_media(client, catalog, track, object_count, timeout),
          {:ok, report} <- write_capture(path, track, init_payload, objects) do
       {:ok, report}
     else
@@ -153,6 +153,10 @@ defmodule MOQX.CMAF do
     end
   end
 
+  defp validate_track(%Track{packaging: packaging, init_data: init_data})
+       when packaging in ["cmaf", "chunk-per-object"] and is_binary(init_data),
+       do: :ok
+
   defp validate_track(%Track{packaging: "cmaf", init_track: init_track})
        when is_binary(init_track),
        do: :ok
@@ -160,8 +164,12 @@ defmodule MOQX.CMAF do
   defp validate_track(%Track{packaging: packaging}),
     do: {:error, {:unsupported_packaging, packaging}}
 
-  defp capture_init(client, track, timeout) do
-    init_ref = %{Track.track_ref(track) | track: track.init_track}
+  defp capture_init(_client, _catalog, %Track{init_data: init_data}, _timeout)
+       when is_binary(init_data),
+       do: {:ok, init_data}
+
+  defp capture_init(client, catalog, track, timeout) do
+    init_ref = %{Catalog.track_ref(catalog, track) | track: track.init_track}
 
     with {:ok, subscription} <- MOQX.subscribe(client, init_ref) do
       try do
@@ -175,8 +183,8 @@ defmodule MOQX.CMAF do
     end
   end
 
-  defp capture_media(client, track, object_count, timeout) do
-    with {:ok, subscription} <- MOQX.subscribe(client, Track.track_ref(track)) do
+  defp capture_media(client, catalog, track, object_count, timeout) do
+    with {:ok, subscription} <- MOQX.subscribe(client, Catalog.track_ref(catalog, track)) do
       try do
         await_objects(client, subscription, object_count, timeout)
       after

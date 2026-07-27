@@ -10,6 +10,7 @@ defmodule MOQX.Protocol.Draft16 do
   @behaviour MOQX.Protocol
 
   alias MOQX.Event.{
+    CatalogReceived,
     ConnectionClosed,
     ObjectReceived,
     ObjectStatus,
@@ -422,6 +423,20 @@ defmodule MOQX.Protocol.Draft16 do
         Transition.ok(state,
           events: [%ObjectStatus{object: public_object(subscription, decoded)}]
         )
+
+      %MOQX.Subscription{track: %{track: "catalog"}} = subscription ->
+        case MOQX.Catalog.decode(decoded.payload,
+               format: :moqtail_cmsf,
+               namespace: subscription.track.namespace
+             ) do
+          {:ok, catalog} ->
+            Transition.ok(state,
+              events: [%CatalogReceived{catalog: catalog, subscription: subscription}]
+            )
+
+          {:error, reason} ->
+            Transition.error(state, {:invalid_catalog, reason})
+        end
 
       %MOQX.Subscription{} = subscription ->
         Transition.ok(state,
