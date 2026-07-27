@@ -105,3 +105,73 @@ services:
         condition: service_healthy
     volumes:
       - ./.tmp/integration-certs:/certs:ro
+
+  moqtail-draft16-relay:
+    image: moqx-moqtail-draft16-relay
+    build:
+      context: .
+      dockerfile: docker/relays/moqtail/Dockerfile
+      args:
+        MOQTAIL_REF: c2ff7253479c6a0d7c8282a1cad289d591ebc302
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    environment:
+      RUST_LOG: info
+    command:
+      - /usr/local/bin/moqtail-relay
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "4433"
+      - --cert-file
+      - /certs/server.pem
+      - --key-file
+      - /certs/server-key.pem
+    volumes:
+      - ./.tmp/integration-certs:/certs:ro
+    ports:
+      - "4453:4433/udp"
+
+  moqtail-draft16-publisher:
+    image: moqx-moqtail-draft16-relay
+    pull_policy: never
+    depends_on:
+      moqtail-draft16-relay:
+        condition: service_started
+    restart: on-failure
+    command:
+      - /usr/local/bin/moqtail-client
+      - --command
+      - publish-namespace
+      - --server
+      - moqt://moqtail-draft16-relay:4433
+      - --no-cert-validation
+      - --namespace
+      - integration
+      - --group-count
+      - "2"
+      - --objects-per-group
+      - "1"
+      - --interval
+      - "10"
+      - --payload-size
+      - "64"
+
+  moqx-moqtail-draft16-test:
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    depends_on:
+      moqtail-draft16-publisher:
+        condition: service_started
+    volumes:
+      - ./.tmp/integration-certs:/certs:ro
+    command:
+      - mix
+      - test
+      - test/integration/moqtail_draft_16_relay_test.exs
+      - --include
+      - integration
+      - --include
+      - moqtail_draft16_relay

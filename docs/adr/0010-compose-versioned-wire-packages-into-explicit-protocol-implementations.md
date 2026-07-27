@@ -35,6 +35,11 @@ Moqtail's `draft-16` branch pinned at
 `relay.moqtail.dev` endpoint. CMSF catalog decoding, cross-stream ordering
 policy, and draft-16 publication remain separate incremental work.
 
+The pin is also executable through
+`scripts/run_moqtail_draft16_integration.sh`: Docker builds the Moqtail relay
+and namespace publisher at that revision, then runs the stable MOQX subscriber
+API against the local native-QUIC endpoint with generated TLS.
+
 ## Context
 
 `moqx` needs to support multiple deployed MOQT-family protocols over the

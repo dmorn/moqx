@@ -20,6 +20,11 @@ native QUIC.
   is never inferred from the hostname or negotiated as silent fallback.
 - Concrete protocol implementations select ALPN, required transport
   capabilities, wire packages, lifecycle, and relay-specific behavior.
+- Standard draft-16 subscriber support includes all four subscription filters,
+  request updates, subgroup and datagram delivery, accepted parameter and
+  extension preservation, and `PUBLISH_DONE` delivery draining. Independent
+  subgroup streams are emitted in transport arrival order until #29 defines a
+  stronger public ordering contract.
 - The protocol-neutral connection driver owns the transport context, feeds
   normalized events to the selected implementation, and applies returned
   transport actions.

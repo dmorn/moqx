@@ -26,7 +26,8 @@ cd "$CERT_DIR"
 
 if [ -s ca.pem ] && [ -s server.pem ] && [ -s server-key.pem ] &&
   openssl x509 -checkend "$RENEW_WITHIN_SECONDS" -noout -in server.pem >/dev/null 2>&1 &&
-  openssl x509 -checkhost moq-rs-relay -noout -in server.pem >/dev/null 2>&1; then
+  openssl x509 -checkhost moq-rs-relay -noout -in server.pem >/dev/null 2>&1 &&
+  openssl x509 -checkhost moqtail-draft16-relay -noout -in server.pem >/dev/null 2>&1; then
   echo "Using existing valid loopback certificates in $CERT_DIR"
   exit 0
 fi
@@ -53,6 +54,7 @@ DNS.1 = localhost
 DNS.2 = quic-ref-server
 DNS.3 = host.docker.internal
 DNS.4 = moq-rs-relay
+DNS.5 = moqtail-draft16-relay
 IP.1 = 127.0.0.1
 IP.2 = ::1
 EOF

@@ -342,6 +342,18 @@ mix test --only integration \
   test/integration/moqtail_draft_16_catalog_test.exs
 ```
 
+The repo-owned draft-16 harness builds Moqtail's relay and test publisher at
+the immutable revision
+`c2ff7253479c6a0d7c8282a1cad289d591ebc302`, then verifies the ordinary MOQX
+public subscriber API over local QUIC with generated TLS:
+
+```bash
+scripts/run_moqtail_draft16_integration.sh
+```
+
+This pinned harness is independent of the public relay smoke and does not run
+during ordinary `mix test`.
+
 The self-contained public Cloudflare subscription-start check publishes a
 unique namespace, subscribes with `:next_group`, and records the deployed
 relay's boundary behavior. It is independently selectable and depends on the

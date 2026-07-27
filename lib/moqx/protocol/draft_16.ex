@@ -24,6 +24,8 @@ defmodule MOQX.Protocol.Draft16 do
   alias MOQX.Protocol.{Capabilities, Transition, TransportSpec}
   alias MOQX.Protocol.MOQTDraft16.{Codec, SubgroupDecoder}
 
+  @known_message_parameter_ids [0x02, 0x03, 0x08, 0x09, 0x10, 0x20, 0x21, 0x22, 0x32]
+
   defmodule State do
     @moduledoc false
     defstruct phase: :starting,
@@ -102,7 +104,7 @@ defmodule MOQX.Protocol.Draft16 do
   def handle_transport(%State{} = state, {:stream_event, stream, event, _metadata})
       when event in [:peer_finished_sending, :peer_aborted_sending, :closed] do
     if stream.info.direction == :bidirectional and stream.info.initiator == :local do
-      Transition.error(state, {:control_stream_terminated, event})
+      Transition.error(close_state(state), control_stream_termination_reason(state, event))
     else
       finish_subgroup_stream(state, stream.info.stream_id)
     end
@@ -116,11 +118,11 @@ defmodule MOQX.Protocol.Draft16 do
         %State{phase: :setup} = state,
         {:connection_event, _conn, :closed, metadata}
       ) do
-    Transition.error(state, {:connection_closed_during_setup, metadata})
+    Transition.error(close_state(state), {:connection_closed_during_setup, metadata})
   end
 
   def handle_transport(%State{} = state, {:connection_event, _conn, :closed, metadata}) do
-    Transition.ok(%{state | phase: :closed}, events: [%ConnectionClosed{metadata: metadata}])
+    Transition.ok(close_state(state), events: [%ConnectionClosed{metadata: metadata}])
   end
 
   def handle_transport(%State{} = state, _event), do: Transition.ok(state)
@@ -166,22 +168,24 @@ defmodule MOQX.Protocol.Draft16 do
   def handle_operation(%State{phase: :ready} = state, %Unsubscribe{
         subscription: subscription
       }) do
-    if Map.has_key?(state.subscriptions, subscription.id) do
-      next_state = %{
-        state
-        | subscriptions: Map.delete(state.subscriptions, subscription.id),
-          pending_updates:
-            Map.reject(state.pending_updates, fn {_request_id, candidate} ->
-              candidate.id == subscription.id
-            end)
-      }
+    case state.subscriptions[subscription.id] do
+      ^subscription ->
+        next_state = %{
+          state
+          | subscriptions: Map.delete(state.subscriptions, subscription.id),
+            pending_updates:
+              Map.reject(state.pending_updates, fn {_request_id, candidate} ->
+                candidate.id == subscription.id
+              end)
+        }
 
-      Transition.ok(next_state,
-        events: [{:subscription_ended, subscription}],
-        actions: [{:send_stream, :control, Codec.unsubscribe(subscription.id), []}]
-      )
-    else
-      Transition.error(state, :unknown_subscription)
+        Transition.ok(next_state,
+          events: [{:subscription_ended, subscription}],
+          actions: [{:send_stream, :control, Codec.unsubscribe(subscription.id), []}]
+        )
+
+      _other ->
+        Transition.error(state, :unknown_subscription)
     end
   end
 
@@ -189,7 +193,7 @@ defmodule MOQX.Protocol.Draft16 do
         subscription: subscription,
         options: options
       }) do
-    with %MOQX.Subscription{} <- state.subscriptions[subscription.id],
+    with ^subscription <- state.subscriptions[subscription.id],
          {:ok, options} <- normalize_update_options(options),
          :ok <- validate_request_credit(state) do
       request_id = state.next_request_id
@@ -209,11 +213,12 @@ defmodule MOQX.Protocol.Draft16 do
     else
       nil -> Transition.error(state, :unknown_subscription)
       {:error, reason} -> Transition.error(state, reason)
+      _other -> Transition.error(state, :unknown_subscription)
     end
   end
 
   def handle_operation(%State{} = state, %Close{}) do
-    Transition.ok(%{state | phase: :closed},
+    Transition.ok(close_state(state),
       events: [:connection_ended],
       actions: [{:close_connection, 0}]
     )
@@ -275,7 +280,8 @@ defmodule MOQX.Protocol.Draft16 do
 
   defp handle_control_frame(%State{} = state, {0x04, payload}) do
     with {:ok, ok} <- Codec.decode_subscribe_ok(payload),
-         %MOQX.Subscription{} = subscription <- state.subscriptions[ok.request_id] do
+         %MOQX.Subscription{} = subscription <- state.subscriptions[ok.request_id],
+         :ok <- ensure_track_alias_available(state, ok.track_alias) do
       next_state = %{state | aliases: Map.put(state.aliases, ok.track_alias, subscription)}
 
       Transition.ok(next_state,
@@ -373,6 +379,14 @@ defmodule MOQX.Protocol.Draft16 do
     do: Transition.error(state, :duplicate_server_setup)
 
   defp handle_control_frame(%State{} = state, {_type, _payload}), do: Transition.ok(state)
+
+  defp ensure_track_alias_available(%State{aliases: aliases}, track_alias) do
+    if Map.has_key?(aliases, track_alias) do
+      {:error, {:duplicate_track_alias, track_alias}}
+    else
+      :ok
+    end
+  end
 
   defp handle_subgroup_data(state, stream_id, data) do
     decoder = Map.get(state.stream_decoders, stream_id, %SubgroupDecoder{})
@@ -504,30 +518,55 @@ defmodule MOQX.Protocol.Draft16 do
   defp validate_parameters(options) do
     parameters = Keyword.get(options, :parameters, [])
 
-    if is_list(parameters) and
-         Enum.all?(parameters, fn
-           %MOQX.SubscriptionParameter.Authorization{value: value} ->
-             is_binary(value)
-
-           %MOQX.SubscriptionParameter.DeliveryTimeout{milliseconds: value} ->
-             is_integer(value) and value > 0
-
-           %MOQX.SubscriptionParameter.Extension{
-             protocol: :draft_16,
-             identifier: identifier,
-             value: value
-           } ->
-             is_integer(identifier) and identifier >= 0 and
-               ((is_integer(value) and value >= 0) or is_binary(value))
-
-           _parameter ->
-             false
-         end) do
+    if valid_parameter_list?(parameters) and unique_parameter_ids?(parameters, options) do
       :ok
     else
       {:error, :invalid_subscription_parameters}
     end
   end
+
+  defp valid_parameter_list?(parameters) when is_list(parameters) do
+    Enum.all?(parameters, fn
+      %MOQX.SubscriptionParameter.Authorization{value: value} ->
+        is_binary(value)
+
+      %MOQX.SubscriptionParameter.DeliveryTimeout{milliseconds: value} ->
+        is_integer(value) and value > 0
+
+      %MOQX.SubscriptionParameter.Extension{
+        protocol: :draft_16,
+        identifier: identifier,
+        value: value
+      } ->
+        is_integer(identifier) and identifier >= 0 and
+          identifier not in @known_message_parameter_ids and
+          valid_extension_value?(identifier, value)
+
+      _parameter ->
+        false
+    end)
+  end
+
+  defp valid_parameter_list?(_parameters), do: false
+
+  defp valid_extension_value?(identifier, value) when rem(identifier, 2) == 0,
+    do: is_integer(value) and value >= 0
+
+  defp valid_extension_value?(_identifier, value), do: is_binary(value)
+
+  defp unique_parameter_ids?(parameters, options) do
+    option_ids =
+      if Keyword.has_key?(options, :delivery_timeout), do: [0x02], else: []
+
+    ids = option_ids ++ Enum.map(parameters, &parameter_identifier/1)
+    length(ids) == MapSet.size(MapSet.new(ids))
+  end
+
+  defp parameter_identifier(%MOQX.SubscriptionParameter.Authorization{}), do: 0x03
+  defp parameter_identifier(%MOQX.SubscriptionParameter.DeliveryTimeout{}), do: 0x02
+
+  defp parameter_identifier(%MOQX.SubscriptionParameter.Extension{identifier: identifier}),
+    do: identifier
 
   defp validate_request_credit(%State{next_request_id: next, max_request_id: max})
        when next <= max,
@@ -624,16 +663,12 @@ defmodule MOQX.Protocol.Draft16 do
       finish_complete_subgroup_stream(state, stream_id, request_id)
     else
       nil -> Transition.ok(state)
-      {:error, reason} -> Transition.error(state, reason)
+      {:error, reason} -> Transition.error(drop_stream(state, stream_id), reason)
     end
   end
 
   defp finish_complete_subgroup_stream(state, stream_id, request_id) do
-    state = %{
-      state
-      | stream_decoders: Map.delete(state.stream_decoders, stream_id),
-        stream_subscriptions: Map.delete(state.stream_subscriptions, stream_id)
-    }
+    state = drop_stream(state, stream_id)
 
     case state.subscription_lifecycles[request_id] do
       %SubscriptionState{processed_streams: processed} = lifecycle ->
@@ -751,4 +786,32 @@ defmodule MOQX.Protocol.Draft16 do
 
   defp expected_stream_count(0x3FFF_FFFF_FFFF_FFFF), do: :unknown
   defp expected_stream_count(count), do: count
+
+  defp drop_stream(state, stream_id) do
+    %{
+      state
+      | stream_decoders: Map.delete(state.stream_decoders, stream_id),
+        stream_subscriptions: Map.delete(state.stream_subscriptions, stream_id)
+    }
+  end
+
+  defp close_state(state) do
+    %{
+      state
+      | phase: :closed,
+        control_buffer: <<>>,
+        stream_decoders: %{},
+        stream_subscriptions: %{},
+        subscriptions: %{},
+        subscription_lifecycles: %{},
+        pending_updates: %{},
+        aliases: %{}
+    }
+  end
+
+  defp control_stream_termination_reason(%State{control_buffer: <<>>}, event),
+    do: {:control_stream_terminated, event}
+
+  defp control_stream_termination_reason(%State{control_buffer: buffer}, event),
+    do: {:incomplete_control_stream, event, byte_size(buffer)}
 end

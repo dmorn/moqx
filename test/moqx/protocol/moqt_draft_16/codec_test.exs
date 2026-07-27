@@ -15,6 +15,10 @@ defmodule MOQX.Protocol.MOQTDraft16.CodecTest do
     assert Codec.subscribe(0, track, start: :next_group, priority: 127) ==
              <<0x03, 0, 33, 0, 2, 7, "moqtail", 7, "testsrc", 7, "catalog", 2, 0x20, 0x407F::16,
                1, 1, 1>>
+
+    assert Codec.subscribe(0, track, start: :next_object, priority: 127) ==
+             <<0x03, 0, 33, 0, 2, 7, "moqtail", 7, "testsrc", 7, "catalog", 2, 0x20, 0x407F::16,
+               1, 1, 2>>
   end
 
   test "decodes setup, subscribe acceptance, and one subgroup object incrementally" do
@@ -42,6 +46,13 @@ defmodule MOQX.Protocol.MOQTDraft16.CodecTest do
              end_of_group?: false,
              payload: "hello"
            }
+  end
+
+  test "control framing returns an incomplete trailing frame without consuming it" do
+    trailing = <<0x04, 0>>
+
+    assert {:ok, [{0x21, <<0>>}], ^trailing} =
+             Codec.decode_control(<<0x21, 0, 1, 0, trailing::binary>>)
   end
 
   test "strictly decodes server setup parameters and rejects malformed payloads" do

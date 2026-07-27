@@ -32,6 +32,74 @@ defmodule MOQX.Draft16SubscriberReducerTest do
              )
   end
 
+  test "partial setup followed by control reset reports truncation and cleans session state" do
+    assert {:ok, %Transition{state: state}} =
+             Draft16.handle_transport(
+               %State{phase: :setup},
+               {:stream_data, control_stream(), <<0x21, 0>>, %{}}
+             )
+
+    assert state.control_buffer == <<0x21, 0>>
+
+    assert {:error, {:incomplete_control_stream, :peer_aborted_sending, 2},
+            %Transition{state: failed_state}} =
+             Draft16.handle_transport(
+               state,
+               {:stream_event, control_stream(), :peer_aborted_sending, %{error_code: 7}}
+             )
+
+    assert failed_state.phase == :closed
+    assert failed_state.control_buffer == ""
+  end
+
+  test "connection close drops every connection-scoped subscriber handle" do
+    subscription = subscription()
+
+    state = %State{
+      phase: :ready,
+      control_buffer: <<0x21>>,
+      stream_decoders: %{4 => %MOQX.Protocol.MOQTDraft16.SubgroupDecoder{}},
+      stream_subscriptions: %{4 => 0},
+      subscriptions: %{0 => subscription},
+      subscription_lifecycles: %{
+        0 => %Draft16.SubscriptionState{subscription: subscription, delivery_timeout: 50}
+      },
+      pending_updates: %{2 => subscription},
+      aliases: %{7 => subscription}
+    }
+
+    assert {:ok,
+            %Transition{
+              state: %State{
+                phase: :closed,
+                control_buffer: "",
+                stream_decoders: %{},
+                stream_subscriptions: %{},
+                subscriptions: %{},
+                subscription_lifecycles: %{},
+                pending_updates: %{},
+                aliases: %{}
+              },
+              events: [%MOQX.Event.ConnectionClosed{metadata: %{error_code: 9}}]
+            }} =
+             Draft16.handle_transport(
+               state,
+               {:connection_event, :connection, :closed, %{error_code: 9}}
+             )
+
+    assert {:ok,
+            %Transition{
+              state: close_state,
+              events: [:connection_ended],
+              actions: [{:close_connection, 0}]
+            }} = Draft16.handle_operation(state, %MOQX.Operation.Close{})
+
+    assert close_state.phase == :closed
+    assert close_state.subscriptions == %{}
+    assert close_state.subscription_lifecycles == %{}
+    assert close_state.aliases == %{}
+  end
+
   test "delivers datagrams and drains subgroup streams before publish done" do
     subscription = %MOQX.Subscription{
       id: 0,
@@ -111,6 +179,37 @@ defmodule MOQX.Draft16SubscriberReducerTest do
     refute Map.has_key?(state.stream_decoders, 4)
   end
 
+  test "partial subgroup reset is a failure and releases decoder ownership" do
+    subscription = subscription()
+
+    state = %State{
+      phase: :ready,
+      subscriptions: %{0 => subscription},
+      aliases: %{7 => subscription},
+      subscription_lifecycles: %{
+        0 => %Draft16.SubscriptionState{subscription: subscription, delivery_timeout: 50}
+      }
+    }
+
+    assert {:ok, %Transition{state: state}} =
+             Draft16.handle_transport(
+               state,
+               {:stream_data, subgroup_stream(4), <<0x34, 7, 9, 3, 0, 5, "hi">>, %{}}
+             )
+
+    assert state.stream_subscriptions == %{4 => 0}
+
+    assert {:error, {:incomplete_subgroup_stream, %{header_decoded?: true, buffered_bytes: 4}},
+            %Transition{state: failed_state}} =
+             Draft16.handle_transport(
+               state,
+               {:stream_event, subgroup_stream(4), :peer_aborted_sending, %{error_code: 7}}
+             )
+
+    assert failed_state.stream_decoders == %{}
+    assert failed_state.stream_subscriptions == %{}
+  end
+
   test "encodes every public subscription filter and validates request credit" do
     track = %MOQX.TrackRef{namespace: ["live"], track: "video"}
     ready = %State{phase: :ready, max_request_id: 0}
@@ -139,6 +238,190 @@ defmodule MOQX.Draft16SubscriberReducerTest do
 
     assert {:error, :request_id_credit_exhausted, %Transition{}} =
              Draft16.handle_operation(%{ready | next_request_id: 2}, %Subscribe{track: track})
+
+    for filter <- [
+          %MOQX.SubscriptionFilter{type: :next_group_start},
+          %MOQX.SubscriptionFilter{type: :largest_object},
+          %MOQX.SubscriptionFilter{type: :absolute_start, start_location: {12, 4}},
+          %MOQX.SubscriptionFilter{
+            type: :absolute_range,
+            start_location: {12, 4},
+            end_group: 20
+          }
+        ] do
+      assert {:ok, %Transition{actions: [{:send_stream, :control, <<3, _::binary>>, []}]}} =
+               Draft16.handle_operation(
+                 ready,
+                 %Subscribe{track: track, options: [filter: filter]}
+               )
+    end
+
+    for invalid_filter <- [
+          %MOQX.SubscriptionFilter{type: :next_group_start, start_location: {0, 0}},
+          %MOQX.SubscriptionFilter{type: :absolute_start},
+          %MOQX.SubscriptionFilter{
+            type: :absolute_range,
+            start_location: {12, 4},
+            end_group: 11
+          }
+        ] do
+      assert {:error, {:invalid_subscription_filter, ^invalid_filter}, %Transition{}} =
+               Draft16.handle_operation(
+                 ready,
+                 %Subscribe{track: track, options: [filter: invalid_filter]}
+               )
+    end
+  end
+
+  test "unknown request parameters are lossless and cannot violate KVP typing or uniqueness" do
+    track = %MOQX.TrackRef{namespace: ["live"], track: "video"}
+    ready = %State{phase: :ready, max_request_id: 0}
+
+    parameters = [
+      %MOQX.SubscriptionParameter.Authorization{value: "Bearer token"},
+      %MOQX.SubscriptionParameter.Extension{
+        protocol: :draft_16,
+        identifier: 0x24,
+        value: 9
+      },
+      %MOQX.SubscriptionParameter.Extension{
+        protocol: :draft_16,
+        identifier: 0x25,
+        value: "opaque"
+      }
+    ]
+
+    assert {:ok, %Transition{actions: [{:send_stream, :control, encoded, []}]}} =
+             Draft16.handle_operation(
+               ready,
+               %Subscribe{track: track, options: [parameters: parameters]}
+             )
+
+    assert encoded =~ <<0x03, 12, "Bearer token">>
+    assert encoded =~ <<0x03, 9, 1, 6, "opaque">>
+
+    for invalid_parameters <- [
+          [
+            %MOQX.SubscriptionParameter.Extension{
+              protocol: :draft_16,
+              identifier: 0x25,
+              value: 9
+            }
+          ],
+          [
+            %MOQX.SubscriptionParameter.Extension{
+              protocol: :draft_16,
+              identifier: 0x24,
+              value: "wrong wire type"
+            }
+          ],
+          [
+            %MOQX.SubscriptionParameter.Extension{
+              protocol: :draft_16,
+              identifier: 0x20,
+              value: 9
+            }
+          ],
+          [
+            %MOQX.SubscriptionParameter.Authorization{value: "one"},
+            %MOQX.SubscriptionParameter.Authorization{value: "two"}
+          ]
+        ] do
+      assert {:error, :invalid_subscription_parameters, %Transition{}} =
+               Draft16.handle_operation(
+                 ready,
+                 %Subscribe{track: track, options: [parameters: invalid_parameters]}
+               )
+    end
+  end
+
+  test "subscribe and update responses preserve independent deterministic lifecycles" do
+    subscription = subscription()
+
+    pending = %State{
+      phase: :ready,
+      subscriptions: %{0 => subscription},
+      subscription_lifecycles: %{
+        0 => %Draft16.SubscriptionState{subscription: subscription, delivery_timeout: 50}
+      }
+    }
+
+    assert {:ok,
+            %Transition{
+              state: accepted,
+              events: [
+                %MOQX.Event.SubscriptionAccepted{
+                  subscription: ^subscription,
+                  parameters: [],
+                  track_extensions: []
+                }
+              ]
+            }} =
+             Draft16.handle_transport(
+               pending,
+               {:stream_data, control_stream(), <<4, 0, 3, 0, 7, 0>>, %{}}
+             )
+
+    assert accepted.aliases == %{7 => subscription}
+
+    assert {:ok,
+            %Transition{
+              state: rejected,
+              events: [
+                %MOQX.Event.SubscriptionFailed{
+                  subscription: ^subscription,
+                  error: %MOQX.ProtocolError{operation: :subscribe, code: 4, reason: "gone"}
+                }
+              ]
+            }} =
+             Draft16.handle_transport(
+               pending,
+               {:stream_data, control_stream(), <<5, 0, 8, 0, 4, 0, 4, "gone">>, %{}}
+             )
+
+    assert rejected.subscriptions == %{}
+    assert rejected.subscription_lifecycles == %{}
+
+    updating = %{pending | pending_updates: %{2 => subscription}}
+
+    assert {:ok,
+            %Transition{
+              state: updated,
+              events: [
+                %MOQX.Event.SubscriptionUpdated{
+                  subscription: ^subscription,
+                  parameters: []
+                }
+              ]
+            }} =
+             Draft16.handle_transport(
+               updating,
+               {:stream_data, control_stream(), <<7, 0, 2, 2, 0>>, %{}}
+             )
+
+    assert updated.pending_updates == %{}
+    assert updated.subscriptions[0] == subscription
+  end
+
+  test "subscribe acceptance cannot overwrite another subscription's track alias" do
+    first = subscription()
+
+    second = %MOQX.Subscription{
+      id: 2,
+      track: %MOQX.TrackRef{namespace: ["live"], track: "audio"}
+    }
+
+    state = %State{
+      phase: :ready,
+      subscriptions: %{0 => first, 2 => second},
+      aliases: %{7 => first}
+    }
+
+    assert {:error, {:duplicate_track_alias, 7}, %Transition{state: ^state}} =
+             Draft16.handle_transport(
+               state,
+               {:stream_data, control_stream(), <<4, 0, 3, 2, 7, 0>>, %{}}
+             )
   end
 
   test "request update has an independent lifecycle and rejection keeps subscription active" do
@@ -220,9 +503,96 @@ defmodule MOQX.Draft16SubscriberReducerTest do
     assert state.subscription_lifecycles[0] == lifecycle
     assert state.aliases[7] == subscription
     assert state.stream_subscriptions[4] == 0
+
+    assert {:ok,
+            %Transition{
+              state: completed,
+              events: [%MOQX.Event.SubscriptionDone{subscription: ^subscription}]
+            }} =
+             Draft16.handle_transport(
+               state,
+               {:stream_data, control_stream(), <<0x0B, 0, 4, 0, 3, 0, 0>>, %{}}
+             )
+
+    assert completed.subscription_lifecycles == %{}
+    assert completed.aliases == %{}
+  end
+
+  test "publish done times out deterministically when advertised delivery is missing" do
+    subscription = subscription()
+
+    state = %State{
+      phase: :ready,
+      subscriptions: %{0 => subscription},
+      aliases: %{7 => subscription},
+      subscription_lifecycles: %{
+        0 => %Draft16.SubscriptionState{subscription: subscription, delivery_timeout: 50}
+      }
+    }
+
+    assert {:ok,
+            %Transition{
+              state: draining,
+              events: [],
+              actions: [{:start_timer, {:subscription_delivery, 0}, 50}]
+            }} =
+             Draft16.handle_transport(
+               state,
+               {:stream_data, control_stream(), <<0x0B, 0, 4, 0, 2, 1, 0>>, %{}}
+             )
+
+    assert {:ok,
+            %Transition{
+              state: completed,
+              events: [
+                %MOQX.Event.SubscriptionDone{
+                  subscription: ^subscription,
+                  completion: %MOQX.Subscription.Completion{
+                    expected_streams: 1,
+                    processed_streams: 0,
+                    timed_out?: true
+                  }
+                }
+              ]
+            }} =
+             Draft16.handle_transport(draining, {:runtime_timeout, {:subscription_delivery, 0}})
+
+    assert completed.subscription_lifecycles == %{}
+    assert completed.aliases == %{}
+  end
+
+  test "stale or forged subscription handles cannot mutate a live request" do
+    subscription = subscription()
+
+    stale = %MOQX.Subscription{
+      id: subscription.id,
+      track: %MOQX.TrackRef{namespace: ["other"], track: "track"}
+    }
+
+    state = %State{
+      phase: :ready,
+      max_request_id: 2,
+      subscriptions: %{subscription.id => subscription}
+    }
+
+    assert {:error, :unknown_subscription, %Transition{state: ^state}} =
+             Draft16.handle_operation(state, %Unsubscribe{subscription: stale})
+
+    assert {:error, :unknown_subscription, %Transition{state: ^state}} =
+             Draft16.handle_operation(
+               state,
+               %UpdateSubscription{subscription: stale, options: [priority: 1]}
+             )
   end
 
   defp transition_state({:ok, %Transition{state: state}}), do: state
+
+  defp subscription do
+    %MOQX.Subscription{
+      id: 0,
+      track: %MOQX.TrackRef{namespace: ["live"], track: "video"}
+    }
+  end
 
   defp control_stream do
     %Stream{info: %Info{stream_id: 0, direction: :bidirectional, initiator: :local}}
