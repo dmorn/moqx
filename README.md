@@ -53,6 +53,21 @@ This path uses native QUIC with ALPN `moq-00`, negotiates MOQT draft-14,
 subscribes with `LargestObject`, and decodes the CMSF catalog delivered on a
 subgroup stream. It does not use `FETCH`.
 
+Subscriptions accept a protocol-neutral relative start policy:
+
+```elixir
+{:ok, subscription} =
+  MOQX.subscribe(client, track,
+    start: :next_group
+  )
+```
+
+`:next_object` is the compatibility default and maps to draft-14
+`LargestObject`; `:next_group` maps to `NextGroupStart`. A selected protocol
+that cannot represent a requested policy returns
+`{:error, {:unsupported_subscription_start, policy}}` instead of silently
+substituting another boundary.
+
 Catalog tracks can be subscribed directly. Delivered objects retain their
 subscription, group, subgroup, object, and priority coordinates:
 
@@ -242,12 +257,18 @@ mix ci
 Default tests are fast and hermetic. Real QUIC checks are tagged as ExUnit
 integration tests and are excluded by default.
 
-The public Cloudflare interop check is independently selectable and depends on
-the availability of an external service:
+The self-contained public Cloudflare subscription-start check publishes a
+unique namespace, subscribes with `:next_group`, and records the deployed
+relay's boundary behavior. It is independently selectable and depends on the
+availability of an external service:
 
 ```bash
-mix test --only integration test/integration/cloudflare_catalog_test.exs
+mix test --only integration \
+  test/integration/cloudflare_subscription_start_test.exs
 ```
+
+The separate `test/integration/cloudflare_catalog_test.exs` smoke depends on
+Cloudflare's optional `bbb/.catalog` fixture being published.
 
 The repo-owned Cloudflare draft-14 roundtrip runs both MOQX and a real relay in
 Docker. It publishes a catalog and media object through the public API,
@@ -264,6 +285,13 @@ replace that pin with `main`: upstream `main` has moved to a later MOQT draft
 and no longer negotiates the draft-14 `moq-00` ALPN. The MOQX test runner joins
 the Compose network directly so the QUIC path is identical on Docker Desktop
 and Linux CI rather than depending on host UDP forwarding.
+
+That pinned relay decodes `NextGroupStart` but does not apply the filter when
+attaching its retained subgroup reader: it can replay the current retained
+group before delivering a later group. The integration test records this relay
+limitation explicitly. Fixed wire and reducer tests establish that MOQX sends
+draft-14 filter value `0x1`; applications must not treat this relay version as
+proof that the peer enforced the requested boundary.
 
 ExUnit never starts Docker. The script owns Compose startup and cleanup, and
 the same script is the `Cloudflare draft-14 relay roundtrip` CI job. Future

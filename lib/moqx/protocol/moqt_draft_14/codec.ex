@@ -24,7 +24,8 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
       request_id: request_id,
       track_namespace: track.namespace,
       track_name: track.track,
-      subscriber_priority: Keyword.get(options, :priority, 127)
+      subscriber_priority: Keyword.get(options, :priority, 127),
+      filter_type: Keyword.get(options, :filter_type, :largest_object)
     })
   end
 

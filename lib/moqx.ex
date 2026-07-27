@@ -9,6 +9,22 @@ defmodule MOQX do
   alias MOQX.Protocol.Resolver
   alias MOQX.Runtime.ConnectionDriver
 
+  @typedoc """
+  Relative object boundary requested when a subscription begins.
+
+  `:next_object` starts after the publisher's current largest object and is the
+  compatibility default. `:next_group` waits for the first object in a later
+  group. A selected protocol returns an error when it cannot represent the
+  requested policy.
+  """
+  @type subscription_start :: :next_object | :next_group
+
+  @typedoc "Option accepted by `subscribe/3`."
+  @type subscription_option ::
+          {:start, subscription_start()}
+          | {:priority, 0..255}
+          | {:delivery_timeout, non_neg_integer()}
+
   @doc "Returns the default native QUIC transport implementation."
   @spec transport() :: module()
   def transport do
@@ -34,8 +50,14 @@ defmodule MOQX do
     end
   end
 
-  @doc "Subscribes to a protocol-neutral track address."
-  @spec subscribe(MOQX.Client.t(), MOQX.TrackRef.t(), keyword()) ::
+  @doc """
+  Subscribes to a protocol-neutral track address.
+
+  The `:start` option accepts `:next_object` or `:next_group` and defaults to
+  `:next_object`. Protocol implementations map that application policy to
+  their native subscription filter and reject unsupported policies explicitly.
+  """
+  @spec subscribe(MOQX.Client.t(), MOQX.TrackRef.t(), [subscription_option()]) ::
           {:ok, MOQX.Subscription.t()} | {:error, term()}
   def subscribe(client, track, options \\ []) do
     ConnectionDriver.subscribe(client, track, options)

@@ -182,8 +182,15 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
 
   @impl true
   def handle_operation(%State{phase: :ready} = state, %Subscribe{track: track, options: options}) do
-    case delivery_timeout(options) do
-      {:ok, delivery_timeout} -> start_subscription(state, track, options, delivery_timeout)
+    with {:ok, delivery_timeout} <- delivery_timeout(options),
+         {:ok, filter_type} <- subscription_filter(options) do
+      start_subscription(
+        state,
+        track,
+        Keyword.put(options, :filter_type, filter_type),
+        delivery_timeout
+      )
+    else
       {:error, reason} -> Transition.error(state, reason)
     end
   end
@@ -375,6 +382,14 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     case Keyword.get(options, :delivery_timeout, 5_000) do
       timeout when is_integer(timeout) and timeout >= 0 -> {:ok, timeout}
       _other -> {:error, :invalid_delivery_timeout}
+    end
+  end
+
+  defp subscription_filter(options) do
+    case Keyword.get(options, :start, :next_object) do
+      :next_object -> {:ok, :largest_object}
+      :next_group -> {:ok, :next_group_start}
+      other -> {:error, {:unsupported_subscription_start, other}}
     end
   end
 

@@ -31,7 +31,7 @@ defmodule MOQX.CloudflareCatalogTest do
         server_setup = <<0x21, 0, 9, 0xC0000000FF00000E::64, 0>>
         {:ok, _send, ctx} = Transport.send_stream(ctx, control, server_setup)
 
-        subscribe = <<0x03, 0, 20, 0, 1, 3, "bbb", 8, ".catalog", 127, 0, 1, 2, 0>>
+        subscribe = <<0x03, 0, 20, 0, 1, 3, "bbb", 8, ".catalog", 127, 0, 1, 1, 0>>
         assert {:ok, ^subscribe, ctx} = Transport.recv_stream(ctx, control, byte_size(subscribe))
 
         # SUBSCRIBE_OK: request=0, alias=0, expires=0, publisher order, content exists,
@@ -112,7 +112,12 @@ defmodule MOQX.CloudflareCatalogTest do
              )
 
     track = %MOQX.TrackRef{namespace: ["bbb"], track: ".catalog"}
-    assert {:ok, %MOQX.Subscription{track: ^track}} = MOQX.subscribe(client, track)
+
+    assert {:error, {:unsupported_subscription_start, :beginning}} =
+             MOQX.subscribe(client, track, start: :beginning)
+
+    assert {:ok, %MOQX.Subscription{track: ^track}} =
+             MOQX.subscribe(client, track, start: :next_group)
 
     assert_receive {:moqx, ^client,
                     %MOQX.Event.CatalogReceived{

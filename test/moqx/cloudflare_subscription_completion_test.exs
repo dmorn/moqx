@@ -11,6 +11,53 @@ defmodule MOQX.CloudflareSubscriptionCompletionTest do
   alias MOQX.Transport.Conn.Stream
   alias MOQX.Transport.Conn.Stream.Info
 
+  test "maps the protocol-neutral next-group start policy to draft-14 NEXT_GROUP_START" do
+    track = %MOQX.TrackRef{namespace: ["bbb"], track: "video.m4s"}
+
+    assert {:ok, transition} =
+             CloudflareDraft14.handle_operation(%State{phase: :ready}, %Subscribe{
+               track: track,
+               options: [start: :next_group]
+             })
+
+    assert [{:send_stream, :control, bytes, []}] = transition.actions
+    assert {:ok, [{0x03, payload}], <<>>} = Codec.decode_control(bytes)
+
+    assert {:ok,
+            %Messages.Subscribe{
+              filter_type: :next_group_start,
+              start_location: nil,
+              end_group: nil
+            }} = Codec.decode_subscribe(payload)
+  end
+
+  test "keeps next-object as the compatibility default and rejects unsupported start policies" do
+    track = %MOQX.TrackRef{namespace: ["bbb"], track: "video.m4s"}
+
+    for options <- [[], [start: :next_object]] do
+      assert {:ok, transition} =
+               CloudflareDraft14.handle_operation(%State{phase: :ready}, %Subscribe{
+                 track: track,
+                 options: options
+               })
+
+      assert [{:send_stream, :control, bytes, []}] = transition.actions
+      assert {:ok, [{0x03, payload}], <<>>} = Codec.decode_control(bytes)
+
+      assert {:ok, %Messages.Subscribe{filter_type: :largest_object}} =
+               Codec.decode_subscribe(payload)
+    end
+
+    assert {:error, {:unsupported_subscription_start, :beginning}, transition} =
+             CloudflareDraft14.handle_operation(%State{phase: :ready}, %Subscribe{
+               track: track,
+               options: [start: :beginning]
+             })
+
+    assert transition.actions == []
+    assert transition.events == []
+  end
+
   test "PUBLISH_DONE waits for a late advertised subgroup stream" do
     track = %MOQX.TrackRef{namespace: ["bbb"], track: "video.m4s"}
 

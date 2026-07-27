@@ -62,13 +62,40 @@ defmodule MOQX.Integration.MoqRsRelayRoundtripTest do
         assert catalog_track.name == "video.m4s"
 
         media_ref = %MOQX.TrackRef{namespace: namespace, track: "video.m4s"}
-        assert {:ok, media_subscription} = MOQX.subscribe(subscriber, media_ref)
+
+        assert {:ok, media_subscription} =
+                 MOQX.subscribe(subscriber, media_ref, start: :next_group)
+
+        assert_receive {:moqx, ^subscriber,
+                        %MOQX.Event.SubscriptionAccepted{
+                          subscription: ^media_subscription
+                        }},
+                       5_000
+
+        # The pinned relay accepts NEXT_GROUP_START but does not apply the
+        # decoded filter when attaching its retained subgroup reader.
+        assert_receive {:moqx, ^subscriber,
+                        %MOQX.Event.ObjectReceived{
+                          object: %MOQX.Object{
+                            subscription: ^media_subscription,
+                            group_id: 42
+                          }
+                        }},
+                       5_000
+
+        assert :ok =
+                 MOQX.publish_object(publisher, media_track, %MOQX.Object{
+                   group_id: 43,
+                   subgroup_id: 0,
+                   object_id: 0,
+                   payload: "docker-relay-fragment"
+                 })
 
         assert_receive {:moqx, ^subscriber,
                         %MOQX.Event.ObjectReceived{
                           object: %MOQX.Object{
                             subscription: ^media_subscription,
-                            group_id: 42,
+                            group_id: 43,
                             object_id: 0,
                             payload: "docker-relay-fragment"
                           }
@@ -83,9 +110,9 @@ defmodule MOQX.Integration.MoqRsRelayRoundtripTest do
                           completion: %MOQX.Subscription.Completion{
                             status: :track_ended,
                             # The pinned relay currently forwards zero here even
-                            # after delivering one subgroup stream (moq-rs TODO).
+                            # after delivering subgroup streams (moq-rs TODO).
                             expected_streams: 0,
-                            processed_streams: 1,
+                            processed_streams: 2,
                             timed_out?: false
                           }
                         }},
