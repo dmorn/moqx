@@ -19,6 +19,8 @@ defmodule MOQX.Protocol.Draft16 do
     PublicationReady,
     PublicationSubscriberJoined,
     PublicationSubscriberLeft,
+    PublicationSubscriptionCancelled,
+    PublicationSubscriptionRequested,
     PublicationTrackFailed,
     SubgroupEnded,
     SubscriptionAccepted,
@@ -29,11 +31,13 @@ defmodule MOQX.Protocol.Draft16 do
   }
 
   alias MOQX.Operation.{
+    AcceptPublicationSubscription,
     AddTrack,
     Close,
     FinishPublication,
     Publish,
     PublishObject,
+    RejectPublicationSubscription,
     Subscribe,
     Unsubscribe,
     UpdateSubscription
@@ -58,6 +62,9 @@ defmodule MOQX.Protocol.Draft16 do
               pending_updates: %{},
               aliases: %{},
               publications: %{},
+              handle_scope: nil,
+              pending_publisher_subscriptions: %{},
+              publisher_subscriptions: %{},
               next_track_alias: 0,
               next_publication_stream: 0
   end
@@ -94,7 +101,7 @@ defmodule MOQX.Protocol.Draft16 do
 
   @impl true
   def init(%URI{scheme: "moqt"} = endpoint, _options),
-    do: {:ok, %State{endpoint: endpoint}}
+    do: {:ok, %State{endpoint: endpoint, handle_scope: make_ref()}}
 
   def init(_endpoint, _options), do: {:error, :draft_16_requires_native_quic}
 
@@ -133,6 +140,13 @@ defmodule MOQX.Protocol.Draft16 do
 
   def handle_transport(%State{} = state, {:runtime_timeout, {:subscription_delivery, request_id}}) do
     complete_subscription(state, request_id, true)
+  end
+
+  def handle_transport(
+        %State{} = state,
+        {:runtime_timeout, {:publisher_subscription_decision, handle}}
+      ) do
+    timeout_publication_subscription(state, handle)
   end
 
   def handle_transport(
@@ -243,6 +257,7 @@ defmodule MOQX.Protocol.Draft16 do
         options: options
       }) do
     with :ok <- validate_namespace(namespace),
+         {:ok, inbound_subscriptions} <- inbound_subscription_options(options),
          false <- publication_namespace?(state, namespace),
          :ok <- validate_request_credit(state) do
       request_id = state.next_request_id
@@ -252,6 +267,7 @@ defmodule MOQX.Protocol.Draft16 do
         publication: publication,
         status: :pending,
         tracks: %{},
+        inbound_subscriptions: inbound_subscriptions,
         options: options
       }
 
@@ -338,15 +354,21 @@ defmodule MOQX.Protocol.Draft16 do
       track_entry = %{track_entry | stream_count: track_entry.stream_count + 1}
       entry = %{entry | tracks: Map.put(entry.tracks, operation.track.track.track, track_entry)}
 
+      next_state = %{
+        state
+        | next_publication_stream: stream_number + 1,
+          publications: Map.put(state.publications, operation.track.publication.id, entry)
+      }
+
+      {next_state, inbound_actions} =
+        inbound_object_actions(next_state, operation.track, operation.object)
+
       Transition.ok(
-        %{
-          state
-          | next_publication_stream: stream_number + 1,
-            publications: Map.put(state.publications, operation.track.publication.id, entry)
-        },
+        next_state,
         events: [{:object_published, operation.track}],
         actions: [
           {:open_stream, key, [direction: :unidirectional], bytes, [finish: true]}
+          | inbound_actions
         ]
       )
     else
@@ -385,6 +407,20 @@ defmodule MOQX.Protocol.Draft16 do
     end
   end
 
+  def handle_operation(
+        %State{phase: :ready} = state,
+        %AcceptPublicationSubscription{} = operation
+      ) do
+    accept_publication_subscription(state, operation)
+  end
+
+  def handle_operation(
+        %State{phase: :ready} = state,
+        %RejectPublicationSubscription{} = operation
+      ) do
+    reject_publication_subscription(state, operation)
+  end
+
   def handle_operation(%State{} = state, %Close{}) do
     Transition.ok(close_state(state),
       events: [:connection_ended],
@@ -397,7 +433,9 @@ defmodule MOQX.Protocol.Draft16 do
 
   def handle_operation(%State{} = state, operation)
       when is_struct(operation, Publish) or is_struct(operation, AddTrack) or
-             is_struct(operation, PublishObject) or is_struct(operation, FinishPublication),
+             is_struct(operation, PublishObject) or is_struct(operation, FinishPublication) or
+             is_struct(operation, AcceptPublicationSubscription) or
+             is_struct(operation, RejectPublicationSubscription),
       do: Transition.error(state, :connection_not_ready)
 
   def handle_operation(%State{} = state, _operation),
@@ -413,7 +451,9 @@ defmodule MOQX.Protocol.Draft16 do
           :publish,
           :add_track,
           :publish_object,
-          :finish_publication
+          :finish_publication,
+          :accept_subscription,
+          :reject_subscription
         ]),
       delivery_modes: MapSet.new([:subgroup, :datagram]),
       metadata: %{catalog_track: "catalog", draft: 16}
@@ -459,6 +499,12 @@ defmodule MOQX.Protocol.Draft16 do
   defp handle_control_frame(%State{phase: :setup} = state, {_type, _payload}),
     do: Transition.error(state, :server_setup_required)
 
+  defp handle_control_frame(%State{} = state, {0x03, payload}) do
+    with {:ok, subscribe} <- Codec.decode_subscribe(payload) do
+      handle_inbound_subscribe(state, subscribe)
+    end
+  end
+
   defp handle_control_frame(%State{} = state, {0x04, payload}) do
     with {:ok, ok} <- Codec.decode_subscribe_ok(payload),
          %MOQX.Subscription{} = subscription <- state.subscriptions[ok.request_id],
@@ -496,6 +542,12 @@ defmodule MOQX.Protocol.Draft16 do
     else
       nil -> Transition.error(state, :unknown_subscribe_request)
       {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  defp handle_control_frame(%State{} = state, {0x0A, payload}) do
+    with {:ok, unsubscribe} <- Codec.decode_unsubscribe(payload) do
+      handle_inbound_unsubscribe(state, unsubscribe.request_id)
     end
   end
 
@@ -822,6 +874,333 @@ defmodule MOQX.Protocol.Draft16 do
   end
 
   defp validate_namespace(_namespace), do: {:error, :invalid_namespace}
+
+  defp inbound_subscription_options(options) do
+    case Keyword.get(options, :inbound_subscriptions, :automatic) do
+      :automatic ->
+        {:ok, %{mode: :automatic}}
+
+      :controlled ->
+        timeout = Keyword.get(options, :subscription_decision_timeout, 5_000)
+        max_pending = Keyword.get(options, :max_pending_subscriptions, 128)
+
+        if is_integer(timeout) and timeout >= 0 and is_integer(max_pending) and max_pending > 0 do
+          {:ok, %{mode: :controlled, timeout: timeout, max_pending: max_pending}}
+        else
+          {:error, :invalid_inbound_subscription_options}
+        end
+
+      _other ->
+        {:error, :invalid_inbound_subscription_options}
+    end
+  end
+
+  defp handle_inbound_subscribe(state, subscribe) do
+    case publication_by_namespace(state, subscribe.track_namespace) do
+      {_publication_id, %{inbound_subscriptions: %{mode: :controlled}} = entry} ->
+        pend_inbound_subscription(state, entry, subscribe)
+
+      {_publication_id, entry} ->
+        automatically_accept_inbound_subscription(state, entry, subscribe)
+
+      nil ->
+        Transition.ok(state,
+          actions: [
+            {:send_stream, :control,
+             Codec.request_error(subscribe.request_id, 4, "track not found"), []}
+          ]
+        )
+    end
+  end
+
+  defp pend_inbound_subscription(state, entry, subscribe) do
+    policy = entry.inbound_subscriptions
+
+    if pending_subscription_count(state, entry.publication.id) >= policy.max_pending do
+      Transition.ok(state,
+        actions: [
+          {:send_stream, :control,
+           Codec.request_error(subscribe.request_id, 0, "pending subscription limit exceeded"),
+           []}
+        ]
+      )
+    else
+      handle = %MOQX.PublicationSubscriptionRequest.Handle{
+        scope: state.handle_scope,
+        request_id: subscribe.request_id
+      }
+
+      request = publication_subscription_request(handle, entry.publication, subscribe)
+      pending = %{request: request, publication_id: entry.publication.id}
+
+      next_state = %{
+        state
+        | pending_publisher_subscriptions:
+            Map.put(state.pending_publisher_subscriptions, subscribe.request_id, pending)
+      }
+
+      Transition.ok(next_state,
+        events: [%PublicationSubscriptionRequested{request: request}],
+        actions: [
+          {:start_timer, {:publisher_subscription_decision, handle}, policy.timeout}
+        ]
+      )
+    end
+  end
+
+  defp pending_subscription_count(state, publication_id) do
+    Enum.count(state.pending_publisher_subscriptions, fn {_request_id, pending} ->
+      pending.publication_id == publication_id
+    end)
+  end
+
+  defp publication_subscription_request(handle, publication, subscribe) do
+    %MOQX.PublicationSubscriptionRequest{
+      handle: handle,
+      publication: publication,
+      track: %MOQX.TrackRef{
+        namespace: subscribe.track_namespace,
+        track: subscribe.track_name
+      },
+      subscriber_priority: subscribe.subscriber_priority,
+      group_order: subscribe.group_order,
+      forward: subscribe.forward,
+      filter: subscribe.filter,
+      parameters: subscribe.parameters
+    }
+  end
+
+  defp accept_publication_subscription(state, operation) do
+    request = operation.request
+    handle = request.handle
+
+    with :ok <- validate_request_scope(state, handle),
+         %{request: ^request} <-
+           state.pending_publisher_subscriptions[handle.request_id],
+         {:ok, entry} <- fetch_publication(state, operation.published_track.publication),
+         %{track: published_track} <- entry.tracks[operation.published_track.track.track],
+         true <-
+           published_track == operation.published_track and published_track.track == request.track,
+         {:ok, group_order} <- accepted_group_order(request.group_order) do
+      track_alias = state.next_track_alias
+
+      subscription = %{
+        request_id: handle.request_id,
+        publication_id: published_track.publication.id,
+        track: published_track,
+        track_alias: track_alias,
+        subscriber_priority: request.subscriber_priority,
+        group_order: group_order,
+        forward: request.forward,
+        filter: request.filter,
+        stream_count: 0
+      }
+
+      next_state = %{
+        state
+        | next_track_alias: track_alias + 1,
+          pending_publisher_subscriptions:
+            Map.delete(state.pending_publisher_subscriptions, handle.request_id),
+          publisher_subscriptions:
+            Map.put(state.publisher_subscriptions, handle.request_id, subscription)
+      }
+
+      Transition.ok(next_state,
+        events: [
+          %PublicationSubscriberJoined{track: published_track, request_id: handle.request_id}
+        ],
+        actions: [
+          {:cancel_timer, {:publisher_subscription_decision, handle}},
+          {:send_stream, :control,
+           Codec.subscribe_ok(handle.request_id, track_alias, group_order: group_order), []}
+        ]
+      )
+    else
+      nil -> Transition.error(state, :stale_subscription_request)
+      false -> Transition.error(state, :subscription_request_track_mismatch)
+      {:error, reason} -> Transition.error(state, reason)
+      _other -> Transition.error(state, :stale_subscription_request)
+    end
+  end
+
+  defp validate_request_scope(%State{handle_scope: scope}, %{scope: scope})
+       when is_reference(scope),
+       do: :ok
+
+  defp validate_request_scope(_state, _handle),
+    do: {:error, :wrong_client_subscription_request}
+
+  defp reject_publication_subscription(state, operation) do
+    request = operation.request
+    handle = request.handle
+
+    with :ok <- validate_request_scope(state, handle),
+         %{request: ^request} <-
+           state.pending_publisher_subscriptions[handle.request_id],
+         {:ok, error_code} <- subscription_error_code(operation.rejection.code) do
+      next_state = %{
+        state
+        | pending_publisher_subscriptions:
+            Map.delete(state.pending_publisher_subscriptions, handle.request_id)
+      }
+
+      reason = operation.rejection.reason || Atom.to_string(operation.rejection.code)
+
+      Transition.ok(next_state,
+        actions: [
+          {:cancel_timer, {:publisher_subscription_decision, handle}},
+          {:send_stream, :control, Codec.request_error(handle.request_id, error_code, reason), []}
+        ]
+      )
+    else
+      nil -> Transition.error(state, :stale_subscription_request)
+      {:error, reason} -> Transition.error(state, reason)
+      _other -> Transition.error(state, :stale_subscription_request)
+    end
+  end
+
+  defp timeout_publication_subscription(state, handle) do
+    with :ok <- validate_request_scope(state, handle),
+         {%{request: request}, pending} <-
+           Map.pop(state.pending_publisher_subscriptions, handle.request_id) do
+      Transition.ok(%{state | pending_publisher_subscriptions: pending},
+        events: [
+          %PublicationSubscriptionCancelled{request: request, reason: :decision_timeout}
+        ],
+        actions: [
+          {:send_stream, :control,
+           Codec.request_error(
+             handle.request_id,
+             2,
+             "subscription decision timed out"
+           ), []}
+        ]
+      )
+    else
+      {nil, _pending} -> Transition.ok(state)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  defp subscription_error_code(:internal_error), do: {:ok, 0}
+  defp subscription_error_code(:unauthorized), do: {:ok, 1}
+  defp subscription_error_code(:timeout), do: {:ok, 2}
+  defp subscription_error_code(:not_supported), do: {:ok, 3}
+  defp subscription_error_code(:track_does_not_exist), do: {:ok, 4}
+  defp subscription_error_code(:invalid_range), do: {:ok, 5}
+  defp subscription_error_code(:malformed_auth_token), do: {:ok, 0x10}
+  defp subscription_error_code(:expired_auth_token), do: {:ok, 0x12}
+  defp subscription_error_code(_code), do: {:error, :invalid_subscription_rejection}
+
+  defp accepted_group_order(:ascending), do: {:ok, :ascending}
+  defp accepted_group_order(:publisher), do: {:ok, :ascending}
+  defp accepted_group_order(:descending), do: {:error, :unsupported_group_order}
+
+  defp automatically_accept_inbound_subscription(state, entry, subscribe) do
+    case entry.tracks[subscribe.track_name] do
+      %{track: track} ->
+        handle = %MOQX.PublicationSubscriptionRequest.Handle{
+          scope: state.handle_scope,
+          request_id: subscribe.request_id
+        }
+
+        request = publication_subscription_request(handle, entry.publication, subscribe)
+        pending = %{request: request, publication_id: entry.publication.id}
+
+        state = %{
+          state
+          | pending_publisher_subscriptions:
+              Map.put(state.pending_publisher_subscriptions, subscribe.request_id, pending)
+        }
+
+        accept_publication_subscription(state, %AcceptPublicationSubscription{
+          request: request,
+          published_track: track
+        })
+
+      nil ->
+        Transition.ok(state,
+          actions: [
+            {:send_stream, :control,
+             Codec.request_error(subscribe.request_id, 4, "track not found"), []}
+          ]
+        )
+    end
+  end
+
+  defp inbound_object_actions(state, track, object) do
+    state.publisher_subscriptions
+    |> Enum.filter(fn {_request_id, subscription} ->
+      subscription.track == track and subscription.forward and
+        object_matches_filter?(subscription.filter, object)
+    end)
+    |> Enum.reduce({state, []}, fn {request_id, subscription}, {state, actions} ->
+      stream_number = state.next_publication_stream
+      key = {:publication, request_id, stream_number}
+      bytes = Codec.encode_subgroup(subscription.track_alias, object)
+      subscription = %{subscription | stream_count: subscription.stream_count + 1}
+
+      next_state = %{
+        state
+        | next_publication_stream: stream_number + 1,
+          publisher_subscriptions:
+            Map.put(state.publisher_subscriptions, request_id, subscription)
+      }
+
+      action = {:open_stream, key, [direction: :unidirectional], bytes, [finish: true]}
+      {next_state, actions ++ [action]}
+    end)
+  end
+
+  defp handle_inbound_unsubscribe(state, request_id) do
+    case Map.pop(state.publisher_subscriptions, request_id) do
+      {nil, _subscriptions} ->
+        Transition.ok(state)
+
+      {subscription, subscriptions} ->
+        Transition.ok(%{state | publisher_subscriptions: subscriptions},
+          events: [
+            %PublicationSubscriberLeft{
+              track: subscription.track,
+              request_id: subscription.request_id
+            }
+          ],
+          actions: [
+            {:send_stream, :control,
+             Codec.publish_done(
+               subscription.request_id,
+               3,
+               subscription.stream_count,
+               "subscription ended"
+             ), []}
+          ]
+        )
+    end
+  end
+
+  defp object_matches_filter?(
+         %MOQX.SubscriptionFilter{type: :absolute_start, start_location: start},
+         object
+       ),
+       do: {object.group_id, object.object_id} >= start
+
+  defp object_matches_filter?(
+         %MOQX.SubscriptionFilter{
+           type: :absolute_range,
+           start_location: start,
+           end_group: end_group
+         },
+         object
+       ),
+       do: {object.group_id, object.object_id} >= start and object.group_id <= end_group
+
+  defp object_matches_filter?(_filter, _object), do: true
+
+  defp publication_by_namespace(state, namespace) do
+    Enum.find(state.publications, fn {_id, entry} ->
+      entry.publication.namespace == namespace
+    end)
+  end
 
   defp validate_track_name(track) when is_binary(track) and byte_size(track) <= 4_096, do: :ok
   defp validate_track_name(_track), do: {:error, :invalid_track_name}
@@ -1246,7 +1625,9 @@ defmodule MOQX.Protocol.Draft16 do
         subscription_lifecycles: %{},
         pending_updates: %{},
         aliases: %{},
-        publications: %{}
+        publications: %{},
+        pending_publisher_subscriptions: %{},
+        publisher_subscriptions: %{}
     }
   end
 

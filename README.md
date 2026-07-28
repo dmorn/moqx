@@ -138,10 +138,16 @@ rejection emit `PublicationFailed`, `PublicationCancelled`, and
 `PublicationTrackFailed` respectively; rejected and finished handles are
 invalidated deterministically.
 
+Incoming draft-16 `SUBSCRIBE` requests use the same
+`inbound_subscriptions: :automatic | :controlled` publication policy and the
+same opaque request, accept, reject, timeout, joined, and left events as the
+draft-14 implementation. Accepted subscribers receive their own track alias
+and subgroup stream fan-out; `UNSUBSCRIBE` completes that subscriber with the
+exact stream count.
+
 The current draft-16 publisher slice emits one subgroup stream per object.
-Inbound `SUBSCRIBE`, datagram publication, and the public player smoke remain
-pending; Cloudflare's `:cloudflare_draft_14` publisher lifecycle below is
-unchanged.
+Datagram publication and the public player smoke remain pending; Cloudflare's
+`:cloudflare_draft_14` publisher lifecycle below is unchanged.
 
 This path negotiates ALPN `moqt-16`, sends native-QUIC `PATH` and `AUTHORITY`
 setup parameters, and decodes draft-16 subgroup streams and object datagrams.

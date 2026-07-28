@@ -1,9 +1,25 @@
 defmodule MOQX.Draft16PublisherReducerTest do
   use ExUnit.Case, async: true
 
-  alias MOQX.Operation.{AddTrack, FinishPublication, Publish, PublishObject}
+  alias MOQX.Event.{
+    PublicationSubscriberJoined,
+    PublicationSubscriberLeft,
+    PublicationSubscriptionCancelled,
+    PublicationSubscriptionRequested
+  }
+
+  alias MOQX.Operation.{
+    AcceptPublicationSubscription,
+    AddTrack,
+    FinishPublication,
+    Publish,
+    PublishObject,
+    RejectPublicationSubscription
+  }
+
   alias MOQX.Protocol.Draft16
   alias MOQX.Protocol.Draft16.State
+  alias MOQX.Protocol.MOQTDraft16.Codec
   alias MOQX.Protocol.Transition
   alias MOQX.Transport.Conn.Stream
   alias MOQX.Transport.Conn.Stream.Info
@@ -281,6 +297,217 @@ defmodule MOQX.Draft16PublisherReducerTest do
 
     assert {:error, :unknown_publication, %Transition{}} =
              Draft16.handle_operation(finished, %FinishPublication{publication: publication})
+  end
+
+  test "controlled inbound subscribe is accepted through protocol-neutral handles" do
+    scope = make_ref()
+    ready = %State{phase: :ready, max_request_id: 4, handle_scope: scope}
+
+    {:ok, published} =
+      Draft16.handle_operation(ready, %Publish{
+        namespace: ["live"],
+        options: [
+          inbound_subscriptions: :controlled,
+          subscription_decision_timeout: 250,
+          max_pending_subscriptions: 2
+        ]
+      })
+
+    {:publication_started, publication} = List.first(published.events)
+
+    {:ok, namespace_ready} =
+      Draft16.handle_transport(
+        published.state,
+        {:stream_data, control_stream(), <<0x07, 0, 2, 0, 0>>, %{}}
+      )
+
+    {:ok, added} =
+      Draft16.handle_operation(namespace_ready.state, %AddTrack{
+        publication: publication,
+        track: "video"
+      })
+
+    {:track_added, track} = List.first(added.events)
+
+    subscribe =
+      Codec.subscribe(
+        1,
+        %MOQX.TrackRef{namespace: ["live"], track: "video"},
+        priority: 9,
+        group_order: :ascending
+      )
+
+    assert {:ok,
+            %Transition{
+              state: pending,
+              events: [
+                %PublicationSubscriptionRequested{
+                  request:
+                    %MOQX.PublicationSubscriptionRequest{
+                      publication: ^publication,
+                      track: %MOQX.TrackRef{namespace: ["live"], track: "video"},
+                      subscriber_priority: 9,
+                      group_order: :ascending,
+                      forward: true,
+                      filter: %MOQX.SubscriptionFilter{type: :largest_object}
+                    } = request
+                }
+              ],
+              actions: [
+                {:start_timer, {:publisher_subscription_decision, handle}, 250}
+              ]
+            }} =
+             Draft16.handle_transport(
+               added.state,
+               {:stream_data, control_stream(), subscribe, %{}}
+             )
+
+    assert request.handle == handle
+    assert inspect(handle) == "#MOQX.PublicationSubscriptionRequest.Handle<OPAQUE>"
+
+    subscribe_ok =
+      Codec.subscribe_ok(1, 1,
+        group_order: :ascending,
+        forward: true
+      )
+
+    assert {:ok,
+            %Transition{
+              state: accepted,
+              events: [
+                %PublicationSubscriberJoined{track: ^track, request_id: 1}
+              ],
+              actions: [
+                {:cancel_timer, {:publisher_subscription_decision, ^handle}},
+                {:send_stream, :control, ^subscribe_ok, []}
+              ]
+            }} =
+             Draft16.handle_operation(pending, %AcceptPublicationSubscription{
+               request: request,
+               published_track: track
+             })
+
+    assert accepted.pending_publisher_subscriptions == %{}
+    assert accepted.publisher_subscriptions[1].track == track
+
+    {:ok, primary_ready} =
+      Draft16.handle_transport(
+        accepted,
+        {:stream_data, control_stream(), <<0x1E, 0, 2, 2, 0>>, %{}}
+      )
+
+    object = %MOQX.Object{group_id: 7, object_id: 0, payload: "x"}
+    primary_bytes = Codec.encode_subgroup(0, object)
+    inbound_bytes = Codec.encode_subgroup(1, object)
+
+    assert {:ok,
+            %Transition{
+              state: delivered,
+              actions: [
+                {:open_stream, {:publication, 2, 0}, [direction: :unidirectional], ^primary_bytes,
+                 [finish: true]},
+                {:open_stream, {:publication, 1, 1}, [direction: :unidirectional], ^inbound_bytes,
+                 [finish: true]}
+              ]
+            }} =
+             Draft16.handle_operation(primary_ready.state, %PublishObject{
+               track: track,
+               object: object
+             })
+
+    unsubscribe = Codec.unsubscribe(1)
+    publish_done = Codec.publish_done(1, 3, 1, "subscription ended")
+
+    assert {:ok,
+            %Transition{
+              state: unsubscribed,
+              events: [
+                %PublicationSubscriberLeft{track: ^track, request_id: 1}
+              ],
+              actions: [{:send_stream, :control, ^publish_done, []}]
+            }} =
+             Draft16.handle_transport(
+               delivered,
+               {:stream_data, control_stream(), unsubscribe, %{}}
+             )
+
+    assert unsubscribed.publisher_subscriptions == %{}
+
+    second_subscribe =
+      Codec.subscribe(
+        3,
+        %MOQX.TrackRef{namespace: ["live"], track: "video"},
+        []
+      )
+
+    {:ok, second_pending} =
+      Draft16.handle_transport(
+        unsubscribed,
+        {:stream_data, control_stream(), second_subscribe, %{}}
+      )
+
+    %PublicationSubscriptionRequested{request: second_request} =
+      List.first(second_pending.events)
+
+    second_handle = second_request.handle
+    rejection = %MOQX.SubscriptionRejection{code: :unauthorized, reason: "denied"}
+    request_error = Codec.request_error(3, 1, "denied")
+
+    assert {:ok,
+            %Transition{
+              state: rejected,
+              actions: [
+                {:cancel_timer, {:publisher_subscription_decision, ^second_handle}},
+                {:send_stream, :control, ^request_error, []}
+              ]
+            }} =
+             Draft16.handle_operation(second_pending.state, %RejectPublicationSubscription{
+               request: second_request,
+               rejection: rejection
+             })
+
+    assert rejected.pending_publisher_subscriptions == %{}
+
+    third_subscribe =
+      Codec.subscribe(
+        5,
+        %MOQX.TrackRef{namespace: ["live"], track: "video"},
+        []
+      )
+
+    {:ok, third_pending} =
+      Draft16.handle_transport(
+        rejected,
+        {:stream_data, control_stream(), third_subscribe, %{}}
+      )
+
+    %PublicationSubscriptionRequested{request: third_request} =
+      List.first(third_pending.events)
+
+    timeout_error =
+      Codec.request_error(
+        5,
+        2,
+        "subscription decision timed out"
+      )
+
+    assert {:ok,
+            %Transition{
+              state: timed_out,
+              events: [
+                %PublicationSubscriptionCancelled{
+                  request: ^third_request,
+                  reason: :decision_timeout
+                }
+              ],
+              actions: [{:send_stream, :control, ^timeout_error, []}]
+            }} =
+             Draft16.handle_transport(
+               third_pending.state,
+               {:runtime_timeout, {:publisher_subscription_decision, third_request.handle}}
+             )
+
+    assert timed_out.pending_publisher_subscriptions == %{}
   end
 
   defp control_stream do

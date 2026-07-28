@@ -36,8 +36,63 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
     ])
   end
 
+  @spec decode_subscribe(binary()) :: {:ok, map()} | {:error, :invalid_subscribe}
+  def decode_subscribe(payload) do
+    with {:ok, request_id, rest} <- decode_varint(payload),
+         {:ok, namespace, rest} <- decode_tuple(rest),
+         {:ok, track_name, rest} <- decode_bytes(rest),
+         {:ok, parameter_count, rest} <- decode_varint(rest),
+         {:ok, parameters, <<>>} <- decode_parameters(rest, parameter_count, :message),
+         {:ok, filter} <- subscribe_filter(parameters),
+         {:ok, forward} <- boolean_parameter(parameters, 0x10, true),
+         {:ok, priority} <- priority_parameter(parameters),
+         {:ok, group_order} <- group_order_parameter(parameters) do
+      {:ok,
+       %{
+         request_id: request_id,
+         track_namespace: namespace,
+         track_name: track_name,
+         subscriber_priority: priority,
+         group_order: group_order,
+         forward: forward,
+         filter: filter,
+         parameters: public_subscribe_parameters(parameters)
+       }}
+    else
+      _other -> {:error, :invalid_subscribe}
+    end
+  end
+
+  @spec subscribe_ok(non_neg_integer(), non_neg_integer(), keyword()) :: binary()
+  def subscribe_ok(request_id, track_alias, options \\ []) do
+    parameters =
+      [
+        {0x08, :integer, Keyword.get(options, :expires)},
+        {0x09, :bytes, encode_location(Keyword.get(options, :largest_location))},
+        {0x22, :integer, encode_group_order(Keyword.get(options, :group_order))}
+      ]
+      |> Enum.reject(fn {_identifier, _kind, value} -> is_nil(value) end)
+      |> Enum.sort_by(&elem(&1, 0))
+
+    frame(0x04, [
+      encode_varint(request_id),
+      encode_varint(track_alias),
+      encode_varint(length(parameters)),
+      encode_parameter_list(parameters)
+    ])
+  end
+
   @spec unsubscribe(non_neg_integer()) :: binary()
   def unsubscribe(request_id), do: frame(0x0A, encode_varint(request_id))
+
+  @spec decode_unsubscribe(binary()) ::
+          {:ok, %{request_id: non_neg_integer()}} | {:error, :invalid_unsubscribe}
+  def decode_unsubscribe(payload) do
+    case decode_varint(payload) do
+      {:ok, request_id, <<>>} -> {:ok, %{request_id: request_id}}
+      _other -> {:error, :invalid_unsubscribe}
+    end
+  end
 
   @spec request_update(non_neg_integer(), non_neg_integer(), keyword()) :: binary()
   def request_update(request_id, existing_request_id, options) do
@@ -93,6 +148,17 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
 
   @spec publish_namespace_done(non_neg_integer()) :: binary()
   def publish_namespace_done(request_id), do: frame(0x09, encode_varint(request_id))
+
+  @spec request_error(non_neg_integer(), non_neg_integer(), binary(), non_neg_integer()) ::
+          binary()
+  def request_error(request_id, error_code, reason, retry_interval \\ 0) do
+    frame(0x05, [
+      encode_varint(request_id),
+      encode_varint(error_code),
+      encode_varint(retry_interval),
+      encode_bytes(reason)
+    ])
+  end
 
   @spec decode_publish_ok(binary()) ::
           {:ok, %{request_id: non_neg_integer(), parameters: [SubscriptionParameter.t()]}}
@@ -360,6 +426,24 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
     [encode_varint(length(fields)) | Enum.map(fields, &encode_bytes/1)]
   end
 
+  defp decode_tuple(binary) do
+    with {:ok, count, rest} <- decode_varint(binary) do
+      decode_tuple_fields(rest, count, [])
+    end
+  end
+
+  defp decode_tuple_fields(rest, 0, fields), do: {:ok, Enum.reverse(fields), rest}
+
+  defp decode_tuple_fields(binary, count, fields) do
+    case decode_bytes(binary) do
+      {:ok, field, rest} when byte_size(field) > 0 ->
+        decode_tuple_fields(rest, count - 1, [field | fields])
+
+      _other ->
+        {:error, :invalid_tuple}
+    end
+  end
+
   defp encode_bytes(value), do: [encode_varint(byte_size(value)), value]
 
   defp encode_integer_parameter(delta_type, value),
@@ -475,6 +559,11 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
   defp encode_group_order(:ascending), do: 1
   defp encode_group_order(:descending), do: 2
 
+  defp encode_location(nil), do: nil
+
+  defp encode_location({group, object}),
+    do: IO.iodata_to_binary([encode_varint(group), encode_varint(object)])
+
   defp encode_boolean(nil), do: nil
   defp encode_boolean(false), do: 0
   defp encode_boolean(true), do: 1
@@ -513,6 +602,80 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
     else
       _other -> {:error, :invalid_parameters}
     end
+  end
+
+  defp subscribe_filter(parameters) do
+    case parameter_value(parameters, 0x21) do
+      nil -> {:ok, %MOQX.SubscriptionFilter{type: :largest_object}}
+      encoded -> decode_filter(encoded)
+    end
+  end
+
+  defp decode_filter(encoded) do
+    case decode_varint(encoded) do
+      {:ok, 1, <<>>} ->
+        {:ok, %MOQX.SubscriptionFilter{type: :next_group_start}}
+
+      {:ok, 2, <<>>} ->
+        {:ok, %MOQX.SubscriptionFilter{type: :largest_object}}
+
+      {:ok, 3, rest} ->
+        with {:ok, group, rest} <- decode_varint(rest),
+             {:ok, object, <<>>} <- decode_varint(rest) do
+          {:ok, %MOQX.SubscriptionFilter{type: :absolute_start, start_location: {group, object}}}
+        end
+
+      {:ok, 4, rest} ->
+        with {:ok, group, rest} <- decode_varint(rest),
+             {:ok, object, rest} <- decode_varint(rest),
+             {:ok, end_group, <<>>} <- decode_varint(rest),
+             true <- end_group >= group do
+          {:ok,
+           %MOQX.SubscriptionFilter{
+             type: :absolute_range,
+             start_location: {group, object},
+             end_group: end_group
+           }}
+        else
+          _other -> {:error, :invalid_filter}
+        end
+
+      _other ->
+        {:error, :invalid_filter}
+    end
+  end
+
+  defp boolean_parameter(parameters, identifier, default) do
+    case parameter_value(parameters, identifier) do
+      nil -> {:ok, default}
+      0 -> {:ok, false}
+      1 -> {:ok, true}
+      _other -> {:error, :invalid_boolean_parameter}
+    end
+  end
+
+  defp priority_parameter(parameters) do
+    case parameter_value(parameters, 0x20) do
+      nil -> {:ok, 128}
+      priority when priority in 0..255 -> {:ok, priority}
+      _other -> {:error, :invalid_priority}
+    end
+  end
+
+  defp group_order_parameter(parameters) do
+    case parameter_value(parameters, 0x22) do
+      nil -> {:ok, :publisher}
+      1 -> {:ok, :ascending}
+      2 -> {:ok, :descending}
+      _other -> {:error, :invalid_group_order}
+    end
+  end
+
+  defp parameter_value(parameters, identifier) do
+    Enum.find_value(parameters, fn
+      %{identifier: ^identifier, value: value} -> value
+      _parameter -> nil
+    end)
   end
 
   defp decode_extension_parameters(binary),
@@ -572,6 +735,12 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
     do: %SubscriptionParameter.GroupOrder{value: :descending}
 
   defp public_parameter(parameter), do: public_extension(parameter)
+
+  defp public_subscribe_parameters(parameters) do
+    parameters
+    |> Enum.reject(&(&1.identifier in [0x10, 0x20, 0x21, 0x22]))
+    |> Enum.map(&public_parameter/1)
+  end
 
   defp public_extension(%{identifier: identifier, value: value}) do
     %SubscriptionParameter.Extension{
