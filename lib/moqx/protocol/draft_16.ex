@@ -14,6 +14,8 @@ defmodule MOQX.Protocol.Draft16 do
     ConnectionClosed,
     ObjectReceived,
     ObjectStatus,
+    PublicationReady,
+    PublicationSubscriberJoined,
     SubgroupEnded,
     SubscriptionAccepted,
     SubscriptionDone,
@@ -22,7 +24,16 @@ defmodule MOQX.Protocol.Draft16 do
     SubscriptionUpdateFailed
   }
 
-  alias MOQX.Operation.{Close, Subscribe, Unsubscribe, UpdateSubscription}
+  alias MOQX.Operation.{
+    AddTrack,
+    Close,
+    Publish,
+    PublishObject,
+    Subscribe,
+    Unsubscribe,
+    UpdateSubscription
+  }
+
   alias MOQX.Protocol.{Capabilities, Transition, TransportSpec}
   alias MOQX.Protocol.MOQTDraft16.{Codec, SubgroupDecoder}
 
@@ -40,7 +51,10 @@ defmodule MOQX.Protocol.Draft16 do
               subscriptions: %{},
               subscription_lifecycles: %{},
               pending_updates: %{},
-              aliases: %{}
+              aliases: %{},
+              publications: %{},
+              next_track_alias: 0,
+              next_publication_stream: 0
   end
 
   defmodule SubscriptionState do
@@ -219,6 +233,117 @@ defmodule MOQX.Protocol.Draft16 do
     end
   end
 
+  def handle_operation(%State{phase: :ready} = state, %Publish{
+        namespace: namespace,
+        options: options
+      }) do
+    with :ok <- validate_namespace(namespace),
+         false <- publication_namespace?(state, namespace),
+         :ok <- validate_request_credit(state) do
+      request_id = state.next_request_id
+      publication = %MOQX.Publication{id: request_id, namespace: namespace}
+
+      entry = %{
+        publication: publication,
+        status: :pending,
+        tracks: %{},
+        options: options
+      }
+
+      next_state = %{
+        state
+        | next_request_id: request_id + 2,
+          publications: Map.put(state.publications, request_id, entry)
+      }
+
+      Transition.ok(next_state,
+        events: [{:publication_started, publication}],
+        actions: [
+          {:send_stream, :control, Codec.publish_namespace(request_id, namespace), []}
+        ]
+      )
+    else
+      true -> Transition.error(state, :namespace_already_published)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  def handle_operation(%State{phase: :ready} = state, %AddTrack{} = operation) do
+    with {:ok, entry} <- fetch_publication(state, operation.publication),
+         :ready <- entry.status,
+         :ok <- validate_track_name(operation.track),
+         false <- Map.has_key?(entry.tracks, operation.track),
+         {:ok, retention} <- validate_retention(Keyword.get(operation.options, :retention, :live)),
+         :ok <- validate_request_credit(state) do
+      request_id = state.next_request_id
+      track_alias = state.next_track_alias
+
+      track_ref = %MOQX.TrackRef{
+        namespace: operation.publication.namespace,
+        track: operation.track
+      }
+
+      published_track = %MOQX.PublishedTrack{
+        publication: operation.publication,
+        track: track_ref,
+        retention: retention
+      }
+
+      track_entry = %{
+        track: published_track,
+        request_id: request_id,
+        track_alias: track_alias,
+        status: :pending,
+        options: operation.options
+      }
+
+      entry = %{entry | tracks: Map.put(entry.tracks, operation.track, track_entry)}
+
+      next_state = %{
+        state
+        | next_request_id: request_id + 2,
+          next_track_alias: track_alias + 1,
+          publications: Map.put(state.publications, operation.publication.id, entry)
+      }
+
+      Transition.ok(next_state,
+        events: [{:track_added, published_track}],
+        actions: [
+          {:send_stream, :control,
+           Codec.publish_track(request_id, track_ref, track_alias, operation.options), []}
+        ]
+      )
+    else
+      :pending -> Transition.error(state, :publication_not_ready)
+      true -> Transition.error(state, :track_already_registered)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  def handle_operation(%State{phase: :ready} = state, %PublishObject{} = operation) do
+    with {:ok, entry} <- fetch_publication(state, operation.track.publication),
+         %{track: published_track, status: :ready} = track_entry <-
+           entry.tracks[operation.track.track.track],
+         true <- published_track == operation.track,
+         :ok <- validate_object(operation.object) do
+      stream_number = state.next_publication_stream
+      key = {:publication, track_entry.request_id, stream_number}
+      bytes = Codec.encode_subgroup(track_entry.track_alias, operation.object)
+
+      Transition.ok(%{state | next_publication_stream: stream_number + 1},
+        events: [{:object_published, operation.track}],
+        actions: [
+          {:open_stream, key, [direction: :unidirectional], bytes, [finish: true]}
+        ]
+      )
+    else
+      %{status: :pending} -> Transition.error(state, :published_track_not_ready)
+      nil -> Transition.error(state, :unknown_published_track)
+      false -> Transition.error(state, :unknown_published_track)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
   def handle_operation(%State{} = state, %Close{}) do
     Transition.ok(close_state(state),
       events: [:connection_ended],
@@ -229,13 +354,19 @@ defmodule MOQX.Protocol.Draft16 do
   def handle_operation(%State{} = state, %Subscribe{}),
     do: Transition.error(state, :connection_not_ready)
 
+  def handle_operation(%State{} = state, operation)
+      when is_struct(operation, Publish) or is_struct(operation, AddTrack) or
+             is_struct(operation, PublishObject),
+      do: Transition.error(state, :connection_not_ready)
+
   def handle_operation(%State{} = state, _operation),
     do: Transition.error(state, :unsupported_operation)
 
   @impl true
   def capabilities(_state) do
     %Capabilities{
-      operations: MapSet.new([:subscribe, :update_subscription]),
+      operations:
+        MapSet.new([:subscribe, :update_subscription, :publish, :add_track, :publish_object]),
       delivery_modes: MapSet.new([:subgroup, :datagram]),
       metadata: %{catalog_track: "catalog", draft: 16}
     }
@@ -352,17 +483,50 @@ defmodule MOQX.Protocol.Draft16 do
   end
 
   defp handle_control_frame(%State{} = state, {0x07, payload}) do
-    with {:ok, ok} <- Codec.decode_request_ok(payload),
-         %MOQX.Subscription{} = subscription <- state.pending_updates[ok.request_id] do
-      next_state = %{state | pending_updates: Map.delete(state.pending_updates, ok.request_id)}
+    with {:ok, ok} <- Codec.decode_request_ok(payload) do
+      case state.pending_updates[ok.request_id] do
+        %MOQX.Subscription{} = subscription ->
+          next_state = %{
+            state
+            | pending_updates: Map.delete(state.pending_updates, ok.request_id)
+          }
+
+          Transition.ok(next_state,
+            events: [
+              %SubscriptionUpdated{subscription: subscription, parameters: ok.parameters}
+            ]
+          )
+
+        nil ->
+          accept_publication_namespace(state, ok.request_id)
+      end
+    end
+  end
+
+  defp handle_control_frame(%State{} = state, {0x1E, payload}) do
+    with {:ok, ok} <- Codec.decode_publish_ok(payload),
+         {:ok, publication_id, track_name, track_entry} <-
+           fetch_track_by_request_id(state, ok.request_id),
+         :pending <- track_entry.status do
+      entry = state.publications[publication_id]
+      track_entry = %{track_entry | status: :ready}
+      entry = %{entry | tracks: Map.put(entry.tracks, track_name, track_entry)}
+
+      next_state = %{
+        state
+        | publications: Map.put(state.publications, publication_id, entry)
+      }
 
       Transition.ok(next_state,
         events: [
-          %SubscriptionUpdated{subscription: subscription, parameters: ok.parameters}
+          %PublicationSubscriberJoined{
+            track: track_entry.track,
+            request_id: ok.request_id
+          }
         ]
       )
     else
-      nil -> Transition.error(state, :unknown_update_request)
+      :ready -> Transition.error(state, :duplicate_publish_ok)
       {:error, reason} -> Transition.error(state, reason)
     end
   end
@@ -583,6 +747,83 @@ defmodule MOQX.Protocol.Draft16 do
 
   defp parameter_identifier(%MOQX.SubscriptionParameter.Extension{identifier: identifier}),
     do: identifier
+
+  defp validate_namespace(namespace)
+       when is_list(namespace) and namespace != [] and length(namespace) <= 32 do
+    if Enum.all?(namespace, &(is_binary(&1) and byte_size(&1) > 0)) and
+         Enum.sum(Enum.map(namespace, &byte_size/1)) <= 4_096 do
+      :ok
+    else
+      {:error, :invalid_namespace}
+    end
+  end
+
+  defp validate_namespace(_namespace), do: {:error, :invalid_namespace}
+
+  defp validate_track_name(track) when is_binary(track) and byte_size(track) <= 4_096, do: :ok
+  defp validate_track_name(_track), do: {:error, :invalid_track_name}
+
+  defp validate_retention(retention) when retention in [:live, :latest, :all],
+    do: {:ok, retention}
+
+  defp validate_retention(_retention), do: {:error, :invalid_retention}
+
+  defp validate_object(%MOQX.Object{} = object) do
+    validators = [
+      valid_non_negative_integer?(object.group_id),
+      valid_non_negative_integer?(object.object_id),
+      is_nil(object.subgroup_id) or valid_non_negative_integer?(object.subgroup_id),
+      is_nil(object.publisher_priority) or object.publisher_priority in 0..255,
+      is_binary(object.payload)
+    ]
+
+    if Enum.all?(validators), do: :ok, else: {:error, :invalid_object}
+  end
+
+  defp validate_object(_object), do: {:error, :invalid_object}
+
+  defp valid_non_negative_integer?(value), do: is_integer(value) and value >= 0
+
+  defp publication_namespace?(state, namespace) do
+    Enum.any?(state.publications, fn {_id, entry} ->
+      entry.publication.namespace == namespace
+    end)
+  end
+
+  defp fetch_publication(state, publication) do
+    case state.publications[publication.id] do
+      %{publication: ^publication} = entry -> {:ok, entry}
+      _other -> {:error, :unknown_publication}
+    end
+  end
+
+  defp accept_publication_namespace(state, request_id) do
+    case state.publications[request_id] do
+      %{status: :pending, publication: publication} = entry ->
+        next_state = %{
+          state
+          | publications: Map.put(state.publications, request_id, %{entry | status: :ready})
+        }
+
+        Transition.ok(next_state, events: [%PublicationReady{publication: publication}])
+
+      %{status: :ready} ->
+        Transition.error(state, :duplicate_publication_response)
+
+      nil ->
+        Transition.error(state, :unknown_update_request)
+    end
+  end
+
+  defp fetch_track_by_request_id(state, request_id) do
+    matches =
+      for {publication_id, entry} <- state.publications,
+          {track_name, track_entry} <- entry.tracks,
+          track_entry.request_id == request_id,
+          do: {:ok, publication_id, track_name, track_entry}
+
+    List.first(matches) || {:error, :unknown_publish_request}
+  end
 
   defp validate_request_credit(%State{next_request_id: next, max_request_id: max})
        when next <= max,

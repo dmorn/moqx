@@ -73,10 +73,11 @@ that cannot represent a requested policy returns
 `{:error, {:unsupported_subscription_start, policy}}` instead of silently
 substituting another boundary.
 
-## Standard draft-16 subscriber
+## Standard draft-16 subscriber and publisher
 
 Moqtail's public relay can be reached through the independent `:draft_16`
-implementation:
+implementation. Subscription and catalog reception are available against the
+public relay:
 
 ```elixir
 {:ok, client} =
@@ -105,6 +106,34 @@ receive do
     catalog
 end
 ```
+
+Draft-16 publication uses two readiness boundaries. `PublicationReady` means
+the relay accepted the namespace. Each added track then sends draft-16
+`PUBLISH`; objects are accepted only after the corresponding
+`PublicationSubscriberJoined` event confirms `PUBLISH_OK`:
+
+```elixir
+{:ok, publication} = MOQX.publish(client, ["example", "camera"])
+
+receive do
+  {:moqx, ^client,
+   %MOQX.Event.PublicationReady{publication: ^publication}} ->
+    :ok
+end
+
+{:ok, video} = MOQX.add_track(client, publication, "video")
+
+receive do
+  {:moqx, ^client,
+   %MOQX.Event.PublicationSubscriberJoined{track: ^video}} ->
+    MOQX.publish_object(client, video, object)
+end
+```
+
+The current draft-16 publisher slice emits one subgroup stream per object.
+Namespace/track rejection, inbound `SUBSCRIBE`, datagram publication,
+withdrawal, and the public player smoke remain pending; Cloudflare's
+`:cloudflare_draft_14` publisher lifecycle below is unchanged.
 
 This path negotiates ALPN `moqt-16`, sends native-QUIC `PATH` and `AUTHORITY`
 setup parameters, and decodes draft-16 subgroup streams and object datagrams.

@@ -51,6 +51,65 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
     ])
   end
 
+  @spec publish_namespace(non_neg_integer(), [binary()]) :: binary()
+  def publish_namespace(request_id, namespace) do
+    frame(0x06, [
+      encode_varint(request_id),
+      encode_tuple(namespace),
+      encode_varint(0)
+    ])
+  end
+
+  @spec publish_track(
+          non_neg_integer(),
+          MOQX.TrackRef.t(),
+          non_neg_integer(),
+          keyword()
+        ) :: binary()
+  def publish_track(request_id, %MOQX.TrackRef{} = track, track_alias, options \\ []) do
+    parameters = [{0x10, :integer, boolean_integer(Keyword.get(options, :forward, true))}]
+
+    frame(0x1D, [
+      encode_varint(request_id),
+      encode_tuple(track.namespace),
+      encode_bytes(track.track),
+      encode_varint(track_alias),
+      encode_varint(length(parameters)),
+      encode_parameter_list(parameters),
+      encode_varint(0)
+    ])
+  end
+
+  @spec decode_publish_ok(binary()) ::
+          {:ok, %{request_id: non_neg_integer(), parameters: [SubscriptionParameter.t()]}}
+          | {:error, :invalid_publish_ok}
+  def decode_publish_ok(payload) do
+    with {:ok, request_id, rest} <- decode_varint(payload),
+         {:ok, parameter_count, rest} <- decode_varint(rest),
+         {:ok, parameters, <<>>} <- decode_parameters(rest, parameter_count, :message) do
+      {:ok, %{request_id: request_id, parameters: Enum.map(parameters, &public_parameter/1)}}
+    else
+      _other -> {:error, :invalid_publish_ok}
+    end
+  end
+
+  @spec encode_subgroup(non_neg_integer(), MOQX.Object.t()) :: binary()
+  def encode_subgroup(track_alias, %MOQX.Object{} = object) do
+    subgroup_id = object.subgroup_id || 0
+    priority = object.publisher_priority || 127
+    type = if object.end_of_group?, do: 0x1C, else: 0x14
+
+    IO.iodata_to_binary([
+      encode_varint(type),
+      encode_varint(track_alias),
+      encode_varint(object.group_id),
+      encode_varint(subgroup_id),
+      <<priority>>,
+      encode_varint(object.object_id),
+      encode_object_payload(object)
+    ])
+  end
+
   @spec decode_request_ok(binary()) ::
           {:ok, %{request_id: non_neg_integer(), parameters: [SubscriptionParameter.t()]}}
           | {:error, :invalid_request_ok}
@@ -249,6 +308,21 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
   def encode_varint(value) when value < 16_384, do: <<1::2, value::14>>
   def encode_varint(value) when value < 1_073_741_824, do: <<2::2, value::30>>
   def encode_varint(value) when value < 4_611_686_018_427_387_904, do: <<3::2, value::62>>
+
+  defp boolean_integer(true), do: 1
+  defp boolean_integer(false), do: 0
+
+  defp encode_object_payload(%MOQX.Object{payload: payload}) when byte_size(payload) > 0,
+    do: [encode_varint(byte_size(payload)), payload]
+
+  defp encode_object_payload(%MOQX.Object{status: status}) do
+    [encode_varint(0), encode_varint(object_status(status))]
+  end
+
+  defp object_status(nil), do: 0
+  defp object_status(:object_does_not_exist), do: 1
+  defp object_status(:end_of_group), do: 3
+  defp object_status(:end_of_track), do: 4
 
   defp frame(type, payload) do
     payload = IO.iodata_to_binary(payload)
