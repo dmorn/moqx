@@ -385,7 +385,18 @@ defmodule MOQX.Protocol.Draft16 do
   def handle_operation(%State{phase: :ready} = state, %FinishPublication{} = operation) do
     with {:ok, entry} <- fetch_publication(state, operation.publication),
          {:ok, status, reason} <- publication_completion(operation.options) do
-      {events, actions} =
+      {pending, pending_events, pending_actions} =
+        finish_pending_publication_subscriptions(state, operation.publication.id)
+
+      {subscriptions, subscription_events, subscription_actions} =
+        finish_publication_subscriptions(
+          state,
+          operation.publication.id,
+          status,
+          reason
+        )
+
+      {track_events, track_actions} =
         entry.tracks
         |> Enum.sort_by(&elem(&1, 0))
         |> Enum.reduce({[], []}, fn {_name, track_entry}, {events, actions} ->
@@ -394,13 +405,19 @@ defmodule MOQX.Protocol.Draft16 do
 
       next_state = %{
         state
-        | publications: Map.delete(state.publications, operation.publication.id)
+        | publications: Map.delete(state.publications, operation.publication.id),
+          pending_publisher_subscriptions: pending,
+          publisher_subscriptions: subscriptions
       }
 
       Transition.ok(next_state,
-        events: [{:publication_finished, operation.publication} | events],
+        events:
+          [{:publication_finished, operation.publication}] ++
+            pending_events ++ subscription_events ++ track_events,
         actions:
-          actions ++
+          pending_actions ++
+            subscription_actions ++
+            track_actions ++
             [
               {:send_stream, :control, Codec.publish_namespace_done(operation.publication.id), []}
             ]
@@ -1089,10 +1106,10 @@ defmodule MOQX.Protocol.Draft16 do
   defp subscription_error_code(:unauthorized), do: {:ok, 1}
   defp subscription_error_code(:timeout), do: {:ok, 2}
   defp subscription_error_code(:not_supported), do: {:ok, 3}
-  defp subscription_error_code(:track_does_not_exist), do: {:ok, 4}
-  defp subscription_error_code(:invalid_range), do: {:ok, 5}
-  defp subscription_error_code(:malformed_auth_token), do: {:ok, 0x10}
-  defp subscription_error_code(:expired_auth_token), do: {:ok, 0x12}
+  defp subscription_error_code(:malformed_auth_token), do: {:ok, 4}
+  defp subscription_error_code(:expired_auth_token), do: {:ok, 5}
+  defp subscription_error_code(:track_does_not_exist), do: {:ok, 0x10}
+  defp subscription_error_code(:invalid_range), do: {:ok, 0x11}
   defp subscription_error_code(_code), do: {:error, :invalid_subscription_rejection}
 
   defp accepted_group_order(:ascending), do: {:ok, :ascending}
@@ -1348,6 +1365,50 @@ defmodule MOQX.Protocol.Draft16 do
   end
 
   defp finish_track(_track_entry, _status, _reason, events, actions), do: {events, actions}
+
+  defp finish_pending_publication_subscriptions(state, publication_id) do
+    state.pending_publisher_subscriptions
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce({%{}, [], []}, fn {request_id, pending}, {remaining, events, actions} ->
+      if pending.publication_id == publication_id do
+        event = %PublicationSubscriptionCancelled{
+          request: pending.request,
+          reason: :publication_finished
+        }
+
+        next_actions = [
+          {:cancel_timer, {:publisher_subscription_decision, pending.request.handle}},
+          {:send_stream, :control, Codec.request_error(request_id, 0x10, "publication finished"),
+           []}
+        ]
+
+        {remaining, events ++ [event], actions ++ next_actions}
+      else
+        {Map.put(remaining, request_id, pending), events, actions}
+      end
+    end)
+  end
+
+  defp finish_publication_subscriptions(state, publication_id, status, reason) do
+    state.publisher_subscriptions
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce({%{}, [], []}, fn {request_id, subscription}, {remaining, events, actions} ->
+      if subscription.publication_id == publication_id do
+        event = %PublicationSubscriberLeft{
+          track: subscription.track,
+          request_id: request_id
+        }
+
+        action =
+          {:send_stream, :control,
+           Codec.publish_done(request_id, status, subscription.stream_count, reason), []}
+
+        {remaining, events ++ [event], actions ++ [action]}
+      else
+        {Map.put(remaining, request_id, subscription), events, actions}
+      end
+    end)
+  end
 
   defp validate_request_credit(%State{next_request_id: next, max_request_id: max})
        when next <= max,

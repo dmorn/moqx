@@ -201,6 +201,136 @@ defmodule MOQX.Draft16PublisherTest do
     assert :ok = Task.await(relay, 1_000)
   end
 
+  test "finishes pending and active controlled subscriptions through the public API" do
+    {:ok, network} = Support.start_network()
+    parent = self()
+
+    relay =
+      Task.async(fn ->
+        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_16)
+        {:ok, listener, ctx} = Transport.listen(ctx, 0)
+        {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
+        send(parent, {:relay_ready, port})
+
+        {:ok, conn, ctx} = Transport.accept(ctx, listener, [], 1_000)
+        {:ok, conn, ctx} = Transport.handshake(ctx, conn, 1_000)
+        {:ok, control, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
+
+        setup = Codec.client_setup(URI.parse("moqt://localhost:#{port}"))
+        assert {:ok, ^setup, ctx} = Transport.recv_stream(ctx, control, byte_size(setup))
+
+        {:ok, _send, ctx} =
+          Transport.send_stream(ctx, control, <<0x21, 0, 3, 1, 2, 4>>)
+
+        namespace = ["live", "cleanup"]
+        publish_namespace = Codec.publish_namespace(0, namespace)
+
+        assert {:ok, ^publish_namespace, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(publish_namespace))
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x07, 0, 2, 0, 0>>)
+
+        track_ref = %MOQX.TrackRef{namespace: namespace, track: "video"}
+        publish_track = Codec.publish_track(2, track_ref, 0)
+
+        assert {:ok, ^publish_track, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(publish_track))
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x1E, 0, 2, 2, 0>>)
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, Codec.subscribe(1, track_ref, []))
+
+        subscribe_ok = Codec.subscribe_ok(1, 1, group_order: :ascending)
+
+        assert {:ok, ^subscribe_ok, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(subscribe_ok))
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, Codec.subscribe(3, track_ref, []))
+
+        pending_error = Codec.request_error(3, 0x10, "publication finished")
+
+        assert {:ok, ^pending_error, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(pending_error))
+
+        active_done = Codec.publish_done(1, 2, 0, "complete")
+
+        assert {:ok, ^active_done, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(active_done))
+
+        primary_done = Codec.publish_done(2, 2, 0, "complete")
+
+        assert {:ok, ^primary_done, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(primary_done))
+
+        namespace_done = Codec.publish_namespace_done(0)
+
+        assert {:ok, ^namespace_done, _ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(namespace_done))
+
+        :ok
+      end)
+
+    assert_receive {:relay_ready, port}, 1_000
+
+    assert {:ok, client} =
+             MOQX.connect("moqt://localhost:#{port}",
+               protocol: :draft_16,
+               transport: {Support, network: network, profile: :draft_16},
+               timeout: 1_000
+             )
+
+    assert {:ok, publication} =
+             MOQX.publish(client, ["live", "cleanup"],
+               inbound_subscriptions: :controlled,
+               subscription_decision_timeout: 1_000
+             )
+
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationReady{publication: ^publication}},
+                   1_000
+
+    assert {:ok, track} = MOQX.add_track(client, publication, "video")
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 2}},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriptionRequested{request: first_request}},
+                   1_000
+
+    assert :ok = MOQX.accept_subscription(client, first_request, track)
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 1}},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriptionRequested{request: second_request}},
+                   1_000
+
+    assert :ok =
+             MOQX.finish_publication(client, publication, status: 2, reason: "complete")
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriptionCancelled{
+                      request: ^second_request,
+                      reason: :publication_finished
+                    }},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberLeft{track: ^track, request_id: 1}},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberLeft{track: ^track, request_id: 2}},
+                   1_000
+
+    assert {:error, :stale_subscription_request} =
+             MOQX.accept_subscription(client, second_request, track)
+
+    assert :ok = Task.await(relay, 1_000)
+  end
+
   defp receive_datagram(ctx) do
     case Transport.receive_event(ctx, 1_000) do
       {:ok, {:datagram, _conn, _data, _metadata} = event, ctx} ->

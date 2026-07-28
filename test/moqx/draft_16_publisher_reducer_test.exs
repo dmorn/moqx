@@ -530,6 +530,36 @@ defmodule MOQX.Draft16PublisherReducerTest do
       List.first(second_pending.events)
 
     second_handle = second_request.handle
+
+    [
+      internal_error: 0,
+      unauthorized: 1,
+      timeout: 2,
+      not_supported: 3,
+      malformed_auth_token: 4,
+      expired_auth_token: 5,
+      track_does_not_exist: 0x10,
+      invalid_range: 0x11
+    ]
+    |> Enum.each(fn {code, wire_code} ->
+      expected = Codec.request_error(3, wire_code, Atom.to_string(code))
+
+      assert {:ok,
+              %Transition{
+                actions: [
+                  {:cancel_timer, {:publisher_subscription_decision, ^second_handle}},
+                  {:send_stream, :control, ^expected, []}
+                ]
+              }} =
+               Draft16.handle_operation(
+                 second_pending.state,
+                 %RejectPublicationSubscription{
+                   request: second_request,
+                   rejection: %MOQX.SubscriptionRejection{code: code}
+                 }
+               )
+    end)
+
     rejection = %MOQX.SubscriptionRejection{code: :unauthorized, reason: "denied"}
     request_error = Codec.request_error(3, 1, "denied")
 
@@ -588,6 +618,120 @@ defmodule MOQX.Draft16PublisherReducerTest do
              )
 
     assert timed_out.pending_publisher_subscriptions == %{}
+  end
+
+  test "finishing a publication cancels pending requests and completes active subscribers" do
+    scope = make_ref()
+    ready = %State{phase: :ready, max_request_id: 4, handle_scope: scope}
+
+    {:ok, published} =
+      Draft16.handle_operation(ready, %Publish{
+        namespace: ["live"],
+        options: [
+          inbound_subscriptions: :controlled,
+          subscription_decision_timeout: 250
+        ]
+      })
+
+    {:publication_started, publication} = List.first(published.events)
+
+    {:ok, namespace_ready} =
+      Draft16.handle_transport(
+        published.state,
+        {:stream_data, control_stream(), <<0x07, 0, 2, 0, 0>>, %{}}
+      )
+
+    {:ok, added} =
+      Draft16.handle_operation(namespace_ready.state, %AddTrack{
+        publication: publication,
+        track: "video"
+      })
+
+    {:track_added, track} = List.first(added.events)
+
+    {:ok, primary_ready} =
+      Draft16.handle_transport(
+        added.state,
+        {:stream_data, control_stream(), <<0x1E, 0, 2, 2, 0>>, %{}}
+      )
+
+    subscribe_one =
+      Codec.subscribe(1, %MOQX.TrackRef{namespace: ["live"], track: "video"}, [])
+
+    {:ok, first_pending} =
+      Draft16.handle_transport(
+        primary_ready.state,
+        {:stream_data, control_stream(), subscribe_one, %{}}
+      )
+
+    %PublicationSubscriptionRequested{request: first_request} =
+      List.first(first_pending.events)
+
+    {:ok, first_accepted} =
+      Draft16.handle_operation(first_pending.state, %AcceptPublicationSubscription{
+        request: first_request,
+        published_track: track
+      })
+
+    subscribe_two =
+      Codec.subscribe(3, %MOQX.TrackRef{namespace: ["live"], track: "video"}, [])
+
+    {:ok, second_pending} =
+      Draft16.handle_transport(
+        first_accepted.state,
+        {:stream_data, control_stream(), subscribe_two, %{}}
+      )
+
+    %PublicationSubscriptionRequested{request: second_request} =
+      List.first(second_pending.events)
+
+    second_handle = second_request.handle
+
+    {:ok, delivered} =
+      Draft16.handle_operation(second_pending.state, %PublishObject{
+        track: track,
+        object: %MOQX.Object{group_id: 0, object_id: 0, payload: "x"}
+      })
+
+    pending_error = Codec.request_error(3, 0x10, "publication finished")
+    active_done = Codec.publish_done(1, 2, 1, "complete")
+    primary_done = Codec.publish_done(2, 2, 1, "complete")
+    namespace_done = Codec.publish_namespace_done(0)
+
+    assert {:ok,
+            %Transition{
+              state: finished,
+              events: [
+                {:publication_finished, ^publication},
+                %PublicationSubscriptionCancelled{
+                  request: ^second_request,
+                  reason: :publication_finished
+                },
+                %PublicationSubscriberLeft{track: ^track, request_id: 1},
+                %PublicationSubscriberLeft{track: ^track, request_id: 2}
+              ],
+              actions: [
+                {:cancel_timer, {:publisher_subscription_decision, ^second_handle}},
+                {:send_stream, :control, ^pending_error, []},
+                {:send_stream, :control, ^active_done, []},
+                {:send_stream, :control, ^primary_done, []},
+                {:send_stream, :control, ^namespace_done, []}
+              ]
+            }} =
+             Draft16.handle_operation(delivered.state, %FinishPublication{
+               publication: publication,
+               options: [status: 2, reason: "complete"]
+             })
+
+    assert finished.publications == %{}
+    assert finished.pending_publisher_subscriptions == %{}
+    assert finished.publisher_subscriptions == %{}
+
+    assert {:error, :stale_subscription_request, %Transition{state: ^finished}} =
+             Draft16.handle_operation(finished, %AcceptPublicationSubscription{
+               request: second_request,
+               published_track: track
+             })
   end
 
   defp control_stream do

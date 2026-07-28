@@ -142,11 +142,17 @@ relay-initiated subscribers of that track. Cloudflare draft-14 rejects
 `:datagram` explicitly because that implementation supports subgroup
 publication only.
 
-`finish_publication/3` completes each ready track with its opened-stream count,
-then withdraws the namespace. Namespace rejection/cancellation and per-track
-rejection emit `PublicationFailed`, `PublicationCancelled`, and
-`PublicationTrackFailed` respectively; rejected and finished handles are
-invalidated deterministically.
+`finish_publication/3` first cancels pending controlled requests with
+`REQUEST_ERROR(DOES_NOT_EXIST)`, then completes established relay subscriptions
+and ready publisher-initiated tracks with `PUBLISH_DONE` and their exact
+opened-stream counts. It sends `PUBLISH_NAMESPACE_DONE` only after those
+subscription boundaries. Applications receive
+`PublicationSubscriptionCancelled` and `PublicationSubscriberLeft` for the
+affected requests, and their handles become stale immediately.
+
+Namespace rejection/cancellation and per-track rejection emit
+`PublicationFailed`, `PublicationCancelled`, and `PublicationTrackFailed`
+respectively; rejected and finished handles are invalidated deterministically.
 
 Incoming draft-16 `SUBSCRIBE` requests use the same
 `inbound_subscriptions: :automatic | :controlled` publication policy and the

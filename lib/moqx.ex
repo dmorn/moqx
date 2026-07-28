@@ -148,7 +148,13 @@ defmodule MOQX do
     ConnectionDriver.publish_object(client, track, object)
   end
 
-  @doc "Finishes every active delivery and withdraws a namespace publication."
+  @doc """
+  Finishes every active delivery and withdraws a namespace publication.
+
+  Pending controlled subscription requests are cancelled before established
+  subscriptions and published tracks complete. The selected protocol
+  withdraws the namespace only after those per-request completion boundaries.
+  """
   @spec finish_publication(MOQX.Client.t(), MOQX.Publication.t(), keyword()) ::
           :ok | {:error, term()}
   def finish_publication(client, publication, options \\ []) do
