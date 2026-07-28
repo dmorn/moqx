@@ -110,4 +110,107 @@ defmodule MOQX.Draft16PublisherTest do
     assert {:error, :unknown_publication} = MOQX.publish_object(client, track, object)
     assert :ok = Task.await(relay, 1_000)
   end
+
+  test "publishes a datagram track through the public API and reports zero streams" do
+    {:ok, network} = Support.start_network()
+    parent = self()
+
+    relay =
+      Task.async(fn ->
+        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_16)
+        {:ok, listener, ctx} = Transport.listen(ctx, 0)
+        {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
+        send(parent, {:relay_ready, port})
+
+        {:ok, conn, ctx} = Transport.accept(ctx, listener, [], 1_000)
+        {:ok, conn, ctx} = Transport.handshake(ctx, conn, 1_000)
+        {:ok, control, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
+
+        setup = Codec.client_setup(URI.parse("moqt://localhost:#{port}"))
+        assert {:ok, ^setup, ctx} = Transport.recv_stream(ctx, control, byte_size(setup))
+
+        {:ok, _send, ctx} =
+          Transport.send_stream(ctx, control, <<0x21, 0, 3, 1, 2, 4>>)
+
+        publish_namespace = Codec.publish_namespace(0, ["live", "camera"])
+
+        assert {:ok, ^publish_namespace, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(publish_namespace))
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x07, 0, 2, 0, 0>>)
+
+        publish_track =
+          Codec.publish_track(
+            2,
+            %MOQX.TrackRef{namespace: ["live", "camera"], track: "audio"},
+            0
+          )
+
+        assert {:ok, ^publish_track, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(publish_track))
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x1E, 0, 2, 2, 0>>)
+
+        assert {:ok, {:datagram, ^conn, <<0x06, 0, 9, 17, "media">>, %{}}, ctx} =
+                 receive_datagram(ctx)
+
+        publish_done = Codec.publish_done(2, 2, 0, "track ended")
+
+        assert {:ok, ^publish_done, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(publish_done))
+
+        namespace_done = Codec.publish_namespace_done(0)
+
+        assert {:ok, ^namespace_done, _ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(namespace_done))
+
+        :ok
+      end)
+
+    assert_receive {:relay_ready, port}, 1_000
+
+    assert {:ok, client} =
+             MOQX.connect("moqt://localhost:#{port}",
+               protocol: :draft_16,
+               transport: {Support, network: network, profile: :draft_16},
+               timeout: 1_000
+             )
+
+    assert {:ok, publication} = MOQX.publish(client, ["live", "camera"])
+
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationReady{publication: ^publication}},
+                   1_000
+
+    assert {:ok, track} =
+             MOQX.add_track(client, publication, "audio", delivery: :datagram)
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 2}},
+                   1_000
+
+    object = %MOQX.Object{
+      group_id: 9,
+      object_id: 0,
+      publisher_priority: 17,
+      end_of_group?: true,
+      payload: "media"
+    }
+
+    assert :ok = MOQX.publish_object(client, track, object)
+    assert :ok = MOQX.finish_publication(client, publication)
+    assert :ok = Task.await(relay, 1_000)
+  end
+
+  defp receive_datagram(ctx) do
+    case Transport.receive_event(ctx, 1_000) do
+      {:ok, {:datagram, _conn, _data, _metadata} = event, ctx} ->
+        {:ok, event, ctx}
+
+      {:ok, _event, ctx} ->
+        receive_datagram(ctx)
+
+      other ->
+        other
+    end
+  end
 end

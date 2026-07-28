@@ -376,6 +376,13 @@ defmodule MOQX.Runtime.ConnectionDriver do
     end
   end
 
+  defp apply_action(state, {:send_datagram, data}) do
+    case Transport.send_datagram(state.context, state.connection, transport_data(data)) do
+      {:ok, context} -> {:ok, %{state | context: context}}
+      {:error, reason, context} -> {:error, reason, %{state | context: context}}
+    end
+  end
+
   defp apply_action(state, {:close_connection, error_code}) do
     case Transport.close_connection(state.context, state.connection, error_code) do
       {:ok, context} -> {:ok, %{state | context: context}}

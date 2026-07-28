@@ -203,6 +203,32 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
     ])
   end
 
+  @spec encode_datagram(non_neg_integer(), MOQX.Object.t()) :: binary()
+  def encode_datagram(track_alias, %MOQX.Object{} = object) do
+    extensions = encode_object_extensions(object.extensions || [])
+
+    type =
+      0x00
+      |> set_datagram_bit(0x01, extensions != "")
+      |> set_datagram_bit(0x02, object.end_of_group? == true)
+      |> set_datagram_bit(0x04, object.object_id == 0)
+      |> set_datagram_bit(0x08, is_nil(object.publisher_priority))
+      |> set_datagram_bit(0x20, not is_nil(object.status))
+
+    IO.iodata_to_binary([
+      encode_varint(type),
+      encode_varint(track_alias),
+      encode_varint(object.group_id),
+      if(object.object_id == 0, do: [], else: encode_varint(object.object_id)),
+      if(is_nil(object.publisher_priority), do: [], else: <<object.publisher_priority>>),
+      if(extensions == "", do: [], else: [encode_varint(byte_size(extensions)), extensions]),
+      if(is_nil(object.status),
+        do: object.payload,
+        else: encode_varint(object_status(object.status))
+      )
+    ])
+  end
+
   @spec decode_request_ok(binary()) ::
           {:ok, %{request_id: non_neg_integer(), parameters: [SubscriptionParameter.t()]}}
           | {:error, :invalid_request_ok}
@@ -416,6 +442,25 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
   defp object_status(:object_does_not_exist), do: 1
   defp object_status(:end_of_group), do: 3
   defp object_status(:end_of_track), do: 4
+
+  defp set_datagram_bit(type, bit, true), do: type ||| bit
+  defp set_datagram_bit(type, _bit, false), do: type
+
+  defp encode_object_extensions(extensions) do
+    extensions
+    |> Enum.map(fn
+      %MOQX.Extension{protocol: :draft_16, identifier: identifier, value: value}
+      when is_integer(value) ->
+        {identifier, :integer, value}
+
+      %MOQX.Extension{protocol: :draft_16, identifier: identifier, value: value}
+      when is_binary(value) ->
+        {identifier, :bytes, value}
+    end)
+    |> Enum.sort_by(&elem(&1, 0))
+    |> encode_parameter_list()
+    |> IO.iodata_to_binary()
+  end
 
   defp frame(type, payload) do
     payload = IO.iodata_to_binary(payload)
@@ -817,6 +862,7 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
   end
 
   defp decode_object_status(0), do: {:ok, nil}
+  defp decode_object_status(1), do: {:ok, :object_does_not_exist}
   defp decode_object_status(3), do: {:ok, :end_of_group}
   defp decode_object_status(4), do: {:ok, :end_of_track}
   defp decode_object_status(_status), do: {:error, :invalid_object_status}

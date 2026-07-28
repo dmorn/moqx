@@ -107,6 +107,86 @@ defmodule MOQX.Draft16PublisherReducerTest do
     assert subgroup == <<0x14, 0, 7, 3, 10, 0, 8, "fragment">>
   end
 
+  test "a datagram track publishes without opening a stream and completes with zero streams" do
+    ready = %State{phase: :ready, max_request_id: 4}
+    {:ok, published} = Draft16.handle_operation(ready, %Publish{namespace: ["live"]})
+    {:publication_started, publication} = List.first(published.events)
+
+    {:ok, namespace_ready} =
+      Draft16.handle_transport(
+        published.state,
+        {:stream_data, control_stream(), <<0x07, 0, 2, 0, 0>>, %{}}
+      )
+
+    {:ok, added} =
+      Draft16.handle_operation(namespace_ready.state, %AddTrack{
+        publication: publication,
+        track: "audio",
+        options: [delivery: :datagram]
+      })
+
+    {:track_added, track} = List.first(added.events)
+
+    {:ok, track_ready} =
+      Draft16.handle_transport(
+        added.state,
+        {:stream_data, control_stream(), <<0x1E, 0, 2, 2, 0>>, %{}}
+      )
+
+    object = %MOQX.Object{
+      group_id: 9,
+      object_id: 0,
+      publisher_priority: 17,
+      end_of_group?: true,
+      payload: "media"
+    }
+
+    assert {:ok,
+            %Transition{
+              state: delivered,
+              actions: [{:send_datagram, <<0x06, 0, 9, 17, "media">>}]
+            }} =
+             Draft16.handle_operation(track_ready.state, %PublishObject{
+               track: track,
+               object: object
+             })
+
+    assert {:ok,
+            %Transition{
+              actions: [
+                {:send_stream, :control, publish_done, []},
+                {:send_stream, :control, _namespace_done, []}
+              ]
+            }} =
+             Draft16.handle_operation(delivered, %FinishPublication{
+               publication: publication
+             })
+
+    assert {:ok, [{0x0B, publish_done_payload}], ""} = Codec.decode_control(publish_done)
+
+    assert {:ok, %{request_id: 2, stream_count: 0}} =
+             Codec.decode_publish_done(publish_done_payload)
+  end
+
+  test "rejects an unknown publication delivery mode" do
+    ready = %State{phase: :ready, max_request_id: 4}
+    {:ok, published} = Draft16.handle_operation(ready, %Publish{namespace: ["live"]})
+    {:publication_started, publication} = List.first(published.events)
+
+    {:ok, namespace_ready} =
+      Draft16.handle_transport(
+        published.state,
+        {:stream_data, control_stream(), <<0x07, 0, 2, 0, 0>>, %{}}
+      )
+
+    assert {:error, :invalid_publication_delivery, %Transition{}} =
+             Draft16.handle_operation(namespace_ready.state, %AddTrack{
+               publication: publication,
+               track: "audio",
+               options: [delivery: :unknown]
+             })
+  end
+
   test "namespace rejection emits a typed error and invalidates the publication handle" do
     ready = %State{phase: :ready, max_request_id: 2}
 

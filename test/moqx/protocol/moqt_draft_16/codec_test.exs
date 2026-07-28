@@ -125,6 +125,38 @@ defmodule MOQX.Protocol.MOQTDraft16.CodecTest do
     assert {:error, :invalid_datagram} = Codec.decode_datagram(<<0x10, 7, 9>>)
   end
 
+  test "encodes Moqtail-compatible unified payload and status datagrams" do
+    payload = %MOQX.Object{
+      group_id: 9,
+      object_id: 0,
+      publisher_priority: 17,
+      end_of_group?: true,
+      payload: "media"
+    }
+
+    status = %MOQX.Object{
+      group_id: 9,
+      object_id: 0,
+      publisher_priority: nil,
+      status: :end_of_track,
+      payload: ""
+    }
+
+    extended = %{
+      payload
+      | end_of_group?: false,
+        extensions: [
+          %MOQX.Extension{protocol: :draft_16, identifier: 0x3E, value: 4}
+        ]
+    }
+
+    assert Codec.encode_datagram(7, payload) == <<0x06, 7, 9, 17, "media">>
+    assert Codec.encode_datagram(7, status) == <<0x2C, 7, 9, 4>>
+
+    assert Codec.encode_datagram(7, extended) ==
+             <<0x05, 7, 9, 17, 2, 0x3E, 4, "media">>
+  end
+
   test "encodes request update and decodes its acknowledgement" do
     filter = %MOQX.SubscriptionFilter{
       type: :absolute_start,

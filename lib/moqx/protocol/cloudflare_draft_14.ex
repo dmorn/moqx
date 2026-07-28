@@ -259,7 +259,9 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     with {:ok, entry} <- fetch_publication(state, operation.publication),
          :ok <- validate_track_name(operation.track),
          false <- Map.has_key?(entry.tracks, operation.track),
-         {:ok, retention} <- validate_retention(Keyword.get(operation.options, :retention, :live)) do
+         {:ok, retention} <- validate_retention(Keyword.get(operation.options, :retention, :live)),
+         :ok <-
+           validate_publication_delivery(Keyword.get(operation.options, :delivery, :subgroup)) do
       track_ref = %MOQX.TrackRef{
         namespace: operation.publication.namespace,
         track: operation.track
@@ -1407,6 +1409,15 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     do: {:ok, retention}
 
   defp validate_retention(_retention), do: {:error, :invalid_retention}
+
+  defp validate_publication_delivery(:subgroup), do: :ok
+
+  defp validate_publication_delivery(delivery)
+       when delivery in [:datagram],
+       do: {:error, {:unsupported_publication_delivery, delivery}}
+
+  defp validate_publication_delivery(_delivery),
+    do: {:error, :invalid_publication_delivery}
 
   defp validate_track_name(track) when is_binary(track) and byte_size(track) > 0, do: :ok
   defp validate_track_name(_track), do: {:error, :invalid_track_name}

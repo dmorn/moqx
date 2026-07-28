@@ -121,7 +121,10 @@ receive do
     :ok
 end
 
-{:ok, video} = MOQX.add_track(client, publication, "video")
+{:ok, video} =
+  MOQX.add_track(client, publication, "video",
+    delivery: :datagram
+  )
 
 receive do
   {:moqx, ^client,
@@ -131,6 +134,13 @@ end
 
 :ok = MOQX.finish_publication(client, publication)
 ```
+
+`delivery: :subgroup` is the default and opens one subgroup stream per object.
+`delivery: :datagram` emits draft-16 unified object datagrams and reports zero
+opened streams when the track completes. The delivery choice also applies to
+relay-initiated subscribers of that track. Cloudflare draft-14 rejects
+`:datagram` explicitly because that implementation supports subgroup
+publication only.
 
 `finish_publication/3` completes each ready track with its opened-stream count,
 then withdraws the namespace. Namespace rejection/cancellation and per-track
@@ -142,12 +152,10 @@ Incoming draft-16 `SUBSCRIBE` requests use the same
 `inbound_subscriptions: :automatic | :controlled` publication policy and the
 same opaque request, accept, reject, timeout, joined, and left events as the
 draft-14 implementation. Accepted subscribers receive their own track alias
-and subgroup stream fan-out; `UNSUBSCRIBE` completes that subscriber with the
-exact stream count.
+and the track's selected subgroup or datagram delivery; `UNSUBSCRIBE` completes
+that subscriber with the exact stream count.
 
-The current draft-16 publisher slice emits one subgroup stream per object.
-Datagram publication and the public player smoke remain pending; Cloudflare's
-`:cloudflare_draft_14` publisher lifecycle below is unchanged.
+Public relay publication and player playback proof remain pending.
 
 This path negotiates ALPN `moqt-16`, sends native-QUIC `PATH` and `AUTHORITY`
 setup parameters, and decodes draft-16 subgroup streams and object datagrams.

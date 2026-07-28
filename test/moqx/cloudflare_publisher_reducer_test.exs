@@ -14,6 +14,7 @@ defmodule MOQX.CloudflarePublisherReducerTest do
   alias MOQX.Protocol.CloudflareDraft14.State
   alias MOQX.Protocol.MOQTDraft14.Codec
   alias MOQX.Protocol.MOQTDraft14.Messages
+  alias MOQX.Protocol.Transition
   alias MOQX.Transport.Conn.Stream
   alias MOQX.Transport.Conn.Stream.Info
 
@@ -582,6 +583,22 @@ defmodule MOQX.CloudflarePublisherReducerTest do
              Codec.encode_subgroup(1, Enum.at(retained, 1)),
              Codec.encode_subgroup(1, Enum.at(retained, 2))
            ]
+  end
+
+  test "rejects datagram delivery without changing draft-14 publication behavior" do
+    state = %State{phase: :ready, handle_scope: make_ref()}
+
+    {:ok, published} =
+      CloudflareDraft14.handle_operation(state, %Publish{namespace: ["live"]})
+
+    {:publication_started, publication} = List.first(published.events)
+
+    assert {:error, {:unsupported_publication_delivery, :datagram}, %Transition{}} =
+             CloudflareDraft14.handle_operation(published.state, %AddTrack{
+               publication: publication,
+               track: "audio",
+               options: [delivery: :datagram]
+             })
   end
 
   test "largest-object filter is fixed when the controlled request arrives" do

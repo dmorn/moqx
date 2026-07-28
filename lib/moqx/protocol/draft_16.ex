@@ -295,6 +295,8 @@ defmodule MOQX.Protocol.Draft16 do
          :ok <- validate_track_name(operation.track),
          false <- Map.has_key?(entry.tracks, operation.track),
          {:ok, retention} <- validate_retention(Keyword.get(operation.options, :retention, :live)),
+         {:ok, delivery} <-
+           validate_publication_delivery(Keyword.get(operation.options, :delivery, :subgroup)),
          :ok <- validate_request_credit(state) do
       request_id = state.next_request_id
       track_alias = state.next_track_alias
@@ -314,6 +316,7 @@ defmodule MOQX.Protocol.Draft16 do
         track: published_track,
         request_id: request_id,
         track_alias: track_alias,
+        delivery: delivery,
         status: :pending,
         stream_count: 0,
         options: operation.options
@@ -348,28 +351,28 @@ defmodule MOQX.Protocol.Draft16 do
            entry.tracks[operation.track.track.track],
          true <- published_track == operation.track,
          :ok <- validate_object(operation.object) do
-      stream_number = state.next_publication_stream
-      key = {:publication, track_entry.request_id, stream_number}
-      bytes = Codec.encode_subgroup(track_entry.track_alias, operation.object)
-      track_entry = %{track_entry | stream_count: track_entry.stream_count + 1}
+      {state, track_entry, primary_action} =
+        publication_object_action(state, track_entry, operation.object)
+
       entry = %{entry | tracks: Map.put(entry.tracks, operation.track.track.track, track_entry)}
 
       next_state = %{
         state
-        | next_publication_stream: stream_number + 1,
-          publications: Map.put(state.publications, operation.track.publication.id, entry)
+        | publications: Map.put(state.publications, operation.track.publication.id, entry)
       }
 
       {next_state, inbound_actions} =
-        inbound_object_actions(next_state, operation.track, operation.object)
+        inbound_object_actions(
+          next_state,
+          operation.track,
+          track_entry.delivery,
+          operation.object
+        )
 
       Transition.ok(
         next_state,
         events: [{:object_published, operation.track}],
-        actions: [
-          {:open_stream, key, [direction: :unidirectional], bytes, [finish: true]}
-          | inbound_actions
-        ]
+        actions: [primary_action | inbound_actions]
       )
     else
       %{status: :pending} -> Transition.error(state, :published_track_not_ready)
@@ -1128,28 +1131,41 @@ defmodule MOQX.Protocol.Draft16 do
     end
   end
 
-  defp inbound_object_actions(state, track, object) do
+  defp inbound_object_actions(state, track, delivery, object) do
     state.publisher_subscriptions
     |> Enum.filter(fn {_request_id, subscription} ->
       subscription.track == track and subscription.forward and
         object_matches_filter?(subscription.filter, object)
     end)
     |> Enum.reduce({state, []}, fn {request_id, subscription}, {state, actions} ->
-      stream_number = state.next_publication_stream
-      key = {:publication, request_id, stream_number}
-      bytes = Codec.encode_subgroup(subscription.track_alias, object)
-      subscription = %{subscription | stream_count: subscription.stream_count + 1}
+      {next_state, subscription, action} =
+        publication_object_action(state, subscription, delivery, object)
 
       next_state = %{
-        state
-        | next_publication_stream: stream_number + 1,
-          publisher_subscriptions:
-            Map.put(state.publisher_subscriptions, request_id, subscription)
+        next_state
+        | publisher_subscriptions:
+            Map.put(next_state.publisher_subscriptions, request_id, subscription)
       }
 
-      action = {:open_stream, key, [direction: :unidirectional], bytes, [finish: true]}
       {next_state, actions ++ [action]}
     end)
+  end
+
+  defp publication_object_action(state, entry, object),
+    do: publication_object_action(state, entry, entry.delivery, object)
+
+  defp publication_object_action(state, entry, :datagram, object) do
+    {state, entry, {:send_datagram, Codec.encode_datagram(entry.track_alias, object)}}
+  end
+
+  defp publication_object_action(state, entry, :subgroup, object) do
+    stream_number = state.next_publication_stream
+    key = {:publication, entry.request_id, stream_number}
+    bytes = Codec.encode_subgroup(entry.track_alias, object)
+    entry = %{entry | stream_count: entry.stream_count + 1}
+    state = %{state | next_publication_stream: stream_number + 1}
+
+    {state, entry, {:open_stream, key, [direction: :unidirectional], bytes, [finish: true]}}
   end
 
   defp handle_inbound_unsubscribe(state, request_id) do
@@ -1210,12 +1226,22 @@ defmodule MOQX.Protocol.Draft16 do
 
   defp validate_retention(_retention), do: {:error, :invalid_retention}
 
+  defp validate_publication_delivery(delivery) when delivery in [:subgroup, :datagram],
+    do: {:ok, delivery}
+
+  defp validate_publication_delivery(_delivery),
+    do: {:error, :invalid_publication_delivery}
+
   defp validate_object(%MOQX.Object{} = object) do
     validators = [
       valid_non_negative_integer?(object.group_id),
       valid_non_negative_integer?(object.object_id),
       is_nil(object.subgroup_id) or valid_non_negative_integer?(object.subgroup_id),
       is_nil(object.publisher_priority) or object.publisher_priority in 0..255,
+      object.status in [nil, :object_does_not_exist, :end_of_group, :end_of_track],
+      object.end_of_group? in [nil, true, false],
+      valid_object_extensions?(object.extensions),
+      is_nil(object.status) or (object.payload == "" and object.end_of_group? != true),
       is_binary(object.payload)
     ]
 
@@ -1225,6 +1251,30 @@ defmodule MOQX.Protocol.Draft16 do
   defp validate_object(_object), do: {:error, :invalid_object}
 
   defp valid_non_negative_integer?(value), do: is_integer(value) and value >= 0
+
+  defp valid_object_extensions?(nil), do: true
+
+  defp valid_object_extensions?(extensions) when is_list(extensions) do
+    identifiers =
+      Enum.map(extensions, fn
+        %MOQX.Extension{
+          protocol: :draft_16,
+          identifier: identifier,
+          value: value
+        }
+        when is_integer(identifier) and identifier >= 0 and
+               ((rem(identifier, 2) == 0 and is_integer(value) and value >= 0) or
+                  (rem(identifier, 2) == 1 and is_binary(value))) ->
+          identifier
+
+        _extension ->
+          nil
+      end)
+
+    nil not in identifiers and length(identifiers) == length(Enum.uniq(identifiers))
+  end
+
+  defp valid_object_extensions?(_extensions), do: false
 
   defp publication_namespace?(state, namespace) do
     Enum.any?(state.publications, fn {_id, entry} ->

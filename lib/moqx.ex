@@ -38,6 +38,14 @@ defmodule MOQX do
           | {:new_group, non_neg_integer()}
           | {:parameters, [MOQX.SubscriptionParameter.t()]}
 
+  @typedoc "Object delivery selected for a published track."
+  @type publication_delivery :: :subgroup | :datagram
+
+  @typedoc "Option accepted by `add_track/4`."
+  @type published_track_option ::
+          {:retention, :live | :latest | :all}
+          | {:delivery, publication_delivery()}
+
   @doc "Returns the default native QUIC transport implementation."
   @spec transport() :: module()
   def transport do
@@ -100,8 +108,13 @@ defmodule MOQX do
     ConnectionDriver.publish(client, namespace, options)
   end
 
-  @doc "Registers a track under an active publication."
-  @spec add_track(MOQX.Client.t(), MOQX.Publication.t(), binary(), keyword()) ::
+  @doc """
+  Registers a track under an active publication.
+
+  `:delivery` defaults to `:subgroup`. The selected protocol rejects a delivery
+  mode it cannot represent.
+  """
+  @spec add_track(MOQX.Client.t(), MOQX.Publication.t(), binary(), [published_track_option()]) ::
           {:ok, MOQX.PublishedTrack.t()} | {:error, term()}
   def add_track(client, publication, track, options \\ []) when is_binary(track) do
     ConnectionDriver.add_track(client, publication, track, options)
