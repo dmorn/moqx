@@ -6,6 +6,9 @@ All notable changes to `moqx` will be documented in this file.
 
 ### Added
 
+- Added a draft-16 CMAF publisher workflow with namespace/track readiness,
+  Moqtail-compatible CMSF catalogs, a bounded catalog discovery window, paced
+  media fragments, and a public relay/player operator script.
 - Added opt-in application-controlled inbound publisher subscriptions with
   typed request and cancellation events, explicit accept/reject operations,
   bounded decision timers, and deterministic stale/wrong-client handling.

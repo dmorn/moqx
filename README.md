@@ -374,15 +374,47 @@ delivery remains pending and `accept_subscription/4` returns
 `:not_supported`. Publisher-selected order defaults to ascending and can be
 confirmed explicitly with `group_order: :ascending` in the acceptance options.
 
-`MOQX.CMAF.publish_file/3` prepares a fragmented MP4 as a CMSF `.catalog`, an
-initialization track, and retained media fragments:
+`MOQX.CMAF.publish_file/3` prepares a fragmented MP4 using the selected
+protocol's catalog convention. Cloudflare draft-14 uses `.catalog`, a separate
+initialization track, and retained media fragments. Standard draft-16 waits for
+namespace and track readiness, publishes a Moqtail-compatible `catalog` with
+inline `initData`, then publishes retained media on `video`:
 
 ```elixir
 {:ok, published} =
   MOQX.CMAF.publish_file(client, "/tmp/input.mp4",
-    namespace: ["live", "camera-1"]
+    namespace: ["live", "camera-1"],
+    catalog_repetitions: 10,
+    catalog_interval: 1_000,
+    fragment_interval: 1_000
   )
 ```
+
+The repository includes an opt-in finite publisher for the public Moqtail
+draft-16 relay and player. It prints the player URL before publication starts,
+repeats only the catalog during the discovery window, and sends each media
+fragment once so embedded CMAF decode timestamps remain monotonic:
+
+```bash
+ffmpeg -i input.mp4 -an -c:v libx264 -profile:v baseline -level 3.1 \
+  -g 30 -keyint_min 30 -sc_threshold 0 \
+  -movflags +frag_keyframe+empty_moov+default_base_moof \
+  -frag_duration 1000000 -f mp4 /tmp/input-fragmented.mp4
+
+mise exec -- mix run scripts/moqtail_cmaf_publish.exs \
+  /tmp/input-fragmented.mp4 \
+  --endpoint moqt://relay.moqtail.dev:443 \
+  --namespace moqx/unique-camera \
+  --catalog-repetitions 10 \
+  --catalog-interval 1000 \
+  --fragment-interval 1000
+```
+
+Open the printed `https://player.moqtail.dev` URL during the catalog discovery
+window. The input must be fragmented H.264 CMAF; the codec, dimensions,
+bitrate, timescale, and fragment pacing options must describe that file. This
+manual workflow is not part of ordinary `mix test`, and local success alone is
+not evidence of public relay/player playback.
 
 Managed relay credentials are explicit caller input. The credential value is
 wrapped so both its value and the resulting sensitive wire actions have

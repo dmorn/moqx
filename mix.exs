@@ -43,7 +43,7 @@ defmodule MOQX.MixProject do
   end
 
   defp description do
-    "Elixir Media over QUIC transport library targeting MOQT draft-14."
+    "Elixir Media over QUIC transport library targeting MOQT drafts 14 and 16."
   end
 
   defp package do

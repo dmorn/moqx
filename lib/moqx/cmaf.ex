@@ -55,7 +55,7 @@ defmodule MOQX.CMAF do
     @type t :: %__MODULE__{
             publication: MOQX.Publication.t(),
             catalog_track: MOQX.PublishedTrack.t(),
-            init_track: MOQX.PublishedTrack.t(),
+            init_track: MOQX.PublishedTrack.t() | nil,
             media_track: MOQX.PublishedTrack.t(),
             fragment_count: pos_integer(),
             init_bytes: pos_integer(),
@@ -64,48 +64,45 @@ defmodule MOQX.CMAF do
   end
 
   @doc """
-  Publishes a fragmented MP4 as catalog, initialization, and media tracks.
+  Publishes a fragmented MP4 as catalog and media tracks.
 
   The file is prepared as retained content so a subscriber may arrive after
-  namespace registration. The caller remains responsible for finishing the
-  returned namespace publication.
+  namespace registration. Draft-16 publications carry initialization data in
+  the CMSF catalog; draft-14 publications retain their separate initialization
+  track. The caller remains responsible for finishing the returned namespace
+  publication.
   """
   @spec publish_file(Client.t(), Path.t(), keyword()) ::
           {:ok, Publication.t()} | {:error, term()}
   def publish_file(%Client{} = client, path, options) do
     namespace = Keyword.fetch!(options, :namespace)
-    catalog_name = Keyword.get(options, :catalog_track, ".catalog")
-    init_name = Keyword.get(options, :init_track, "init.mp4")
-    media_name = Keyword.get(options, :media_track, "video.m4s")
-    codec = Keyword.get(options, :codec, "avc1.42C01F")
+    timeout = Keyword.get(options, :timeout, 15_000)
 
-    with {:ok, init, fragments} <- read_fragments(path),
+    with :ok <- validate_publish_options(client, options),
+         {:ok, init, fragments} <- read_fragments(path),
          {:ok, publication} <- MOQX.publish(client, namespace),
-         {:ok, catalog_track} <-
-           MOQX.add_track(client, publication, catalog_name, retention: :latest),
-         {:ok, init_track} <-
-           MOQX.add_track(client, publication, init_name, retention: :latest),
-         {:ok, media_track} <-
-           MOQX.add_track(client, publication, media_name, retention: :all),
+         :ok <- await_publication_for_file(client, publication, timeout),
+         {:ok, catalog_track, init_track, media_track} <-
+           prepare_publication_tracks(client, publication, options, timeout),
          :ok <-
-           publish_payload(
+           publish_file_payloads(
              client,
+             namespace,
              catalog_track,
-             catalog_payload(namespace, init_name, media_name, codec),
-             0
-           ),
-         :ok <- publish_payload(client, init_track, init, 0),
-         :ok <- publish_fragments(client, media_track, fragments) do
-      {:ok,
-       %Publication{
-         publication: publication,
-         catalog_track: catalog_track,
-         init_track: init_track,
-         media_track: media_track,
-         fragment_count: length(fragments),
-         init_bytes: byte_size(init),
-         media_bytes: Enum.reduce(fragments, 0, &(byte_size(&1) + &2))
-       }}
+             init_track,
+             media_track,
+             init,
+             fragments,
+             options
+           ) do
+      publication_report(
+        publication,
+        catalog_track,
+        init_track,
+        media_track,
+        init,
+        fragments
+      )
     end
   rescue
     KeyError -> {:error, :namespace_required}
@@ -256,28 +253,257 @@ defmodule MOQX.CMAF do
     {object.group_id, object.subgroup_id || 0, object.object_id}
   end
 
-  defp publish_payload(client, track, payload, group_id) do
+  defp prepare_publication_tracks(
+         %Client{protocol: :draft_16} = client,
+         publication,
+         options,
+         timeout
+       ) do
+    catalog_name = Keyword.get(options, :catalog_track, "catalog")
+    media_name = Keyword.get(options, :media_track, "video")
+    delivery = Keyword.get(options, :delivery, :subgroup)
+
+    with {:ok, catalog_track} <-
+           MOQX.add_track(client, publication, catalog_name,
+             retention: :latest,
+             delivery: :subgroup
+           ),
+         :ok <- await_track(client, catalog_track, timeout),
+         {:ok, media_track} <-
+           MOQX.add_track(client, publication, media_name,
+             retention: :all,
+             delivery: delivery
+           ),
+         :ok <- await_track(client, media_track, timeout) do
+      {:ok, catalog_track, nil, media_track}
+    end
+  end
+
+  defp prepare_publication_tracks(client, publication, options, _timeout) do
+    catalog_name = Keyword.get(options, :catalog_track, ".catalog")
+    init_name = Keyword.get(options, :init_track, "init.mp4")
+    media_name = Keyword.get(options, :media_track, "video.m4s")
+
+    with {:ok, catalog_track} <-
+           MOQX.add_track(client, publication, catalog_name, retention: :latest),
+         {:ok, init_track} <-
+           MOQX.add_track(client, publication, init_name, retention: :latest),
+         {:ok, media_track} <-
+           MOQX.add_track(client, publication, media_name, retention: :all) do
+      {:ok, catalog_track, init_track, media_track}
+    end
+  end
+
+  defp publish_file_payloads(
+         %Client{protocol: :draft_16} = client,
+         _namespace,
+         catalog_track,
+         nil,
+         media_track,
+         init,
+         fragments,
+         options
+       ) do
+    catalog_payload = moqtail_catalog_payload(init, media_track.track.track, options)
+    catalog_repetitions = Keyword.get(options, :catalog_repetitions, 1)
+    catalog_interval = Keyword.get(options, :catalog_interval, 0)
+    fragment_interval = Keyword.get(options, :fragment_interval, 0)
+
+    with :ok <-
+           publish_catalogs(
+             client,
+             catalog_track,
+             catalog_payload,
+             catalog_repetitions,
+             catalog_interval
+           ) do
+      publish_fragments(
+        client,
+        media_track,
+        fragments,
+        0,
+        1,
+        fragment_interval
+      )
+    end
+  end
+
+  defp publish_file_payloads(
+         client,
+         namespace,
+         catalog_track,
+         init_track,
+         media_track,
+         init,
+         fragments,
+         options
+       ) do
+    codec = Keyword.get(options, :codec, "avc1.42C01F")
+    catalog_payload = cloudflare_catalog_payload(namespace, init_track, media_track, codec)
+    catalog_group_id = Keyword.get(options, :catalog_group_id, 0)
+    media_group_offset = Keyword.get(options, :media_group_offset, 0)
+    fragment_interval = Keyword.get(options, :fragment_interval, 0)
+
+    with :ok <- publish_payload(client, catalog_track, catalog_payload, catalog_group_id, 127),
+         :ok <- publish_payload(client, init_track, init, catalog_group_id, 127) do
+      publish_fragments(
+        client,
+        media_track,
+        fragments,
+        media_group_offset,
+        127,
+        fragment_interval
+      )
+    end
+  end
+
+  defp publication_report(
+         publication,
+         catalog_track,
+         init_track,
+         media_track,
+         init,
+         fragments
+       ) do
+    {:ok,
+     %Publication{
+       publication: publication,
+       catalog_track: catalog_track,
+       init_track: init_track,
+       media_track: media_track,
+       fragment_count: length(fragments),
+       init_bytes: byte_size(init),
+       media_bytes: Enum.reduce(fragments, 0, &(byte_size(&1) + &2))
+     }}
+  end
+
+  defp await_publication(client, publication, timeout) do
+    receive do
+      {:moqx, ^client, %MOQX.Event.PublicationReady{publication: ^publication}} ->
+        :ok
+
+      {:moqx, ^client, %MOQX.Event.PublicationFailed{publication: ^publication, error: error}} ->
+        {:error, error}
+
+      {:moqx, ^client, %MOQX.Event.PublicationCancelled{publication: ^publication, error: error}} ->
+        {:error, error}
+
+      {:moqx, ^client, %MOQX.Event.ProtocolFailed{reason: reason}} ->
+        {:error, reason}
+    after
+      timeout -> {:error, :publication_timeout}
+    end
+  end
+
+  defp await_publication_for_file(
+         %Client{protocol: :draft_16} = client,
+         publication,
+         timeout
+       ),
+       do: await_publication(client, publication, timeout)
+
+  defp await_publication_for_file(_client, _publication, _timeout), do: :ok
+
+  defp await_track(client, track, timeout) do
+    receive do
+      {:moqx, ^client, %MOQX.Event.PublicationSubscriberJoined{track: ^track}} ->
+        :ok
+
+      {:moqx, ^client, %MOQX.Event.PublicationTrackFailed{track: ^track, error: error}} ->
+        {:error, error}
+
+      {:moqx, ^client, %MOQX.Event.PublicationCancelled{error: error}} ->
+        {:error, error}
+
+      {:moqx, ^client, %MOQX.Event.ProtocolFailed{reason: reason}} ->
+        {:error, reason}
+    after
+      timeout -> {:error, {:track_readiness_timeout, track.track}}
+    end
+  end
+
+  defp publish_payload(client, track, payload, group_id, priority) do
     MOQX.publish_object(client, track, %Object{
       group_id: group_id,
       subgroup_id: 0,
       object_id: 0,
-      publisher_priority: 127,
+      publisher_priority: priority,
       payload: payload
     })
   end
 
-  defp publish_fragments(client, track, fragments) do
-    fragments
-    |> Enum.with_index()
-    |> Enum.reduce_while(:ok, fn {fragment, group_id}, :ok ->
-      case publish_payload(client, track, fragment, group_id) do
-        :ok -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
+  defp publish_catalogs(client, track, payload, repetitions, interval) do
+    0..(repetitions - 1)
+    |> Enum.reduce_while(:ok, fn group_id, :ok ->
+      case publish_payload(client, track, payload, group_id, 0) do
+        :ok ->
+          sleep_between(interval, group_id < repetitions - 1)
+          {:cont, :ok}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
       end
     end)
   end
 
-  defp catalog_payload(namespace, init_name, media_name, codec) do
+  defp publish_fragments(
+         client,
+         track,
+         fragments,
+         group_offset,
+         priority,
+         fragment_interval
+       ) do
+    last_group_id = group_offset + length(fragments) - 1
+
+    fragments
+    |> Enum.with_index(group_offset)
+    |> Enum.reduce_while(:ok, fn {fragment, group_id}, :ok ->
+      case publish_payload(client, track, fragment, group_id, priority) do
+        :ok ->
+          sleep_between(fragment_interval, group_id < last_group_id)
+          {:cont, :ok}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp sleep_between(interval, true) when interval > 0, do: Process.sleep(interval)
+  defp sleep_between(_interval, _between?), do: :ok
+
+  defp validate_publish_options(%Client{protocol: :draft_16}, options) do
+    catalog_repetitions = Keyword.get(options, :catalog_repetitions, 1)
+    catalog_interval = Keyword.get(options, :catalog_interval, 0)
+    fragment_interval = Keyword.get(options, :fragment_interval, 0)
+
+    if is_integer(catalog_repetitions) and catalog_repetitions > 0 and
+         non_negative_integer?(catalog_interval) and
+         non_negative_integer?(fragment_interval) do
+      :ok
+    else
+      {:error, :invalid_publication_timing_options}
+    end
+  end
+
+  defp validate_publish_options(_client, options) do
+    catalog_group_id = Keyword.get(options, :catalog_group_id, 0)
+    media_group_offset = Keyword.get(options, :media_group_offset, 0)
+    fragment_interval = Keyword.get(options, :fragment_interval, 0)
+
+    if non_negative_integer?(catalog_group_id) and
+         non_negative_integer?(media_group_offset) and
+         non_negative_integer?(fragment_interval) do
+      :ok
+    else
+      {:error, :invalid_publication_timing_options}
+    end
+  end
+
+  defp non_negative_integer?(value), do: is_integer(value) and value >= 0
+
+  defp cloudflare_catalog_payload(namespace, init_track, media_track, codec) do
     JSON.encode!(%{
       "version" => 1,
       "streamingFormat" => 1,
@@ -289,13 +515,33 @@ defmodule MOQX.CMAF do
       },
       "tracks" => [
         %{
-          "name" => media_name,
-          "initTrack" => init_name,
+          "name" => media_track.track.track,
+          "initTrack" => init_track.track.track,
           "selectionParams" => %{"codec" => codec}
         }
       ]
     })
   end
+
+  defp moqtail_catalog_payload(init, media_name, options) do
+    track =
+      %{
+        "name" => media_name,
+        "role" => "video",
+        "packaging" => "cmaf",
+        "codec" => Keyword.get(options, :codec, "avc1.42C01F"),
+        "timescale" => Keyword.get(options, :timescale, 90_000),
+        "initData" => Base.encode64(init)
+      }
+      |> put_optional_catalog_field("width", options[:width])
+      |> put_optional_catalog_field("height", options[:height])
+      |> put_optional_catalog_field("bitrate", options[:bitrate])
+
+    JSON.encode!(%{"version" => 1, "tracks" => [track]})
+  end
+
+  defp put_optional_catalog_field(track, _name, nil), do: track
+  defp put_optional_catalog_field(track, name, value), do: Map.put(track, name, value)
 
   defp decode_boxes(bytes), do: decode_boxes(bytes, [])
   defp decode_boxes(<<>>, boxes), do: {:ok, Enum.reverse(boxes)}
