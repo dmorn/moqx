@@ -14,8 +14,12 @@ defmodule MOQX.Protocol.Draft16 do
     ConnectionClosed,
     ObjectReceived,
     ObjectStatus,
+    PublicationCancelled,
+    PublicationFailed,
     PublicationReady,
     PublicationSubscriberJoined,
+    PublicationSubscriberLeft,
+    PublicationTrackFailed,
     SubgroupEnded,
     SubscriptionAccepted,
     SubscriptionDone,
@@ -27,6 +31,7 @@ defmodule MOQX.Protocol.Draft16 do
   alias MOQX.Operation.{
     AddTrack,
     Close,
+    FinishPublication,
     Publish,
     PublishObject,
     Subscribe,
@@ -294,6 +299,7 @@ defmodule MOQX.Protocol.Draft16 do
         request_id: request_id,
         track_alias: track_alias,
         status: :pending,
+        stream_count: 0,
         options: operation.options
       }
 
@@ -329,8 +335,15 @@ defmodule MOQX.Protocol.Draft16 do
       stream_number = state.next_publication_stream
       key = {:publication, track_entry.request_id, stream_number}
       bytes = Codec.encode_subgroup(track_entry.track_alias, operation.object)
+      track_entry = %{track_entry | stream_count: track_entry.stream_count + 1}
+      entry = %{entry | tracks: Map.put(entry.tracks, operation.track.track.track, track_entry)}
 
-      Transition.ok(%{state | next_publication_stream: stream_number + 1},
+      Transition.ok(
+        %{
+          state
+          | next_publication_stream: stream_number + 1,
+            publications: Map.put(state.publications, operation.track.publication.id, entry)
+        },
         events: [{:object_published, operation.track}],
         actions: [
           {:open_stream, key, [direction: :unidirectional], bytes, [finish: true]}
@@ -340,6 +353,34 @@ defmodule MOQX.Protocol.Draft16 do
       %{status: :pending} -> Transition.error(state, :published_track_not_ready)
       nil -> Transition.error(state, :unknown_published_track)
       false -> Transition.error(state, :unknown_published_track)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  def handle_operation(%State{phase: :ready} = state, %FinishPublication{} = operation) do
+    with {:ok, entry} <- fetch_publication(state, operation.publication),
+         {:ok, status, reason} <- publication_completion(operation.options) do
+      {events, actions} =
+        entry.tracks
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.reduce({[], []}, fn {_name, track_entry}, {events, actions} ->
+          finish_track(track_entry, status, reason, events, actions)
+        end)
+
+      next_state = %{
+        state
+        | publications: Map.delete(state.publications, operation.publication.id)
+      }
+
+      Transition.ok(next_state,
+        events: [{:publication_finished, operation.publication} | events],
+        actions:
+          actions ++
+            [
+              {:send_stream, :control, Codec.publish_namespace_done(operation.publication.id), []}
+            ]
+      )
+    else
       {:error, reason} -> Transition.error(state, reason)
     end
   end
@@ -356,7 +397,7 @@ defmodule MOQX.Protocol.Draft16 do
 
   def handle_operation(%State{} = state, operation)
       when is_struct(operation, Publish) or is_struct(operation, AddTrack) or
-             is_struct(operation, PublishObject),
+             is_struct(operation, PublishObject) or is_struct(operation, FinishPublication),
       do: Transition.error(state, :connection_not_ready)
 
   def handle_operation(%State{} = state, _operation),
@@ -366,7 +407,14 @@ defmodule MOQX.Protocol.Draft16 do
   def capabilities(_state) do
     %Capabilities{
       operations:
-        MapSet.new([:subscribe, :update_subscription, :publish, :add_track, :publish_object]),
+        MapSet.new([
+          :subscribe,
+          :update_subscription,
+          :publish,
+          :add_track,
+          :publish_object,
+          :finish_publication
+        ]),
       delivery_modes: MapSet.new([:subgroup, :datagram]),
       metadata: %{catalog_track: "catalog", draft: 16}
     }
@@ -477,7 +525,7 @@ defmodule MOQX.Protocol.Draft16 do
           )
 
         nil ->
-          fail_subscription_request(state, error)
+          fail_new_request(state, error)
       end
     end
   end
@@ -527,6 +575,21 @@ defmodule MOQX.Protocol.Draft16 do
       )
     else
       :ready -> Transition.error(state, :duplicate_publish_ok)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  defp handle_control_frame(%State{} = state, {0x0C, payload}) do
+    with {:ok, cancel} <- Codec.decode_publish_namespace_cancel(payload),
+         %{publication: publication} <- state.publications[cancel.request_id] do
+      protocol_error = publication_error(:publish, cancel)
+
+      Transition.ok(
+        %{state | publications: Map.delete(state.publications, cancel.request_id)},
+        events: [%PublicationCancelled{publication: publication, error: protocol_error}]
+      )
+    else
+      nil -> Transition.ok(state)
       {:error, reason} -> Transition.error(state, reason)
     end
   end
@@ -825,6 +888,38 @@ defmodule MOQX.Protocol.Draft16 do
     List.first(matches) || {:error, :unknown_publish_request}
   end
 
+  defp publication_completion(options) do
+    status = Keyword.get(options, :status, 2)
+    reason = Keyword.get(options, :reason, "track ended")
+
+    if is_integer(status) and status >= 0 and is_binary(reason) and byte_size(reason) <= 1_024 do
+      {:ok, status, reason}
+    else
+      {:error, :invalid_publication_completion}
+    end
+  end
+
+  defp finish_track(
+         %{status: :ready} = track_entry,
+         status,
+         reason,
+         events,
+         actions
+       ) do
+    event = %PublicationSubscriberLeft{
+      track: track_entry.track,
+      request_id: track_entry.request_id
+    }
+
+    action =
+      {:send_stream, :control,
+       Codec.publish_done(track_entry.request_id, status, track_entry.stream_count, reason), []}
+
+    {events ++ [event], actions ++ [action]}
+  end
+
+  defp finish_track(_track_entry, _status, _reason, events, actions), do: {events, actions}
+
   defp validate_request_credit(%State{next_request_id: next, max_request_id: max})
        when next <= max,
        do: :ok
@@ -898,6 +993,49 @@ defmodule MOQX.Protocol.Draft16 do
       nil ->
         Transition.error(state, :unknown_subscribe_request)
     end
+  end
+
+  defp fail_new_request(state, error) do
+    case state.publications[error.request_id] do
+      %{publication: publication} ->
+        protocol_error = publication_error(:publish, error)
+
+        Transition.ok(
+          %{state | publications: Map.delete(state.publications, error.request_id)},
+          events: [%PublicationFailed{publication: publication, error: protocol_error}]
+        )
+
+      nil ->
+        fail_track_or_subscription_request(state, error)
+    end
+  end
+
+  defp fail_track_or_subscription_request(state, error) do
+    case fetch_track_by_request_id(state, error.request_id) do
+      {:ok, publication_id, track_name, track_entry} ->
+        entry = state.publications[publication_id]
+        entry = %{entry | tracks: Map.delete(entry.tracks, track_name)}
+        protocol_error = publication_error(:add_track, error)
+
+        Transition.ok(
+          %{state | publications: Map.put(state.publications, publication_id, entry)},
+          events: [
+            %PublicationTrackFailed{track: track_entry.track, error: protocol_error}
+          ]
+        )
+
+      {:error, :unknown_publish_request} ->
+        fail_subscription_request(state, error)
+    end
+  end
+
+  defp publication_error(operation, error) do
+    %MOQX.ProtocolError{
+      protocol: id(),
+      operation: operation,
+      code: error.error_code,
+      reason: error.reason
+    }
   end
 
   defp associate_stream(state, %{header: %{track_alias: alias_id}}, stream_id) do
@@ -1107,7 +1245,8 @@ defmodule MOQX.Protocol.Draft16 do
         subscriptions: %{},
         subscription_lifecycles: %{},
         pending_updates: %{},
-        aliases: %{}
+        aliases: %{},
+        publications: %{}
     }
   end
 

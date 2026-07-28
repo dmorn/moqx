@@ -54,6 +54,7 @@ defmodule MOQX.Draft16SubscriberReducerTest do
 
   test "connection close drops every connection-scoped subscriber handle" do
     subscription = subscription()
+    publication = %MOQX.Publication{id: 2, namespace: ["live"]}
 
     state = %State{
       phase: :ready,
@@ -65,7 +66,10 @@ defmodule MOQX.Draft16SubscriberReducerTest do
         0 => %Draft16.SubscriptionState{subscription: subscription, delivery_timeout: 50}
       },
       pending_updates: %{2 => subscription},
-      aliases: %{7 => subscription}
+      aliases: %{7 => subscription},
+      publications: %{
+        2 => %{publication: publication, status: :ready, tracks: %{}, options: []}
+      }
     }
 
     assert {:ok,
@@ -78,7 +82,8 @@ defmodule MOQX.Draft16SubscriberReducerTest do
                 subscriptions: %{},
                 subscription_lifecycles: %{},
                 pending_updates: %{},
-                aliases: %{}
+                aliases: %{},
+                publications: %{}
               },
               events: [%MOQX.Event.ConnectionClosed{metadata: %{error_code: 9}}]
             }} =
@@ -98,6 +103,7 @@ defmodule MOQX.Draft16SubscriberReducerTest do
     assert close_state.subscriptions == %{}
     assert close_state.subscription_lifecycles == %{}
     assert close_state.aliases == %{}
+    assert close_state.publications == %{}
   end
 
   test "delivers datagrams and drains subgroup streams before publish done" do

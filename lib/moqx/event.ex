@@ -13,6 +13,7 @@ defmodule MOQX.Event do
           | MOQX.Event.CatalogReceived.t()
           | MOQX.Event.PublicationReady.t()
           | MOQX.Event.PublicationFailed.t()
+          | MOQX.Event.PublicationTrackFailed.t()
           | MOQX.Event.PublicationCancelled.t()
           | MOQX.Event.PublicationSubscriptionRequested.t()
           | MOQX.Event.PublicationSubscriptionCancelled.t()
@@ -150,6 +151,17 @@ defmodule MOQX.Event.PublicationFailed do
   @enforce_keys [:publication, :error]
   defstruct [:publication, :error]
   @type t :: %__MODULE__{publication: MOQX.Publication.t(), error: MOQX.ProtocolError.t()}
+end
+
+defmodule MOQX.Event.PublicationTrackFailed do
+  @moduledoc "A published track request was rejected while its namespace remains active."
+  @enforce_keys [:track, :error]
+  defstruct [:track, :error]
+
+  @type t :: %__MODULE__{
+          track: MOQX.PublishedTrack.t(),
+          error: MOQX.ProtocolError.t()
+        }
 end
 
 defmodule MOQX.Event.PublicationCancelled do

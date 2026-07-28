@@ -59,6 +59,16 @@ defmodule MOQX.Draft16PublisherTest do
         assert {:ok, ^expected, _ctx} =
                  Transport.recv_stream(ctx, subgroup, byte_size(expected))
 
+        publish_done = Codec.publish_done(2, 2, 1, "track ended")
+
+        assert {:ok, ^publish_done, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(publish_done))
+
+        namespace_done = Codec.publish_namespace_done(0)
+
+        assert {:ok, ^namespace_done, _ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(namespace_done))
+
         :ok
       end)
 
@@ -95,6 +105,9 @@ defmodule MOQX.Draft16PublisherTest do
                    1_000
 
     assert :ok = MOQX.publish_object(client, track, object)
+    assert :ok = MOQX.finish_publication(client, publication)
+
+    assert {:error, :unknown_publication} = MOQX.publish_object(client, track, object)
     assert :ok = Task.await(relay, 1_000)
   end
 end

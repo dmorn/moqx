@@ -128,12 +128,20 @@ receive do
    %MOQX.Event.PublicationSubscriberJoined{track: ^video}} ->
     MOQX.publish_object(client, video, object)
 end
+
+:ok = MOQX.finish_publication(client, publication)
 ```
 
+`finish_publication/3` completes each ready track with its opened-stream count,
+then withdraws the namespace. Namespace rejection/cancellation and per-track
+rejection emit `PublicationFailed`, `PublicationCancelled`, and
+`PublicationTrackFailed` respectively; rejected and finished handles are
+invalidated deterministically.
+
 The current draft-16 publisher slice emits one subgroup stream per object.
-Namespace/track rejection, inbound `SUBSCRIBE`, datagram publication,
-withdrawal, and the public player smoke remain pending; Cloudflare's
-`:cloudflare_draft_14` publisher lifecycle below is unchanged.
+Inbound `SUBSCRIBE`, datagram publication, and the public player smoke remain
+pending; Cloudflare's `:cloudflare_draft_14` publisher lifecycle below is
+unchanged.
 
 This path negotiates ALPN `moqt-16`, sends native-QUIC `PATH` and `AUTHORITY`
 setup parameters, and decodes draft-16 subgroup streams and object datagrams.

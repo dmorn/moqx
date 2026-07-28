@@ -80,6 +80,20 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
     ])
   end
 
+  @spec publish_done(non_neg_integer(), non_neg_integer(), non_neg_integer(), binary()) ::
+          binary()
+  def publish_done(request_id, status, stream_count, reason) do
+    frame(0x0B, [
+      encode_varint(request_id),
+      encode_varint(status),
+      encode_varint(stream_count),
+      encode_bytes(reason)
+    ])
+  end
+
+  @spec publish_namespace_done(non_neg_integer()) :: binary()
+  def publish_namespace_done(request_id), do: frame(0x09, encode_varint(request_id))
+
   @spec decode_publish_ok(binary()) ::
           {:ok, %{request_id: non_neg_integer(), parameters: [SubscriptionParameter.t()]}}
           | {:error, :invalid_publish_ok}
@@ -90,6 +104,19 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
       {:ok, %{request_id: request_id, parameters: Enum.map(parameters, &public_parameter/1)}}
     else
       _other -> {:error, :invalid_publish_ok}
+    end
+  end
+
+  @spec decode_publish_namespace_cancel(binary()) ::
+          {:ok, %{request_id: non_neg_integer(), error_code: non_neg_integer(), reason: binary()}}
+          | {:error, :invalid_publish_namespace_cancel}
+  def decode_publish_namespace_cancel(payload) do
+    with {:ok, request_id, rest} <- decode_varint(payload),
+         {:ok, error_code, rest} <- decode_varint(rest),
+         {:ok, reason, <<>>} <- decode_bytes(rest) do
+      {:ok, %{request_id: request_id, error_code: error_code, reason: reason}}
+    else
+      _other -> {:error, :invalid_publish_namespace_cancel}
     end
   end
 
