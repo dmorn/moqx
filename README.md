@@ -161,7 +161,12 @@ draft-14 implementation. Accepted subscribers receive their own track alias
 and the track's selected subgroup or datagram delivery; `UNSUBSCRIBE` completes
 that subscriber with the exact stream count.
 
-Public relay publication and player playback proof remain pending.
+The operator workflow below was verified against `relay.moqtail.dev` and
+`player.moqtail.dev` on 2026-07-28: the player discovered the CMSF catalog,
+selected the advertised H.264 track, reached `Playing`, decoded 640×360 video,
+and advanced its media clock while the publisher completed cleanly. Those
+services can change independently, so rerun the smoke for current deployment
+evidence.
 
 This path negotiates ALPN `moqt-16`, sends native-QUIC `PATH` and `AUTHORITY`
 setup parameters, and decodes draft-16 subgroup streams and object datagrams.

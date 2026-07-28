@@ -60,7 +60,7 @@ defmodule MOQX.Draft16PublisherReducerTest do
              })
 
     assert publish_track ==
-             <<0x1D, 0, 25, 2, 2, 4, "live", 6, "camera", 5, "video", 0, 1, 0x10, 1, 0>>
+             <<0x1D, 0, 24, 2, 2, 4, "live", 6, "camera", 5, "video", 0, 1, 0x10, 1>>
 
     object = %MOQX.Object{
       group_id: 7,

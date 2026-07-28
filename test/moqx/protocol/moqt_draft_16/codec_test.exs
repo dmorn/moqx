@@ -21,6 +21,13 @@ defmodule MOQX.Protocol.MOQTDraft16.CodecTest do
                1, 1, 2>>
   end
 
+  test "encodes PUBLISH track extensions as the uncounted frame remainder" do
+    track = %MOQX.TrackRef{namespace: ["live", "camera"], track: "video"}
+
+    assert Codec.publish_track(2, track, 0) ==
+             <<0x1D, 0, 24, 2, 2, 4, "live", 6, "camera", 5, "video", 0, 1, 0x10, 1>>
+  end
+
   test "decodes setup, subscribe acceptance, and one subgroup object incrementally" do
     assert {:ok, [{0x21, <<0>>}], <<>>} = Codec.decode_control(<<0x21, 0, 1, 0>>)
 

@@ -130,8 +130,7 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
       encode_bytes(track.track),
       encode_varint(track_alias),
       encode_varint(length(parameters)),
-      encode_parameter_list(parameters),
-      encode_varint(0)
+      encode_parameter_list(parameters)
     ])
   end
 

@@ -22,6 +22,14 @@ All notable changes to `moqx` will be documented in this file.
   replay and future objects. Automatic inbound subscription behavior remains
   the default for backwards compatibility.
 
+### Fixed
+
+- Fixed draft-16 `PUBLISH` framing to encode track extensions as the uncounted
+  frame remainder. The former trailing zero caused Moqtail's public relay to
+  close the connection with `ProtocolViolation`.
+- The Moqtail operator publisher now reports publication failures instead of
+  returning them silently.
+
 ## [0.7.1] - 2026-04-23
 
 ### Fixed

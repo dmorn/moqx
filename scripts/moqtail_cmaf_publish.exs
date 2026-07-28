@@ -11,7 +11,10 @@ defmodule MOQX.Scripts.MoqtailCMAFPublish do
              timeout: config.timeout
            ) do
       try do
-        publish(client, config)
+        case publish(client, config) do
+          :ok -> :ok
+          {:error, reason} -> raise "Moqtail CMAF publication failed: #{inspect(reason)}"
+        end
       after
         _result = MOQX.close(client)
       end
