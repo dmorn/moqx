@@ -115,9 +115,6 @@ defmodule MOQX.Catalog do
         {:error, %MOQX.Catalog.Error{} = error} ->
           error = %{error | path: [:tracks, index | error.path]}
           {:halt, {:error, error}}
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
       end
     end)
     |> case do
