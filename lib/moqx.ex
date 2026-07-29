@@ -120,14 +120,32 @@ defmodule MOQX do
     ConnectionDriver.add_track(client, publication, track, options)
   end
 
-  @doc "Accepts one pending inbound publisher subscription."
+  @doc """
+  Accepts one pending inbound publisher subscription.
+
+  Pass an existing `PublishedTrack` to attach another subscriber to a
+  registered track. Pass track options instead to register the requested track
+  reactively and accept its first subscription without sending a separate
+  publisher-initiated `PUBLISH`.
+  """
+  def accept_subscription(client, request, published_track_or_options, options \\ [])
+
+  @spec accept_subscription(
+          MOQX.Client.t(),
+          MOQX.PublicationSubscriptionRequest.t(),
+          [published_track_option()]
+        ) :: {:ok, MOQX.PublishedTrack.t()} | {:error, term()}
+  def accept_subscription(client, request, options, []) when is_list(options) do
+    ConnectionDriver.accept_subscription(client, request, nil, options)
+  end
+
   @spec accept_subscription(
           MOQX.Client.t(),
           MOQX.PublicationSubscriptionRequest.t(),
           MOQX.PublishedTrack.t(),
           keyword()
         ) :: :ok | {:error, term()}
-  def accept_subscription(client, request, published_track, options \\ []) do
+  def accept_subscription(client, request, %MOQX.PublishedTrack{} = published_track, options) do
     ConnectionDriver.accept_subscription(client, request, published_track, options)
   end
 
