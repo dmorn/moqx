@@ -67,14 +67,20 @@ defmodule MOQX.Operation do
   end
 
   defmodule AcceptPublicationSubscription do
-    @moduledoc "Accepts one pending inbound publisher subscription."
+    @moduledoc """
+    Accepts one pending inbound publisher subscription.
 
-    @enforce_keys [:request, :published_track]
+    When `published_track` is absent, the selected protocol may register the
+    requested track reactively from `options` without initiating a separate
+    publisher-driven subscription.
+    """
+
+    @enforce_keys [:request]
     defstruct [:request, :published_track, options: []]
 
     @type t :: %__MODULE__{
             request: MOQX.PublicationSubscriptionRequest.t(),
-            published_track: MOQX.PublishedTrack.t(),
+            published_track: MOQX.PublishedTrack.t() | nil,
             options: keyword()
           }
   end

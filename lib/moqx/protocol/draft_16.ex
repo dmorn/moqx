@@ -314,6 +314,7 @@ defmodule MOQX.Protocol.Draft16 do
 
       track_entry = %{
         track: published_track,
+        origin: :publish,
         request_id: request_id,
         track_alias: track_alias,
         delivery: delivery,
@@ -351,8 +352,8 @@ defmodule MOQX.Protocol.Draft16 do
            entry.tracks[operation.track.track.track],
          true <- published_track == operation.track,
          :ok <- validate_object(operation.object) do
-      {state, track_entry, primary_action} =
-        publication_object_action(state, track_entry, operation.object)
+      {state, track_entry, primary_actions} =
+        primary_publication_object_actions(state, track_entry, operation.object)
 
       entry = %{entry | tracks: Map.put(entry.tracks, operation.track.track.track, track_entry)}
 
@@ -372,7 +373,7 @@ defmodule MOQX.Protocol.Draft16 do
       Transition.ok(
         next_state,
         events: [{:object_published, operation.track}],
-        actions: [primary_action | inbound_actions]
+        actions: primary_actions ++ inbound_actions
       )
     else
       %{status: :pending} -> Transition.error(state, :published_track_not_ready)
@@ -990,7 +991,35 @@ defmodule MOQX.Protocol.Draft16 do
     }
   end
 
-  defp accept_publication_subscription(state, operation) do
+  defp accept_publication_subscription(state, %{published_track: nil} = operation) do
+    request = operation.request
+    handle = request.handle
+
+    with :ok <- validate_request_scope(state, handle),
+         %{request: ^request} <-
+           state.pending_publisher_subscriptions[handle.request_id],
+         {:ok, group_order} <- accepted_group_order(request.group_order),
+         {:ok, state, published_track} <-
+           reactive_published_track(state, request, operation.options) do
+      establish_publication_subscription(
+        state,
+        request,
+        published_track,
+        group_order,
+        [{:track_added, published_track}]
+      )
+    else
+      nil -> Transition.error(state, :stale_subscription_request)
+      false -> Transition.error(state, :subscription_request_track_mismatch)
+      {:error, reason} -> Transition.error(state, reason)
+      _other -> Transition.error(state, :stale_subscription_request)
+    end
+  end
+
+  defp accept_publication_subscription(
+         state,
+         %{published_track: %MOQX.PublishedTrack{}} = operation
+       ) do
     request = operation.request
     handle = request.handle
 
@@ -1002,45 +1031,101 @@ defmodule MOQX.Protocol.Draft16 do
          true <-
            published_track == operation.published_track and published_track.track == request.track,
          {:ok, group_order} <- accepted_group_order(request.group_order) do
-      track_alias = state.next_track_alias
-
-      subscription = %{
-        request_id: handle.request_id,
-        publication_id: published_track.publication.id,
-        track: published_track,
-        track_alias: track_alias,
-        subscriber_priority: request.subscriber_priority,
-        group_order: group_order,
-        forward: request.forward,
-        filter: request.filter,
-        stream_count: 0
-      }
-
-      next_state = %{
-        state
-        | next_track_alias: track_alias + 1,
-          pending_publisher_subscriptions:
-            Map.delete(state.pending_publisher_subscriptions, handle.request_id),
-          publisher_subscriptions:
-            Map.put(state.publisher_subscriptions, handle.request_id, subscription)
-      }
-
-      Transition.ok(next_state,
-        events: [
-          %PublicationSubscriberJoined{track: published_track, request_id: handle.request_id}
-        ],
-        actions: [
-          {:cancel_timer, {:publisher_subscription_decision, handle}},
-          {:send_stream, :control,
-           Codec.subscribe_ok(handle.request_id, track_alias, group_order: group_order), []}
-        ]
-      )
+      establish_publication_subscription(state, request, published_track, group_order)
     else
       nil -> Transition.error(state, :stale_subscription_request)
       false -> Transition.error(state, :subscription_request_track_mismatch)
       {:error, reason} -> Transition.error(state, reason)
       _other -> Transition.error(state, :stale_subscription_request)
     end
+  end
+
+  defp reactive_published_track(state, request, options) do
+    with {:ok, entry} <- fetch_publication(state, request.publication),
+         :ready <- entry.status,
+         :ok <- validate_track_name(request.track.track),
+         false <- Map.has_key?(entry.tracks, request.track.track),
+         {:ok, retention} <- validate_retention(Keyword.get(options, :retention, :live)),
+         {:ok, delivery} <-
+           validate_publication_delivery(Keyword.get(options, :delivery, :subgroup)) do
+      published_track = %MOQX.PublishedTrack{
+        publication: request.publication,
+        track: request.track,
+        retention: retention
+      }
+
+      track_entry = %{
+        track: published_track,
+        origin: :reactive,
+        request_id: nil,
+        track_alias: nil,
+        delivery: delivery,
+        status: :ready,
+        stream_count: 0,
+        options: options
+      }
+
+      entry = %{entry | tracks: Map.put(entry.tracks, request.track.track, track_entry)}
+
+      state = %{
+        state
+        | publications: Map.put(state.publications, request.publication.id, entry)
+      }
+
+      {:ok, state, published_track}
+    else
+      :pending -> {:error, :publication_not_ready}
+      true -> {:error, :track_already_registered}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp establish_publication_subscription(
+         state,
+         request,
+         published_track,
+         group_order,
+         reply_events \\ []
+       ) do
+    handle = request.handle
+    track_alias = state.next_track_alias
+
+    subscription = %{
+      request_id: handle.request_id,
+      publication_id: published_track.publication.id,
+      track: published_track,
+      track_alias: track_alias,
+      subscriber_priority: request.subscriber_priority,
+      group_order: group_order,
+      forward: request.forward,
+      filter: request.filter,
+      stream_count: 0
+    }
+
+    next_state = %{
+      state
+      | next_track_alias: track_alias + 1,
+        pending_publisher_subscriptions:
+          Map.delete(state.pending_publisher_subscriptions, handle.request_id),
+        publisher_subscriptions:
+          Map.put(state.publisher_subscriptions, handle.request_id, subscription)
+    }
+
+    Transition.ok(next_state,
+      events:
+        reply_events ++
+          [
+            %PublicationSubscriberJoined{
+              track: published_track,
+              request_id: handle.request_id
+            }
+          ],
+      actions: [
+        {:cancel_timer, {:publisher_subscription_decision, handle}},
+        {:send_stream, :control,
+         Codec.subscribe_ok(handle.request_id, track_alias, group_order: group_order), []}
+      ]
+    )
   end
 
   defp validate_request_scope(%State{handle_scope: scope}, %{scope: scope})
@@ -1170,6 +1255,14 @@ defmodule MOQX.Protocol.Draft16 do
 
   defp publication_object_action(state, entry, object),
     do: publication_object_action(state, entry, entry.delivery, object)
+
+  defp primary_publication_object_actions(state, %{origin: :reactive} = entry, _object),
+    do: {state, entry, []}
+
+  defp primary_publication_object_actions(state, entry, object) do
+    {state, entry, action} = publication_object_action(state, entry, object)
+    {state, entry, [action]}
+  end
 
   defp publication_object_action(state, entry, :datagram, object) do
     {state, entry, {:send_datagram, Codec.encode_datagram(entry.track_alias, object)}}
@@ -1346,7 +1439,7 @@ defmodule MOQX.Protocol.Draft16 do
   end
 
   defp finish_track(
-         %{status: :ready} = track_entry,
+         %{origin: :publish, status: :ready} = track_entry,
          status,
          reason,
          events,

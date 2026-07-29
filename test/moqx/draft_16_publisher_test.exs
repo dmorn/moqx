@@ -331,6 +331,104 @@ defmodule MOQX.Draft16PublisherTest do
     assert :ok = Task.await(relay, 1_000)
   end
 
+  test "accepts a namespace-routed subscription without sending PUBLISH" do
+    {:ok, network} = Support.start_network()
+    parent = self()
+
+    relay =
+      Task.async(fn ->
+        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_16)
+        {:ok, listener, ctx} = Transport.listen(ctx, 0)
+        {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
+        send(parent, {:relay_ready, port})
+
+        {:ok, conn, ctx} = Transport.accept(ctx, listener, [], 1_000)
+        {:ok, conn, ctx} = Transport.handshake(ctx, conn, 1_000)
+        {:ok, control, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
+
+        setup = Codec.client_setup(URI.parse("moqt://localhost:#{port}"))
+        assert {:ok, ^setup, ctx} = Transport.recv_stream(ctx, control, byte_size(setup))
+
+        {:ok, _send, ctx} =
+          Transport.send_stream(ctx, control, <<0x21, 0, 3, 1, 2, 4>>)
+
+        namespace = ["live", "reactive"]
+        publish_namespace = Codec.publish_namespace(0, namespace)
+
+        assert {:ok, ^publish_namespace, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(publish_namespace))
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x07, 0, 2, 0, 0>>)
+
+        track_ref = %MOQX.TrackRef{namespace: namespace, track: "audio.it.opus"}
+        {:ok, _send, ctx} = Transport.send_stream(ctx, control, Codec.subscribe(1, track_ref, []))
+
+        subscribe_ok = Codec.subscribe_ok(1, 0, group_order: :ascending)
+
+        assert {:ok, ^subscribe_ok, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(subscribe_ok))
+
+        {:ok, subgroup, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
+        expected = <<0x14, 0, 0, 0, 127, 0, 4, "opus">>
+
+        assert {:ok, ^expected, ctx} =
+                 Transport.recv_stream(ctx, subgroup, byte_size(expected))
+
+        publish_done = Codec.publish_done(1, 2, 1, "complete")
+
+        assert {:ok, ^publish_done, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(publish_done))
+
+        namespace_done = Codec.publish_namespace_done(0)
+
+        assert {:ok, ^namespace_done, _ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(namespace_done))
+
+        :ok
+      end)
+
+    assert_receive {:relay_ready, port}, 1_000
+
+    assert {:ok, client} =
+             MOQX.connect("moqt://localhost:#{port}",
+               protocol: :draft_16,
+               transport: {Support, network: network, profile: :draft_16},
+               timeout: 1_000
+             )
+
+    assert {:ok, publication} =
+             MOQX.publish(client, ["live", "reactive"], inbound_subscriptions: :controlled)
+
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationReady{publication: ^publication}},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriptionRequested{request: request}},
+                   1_000
+
+    assert {:ok, track} =
+             MOQX.accept_subscription(client, request,
+               retention: :live,
+               delivery: :subgroup
+             )
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 1}},
+                   1_000
+
+    assert :ok =
+             MOQX.publish_object(client, track, %MOQX.Object{
+               group_id: 0,
+               subgroup_id: 0,
+               object_id: 0,
+               publisher_priority: 127,
+               payload: "opus"
+             })
+
+    assert :ok = MOQX.finish_publication(client, publication, status: 2, reason: "complete")
+    assert :ok = Task.await(relay, 1_000)
+  end
+
   defp receive_datagram(ctx) do
     case Transport.receive_event(ctx, 1_000) do
       {:ok, {:datagram, _conn, _data, _metadata} = event, ctx} ->
