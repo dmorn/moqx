@@ -35,6 +35,7 @@ defmodule MOQX.Protocol.Draft16 do
     AddTrack,
     Close,
     FinishPublication,
+    FinishPublishedSubscription,
     Publish,
     PublishObject,
     RejectPublicationSubscription,
@@ -442,6 +443,13 @@ defmodule MOQX.Protocol.Draft16 do
     reject_publication_subscription(state, operation)
   end
 
+  def handle_operation(
+        %State{phase: :ready} = state,
+        %FinishPublishedSubscription{} = operation
+      ) do
+    finish_published_subscription(state, operation)
+  end
+
   def handle_operation(%State{} = state, %Close{}) do
     Transition.ok(close_state(state),
       events: [:connection_ended],
@@ -455,6 +463,7 @@ defmodule MOQX.Protocol.Draft16 do
   def handle_operation(%State{} = state, operation)
       when is_struct(operation, Publish) or is_struct(operation, AddTrack) or
              is_struct(operation, PublishObject) or is_struct(operation, FinishPublication) or
+             is_struct(operation, FinishPublishedSubscription) or
              is_struct(operation, AcceptPublicationSubscription) or
              is_struct(operation, RejectPublicationSubscription),
       do: Transition.error(state, :connection_not_ready)
@@ -473,6 +482,7 @@ defmodule MOQX.Protocol.Draft16 do
           :add_track,
           :publish_object,
           :finish_publication,
+          :finish_subscription,
           :accept_subscription,
           :reject_subscription
         ]),
@@ -1006,7 +1016,7 @@ defmodule MOQX.Protocol.Draft16 do
         request,
         published_track,
         group_order,
-        [{:track_added, published_track}]
+        operation.reply_mode
       )
     else
       nil -> Transition.error(state, :stale_subscription_request)
@@ -1031,7 +1041,13 @@ defmodule MOQX.Protocol.Draft16 do
          true <-
            published_track == operation.published_track and published_track.track == request.track,
          {:ok, group_order} <- accepted_group_order(request.group_order) do
-      establish_publication_subscription(state, request, published_track, group_order)
+      establish_publication_subscription(
+        state,
+        request,
+        published_track,
+        group_order,
+        operation.reply_mode
+      )
     else
       nil -> Transition.error(state, :stale_subscription_request)
       false -> Transition.error(state, :subscription_request_track_mismatch)
@@ -1085,12 +1101,14 @@ defmodule MOQX.Protocol.Draft16 do
          request,
          published_track,
          group_order,
-         reply_events \\ []
+         reply_mode
        ) do
     handle = request.handle
     track_alias = state.next_track_alias
+    published_subscription = published_subscription(state, handle.request_id)
 
     subscription = %{
+      handle: published_subscription,
       request_id: handle.request_id,
       publication_id: published_track.publication.id,
       track: published_track,
@@ -1113,10 +1131,11 @@ defmodule MOQX.Protocol.Draft16 do
 
     Transition.ok(next_state,
       events:
-        reply_events ++
+        acceptance_reply_events(reply_mode, published_track, published_subscription) ++
           [
             %PublicationSubscriberJoined{
               track: published_track,
+              subscription: published_subscription,
               request_id: handle.request_id
             }
           ],
@@ -1134,6 +1153,18 @@ defmodule MOQX.Protocol.Draft16 do
 
   defp validate_request_scope(_state, _handle),
     do: {:error, :wrong_client_subscription_request}
+
+  defp acceptance_reply_events(:subscription, _track, subscription),
+    do: [{:published_subscription_accepted, subscription}]
+
+  defp acceptance_reply_events(:reactive, track, subscription),
+    do: [{:reactive_subscription_accepted, track, subscription}]
+
+  defp acceptance_reply_events(:none, _track, _subscription), do: []
+
+  defp published_subscription(state, request_id) do
+    %MOQX.PublishedSubscription{scope: state.handle_scope, request_id: request_id}
+  end
 
   defp reject_publication_subscription(state, operation) do
     request = operation.request
@@ -1220,7 +1251,8 @@ defmodule MOQX.Protocol.Draft16 do
 
         accept_publication_subscription(state, %AcceptPublicationSubscription{
           request: request,
-          published_track: track
+          published_track: track,
+          reply_mode: :none
         })
 
       nil ->
@@ -1288,6 +1320,7 @@ defmodule MOQX.Protocol.Draft16 do
           events: [
             %PublicationSubscriberLeft{
               track: subscription.track,
+              subscription: subscription.handle,
               request_id: subscription.request_id
             }
           ],
@@ -1303,6 +1336,77 @@ defmodule MOQX.Protocol.Draft16 do
         )
     end
   end
+
+  defp finish_published_subscription(state, operation) do
+    handle = operation.subscription
+
+    with :ok <- validate_published_subscription_scope(state, handle),
+         %{handle: ^handle} = subscription <- state.publisher_subscriptions[handle.request_id],
+         {:ok, status, reason} <- published_subscription_completion(operation.options) do
+      next_state = %{
+        state
+        | publisher_subscriptions: Map.delete(state.publisher_subscriptions, handle.request_id)
+      }
+
+      Transition.ok(next_state,
+        events: [
+          {:published_subscription_finished, handle},
+          %PublicationSubscriberLeft{
+            track: subscription.track,
+            subscription: handle,
+            request_id: subscription.request_id
+          }
+        ],
+        actions: [
+          {:send_stream, :control,
+           Codec.publish_done(
+             subscription.request_id,
+             status,
+             subscription.stream_count,
+             reason
+           ), []}
+        ]
+      )
+    else
+      nil -> Transition.error(state, :stale_published_subscription)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  defp validate_published_subscription_scope(
+         %State{handle_scope: scope},
+         %MOQX.PublishedSubscription{scope: scope}
+       )
+       when is_reference(scope),
+       do: :ok
+
+  defp validate_published_subscription_scope(_state, %MOQX.PublishedSubscription{}),
+    do: {:error, :wrong_client_published_subscription}
+
+  defp published_subscription_completion(options) do
+    with {:ok, status} <-
+           published_subscription_status(Keyword.get(options, :status, :subscription_ended)),
+         reason when is_binary(reason) <- Keyword.get(options, :reason, "subscription ended"),
+         true <- byte_size(reason) <= 1_024 do
+      {:ok, status, reason}
+    else
+      {:error, reason} -> {:error, reason}
+      _other -> {:error, :invalid_published_subscription_completion}
+    end
+  end
+
+  defp published_subscription_status(:internal_error), do: {:ok, 0}
+  defp published_subscription_status(:unauthorized), do: {:ok, 1}
+  defp published_subscription_status(:track_ended), do: {:ok, 2}
+  defp published_subscription_status(:subscription_ended), do: {:ok, 3}
+  defp published_subscription_status(:going_away), do: {:ok, 4}
+  defp published_subscription_status(:expired), do: {:ok, 5}
+  defp published_subscription_status(:too_far_behind), do: {:ok, 6}
+
+  # draft-ietf-moq-transport-16, Section 9.15.
+  defp published_subscription_status(:update_failed), do: {:ok, 8}
+  defp published_subscription_status(:malformed_track), do: {:ok, 0x12}
+  defp published_subscription_status(_status), do: {:error, :unsupported_completion_status}
 
   defp object_matches_filter?(
          %MOQX.SubscriptionFilter{type: :absolute_start, start_location: start},
@@ -1489,6 +1593,7 @@ defmodule MOQX.Protocol.Draft16 do
       if subscription.publication_id == publication_id do
         event = %PublicationSubscriberLeft{
           track: subscription.track,
+          subscription: subscription.handle,
           request_id: request_id
         }
 

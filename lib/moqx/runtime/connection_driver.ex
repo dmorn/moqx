@@ -89,13 +89,19 @@ defmodule MOQX.Runtime.ConnectionDriver do
   @spec accept_subscription(
           MOQX.Client.t(),
           MOQX.PublicationSubscriptionRequest.t(),
-          MOQX.PublishedTrack.t(),
+          MOQX.PublishedTrack.t() | nil,
           keyword()
-        ) :: :ok | {:error, term()}
+        ) ::
+          {:ok, MOQX.PublishedSubscription.t()}
+          | {:ok, MOQX.PublishedTrack.t(), MOQX.PublishedSubscription.t()}
+          | {:error, term()}
   def accept_subscription(%MOQX.Client{pid: pid}, request, published_track, options) do
+    reply_mode = if is_nil(published_track), do: :reactive, else: :subscription
+
     operation = %Operation.AcceptPublicationSubscription{
       request: request,
       published_track: published_track,
+      reply_mode: reply_mode,
       options: options
     }
 
@@ -126,6 +132,20 @@ defmodule MOQX.Runtime.ConnectionDriver do
           :ok | {:error, term()}
   def finish_publication(%MOQX.Client{pid: pid}, publication, options) do
     operation = %Operation.FinishPublication{publication: publication, options: options}
+    call(pid, {:operation, operation}, 5_000)
+  end
+
+  @spec finish_subscription(
+          MOQX.Client.t(),
+          MOQX.PublishedSubscription.t(),
+          keyword()
+        ) :: :ok | {:error, term()}
+  def finish_subscription(%MOQX.Client{pid: pid}, subscription, options) do
+    operation = %Operation.FinishPublishedSubscription{
+      subscription: subscription,
+      options: options
+    }
+
     call(pid, {:operation, operation}, 5_000)
   end
 
@@ -460,6 +480,15 @@ defmodule MOQX.Runtime.ConnectionDriver do
   defp operation_reply({:track_added, track} = event, events),
     do: {{:ok, track}, List.delete(events, event)}
 
+  defp operation_reply({:published_subscription_accepted, subscription} = event, events),
+    do: {{:ok, subscription}, List.delete(events, event)}
+
+  defp operation_reply(
+         {:reactive_subscription_accepted, track, subscription} = event,
+         events
+       ),
+       do: {{:ok, track, subscription}, List.delete(events, event)}
+
   defp operation_reply(event, events) when not is_nil(event),
     do: {:ok, List.delete(events, event)}
 
@@ -470,8 +499,14 @@ defmodule MOQX.Runtime.ConnectionDriver do
   defp operation_reply_event?({:subscription_updated, _subscription}), do: true
   defp operation_reply_event?({:publication_started, _publication}), do: true
   defp operation_reply_event?({:track_added, _track}), do: true
+  defp operation_reply_event?({:published_subscription_accepted, _subscription}), do: true
+
+  defp operation_reply_event?({:reactive_subscription_accepted, _track, _subscription}),
+    do: true
+
   defp operation_reply_event?({:object_published, _track}), do: true
   defp operation_reply_event?({:publication_finished, _publication}), do: true
+  defp operation_reply_event?({:published_subscription_finished, _subscription}), do: true
   defp operation_reply_event?(:connection_ended), do: true
   defp operation_reply_event?(_event), do: false
 

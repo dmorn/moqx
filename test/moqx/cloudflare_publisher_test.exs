@@ -156,7 +156,21 @@ defmodule MOQX.CloudflarePublisherTest do
                    1_000
 
     assert_receive {:moqx, ^client,
-                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 1}},
+                    %MOQX.Event.PublicationSubscriberJoined{
+                      track: ^track,
+                      subscription: published_subscription,
+                      request_id: 1
+                    }},
+                   1_000
+
+    assert %MOQX.PublishedSubscription{} = published_subscription
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberLeft{
+                      track: ^track,
+                      subscription: ^published_subscription,
+                      request_id: 1
+                    }},
                    1_000
 
     assert_receive :subscriber_finished, 1_000
@@ -232,8 +246,27 @@ defmodule MOQX.CloudflarePublisherTest do
 
         subgroup_bytes = Codec.encode_subgroup(1, object)
 
-        assert {:ok, ^subgroup_bytes, _ctx} =
+        assert {:ok, ^subgroup_bytes, ctx} =
                  Transport.recv_stream(ctx, subgroup, byte_size(subgroup_bytes))
+
+        publish_done =
+          Codec.encode(%Messages.PublishDone{
+            request_id: 1,
+            status_code: 3,
+            stream_count: 1,
+            reason_phrase: "source unavailable"
+          })
+
+        assert {:ok, ^publish_done, ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(publish_done))
+
+        namespace_done =
+          Codec.encode(%Messages.PublishNamespaceDone{
+            track_namespace: ["live", "controlled"]
+          })
+
+        assert {:ok, ^namespace_done, _ctx} =
+                 Transport.recv_stream(ctx, control, byte_size(namespace_done))
 
         :ok
       end)
@@ -258,10 +291,17 @@ defmodule MOQX.CloudflarePublisherTest do
                    1_000
 
     assert {:ok, track} = MOQX.add_track(client, publication, "video")
-    assert :ok = MOQX.accept_subscription(client, request, track)
+
+    assert {:ok, %MOQX.PublishedSubscription{} = published_subscription} =
+             MOQX.accept_subscription(client, request, track)
+
+    assert inspect(published_subscription) == "#MOQX.PublishedSubscription<OPAQUE>"
 
     assert_receive {:moqx, ^client,
-                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 1}},
+                    %MOQX.Event.PublicationSubscriberJoined{
+                      track: ^track,
+                      subscription: ^published_subscription
+                    }},
                    1_000
 
     assert :ok =
@@ -272,6 +312,23 @@ defmodule MOQX.CloudflarePublisherTest do
                payload: "controlled-object"
              })
 
+    assert :ok =
+             MOQX.finish_subscription(client, published_subscription,
+               status: :subscription_ended,
+               reason: "source unavailable"
+             )
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberLeft{
+                      track: ^track,
+                      subscription: ^published_subscription
+                    }},
+                   1_000
+
+    assert {:error, :stale_published_subscription} =
+             MOQX.finish_subscription(client, published_subscription)
+
+    assert :ok = MOQX.finish_publication(client, publication)
     assert :ok = Task.await(relay, 1_000)
     assert :ok = MOQX.close(client)
   end

@@ -101,7 +101,11 @@ defmodule MOQX.Draft16PublisherTest do
     send(relay.pid, :accept_track)
 
     assert_receive {:moqx, ^client,
-                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 2}},
+                    %MOQX.Event.PublicationSubscriberJoined{
+                      track: ^track,
+                      subscription: nil,
+                      request_id: 2
+                    }},
                    1_000
 
     assert :ok = MOQX.publish_object(client, track, object)
@@ -297,10 +301,14 @@ defmodule MOQX.Draft16PublisherTest do
                     %MOQX.Event.PublicationSubscriptionRequested{request: first_request}},
                    1_000
 
-    assert :ok = MOQX.accept_subscription(client, first_request, track)
+    assert {:ok, %MOQX.PublishedSubscription{} = first_subscription} =
+             MOQX.accept_subscription(client, first_request, track)
 
     assert_receive {:moqx, ^client,
-                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 1}},
+                    %MOQX.Event.PublicationSubscriberJoined{
+                      track: ^track,
+                      subscription: ^first_subscription
+                    }},
                    1_000
 
     assert_receive {:moqx, ^client,
@@ -318,7 +326,10 @@ defmodule MOQX.Draft16PublisherTest do
                    1_000
 
     assert_receive {:moqx, ^client,
-                    %MOQX.Event.PublicationSubscriberLeft{track: ^track, request_id: 1}},
+                    %MOQX.Event.PublicationSubscriberLeft{
+                      track: ^track,
+                      subscription: ^first_subscription
+                    }},
                    1_000
 
     assert_receive {:moqx, ^client,
@@ -368,13 +379,10 @@ defmodule MOQX.Draft16PublisherTest do
         assert {:ok, ^subscribe_ok, ctx} =
                  Transport.recv_stream(ctx, control, byte_size(subscribe_ok))
 
-        {:ok, subgroup, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
-        expected = <<0x14, 0, 0, 0, 127, 0, 4, "opus">>
+        assert {:ok, {:datagram, ^conn, <<0x04, 0, 0, 127, "opus">>, %{}}, ctx} =
+                 receive_datagram(ctx)
 
-        assert {:ok, ^expected, ctx} =
-                 Transport.recv_stream(ctx, subgroup, byte_size(expected))
-
-        publish_done = Codec.publish_done(1, 2, 1, "complete")
+        publish_done = Codec.publish_done(1, 3, 0, "source unavailable")
 
         assert {:ok, ^publish_done, ctx} =
                  Transport.recv_stream(ctx, control, byte_size(publish_done))
@@ -406,14 +414,17 @@ defmodule MOQX.Draft16PublisherTest do
                     %MOQX.Event.PublicationSubscriptionRequested{request: request}},
                    1_000
 
-    assert {:ok, track} =
+    assert {:ok, track, %MOQX.PublishedSubscription{} = published_subscription} =
              MOQX.accept_subscription(client, request,
                retention: :live,
-               delivery: :subgroup
+               delivery: :datagram
              )
 
     assert_receive {:moqx, ^client,
-                    %MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 1}},
+                    %MOQX.Event.PublicationSubscriberJoined{
+                      track: ^track,
+                      subscription: ^published_subscription
+                    }},
                    1_000
 
     assert :ok =
@@ -425,7 +436,23 @@ defmodule MOQX.Draft16PublisherTest do
                payload: "opus"
              })
 
-    assert :ok = MOQX.finish_publication(client, publication, status: 2, reason: "complete")
+    assert :ok =
+             MOQX.finish_subscription(client, published_subscription,
+               status: :subscription_ended,
+               reason: "source unavailable"
+             )
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberLeft{
+                      track: ^track,
+                      subscription: ^published_subscription
+                    }},
+                   1_000
+
+    assert {:error, :stale_published_subscription} =
+             MOQX.finish_subscription(client, published_subscription)
+
+    assert :ok = MOQX.finish_publication(client, publication)
     assert :ok = Task.await(relay, 1_000)
   end
 

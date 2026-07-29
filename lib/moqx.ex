@@ -41,6 +41,18 @@ defmodule MOQX do
   @typedoc "Object delivery selected for a published track."
   @type publication_delivery :: :subgroup | :datagram
 
+  @typedoc "Protocol-neutral reason for publisher-initiated subscription completion."
+  @type published_subscription_status ::
+          :internal_error
+          | :unauthorized
+          | :track_ended
+          | :subscription_ended
+          | :going_away
+          | :expired
+          | :too_far_behind
+          | :malformed_track
+          | :update_failed
+
   @typedoc "Option accepted by `add_track/4`."
   @type published_track_option ::
           {:retention, :live | :latest | :all}
@@ -124,9 +136,10 @@ defmodule MOQX do
   Accepts one pending inbound publisher subscription.
 
   Pass an existing `PublishedTrack` to attach another subscriber to a
-  registered track. Pass track options instead to register the requested track
-  reactively and accept its first subscription without sending a separate
-  publisher-initiated `PUBLISH`.
+  registered track; the result contains its `PublishedSubscription` handle.
+  Pass track options instead to register the requested track reactively and
+  accept its first subscription without sending a separate publisher-initiated
+  `PUBLISH`; that result contains both the new track and subscription handles.
   """
   def accept_subscription(client, request, published_track_or_options, options \\ [])
 
@@ -134,7 +147,8 @@ defmodule MOQX do
           MOQX.Client.t(),
           MOQX.PublicationSubscriptionRequest.t(),
           [published_track_option()]
-        ) :: {:ok, MOQX.PublishedTrack.t()} | {:error, term()}
+        ) ::
+          {:ok, MOQX.PublishedTrack.t(), MOQX.PublishedSubscription.t()} | {:error, term()}
   def accept_subscription(client, request, options, []) when is_list(options) do
     ConnectionDriver.accept_subscription(client, request, nil, options)
   end
@@ -144,7 +158,7 @@ defmodule MOQX do
           MOQX.PublicationSubscriptionRequest.t(),
           MOQX.PublishedTrack.t(),
           keyword()
-        ) :: :ok | {:error, term()}
+        ) :: {:ok, MOQX.PublishedSubscription.t()} | {:error, term()}
   def accept_subscription(client, request, %MOQX.PublishedTrack{} = published_track, options) do
     ConnectionDriver.accept_subscription(client, request, published_track, options)
   end
@@ -177,6 +191,22 @@ defmodule MOQX do
           :ok | {:error, term()}
   def finish_publication(client, publication, options \\ []) do
     ConnectionDriver.finish_publication(client, publication, options)
+  end
+
+  @doc """
+  Finishes one accepted publisher subscription without withdrawing its track
+  or namespace publication.
+
+  The selected implementation maps the protocol-neutral `:status` atom to its
+  native `PUBLISH_DONE` code. The default is `:subscription_ended`.
+  """
+  @spec finish_subscription(
+          MOQX.Client.t(),
+          MOQX.PublishedSubscription.t(),
+          [{:status, published_subscription_status()} | {:reason, binary()}]
+        ) :: :ok | {:error, term()}
+  def finish_subscription(client, published_subscription, options \\ []) do
+    ConnectionDriver.finish_subscription(client, published_subscription, options)
   end
 
   @doc "Gracefully closes the selected protocol connection."

@@ -102,13 +102,33 @@ defmodule MOQX.Integration.MoqRsRelayRoundtripTest do
                         }},
                        5_000
 
-        assert :ok = MOQX.finish_publication(publisher, publication)
+        assert_receive {:moqx, ^publisher,
+                        %MOQX.Event.PublicationSubscriberJoined{
+                          track: ^media_track,
+                          subscription: published_subscription
+                        }},
+                       5_000
+
+        assert %MOQX.PublishedSubscription{} = published_subscription
+
+        assert :ok =
+                 MOQX.finish_subscription(publisher, published_subscription,
+                   status: :subscription_ended,
+                   reason: "integration complete"
+                 )
+
+        assert_receive {:moqx, ^publisher,
+                        %MOQX.Event.PublicationSubscriberLeft{
+                          track: ^media_track,
+                          subscription: ^published_subscription
+                        }},
+                       5_000
 
         assert_receive {:moqx, ^subscriber,
                         %MOQX.Event.SubscriptionDone{
                           subscription: ^media_subscription,
                           completion: %MOQX.Subscription.Completion{
-                            status: :track_ended,
+                            status: :subscription_ended,
                             # The pinned relay currently forwards zero here even
                             # after delivering subgroup streams (moq-rs TODO).
                             expected_streams: 0,
@@ -118,6 +138,7 @@ defmodule MOQX.Integration.MoqRsRelayRoundtripTest do
                         }},
                        5_000
 
+        assert :ok = MOQX.finish_publication(publisher, publication)
         refute_receive {:moqx, ^publisher, %MOQX.Event.ProtocolFailed{}}, 100
       after
         _result = MOQX.close(subscriber)

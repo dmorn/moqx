@@ -12,6 +12,7 @@ defmodule MOQX.Draft16PublisherReducerTest do
     AcceptPublicationSubscription,
     AddTrack,
     FinishPublication,
+    FinishPublishedSubscription,
     Publish,
     PublishObject,
     RejectPublicationSubscription
@@ -105,6 +106,75 @@ defmodule MOQX.Draft16PublisherReducerTest do
              })
 
     assert subgroup == <<0x14, 0, 7, 3, 10, 0, 8, "fragment">>
+  end
+
+  test "finishes one published subscription through its opaque handle" do
+    scope = make_ref()
+    publication = %MOQX.Publication{id: 0, namespace: ["live"]}
+
+    track = %MOQX.PublishedTrack{
+      publication: publication,
+      track: %MOQX.TrackRef{namespace: ["live"], track: "video"},
+      retention: :live
+    }
+
+    published_subscription = %MOQX.PublishedSubscription{scope: scope, request_id: 1}
+
+    subscription = %{
+      handle: published_subscription,
+      request_id: 1,
+      publication_id: 0,
+      track: track,
+      track_alias: 7,
+      subscriber_priority: 10,
+      group_order: :ascending,
+      forward: true,
+      filter: %MOQX.SubscriptionFilter{type: :largest_object},
+      stream_count: 2
+    }
+
+    sibling_handle = %MOQX.PublishedSubscription{scope: scope, request_id: 3}
+    sibling_subscription = %{subscription | handle: sibling_handle, request_id: 3}
+
+    state = %State{
+      phase: :ready,
+      handle_scope: scope,
+      publisher_subscriptions: %{1 => subscription, 3 => sibling_subscription}
+    }
+
+    foreign_subscription = %{published_subscription | scope: make_ref()}
+
+    assert {:error, :wrong_client_published_subscription, %Transition{}} =
+             Draft16.handle_operation(state, %FinishPublishedSubscription{
+               subscription: foreign_subscription
+             })
+
+    expected_done = Codec.publish_done(1, 0x12, 2, "bad track")
+
+    assert {:ok,
+            %Transition{
+              state: finished,
+              events: [
+                {:published_subscription_finished, ^published_subscription},
+                %PublicationSubscriberLeft{
+                  track: ^track,
+                  subscription: ^published_subscription,
+                  request_id: 1
+                }
+              ],
+              actions: [{:send_stream, :control, ^expected_done, []}]
+            }} =
+             Draft16.handle_operation(state, %FinishPublishedSubscription{
+               subscription: published_subscription,
+               options: [status: :malformed_track, reason: "bad track"]
+             })
+
+    assert finished.publisher_subscriptions == %{3 => sibling_subscription}
+
+    assert {:error, :stale_published_subscription, %Transition{}} =
+             Draft16.handle_operation(finished, %FinishPublishedSubscription{
+               subscription: published_subscription
+             })
   end
 
   test "a datagram track publishes without opening a stream and completes with zero streams" do
@@ -454,9 +524,7 @@ defmodule MOQX.Draft16PublisherReducerTest do
     assert {:ok,
             %Transition{
               state: accepted,
-              events: [
-                %PublicationSubscriberJoined{track: ^track, request_id: 1}
-              ],
+              events: accepted_events,
               actions: [
                 {:cancel_timer, {:publisher_subscription_decision, ^handle}},
                 {:send_stream, :control, ^subscribe_ok, []}
@@ -466,6 +534,17 @@ defmodule MOQX.Draft16PublisherReducerTest do
                request: request,
                published_track: track
              })
+
+    assert [
+             {:published_subscription_accepted, published_subscription},
+             joined
+           ] = accepted_events
+
+    assert %PublicationSubscriberJoined{
+             track: ^track,
+             subscription: ^published_subscription,
+             request_id: 1
+           } = joined
 
     assert accepted.pending_publisher_subscriptions == %{}
     assert accepted.publisher_subscriptions[1].track == track
@@ -502,7 +581,11 @@ defmodule MOQX.Draft16PublisherReducerTest do
             %Transition{
               state: unsubscribed,
               events: [
-                %PublicationSubscriberLeft{track: ^track, request_id: 1}
+                %PublicationSubscriberLeft{
+                  track: ^track,
+                  subscription: ^published_subscription,
+                  request_id: 1
+                }
               ],
               actions: [{:send_stream, :control, ^publish_done, []}]
             }} =

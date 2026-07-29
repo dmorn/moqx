@@ -23,6 +23,10 @@ native QUIC.
 - Standard draft-16 subscriber support includes all four subscription filters,
   request updates, subgroup and datagram delivery, accepted parameter and
   extension preservation, and `PUBLISH_DONE` delivery draining.
+- Accepted inbound publisher subscriptions have connection-scoped opaque
+  handles. Applications can finish one subscription independently of its
+  published track or namespace; implementations map protocol-neutral status
+  atoms to their draft-specific `PUBLISH_DONE` codes.
 - Objects are emitted in normalized transport arrival order. Each subgroup
   preserves stream-local order and ends with a typed complete/reset/closed
   boundary; no global coordinate ordering or implicit reorder buffer is

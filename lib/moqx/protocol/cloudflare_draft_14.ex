@@ -13,6 +13,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     AddTrack,
     Close,
     FinishPublication,
+    FinishPublishedSubscription,
     Publish,
     PublishObject,
     RejectPublicationSubscription,
@@ -339,6 +340,13 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     end
   end
 
+  def handle_operation(
+        %State{phase: :ready} = state,
+        %FinishPublishedSubscription{} = operation
+      ) do
+    finish_published_subscription(state, operation)
+  end
+
   def handle_operation(%State{phase: :ready} = state, %Close{}) do
     Transition.ok(%{state | phase: :closed},
       events: [:connection_ended],
@@ -353,7 +361,8 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
       when is_struct(operation, Publish) or is_struct(operation, AddTrack) or
              is_struct(operation, AcceptPublicationSubscription) or
              is_struct(operation, RejectPublicationSubscription) or
-             is_struct(operation, PublishObject) or is_struct(operation, FinishPublication),
+             is_struct(operation, PublishObject) or is_struct(operation, FinishPublication) or
+             is_struct(operation, FinishPublishedSubscription),
       do: Transition.error(state, :connection_not_ready)
 
   def handle_operation(%State{} = state, _operation),
@@ -399,7 +408,14 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   @impl true
   def capabilities(_state) do
     %Capabilities{
-      operations: MapSet.new([:subscribe, :publish, :accept_subscription, :reject_subscription]),
+      operations:
+        MapSet.new([
+          :subscribe,
+          :publish,
+          :accept_subscription,
+          :reject_subscription,
+          :finish_subscription
+        ]),
       delivery_modes: MapSet.new([:subgroup]),
       metadata: %{catalog_track: ".catalog"}
     }
@@ -854,8 +870,10 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     case entry.tracks[subscribe.track_name] do
       %{track: published_track} = track_entry ->
         largest_location = track_entry.largest_location
+        published_subscription = published_subscription(state, subscribe.request_id)
 
         subscription = %{
+          handle: published_subscription,
           request_id: subscribe.request_id,
           publication_id: published_track.publication.id,
           track: published_track,
@@ -888,6 +906,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
           events: [
             %PublicationSubscriberJoined{
               track: published_track,
+              subscription: published_subscription,
               request_id: subscribe.request_id
             }
           ],
@@ -971,7 +990,10 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
            published_track == operation.published_track and published_track.track == request.track,
          {:ok, group_order} <- accepted_group_order(request.group_order, operation.options),
          {:ok, expires} <- subscription_expiry(operation.options) do
+      published_subscription = published_subscription(state, handle.request_id)
+
       subscription = %{
+        handle: published_subscription,
         request_id: handle.request_id,
         publication_id: published_track.publication.id,
         track: published_track,
@@ -1004,7 +1026,12 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
 
       Transition.ok(state,
         events: [
-          %PublicationSubscriberJoined{track: published_track, request_id: handle.request_id}
+          {:published_subscription_accepted, published_subscription},
+          %PublicationSubscriberJoined{
+            track: published_track,
+            subscription: published_subscription,
+            request_id: handle.request_id
+          }
         ],
         actions: [
           {:cancel_timer, {:publisher_subscription_decision, handle}},
@@ -1179,6 +1206,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
           events: [
             %PublicationSubscriberLeft{
               track: subscription.track,
+              subscription: subscription.handle,
               request_id: subscription.request_id
             }
           ],
@@ -1186,6 +1214,70 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
         )
     end
   end
+
+  defp finish_published_subscription(state, operation) do
+    handle = operation.subscription
+
+    with :ok <- validate_published_subscription_scope(state, handle),
+         %{handle: ^handle} = subscription <- state.publisher_subscriptions[handle.request_id],
+         {:ok, status, reason} <- published_subscription_completion(operation.options) do
+      done = publish_done(subscription, status, reason)
+
+      next_state = %{
+        state
+        | publisher_subscriptions: Map.delete(state.publisher_subscriptions, handle.request_id)
+      }
+
+      Transition.ok(next_state,
+        events: [
+          {:published_subscription_finished, handle},
+          %PublicationSubscriberLeft{
+            track: subscription.track,
+            subscription: handle,
+            request_id: subscription.request_id
+          }
+        ],
+        actions: [{:send_stream, :control, Codec.encode(done), []}]
+      )
+    else
+      nil -> Transition.error(state, :stale_published_subscription)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  defp validate_published_subscription_scope(
+         %State{handle_scope: scope},
+         %MOQX.PublishedSubscription{scope: scope}
+       )
+       when is_reference(scope),
+       do: :ok
+
+  defp validate_published_subscription_scope(_state, %MOQX.PublishedSubscription{}),
+    do: {:error, :wrong_client_published_subscription}
+
+  defp published_subscription_completion(options) do
+    with {:ok, status} <-
+           published_subscription_status(Keyword.get(options, :status, :subscription_ended)),
+         reason when is_binary(reason) <- Keyword.get(options, :reason, "subscription ended"),
+         true <- byte_size(reason) <= 1_024 do
+      {:ok, status, reason}
+    else
+      {:error, reason} -> {:error, reason}
+      _other -> {:error, :invalid_published_subscription_completion}
+    end
+  end
+
+  defp published_subscription_status(:internal_error), do: {:ok, 0}
+  defp published_subscription_status(:unauthorized), do: {:ok, 1}
+  defp published_subscription_status(:track_ended), do: {:ok, 2}
+  defp published_subscription_status(:subscription_ended), do: {:ok, 3}
+  defp published_subscription_status(:going_away), do: {:ok, 4}
+  defp published_subscription_status(:expired), do: {:ok, 5}
+  defp published_subscription_status(:too_far_behind), do: {:ok, 6}
+
+  # draft-ietf-moq-transport-14, Sections 9.12 and 13.1.3.
+  defp published_subscription_status(:malformed_track), do: {:ok, 7}
+  defp published_subscription_status(_status), do: {:error, :unsupported_completion_status}
 
   defp object_actions(state, track, object) do
     state.publisher_subscriptions
@@ -1197,6 +1289,10 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
       {state, action} = subgroup_action(state, subscription, object)
       {state, actions ++ [action]}
     end)
+  end
+
+  defp published_subscription(state, request_id) do
+    %MOQX.PublishedSubscription{scope: state.handle_scope, request_id: request_id}
   end
 
   defp replay_actions(state, _subscription, []), do: {state, []}

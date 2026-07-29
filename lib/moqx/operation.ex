@@ -14,6 +14,7 @@ defmodule MOQX.Operation do
           | AcceptPublicationSubscription.t()
           | RejectPublicationSubscription.t()
           | PublishObject.t()
+          | FinishPublishedSubscription.t()
           | FinishPublication.t()
           | Close.t()
 
@@ -76,11 +77,12 @@ defmodule MOQX.Operation do
     """
 
     @enforce_keys [:request]
-    defstruct [:request, :published_track, options: []]
+    defstruct [:request, :published_track, reply_mode: :subscription, options: []]
 
     @type t :: %__MODULE__{
             request: MOQX.PublicationSubscriptionRequest.t(),
             published_track: MOQX.PublishedTrack.t() | nil,
+            reply_mode: :subscription | :reactive | :none,
             options: keyword()
           }
   end
@@ -113,6 +115,18 @@ defmodule MOQX.Operation do
     defstruct [:publication, options: []]
 
     @type t :: %__MODULE__{publication: MOQX.Publication.t(), options: keyword()}
+  end
+
+  defmodule FinishPublishedSubscription do
+    @moduledoc "Finishes one accepted inbound publisher subscription."
+
+    @enforce_keys [:subscription]
+    defstruct [:subscription, options: []]
+
+    @type t :: %__MODULE__{
+            subscription: MOQX.PublishedSubscription.t(),
+            options: keyword()
+          }
   end
 
   defmodule Close do

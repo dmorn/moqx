@@ -172,17 +172,40 @@ defmodule MOQX.Event.PublicationCancelled do
 end
 
 defmodule MOQX.Event.PublicationSubscriberJoined do
-  @moduledoc "A remote subscriber joined a published track."
-  @enforce_keys [:track, :request_id]
-  defstruct [:track, :request_id]
-  @type t :: %__MODULE__{track: MOQX.PublishedTrack.t(), request_id: non_neg_integer()}
+  @moduledoc """
+  A remote subscriber joined a published track.
+
+  Accepted inbound subscriptions carry their opaque `subscription` handle.
+  `request_id` remains temporarily available for compatibility. A draft-16
+  publisher-initiated `PUBLISH_OK` readiness event has no inbound-subscription
+  handle.
+  """
+  @enforce_keys [:track]
+  defstruct [:track, :subscription, :request_id]
+
+  @type t :: %__MODULE__{
+          track: MOQX.PublishedTrack.t(),
+          subscription: MOQX.PublishedSubscription.t() | nil,
+          request_id: non_neg_integer() | nil
+        }
 end
 
 defmodule MOQX.Event.PublicationSubscriberLeft do
-  @moduledoc "A remote subscriber left a published track."
-  @enforce_keys [:track, :request_id]
-  defstruct [:track, :request_id]
-  @type t :: %__MODULE__{track: MOQX.PublishedTrack.t(), request_id: non_neg_integer()}
+  @moduledoc """
+  A remote subscriber left a published track.
+
+  Accepted inbound subscriptions carry the same opaque `subscription` handle
+  emitted on join. `request_id` remains temporarily available for
+  compatibility.
+  """
+  @enforce_keys [:track]
+  defstruct [:track, :subscription, :request_id]
+
+  @type t :: %__MODULE__{
+          track: MOQX.PublishedTrack.t(),
+          subscription: MOQX.PublishedSubscription.t() | nil,
+          request_id: non_neg_integer() | nil
+        }
 end
 
 defmodule MOQX.Event.ConnectionClosed do

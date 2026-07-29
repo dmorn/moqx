@@ -362,9 +362,45 @@ receive do
     {:ok, video} =
       MOQX.add_track(client, publication, request.track.track, retention: :live)
 
-    :ok = MOQX.accept_subscription(client, request, video)
+    {:ok, published_subscription} =
+      MOQX.accept_subscription(client, request, video)
 end
 ```
+
+For a draft-16 namespace-forwarded request whose track does not yet exist,
+acceptance can materialize the requested track without sending a conflicting
+publisher-initiated `PUBLISH`. The call returns the track and its first
+accepted subscription as separate opaque handles:
+
+```elixir
+{:ok, video, published_subscription} =
+  MOQX.accept_subscription(client, request,
+    retention: :live,
+    delivery: :subgroup
+  )
+```
+
+`PublicationSubscriberJoined` and `PublicationSubscriberLeft` carry the same
+`PublishedSubscription` handle in their `subscription` field. The legacy
+wire-derived `request_id` field remains temporarily available for
+compatibility, but application lifecycle state should use the opaque handle.
+
+An application can finish exactly one accepted subscriber without withdrawing
+the published track or namespace:
+
+```elixir
+:ok =
+  MOQX.finish_subscription(client, published_subscription,
+    status: :subscription_ended,
+    reason: "source unavailable"
+  )
+```
+
+Both supported implementations translate the status to their native
+`PUBLISH_DONE`, include the exact number of opened subgroup streams, emit
+`PublicationSubscriberLeft`, and invalidate the handle. Remote `UNSUBSCRIBE`
+converges on the same terminal event and handle lifecycle. Duplicate, stale,
+and cross-connection handles return deterministic errors.
 
 `MOQX.reject_subscription/3` accepts a protocol-neutral
 `MOQX.SubscriptionRejection`. Pending requests are connection-scoped, bounded

@@ -5,6 +5,7 @@ defmodule MOQX.CloudflarePublisherReducerTest do
     AcceptPublicationSubscription,
     AddTrack,
     FinishPublication,
+    FinishPublishedSubscription,
     Publish,
     PublishObject,
     RejectPublicationSubscription
@@ -304,8 +305,64 @@ defmodule MOQX.CloudflarePublisherReducerTest do
              {:send_stream, :control, ^expected_ok, []}
            ] = accepted.actions
 
-    assert [%MOQX.Event.PublicationSubscriberJoined{track: ^track, request_id: 1}] =
-             accepted.events
+    assert [
+             {:published_subscription_accepted, published_subscription},
+             joined
+           ] = accepted.events
+
+    assert %MOQX.Event.PublicationSubscriberJoined{
+             track: ^track,
+             subscription: ^published_subscription,
+             request_id: 1
+           } = joined
+
+    assert inspect(published_subscription) == "#MOQX.PublishedSubscription<OPAQUE>"
+
+    foreign_subscription = %{published_subscription | scope: make_ref()}
+
+    assert {:error, :wrong_client_published_subscription, %Transition{}} =
+             CloudflareDraft14.handle_operation(accepted.state, %FinishPublishedSubscription{
+               subscription: foreign_subscription
+             })
+
+    assert {:error, :unsupported_completion_status, %Transition{}} =
+             CloudflareDraft14.handle_operation(accepted.state, %FinishPublishedSubscription{
+               subscription: published_subscription,
+               options: [status: :update_failed]
+             })
+
+    expected_done =
+      Codec.encode(%Messages.PublishDone{
+        request_id: 1,
+        status_code: 7,
+        stream_count: 0,
+        reason_phrase: "bad track"
+      })
+
+    assert {:ok,
+            %Transition{
+              state: finished,
+              events: [
+                {:published_subscription_finished, ^published_subscription},
+                %MOQX.Event.PublicationSubscriberLeft{
+                  track: ^track,
+                  subscription: ^published_subscription,
+                  request_id: 1
+                }
+              ],
+              actions: [{:send_stream, :control, ^expected_done, []}]
+            }} =
+             CloudflareDraft14.handle_operation(accepted.state, %FinishPublishedSubscription{
+               subscription: published_subscription,
+               options: [status: :malformed_track, reason: "bad track"]
+             })
+
+    assert finished.publisher_subscriptions == %{}
+
+    assert {:error, :stale_published_subscription, %Transition{}} =
+             CloudflareDraft14.handle_operation(finished, %FinishPublishedSubscription{
+               subscription: published_subscription
+             })
   end
 
   test "a controlled request can be explicitly rejected only once" do

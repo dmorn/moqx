@@ -6,6 +6,9 @@ All notable changes to `moqx` will be documented in this file.
 
 ### Added
 
+- Added opaque `MOQX.PublishedSubscription` handles, per-subscriber
+  `finish_subscription/3`, protocol-neutral completion statuses, and matching
+  join/left lifecycle events across Cloudflare draft-14 and standard draft-16.
 - Added a draft-16 CMAF publisher workflow with namespace/track readiness,
   Moqtail-compatible CMSF catalogs, a bounded catalog discovery window, paced
   media fragments, and a public relay/player operator script.
