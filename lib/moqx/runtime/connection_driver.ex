@@ -9,6 +9,7 @@ defmodule MOQX.Runtime.ConnectionDriver do
 
   alias MOQX.Operation
   alias MOQX.Protocol.Transition
+  alias MOQX.Runtime.ConnectionDriver.StreamEntry
   alias MOQX.Transport
 
   defstruct [
@@ -322,21 +323,27 @@ defmodule MOQX.Runtime.ConnectionDriver do
     exit(:normal)
   end
 
+  defp maybe_stop_after_transport(state, waiter, {:stream_event, stream, event, _metadata})
+       when event in [:peer_finished_sending, :peer_aborted_sending] do
+    state = close_stream_side(state, stream, :receive)
+    {state, maybe_ready(state, waiter)}
+  end
+
   defp maybe_stop_after_transport(
          state,
          waiter,
-         {:stream_event, stream, event, _metadata}
-       )
-       when event in [
-              :peer_finished_sending,
-              :peer_aborted_sending,
-              :peer_aborted_receiving,
-              :closed
-            ] do
-    streams =
-      Map.reject(state.streams, fn {_key, candidate} -> candidate == stream end)
+         {:stream_event, stream, :peer_aborted_receiving, _metadata}
+       ) do
+    state = close_stream_side(state, stream, :send)
+    {state, maybe_ready(state, waiter)}
+  end
 
-    state = %{state | streams: streams}
+  defp maybe_stop_after_transport(
+         state,
+         waiter,
+         {:stream_event, stream, :closed, _metadata}
+       ) do
+    state = close_stream_side(state, stream, :both)
     {state, maybe_ready(state, waiter)}
   end
 
@@ -348,7 +355,8 @@ defmodule MOQX.Runtime.ConnectionDriver do
     case Transport.set_active(state.context, stream, true) do
       {:ok, context} ->
         key = {:peer_stream, stream.info.stream_id}
-        %{state | context: context, streams: Map.put(state.streams, key, stream)}
+        entry = StreamEntry.new(stream)
+        %{state | context: context, streams: Map.put(state.streams, key, entry)}
 
       {:error, _reason, context} ->
         %{state | context: context}
@@ -368,8 +376,8 @@ defmodule MOQX.Runtime.ConnectionDriver do
   defp tag_logical_stream(_state, event), do: event
 
   defp logical_stream_metadata(state, stream, metadata) do
-    case Enum.find(state.streams, fn {_key, candidate} -> candidate == stream end) do
-      {key, _stream} -> Map.put(metadata, :logical_stream, key)
+    case Enum.find(state.streams, fn {_key, entry} -> entry.stream == stream end) do
+      {key, _entry} -> Map.put(metadata, :logical_stream, key)
       nil -> metadata
     end
   end
@@ -412,12 +420,12 @@ defmodule MOQX.Runtime.ConnectionDriver do
          {:ok, context} <- maybe_set_active(context, stream, active),
          {:ok, _send, context} <-
            Transport.send_stream(context, stream, transport_data(initial_data), send_options) do
-      streams =
-        if Keyword.get(send_options, :finish, false) do
-          state.streams
-        else
-          Map.put(state.streams, key, stream)
-        end
+      entry =
+        stream
+        |> StreamEntry.new()
+        |> maybe_close_send_side(send_options)
+
+      streams = put_stream_entry(state.streams, key, entry)
 
       {:ok, %{state | context: context, streams: streams}}
     else
@@ -426,15 +434,11 @@ defmodule MOQX.Runtime.ConnectionDriver do
   end
 
   defp apply_action(state, {:send_stream, key, data, options}) do
-    with {:ok, stream} <- Map.fetch(state.streams, key),
+    with {:ok, entry} <- Map.fetch(state.streams, key),
          {:ok, _send, context} <-
-           Transport.send_stream(state.context, stream, transport_data(data), options) do
-      streams =
-        if Keyword.get(options, :finish, false) do
-          Map.delete(state.streams, key)
-        else
-          state.streams
-        end
+           Transport.send_stream(state.context, entry.stream, transport_data(data), options) do
+      entry = maybe_close_send_side(entry, options)
+      streams = put_stream_entry(state.streams, key, entry)
 
       {:ok, %{state | context: context, streams: streams}}
     else
@@ -444,9 +448,10 @@ defmodule MOQX.Runtime.ConnectionDriver do
   end
 
   defp apply_action(state, {:abort_stream_sending, key, error_code}) do
-    with {:ok, stream} <- Map.fetch(state.streams, key),
-         {:ok, context} <- Transport.abort_sending(state.context, stream, error_code) do
-      {:ok, %{state | context: context, streams: Map.delete(state.streams, key)}}
+    with {:ok, entry} <- Map.fetch(state.streams, key),
+         {:ok, context} <- Transport.abort_sending(state.context, entry.stream, error_code) do
+      streams = put_stream_entry(state.streams, key, StreamEntry.close(entry, :send))
+      {:ok, %{state | context: context, streams: streams}}
     else
       :error -> {:error, {:unknown_stream_key, key}, state}
       {:error, reason, context} -> {:error, reason, %{state | context: context}}
@@ -454,9 +459,10 @@ defmodule MOQX.Runtime.ConnectionDriver do
   end
 
   defp apply_action(state, {:abort_stream_receiving, key, error_code}) do
-    with {:ok, stream} <- Map.fetch(state.streams, key),
-         {:ok, context} <- Transport.abort_receiving(state.context, stream, error_code) do
-      {:ok, %{state | context: context}}
+    with {:ok, entry} <- Map.fetch(state.streams, key),
+         {:ok, context} <- Transport.abort_receiving(state.context, entry.stream, error_code) do
+      streams = put_stream_entry(state.streams, key, StreamEntry.close(entry, :receive))
+      {:ok, %{state | context: context, streams: streams}}
     else
       :error -> {:error, {:unknown_stream_key, key}, state}
       {:error, reason, context} -> {:error, reason, %{state | context: context}}
@@ -504,6 +510,35 @@ defmodule MOQX.Runtime.ConnectionDriver do
 
   defp maybe_set_active(context, stream, active),
     do: Transport.set_active(context, stream, active)
+
+  defp maybe_close_send_side(entry, options) do
+    if Keyword.get(options, :finish, false) do
+      StreamEntry.close(entry, :send)
+    else
+      entry
+    end
+  end
+
+  defp put_stream_entry(streams, key, entry) do
+    if StreamEntry.terminal?(entry) do
+      Map.delete(streams, key)
+    else
+      Map.put(streams, key, entry)
+    end
+  end
+
+  defp close_stream_side(state, stream, side) do
+    streams =
+      Enum.reduce(state.streams, state.streams, fn
+        {key, %StreamEntry{stream: ^stream} = entry}, streams ->
+          put_stream_entry(streams, key, StreamEntry.close(entry, side))
+
+        {_key, _entry}, streams ->
+          streams
+      end)
+
+    %{state | streams: streams}
+  end
 
   defp transport_data(%MOQX.Sensitive{} = sensitive), do: MOQX.Sensitive.reveal(sensitive)
   defp transport_data(data), do: data
