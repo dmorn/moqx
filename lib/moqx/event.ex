@@ -63,10 +63,11 @@ end
 defmodule MOQX.Event.SubscriptionAccepted do
   @moduledoc "The relay accepted a subscription."
   @enforce_keys [:subscription]
-  defstruct [:subscription, parameters: [], track_extensions: []]
+  defstruct [:subscription, :track_info, parameters: [], track_extensions: []]
 
   @type t :: %__MODULE__{
           subscription: MOQX.Subscription.t(),
+          track_info: MOQX.TrackInfo.t() | nil,
           parameters: [MOQX.SubscriptionParameter.t()],
           track_extensions: [MOQX.Extension.t()]
         }

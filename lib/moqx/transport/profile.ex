@@ -16,7 +16,7 @@ defmodule MOQX.Transport.Profile do
   @enforce_keys [:name, :alpn, :capabilities, :stream_expectations]
   defstruct [:name, :alpn, :capabilities, :stream_expectations]
 
-  @type name :: :draft_14 | :draft_16 | :streams_only
+  @type name :: :draft_14 | :draft_16 | :moq_lite_05 | :streams_only
 
   @type t :: %__MODULE__{
           name: name(),
@@ -29,7 +29,7 @@ defmodule MOQX.Transport.Profile do
   Returns canonical profile names.
   """
   @spec names() :: [name()]
-  def names, do: [:draft_14, :draft_16, :streams_only]
+  def names, do: [:draft_14, :draft_16, :moq_lite_05, :streams_only]
 
   @doc """
   Fetches a profile by canonical name or profile struct.
@@ -41,6 +41,7 @@ defmodule MOQX.Transport.Profile do
     case name do
       :draft_14 -> {:ok, draft_14()}
       :draft_16 -> {:ok, draft_16()}
+      :moq_lite_05 -> {:ok, moq_lite_05()}
       :streams_only -> {:ok, streams_only()}
       _unknown -> {:error, :unknown_profile}
     end
@@ -126,6 +127,26 @@ defmodule MOQX.Transport.Profile do
         },
         data_streams: %{direction: :unidirectional, role: :application_defined},
         datagrams: %{available: false, role: :none}
+      }
+    }
+  end
+
+  defp moq_lite_05 do
+    %__MODULE__{
+      name: :moq_lite_05,
+      alpn: "moq-lite-05",
+      capabilities: %Capabilities{
+        alpn: "moq-lite-05",
+        datagrams: false,
+        max_datagram_size: :unsupported,
+        stream_directions: [:bidirectional, :unidirectional],
+        stream_priority: :supported,
+        transport_stats: :unsupported
+      },
+      stream_expectations: %{
+        setup_stream: %{direction: :unidirectional, initiator: :client, count: :one},
+        application_streams: %{direction: :either, count: :many},
+        datagrams: %{available: false, role: :optional_object_data}
       }
     }
   end

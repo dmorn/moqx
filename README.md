@@ -6,9 +6,9 @@ It provides a QUIC transport boundary backed by [`quicer`](https://github.com/dm
 
 ## Protocol documents
 
-`moqx` implements independent Cloudflare draft-14 and standard MOQT draft-16
-subscriber protocols over native QUIC. Protocol selection is explicit, so both
-implementations coexist without hostname inference or fallback.
+`moqx` implements independent Cloudflare draft-14, standard MOQT draft-16, and
+MoQ Lite draft-05 protocols over native QUIC. Protocol selection is explicit,
+so the implementations coexist without hostname inference or fallback.
 
 Core references:
 
@@ -21,6 +21,7 @@ Core references:
 - [draft-ietf-webtrans-http3-14 — WebTransport over HTTP/3](https://www.ietf.org/archive/id/draft-ietf-webtrans-http3-14.txt)
 - [draft-ietf-moq-transport-14 — Media over QUIC Transport](https://www.ietf.org/archive/id/draft-ietf-moq-transport-14.txt)
 - [draft-ietf-moq-transport-16 — Media over QUIC Transport](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-16)
+- [draft-lcurley-moq-lite-05 — Media over QUIC Lite](https://datatracker.ietf.org/doc/html/draft-lcurley-moq-lite-05)
 
 The draft-16 interoperability reference is Moqtail's `draft-16` branch pinned
 at commit
@@ -72,6 +73,53 @@ Subscriptions accept a protocol-neutral relative start policy:
 that cannot represent a requested policy returns
 `{:error, {:unsupported_subscription_start, policy}}` instead of silently
 substituting another boundary.
+
+## MoQ Lite draft-05 subscriber and publisher
+
+Select MoQ Lite explicitly with `protocol: :moq_lite_05`. It uses native QUIC
+ALPN `moq-lite-05`, sends a unidirectional Setup Stream with Path and Role, and
+implements Announce, Track, Subscribe, and reliable Group Streams through the
+same public API as the other implementations:
+
+```elixir
+{:ok, client} =
+  MOQX.connect("moqt://relay.example/live",
+    protocol: :moq_lite_05,
+    role: :publisher
+  )
+
+{:ok, publication} = MOQX.publish(client, ["live"])
+
+{:ok, video} =
+  MOQX.add_track(client, publication, "video",
+    timescale: 90_000,
+    publisher_priority: 127,
+    publisher_max_latency: 1_000
+  )
+
+:ok =
+  MOQX.publish_object(client, video, %MOQX.Object{
+    group_id: 42,
+    object_id: 0,
+    timestamp: 3_780_000,
+    end_of_group?: true,
+    payload: frame
+  })
+```
+
+`timescale` is required and positive. Publisher priority is a byte and maximum
+latency is a bounded QUIC varint. Received objects preserve FRAME timestamps
+independently from group and object identifiers. Automatic, controlled, and
+reactive inbound subscription handling use the existing opaque request and
+published-subscription handles; a Group Stream is kept open across objects
+until `end_of_group?: true`.
+
+The default subscriber request resolves the publisher's latest group.
+Draft-05 can also represent absolute group starts and ranges whose object
+coordinate is zero. Unsupported relative starts, non-zero object coordinates,
+parameters, and delivery modes return typed errors rather than changing their
+meaning. WebTransport, Fetch, Probe, datagram delivery, catalogs, and draft-06
+are not part of this implementation.
 
 ## Standard draft-16 subscriber and publisher
 

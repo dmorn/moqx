@@ -298,6 +298,7 @@ defmodule MOQX.Runtime.ConnectionDriver do
 
   defp handle_transport_event(state, waiter, event) do
     state = activate_peer_stream(state, event)
+    event = tag_logical_stream(state, event)
     result = state.protocol.handle_transport(state.protocol_state, event)
 
     case transition(state, result) do
@@ -321,18 +322,57 @@ defmodule MOQX.Runtime.ConnectionDriver do
     exit(:normal)
   end
 
+  defp maybe_stop_after_transport(
+         state,
+         waiter,
+         {:stream_event, stream, event, _metadata}
+       )
+       when event in [
+              :peer_finished_sending,
+              :peer_aborted_sending,
+              :peer_aborted_receiving,
+              :closed
+            ] do
+    streams =
+      Map.reject(state.streams, fn {_key, candidate} -> candidate == stream end)
+
+    state = %{state | streams: streams}
+    {state, maybe_ready(state, waiter)}
+  end
+
   defp maybe_stop_after_transport(state, waiter, _event) do
     {state, maybe_ready(state, waiter)}
   end
 
   defp activate_peer_stream(state, {:stream_event, stream, :new_stream, _metadata}) do
     case Transport.set_active(state.context, stream, true) do
-      {:ok, context} -> %{state | context: context}
-      {:error, _reason, context} -> %{state | context: context}
+      {:ok, context} ->
+        key = {:peer_stream, stream.info.stream_id}
+        %{state | context: context, streams: Map.put(state.streams, key, stream)}
+
+      {:error, _reason, context} ->
+        %{state | context: context}
     end
   end
 
   defp activate_peer_stream(state, _event), do: state
+
+  defp tag_logical_stream(state, {:stream_data, stream, data, metadata}) do
+    {:stream_data, stream, data, logical_stream_metadata(state, stream, metadata)}
+  end
+
+  defp tag_logical_stream(state, {:stream_event, stream, event, metadata}) do
+    {:stream_event, stream, event, logical_stream_metadata(state, stream, metadata)}
+  end
+
+  defp tag_logical_stream(_state, event), do: event
+
+  defp logical_stream_metadata(state, stream, metadata) do
+    case Enum.find(state.streams, fn {_key, candidate} -> candidate == stream end) do
+      {key, _stream} -> Map.put(metadata, :logical_stream, key)
+      nil -> metadata
+    end
+  end
 
   defp transition(state, {:ok, %Transition{} = protocol_transition}) do
     state = %{state | protocol_state: protocol_transition.state}
@@ -389,6 +429,33 @@ defmodule MOQX.Runtime.ConnectionDriver do
     with {:ok, stream} <- Map.fetch(state.streams, key),
          {:ok, _send, context} <-
            Transport.send_stream(state.context, stream, transport_data(data), options) do
+      streams =
+        if Keyword.get(options, :finish, false) do
+          Map.delete(state.streams, key)
+        else
+          state.streams
+        end
+
+      {:ok, %{state | context: context, streams: streams}}
+    else
+      :error -> {:error, {:unknown_stream_key, key}, state}
+      {:error, reason, context} -> {:error, reason, %{state | context: context}}
+    end
+  end
+
+  defp apply_action(state, {:abort_stream_sending, key, error_code}) do
+    with {:ok, stream} <- Map.fetch(state.streams, key),
+         {:ok, context} <- Transport.abort_sending(state.context, stream, error_code) do
+      {:ok, %{state | context: context, streams: Map.delete(state.streams, key)}}
+    else
+      :error -> {:error, {:unknown_stream_key, key}, state}
+      {:error, reason, context} -> {:error, reason, %{state | context: context}}
+    end
+  end
+
+  defp apply_action(state, {:abort_stream_receiving, key, error_code}) do
+    with {:ok, stream} <- Map.fetch(state.streams, key),
+         {:ok, context} <- Transport.abort_receiving(state.context, stream, error_code) do
       {:ok, %{state | context: context}}
     else
       :error -> {:error, {:unknown_stream_key, key}, state}

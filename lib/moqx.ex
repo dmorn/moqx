@@ -57,6 +57,9 @@ defmodule MOQX do
   @type published_track_option ::
           {:retention, :live | :latest | :all}
           | {:delivery, publication_delivery()}
+          | {:timescale, pos_integer()}
+          | {:publisher_priority, 0..255}
+          | {:publisher_max_latency, non_neg_integer()}
 
   @doc "Returns the default native QUIC transport implementation."
   @spec transport() :: module()
@@ -124,7 +127,9 @@ defmodule MOQX do
   Registers a track under an active publication.
 
   `:delivery` defaults to `:subgroup`. The selected protocol rejects a delivery
-  mode it cannot represent.
+  mode it cannot represent. MoQ Lite draft-05 additionally requires a positive
+  `:timescale` and accepts `:publisher_priority` and
+  `:publisher_max_latency` for its immutable `TRACK_INFO`.
   """
   @spec add_track(MOQX.Client.t(), MOQX.Publication.t(), binary(), [published_track_option()]) ::
           {:ok, MOQX.PublishedTrack.t()} | {:error, term()}

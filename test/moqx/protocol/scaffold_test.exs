@@ -28,12 +28,13 @@ defmodule MOQX.Protocol.ScaffoldTest do
   end
 
   test "resolves every built-in protocol explicitly" do
-    assert Resolver.ids() == [:cloudflare_draft_14, :draft_16]
+    assert Resolver.ids() == [:cloudflare_draft_14, :draft_16, :moq_lite_05]
 
     assert {:ok, MOQX.Protocol.CloudflareDraft14} =
              Resolver.fetch(:cloudflare_draft_14)
 
     assert {:ok, MOQX.Protocol.Draft16} = Resolver.fetch(:draft_16)
+    assert {:ok, MOQX.Protocol.MOQLite05} = Resolver.fetch(:moq_lite_05)
 
     assert {:error, :unknown_protocol} = Resolver.fetch(:moq_lite_04)
     assert {:error, :unknown_protocol} = Resolver.fetch(:moqtail_draft_14)
