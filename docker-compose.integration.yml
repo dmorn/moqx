@@ -57,6 +57,56 @@ services:
       retries: 30
       start_period: 5s
 
+  curley-moq-lite-05-relay:
+    image: moqx-curley-moq-lite-05
+    build:
+      context: .
+      dockerfile: docker/relays/curley/Dockerfile
+      args:
+        MOQ_REF: fd477082c43c3c0738fb62d077d85ea078f10045
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    command:
+      - /usr/local/bin/moq-relay
+      - --server-bind
+      - "0.0.0.0:443"
+      - --server-version
+      - moq-lite-05
+      - --tls-cert
+      - /certs/server.pem
+      - --tls-key
+      - /certs/server-key.pem
+      - --auth-public
+      - ""
+    volumes:
+      - ./.tmp/integration-certs:/certs:ro
+    ports:
+      - "4463:443/udp"
+
+  moqx-curley-moq-lite-05-test:
+    build:
+      context: .
+      dockerfile: docker/integration/curley/Dockerfile
+    depends_on:
+      curley-moq-lite-05-relay:
+        condition: service_started
+    volumes:
+      - ./.tmp/integration-certs:/certs:ro
+
+  moqx-curley-moq-lite-05-public-test:
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    command:
+      - mix
+      - test
+      - test/integration/curley_moq_lite_05_public_test.exs
+      - --include
+      - integration
+      - --include
+      - curley_moq_lite_05_public
+
   moq-rs-relay:
     build:
       context: .

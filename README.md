@@ -83,7 +83,7 @@ same public API as the other implementations:
 
 ```elixir
 {:ok, client} =
-  MOQX.connect("moqt://relay.example/live",
+  MOQX.connect("moql://relay.example/live",
     protocol: :moq_lite_05,
     role: :publisher
   )
@@ -120,6 +120,12 @@ coordinate is zero. Unsupported relative starts, non-zero object coordinates,
 parameters, and delivery modes return typed errors rather than changing their
 meaning. WebTransport, Fetch, Probe, datagram delivery, catalogs, and draft-06
 are not part of this implementation.
+
+The native-QUIC endpoint scheme is `moql://`; the older `moqt://` spelling
+remains accepted for existing callers. MoQ Lite draft-05 requires the QUIC
+DATAGRAM transport parameter even when an application only publishes reliable
+Group Streams, so MOQX advertises receive support without changing the public
+delivery API.
 
 ## Standard draft-16 subscriber and publisher
 
@@ -610,6 +616,42 @@ the same script is the `Cloudflare draft-14 relay roundtrip` CI job. Future
 relay variants should add separately pinned Compose services,
 tagged public-API tests, and runner scripts following this boundary; they must
 not add an implicit protocol fallback or overload this Cloudflare test.
+
+The MoQ Lite draft-05 interoperability harness builds Curley's official relay
+and `moq` CLI from the same immutable source revision
+`fd477082c43c3c0738fb62d077d85ea078f10045` (the `moq-relay-v0.14.15` and
+`moq-cli-v0.10.0` release commit). It uses generated loopback TLS certificates
+and real native QUIC inside the Compose network:
+
+```bash
+scripts/run_curley_moq_lite_05_integration.sh
+```
+
+The integration matrix verifies an exact timestamped payload through MOQX in
+both roles, then runs the official Curley CLI as an independent H.264 publisher
+and subscriber in the opposite directions. It also verifies relay fan-out and
+final-subscriber lifecycle: A can leave while B continues receiving; B's final
+explicit departure produces the upstream leave within 5 seconds; an abrupt
+final disconnect also leaves; and a later C receives a fresh group without a
+publisher restart. The configured publisher maximum latency remains the issue's
+45-second upper bound. The complete local matrix currently finishes in under a
+second after image startup.
+
+The public `cdn.moq.dev` check is intentionally opt-in. It publishes a unique,
+anonymous broadcast below `/anon`, waits for clustered route propagation, and
+subscribes through a separate MOQX connection:
+
+```bash
+scripts/run_curley_moq_lite_05_public.sh
+```
+
+On 2026-09-03 the container resolved `cdn.moq.dev` to IPv4
+`172.232.208.199`; the DNS resolver returned no IPv6 address. MOQX passes the
+hostname unchanged to Quicer/MsQuic, so address selection and any transport
+fallback remain below the protocol abstraction rather than being implemented
+as a second MOQX connection policy. The test prints current IPv4 and IPv6
+resolution on every run. Public availability and DNS can change independently,
+which is why this check is not part of the hermetic CI job.
 
 To run the caller-managed QUIC integration harness:
 

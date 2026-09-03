@@ -69,6 +69,7 @@ defmodule MOQX.Protocol.MOQLite05 do
        connect_options: [
          alpn: ["moq-lite-05"],
          verify: :verify_peer,
+         datagram_receive_enabled: 1,
          peer_bidi_stream_count: 128,
          peer_unidi_stream_count: 128
        ],
@@ -77,7 +78,7 @@ defmodule MOQX.Protocol.MOQLite05 do
   end
 
   @impl true
-  def init(%URI{scheme: "moqt"} = endpoint, options) do
+  def init(%URI{scheme: scheme} = endpoint, options) when scheme in ["moql", "moqt"] do
     role = Keyword.get(options, :role, :both)
 
     if role in [:both, :publisher, :subscriber] do

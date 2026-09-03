@@ -51,6 +51,25 @@ defmodule MOQX.IntegrationHarnessSetupTest do
     assert workflow =~ "scripts/run_moq_rs_integration.sh"
   end
 
+  test "MoQ Lite 05 Curley integration pins the relay and CLI to one immutable source" do
+    compose = File.read!("docker-compose.integration.yml")
+    dockerfile = File.read!("docker/relays/curley/Dockerfile")
+    runner = File.read!("scripts/run_curley_moq_lite_05_integration.sh")
+    public_runner = File.read!("scripts/run_curley_moq_lite_05_public.sh")
+    workflow = File.read!(".github/workflows/ci.yml")
+
+    source_ref = "fd477082c43c3c0738fb62d077d85ea078f10045"
+
+    assert compose =~ "curley-moq-lite-05-relay:"
+    assert compose =~ source_ref
+    assert dockerfile =~ "cargo build --locked --release -p moq-relay -p moq-cli"
+    assert runner =~ "up --build --wait curley-moq-lite-05-relay"
+    assert runner =~ "run --rm moqx-curley-moq-lite-05-test"
+    assert compose =~ "moqx-curley-moq-lite-05-public-test:"
+    assert public_runner =~ "run --rm moqx-curley-moq-lite-05-public-test"
+    assert workflow =~ "scripts/run_curley_moq_lite_05_integration.sh"
+  end
+
   test "loopback cert generator covers localhost SANs with a long validity" do
     script = File.read!("scripts/gen-loopback-certs.sh")
 

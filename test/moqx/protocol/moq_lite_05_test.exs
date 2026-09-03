@@ -7,10 +7,11 @@ defmodule MOQX.Protocol.MOQLite05Test do
   alias MOQX.Transport.Conn.Stream.Info
 
   test "activates immediately and sends one native-QUIC Setup Stream" do
-    endpoint = URI.parse("moqt://relay.example/live?token=one")
+    endpoint = URI.parse("moql://relay.example/live?token=one")
 
     assert {:ok, %TransportSpec{} = spec} = MOQLite05.transport_spec(endpoint, [])
     assert spec.alpn == "moq-lite-05"
+    assert spec.connect_options[:datagram_receive_enabled] == 1
     assert spec.required_capabilities == MapSet.new([:streams])
 
     assert {:ok, state} = MOQLite05.init(endpoint, role: :subscriber)
