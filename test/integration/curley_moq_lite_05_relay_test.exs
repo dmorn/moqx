@@ -7,6 +7,7 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
   @relay "moql://curley-moq-lite-05-relay:443/"
   @ca_file "/certs/ca.pem"
   @curley "/usr/local/bin/moq"
+  @h264_delimiter <<0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1, 12, 0x80>>
   @h264 Base.decode64!(
           "AAAAAWdCwAraewEQAAADABAAAAMAKPEiagAAAAFozg/IAAABBgX//0/cRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIyIGIzNTYwNWEgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MSBkZWJsb2NrPTA6MDowIGFuYWx5c2U9MDowIG1lPWRpYSBzdWJtZT0wIHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTAgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0wIDh4OGRjdD0wIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PTAgdGhyZWFkcz0xIGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MCB3ZWlnaHRwPTAga2V5aW50PTI1MCBrZXlpbnRfbWluPTEgc2NlbmVjdXQ9MCBpbnRyYV9yZWZyZXNoPTAgcmM9Y3JmIG1idHJlZT0wIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTAAgAAAAWWIhDomKAAJAuA="
         )
@@ -72,40 +73,27 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
   test "official Curley publisher delivers its exact timestamped frame to MOQX" do
     namespace = unique_namespace("curley-publisher")
     track_ref = %MOQX.TrackRef{namespace: namespace, track: "0.avc3"}
-    assert {:ok, subscriber} = connect(:subscriber)
+    curley = open_curley(["--broadcast", Enum.join(namespace, "/"), "import", "avc3"])
 
     try do
-      curley = open_curley(["--broadcast", Enum.join(namespace, "/"), "import", "avc3"])
+      true = Port.command(curley, @h264)
+      true = Port.command(curley, @h264_delimiter)
+
+      {subscriber, subscription, object} =
+        receive_curley_frame_when_routable(track_ref, 5_000)
 
       try do
-        true = Port.command(curley, @h264)
-        subscription = subscribe_when_routable(subscriber, track_ref, 5_000)
-
-        true = Port.command(curley, <<0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1, 12, 0x80>>)
-
-        assert_receive {:moqx, ^subscriber,
-                        %MOQX.Event.SubscriptionAccepted{subscription: ^subscription}},
-                       5_000
-
-        assert_receive {:moqx, ^subscriber,
-                        %MOQX.Event.ObjectReceived{
-                          object:
-                            %MOQX.Object{
-                              subscription: ^subscription,
-                              timestamp: timestamp,
-                              payload: payload
-                            } = object
-                        }},
-                       5_000
+        assert %MOQX.Object{subscription: ^subscription, timestamp: timestamp, payload: payload} =
+                 object
 
         assert object.group_id == 0
         assert {:ok, ^timestamp, encoded_h264} = MOQX.Codec.decode_varint(payload)
         assert encoded_h264 == normalize_annex_b(@h264)
       after
-        Port.close(curley)
+        _result = MOQX.close(subscriber)
       end
     after
-      _result = MOQX.close(subscriber)
+      Port.close(curley)
     end
   end
 
@@ -180,6 +168,7 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
 
       publish_group(publisher, track, 1)
       assert_object_group(subscriber_b, subscription_b, 1)
+      refute_receive {:moqx, ^publisher, %MOQX.Event.PublicationSubscriberLeft{}}, 100
 
       explicit_leave_started = System.monotonic_time(:millisecond)
       assert :ok = MOQX.unsubscribe(subscriber_b, subscription_b)
@@ -317,25 +306,42 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
     Port.open({:spawn_executable, @curley}, [:binary, :exit_status, :use_stdio, args: args])
   end
 
-  defp subscribe_when_routable(subscriber, track, timeout) do
+  defp receive_curley_frame_when_routable(track, timeout) do
     deadline = System.monotonic_time(:millisecond) + timeout
-    do_subscribe_when_routable(subscriber, track, deadline)
+    try_curley_subscription(track, deadline)
   end
 
-  defp do_subscribe_when_routable(subscriber, track, deadline) do
+  defp try_curley_subscription(track, deadline) do
+    assert {:ok, subscriber} = connect(:subscriber)
     assert {:ok, subscription} = MOQX.subscribe(subscriber, track)
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {:moqx, ^subscriber, %MOQX.Event.SubscriptionFailed{subscription: ^subscription}} ->
-        if remaining == 0 do
-          flunk("Curley publication did not become routable")
-        else
-          Process.sleep(min(10, remaining))
-          do_subscribe_when_routable(subscriber, track, deadline)
-        end
+        retry_curley_subscription(subscriber, track, deadline)
+
+      {:moqx, ^subscriber, %MOQX.Event.SubscriptionAccepted{subscription: ^subscription}} ->
+        assert_receive {:moqx, ^subscriber,
+                        %MOQX.Event.ObjectReceived{
+                          object: %MOQX.Object{subscription: ^subscription} = object
+                        }},
+                       remaining
+
+        {subscriber, subscription, object}
     after
-      min(remaining, 100) -> subscription
+      remaining -> retry_curley_subscription(subscriber, track, deadline)
+    end
+  end
+
+  defp retry_curley_subscription(subscriber, track, deadline) do
+    _result = MOQX.close(subscriber)
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    if remaining == 0 do
+      flunk("Curley publication did not become routable with a retained frame")
+    else
+      Process.sleep(min(10, remaining))
+      try_curley_subscription(track, deadline)
     end
   end
 

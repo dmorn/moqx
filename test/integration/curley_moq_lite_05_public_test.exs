@@ -32,7 +32,7 @@ defmodule MOQX.Integration.CurleyMOQLite05PublicTest do
                  publisher_max_latency: 45_000
                )
 
-      {subscriber, subscription} =
+      {subscriber, subscription, published_subscription} =
         connect_and_subscribe_when_routable(publisher, track, track_ref, 30_000)
 
       try do
@@ -67,6 +67,69 @@ defmodule MOQX.Integration.CurleyMOQLite05PublicTest do
                           }
                         }},
                        10_000
+
+        leave_started = System.monotonic_time(:millisecond)
+        assert :ok = MOQX.unsubscribe(subscriber, subscription)
+
+        assert_receive {:moqx, ^publisher,
+                        %MOQX.Event.PublicationSubscriberLeft{
+                          track: ^track,
+                          subscription: ^published_subscription
+                        }},
+                       45_000
+
+        assert System.monotonic_time(:millisecond) - leave_started < 45_000
+
+        {subscriber_after_leave, subscription_after_leave, published_after_leave} =
+          connect_and_subscribe_when_routable(publisher, track, track_ref, 30_000)
+
+        try do
+          assert :ok =
+                   MOQX.publish_object(publisher, track, %MOQX.Object{
+                     group_id: 2,
+                     object_id: 0,
+                     timestamp: 28_000,
+                     end_of_group?: true,
+                     payload: "subscription-ready-after-leave"
+                   })
+
+          assert_receive {:moqx, ^subscriber_after_leave,
+                          %MOQX.Event.SubscriptionAccepted{
+                            subscription: ^subscription_after_leave
+                          }},
+                         10_000
+
+          payload_after_leave = payload <> "-after-leave"
+
+          assert :ok =
+                   MOQX.publish_object(publisher, track, %MOQX.Object{
+                     group_id: 3,
+                     object_id: 0,
+                     timestamp: 29_000,
+                     end_of_group?: true,
+                     payload: payload_after_leave
+                   })
+
+          assert_receive {:moqx, ^subscriber_after_leave,
+                          %MOQX.Event.ObjectReceived{
+                            object: %MOQX.Object{
+                              subscription: ^subscription_after_leave,
+                              group_id: 3,
+                              timestamp: 29_000,
+                              payload: ^payload_after_leave
+                            }
+                          }},
+                         10_000
+        after
+          _result = MOQX.close(subscriber_after_leave)
+        end
+
+        assert_receive {:moqx, ^publisher,
+                        %MOQX.Event.PublicationSubscriberLeft{
+                          track: ^track,
+                          subscription: ^published_after_leave
+                        }},
+                       45_000
       after
         _result = MOQX.close(subscriber)
       end
@@ -105,13 +168,17 @@ defmodule MOQX.Integration.CurleyMOQLite05PublicTest do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:moqx, ^publisher, %MOQX.Event.PublicationSubscriberJoined{track: ^published_track}} ->
-        {subscriber, subscription}
+      {:moqx, ^publisher,
+       %MOQX.Event.PublicationSubscriberJoined{
+         track: ^published_track,
+         subscription: published_subscription
+       }} ->
+        {subscriber, subscription, published_subscription}
 
       {:moqx, ^subscriber, %MOQX.Event.SubscriptionFailed{subscription: ^subscription}} ->
         retry_public_subscription(subscriber, publisher, published_track, track_ref, deadline)
     after
-      min(remaining, 1_000) ->
+      remaining ->
         retry_public_subscription(subscriber, publisher, published_track, track_ref, deadline)
     end
   end

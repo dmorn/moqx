@@ -639,7 +639,9 @@ second after image startup.
 
 The public `cdn.moq.dev` check is intentionally opt-in. It publishes a unique,
 anonymous broadcast below `/anon`, waits for clustered route propagation, and
-subscribes through a separate MOQX connection:
+subscribes through a separate MOQX connection. It then observes the bounded
+final-subscriber leave and proves that a fresh subscriber receives a later
+group without restarting the publisher:
 
 ```bash
 scripts/run_curley_moq_lite_05_public.sh
