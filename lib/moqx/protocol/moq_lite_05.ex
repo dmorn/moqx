@@ -2121,7 +2121,7 @@ defmodule MOQX.Protocol.MOQLite05 do
   end
 
   defp protocol_violation(state, reason) do
-    Transition.error(state, reason, actions: [{:close_connection, 0x3}])
+    Transition.error(state, reason, actions: [{:close_connection, 0x0F}])
   end
 
   defp mirror_peer_termination(stream_id, :peer_finished_sending, _metadata) do
