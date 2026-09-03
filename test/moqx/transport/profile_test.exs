@@ -61,8 +61,18 @@ defmodule MOQX.Transport.ProfileTest do
       assert profile.stream_expectations.control_stream.count == :one
     end
 
+    test "returns the native QUIC MoQ Lite draft-05 fixture" do
+      assert {:ok, %Profile{} = profile} = Profile.fetch(:moq_lite_05)
+
+      assert profile.name == :moq_lite_05
+      assert profile.alpn == "moq-lite-05"
+      assert profile.capabilities.datagrams == false
+      assert profile.stream_expectations.setup_stream.direction == :unidirectional
+      assert profile.stream_expectations.application_streams.count == :many
+    end
+
     test "lists canonical profile names" do
-      assert Profile.names() == [:draft_14, :draft_16, :streams_only]
+      assert Profile.names() == [:draft_14, :draft_16, :moq_lite_05, :streams_only]
     end
 
     test "rejects unknown profiles" do

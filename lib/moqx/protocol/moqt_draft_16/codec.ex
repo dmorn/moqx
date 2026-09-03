@@ -186,7 +186,7 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
   end
 
   @spec encode_subgroup(non_neg_integer(), MOQX.Object.t()) :: binary()
-  def encode_subgroup(track_alias, %MOQX.Object{} = object) do
+  def encode_subgroup(track_alias, %MOQX.Object{timestamp: _timestamp} = object) do
     subgroup_id = object.subgroup_id || 0
     priority = object.publisher_priority || 127
     type = if object.end_of_group?, do: 0x1C, else: 0x14
@@ -203,7 +203,7 @@ defmodule MOQX.Protocol.MOQTDraft16.Codec do
   end
 
   @spec encode_datagram(non_neg_integer(), MOQX.Object.t()) :: binary()
-  def encode_datagram(track_alias, %MOQX.Object{} = object) do
+  def encode_datagram(track_alias, %MOQX.Object{timestamp: _timestamp} = object) do
     extensions = encode_object_extensions(object.extensions || [])
 
     type =

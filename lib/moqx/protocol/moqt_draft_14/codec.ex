@@ -109,7 +109,7 @@ defmodule MOQX.Protocol.MOQTDraft14.Codec do
   def unsubscribe(request_id), do: encode(%Messages.Unsubscribe{request_id: request_id})
 
   @spec encode_subgroup(non_neg_integer(), MOQX.Object.t()) :: binary()
-  def encode_subgroup(track_alias, %MOQX.Object{} = object) do
+  def encode_subgroup(track_alias, %MOQX.Object{timestamp: _timestamp} = object) do
     subgroup_id = object.subgroup_id || 0
     priority = object.publisher_priority || 127
 
