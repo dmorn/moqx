@@ -9,6 +9,7 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
     AnnounceOk,
     AnnounceRequest,
     Subscribe,
+    SubscribeUpdate,
     Track
   }
 
@@ -263,6 +264,65 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
                %MOQX.Operation.FinishPublishedSubscription{
                  subscription: published_subscription
                }
+             )
+  end
+
+  test "applies a SUBSCRIBE_UPDATE coalesced with the initial controlled SUBSCRIBE" do
+    {state, _publication, _published_track} = published_track_state(:controlled)
+    stream = peer_bidirectional_stream(10)
+
+    subscribe = %Subscribe{
+      subscribe_id: 43,
+      broadcast_path: "live",
+      track_name: "video",
+      subscriber_priority: 9,
+      group_start: 7
+    }
+
+    update = %SubscribeUpdate{
+      subscriber_priority: 11,
+      subscriber_ordered: true,
+      subscriber_max_latency: 100,
+      group_start: 8,
+      group_end: 12
+    }
+
+    bytes =
+      <<2, Codec.encode_subscribe(subscribe)::binary,
+        Codec.encode_subscribe_update(update)::binary>>
+
+    assert {:ok,
+            %Transition{
+              state: %{pending_publisher_subscriptions: %{43 => pending}}
+            }} = MOQLite05.handle_transport(state, {:stream_data, stream, bytes, %{}})
+
+    assert pending.subscribe.subscriber_priority == 11
+    assert pending.subscribe.subscriber_ordered
+    assert pending.subscribe.group_start == 8
+    assert pending.subscribe.group_end == 12
+  end
+
+  test "resets an unsupported bidirectional request without failing the connection" do
+    assert {:ok, %Transition{actions: [{:abort_stream_sending, {:peer_stream, 12}, 2}]}} =
+             MOQLite05.handle_transport(
+               %MOQLite05.State{phase: :ready},
+               {:stream_data, peer_bidirectional_stream(12), <<0x21, 0>>, %{}}
+             )
+  end
+
+  test "resets an inbound subscription for an unavailable publication" do
+    subscribe = %Subscribe{
+      subscribe_id: 44,
+      broadcast_path: "missing",
+      track_name: "video",
+      subscriber_priority: 9
+    }
+
+    assert {:ok, %Transition{actions: [{:abort_stream_sending, {:peer_stream, 14}, 0x10}]}} =
+             MOQLite05.handle_transport(
+               %MOQLite05.State{phase: :ready, role: :publisher},
+               {:stream_data, peer_bidirectional_stream(14),
+                <<2, Codec.encode_subscribe(subscribe)::binary>>, %{}}
              )
   end
 

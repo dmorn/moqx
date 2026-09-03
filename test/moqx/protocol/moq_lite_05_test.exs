@@ -27,13 +27,13 @@ defmodule MOQX.Protocol.MOQLite05Test do
     assert setup == <<1, 21, 2, 2, 15, "/live?token=one", 3, 1, 2>>
   end
 
-  test "classifies and validates the peer Setup Stream independently from Group Streams" do
+  test "accepts a server Setup without client-only Path or Role" do
     assert {:ok,
             %Transition{
               state: %{
                 peer_setup: %MOQX.Protocol.MOQLite05.Messages.Setup{
-                  path: "/publish?token=one",
-                  role: :publisher
+                  path: nil,
+                  role: :both
                 },
                 group_decoders: %{}
               },
@@ -41,6 +41,16 @@ defmodule MOQX.Protocol.MOQLite05Test do
             }} =
              MOQLite05.handle_transport(
                %MOQLite05.State{phase: :ready, role: :subscriber},
+               {:stream_data, peer_unidirectional_stream(2), <<1, 1, 0>>, %{}}
+             )
+  end
+
+  test "rejects client-only Path and Role received from the server" do
+    state = %MOQLite05.State{phase: :ready, role: :subscriber}
+
+    assert {:error, :peer_setup_contains_client_parameters, %Transition{}} =
+             MOQLite05.handle_transport(
+               state,
                {:stream_data, peer_unidirectional_stream(2),
                 <<1, 24, 2, 2, 18, "/publish?token=one", 3, 1, 1>>, %{}}
              )
@@ -252,6 +262,96 @@ defmodule MOQX.Protocol.MOQLite05Test do
              MOQLite05.handle_transport(
                state,
                {:stream_event, stream, :peer_finished_sending, %{}}
+             )
+  end
+
+  test "buffers Group frames and their boundary until TRACK_INFO accepts the subscription" do
+    operation = %MOQX.Operation.Subscribe{
+      track: %MOQX.TrackRef{namespace: ["live"], track: "video"}
+    }
+
+    {:ok, started} = MOQLite05.handle_operation(%MOQLite05.State{phase: :ready}, operation)
+    [{:subscription_started, subscription}] = started.events
+
+    {:ok, subscribed} =
+      MOQLite05.handle_transport(
+        started.state,
+        {:stream_data, :subscribe, <<0, 1, 7>>, %{logical_stream: {:subscribe, 0}}}
+      )
+
+    stream = peer_unidirectional_stream(22)
+
+    assert {:ok, %Transition{state: grouped, events: []}} =
+             MOQLite05.handle_transport(
+               subscribed.state,
+               {:stream_data, stream, <<0, 2, 0, 7, 0x80, 0x02, 0xBF, 0x20, 1, "a">>, %{}}
+             )
+
+    assert {:ok, %Transition{state: finished, events: []}} =
+             MOQLite05.handle_transport(
+               grouped,
+               {:stream_event, stream, :peer_finished_sending, %{}}
+             )
+
+    assert {:ok,
+            %Transition{
+              events: [
+                %MOQX.Event.SubscriptionAccepted{subscription: ^subscription},
+                %MOQX.Event.ObjectReceived{
+                  object: %MOQX.Object{subscription: ^subscription, payload: "a"}
+                },
+                %MOQX.Event.SubgroupEnded{
+                  subscription: ^subscription,
+                  group_id: 7,
+                  outcome: :complete
+                }
+              ]
+            }} =
+             MOQLite05.handle_transport(
+               finished,
+               {:stream_data, :track, <<8, 17, 0, 0x43, 0xE8, 0x80, 0x01, 0x5F, 0x90>>,
+                %{logical_stream: {:track, 0}}}
+             )
+  end
+
+  test "fails and cleans up a Track Stream that resets or FINs incomplete" do
+    operation = %MOQX.Operation.Subscribe{
+      track: %MOQX.TrackRef{namespace: ["live"], track: "video"}
+    }
+
+    for {event, metadata} <- [
+          {:peer_aborted_sending, %{error_code: 7}},
+          {:peer_finished_sending, %{}}
+        ] do
+      {:ok, started} = MOQLite05.handle_operation(%MOQLite05.State{phase: :ready}, operation)
+      [{:subscription_started, subscription}] = started.events
+
+      {:ok, partial} =
+        MOQLite05.handle_transport(
+          started.state,
+          {:stream_data, :track, <<8, 17>>, %{logical_stream: {:track, 0}}}
+        )
+
+      assert {:ok,
+              %Transition{
+                state: %{subscriptions: %{}},
+                events: [%MOQX.Event.SubscriptionFailed{subscription: ^subscription}]
+              }} =
+               MOQLite05.handle_transport(
+                 partial.state,
+                 {:stream_event, :track, event, Map.put(metadata, :logical_stream, {:track, 0})}
+               )
+    end
+  end
+
+  test "resets an unknown peer unidirectional stream without failing the connection" do
+    assert {:ok,
+            %Transition{
+              actions: [{:abort_stream_receiving, {:peer_stream, 30}, 2}]
+            }} =
+             MOQLite05.handle_transport(
+               %MOQLite05.State{phase: :ready},
+               {:stream_data, peer_unidirectional_stream(30), <<0x21, 0>>, %{}}
              )
   end
 
