@@ -48,7 +48,8 @@ defmodule MOQX.Protocol.MOQLite05Test do
   test "rejects client-only Path and Role received from the server" do
     state = %MOQLite05.State{phase: :ready, role: :subscriber}
 
-    assert {:error, :peer_setup_contains_client_parameters, %Transition{}} =
+    assert {:error, :peer_setup_contains_client_parameters,
+            %Transition{actions: [{:close_connection, 0x3}]}} =
              MOQLite05.handle_transport(
                state,
                {:stream_data, peer_unidirectional_stream(2),
@@ -81,7 +82,7 @@ defmodule MOQX.Protocol.MOQLite05Test do
               events: [{:subscription_started, subscription}],
               actions: [
                 {:open_stream, {:track, 0}, [direction: :bidirectional, active: true],
-                 track_bytes},
+                 track_bytes, [finish: true]},
                 {:open_stream, {:subscribe, 0}, [direction: :bidirectional, active: true],
                  subscribe_bytes}
               ]
@@ -344,6 +345,81 @@ defmodule MOQX.Protocol.MOQLite05Test do
     end
   end
 
+  test "keeps early Group events behind SUBSCRIBE_OK when TRACK_INFO arrives first" do
+    {started, subscription} = started_subscription()
+    stream = peer_unidirectional_stream(23)
+
+    {:ok, grouped} =
+      MOQLite05.handle_transport(
+        started,
+        {:stream_data, stream, <<0, 2, 0, 7, 0x80, 0x02, 0xBF, 0x20, 1, "a">>, %{}}
+      )
+
+    {:ok, finished} =
+      MOQLite05.handle_transport(
+        grouped.state,
+        {:stream_event, stream, :peer_finished_sending, %{}}
+      )
+
+    assert {:ok, %Transition{state: tracked, events: []}} =
+             receive_track_info(finished.state)
+
+    assert {:ok,
+            %Transition{
+              events: [
+                %MOQX.Event.SubscriptionAccepted{subscription: ^subscription},
+                %MOQX.Event.ObjectReceived{object: %MOQX.Object{payload: "a"}},
+                %MOQX.Event.SubgroupEnded{group_id: 7}
+              ]
+            }} =
+             MOQLite05.handle_transport(
+               tracked,
+               {:stream_data, :subscribe, <<0, 1, 7>>, %{logical_stream: {:subscribe, 0}}}
+             )
+  end
+
+  test "delays Subscribe completion until TRACK_INFO releases buffered Group events" do
+    {started, subscription} = started_subscription()
+
+    {:ok, subscribed} =
+      MOQLite05.handle_transport(
+        started,
+        {:stream_data, :subscribe, <<0, 1, 7, 1, 1, 7>>, %{logical_stream: {:subscribe, 0}}}
+      )
+
+    stream = peer_unidirectional_stream(25)
+
+    {:ok, grouped} =
+      MOQLite05.handle_transport(
+        subscribed.state,
+        {:stream_data, stream, <<0, 2, 0, 7, 0x80, 0x02, 0xBF, 0x20, 1, "a">>, %{}}
+      )
+
+    {:ok, bounded} =
+      MOQLite05.handle_transport(
+        grouped.state,
+        {:stream_event, stream, :peer_finished_sending, %{}}
+      )
+
+    assert {:ok, %Transition{state: waiting, events: []}} =
+             MOQLite05.handle_transport(
+               bounded.state,
+               {:stream_event, :subscribe, :peer_finished_sending,
+                %{logical_stream: {:subscribe, 0}}}
+             )
+
+    assert {:ok,
+            %Transition{
+              state: %{subscriptions: %{}},
+              events: [
+                %MOQX.Event.SubscriptionAccepted{subscription: ^subscription},
+                %MOQX.Event.ObjectReceived{object: %MOQX.Object{payload: "a"}},
+                %MOQX.Event.SubgroupEnded{group_id: 7},
+                %MOQX.Event.SubscriptionDone{subscription: ^subscription}
+              ]
+            }} = receive_track_info(waiting)
+  end
+
   test "resets an unknown peer unidirectional stream without failing the connection" do
     assert {:ok,
             %Transition{
@@ -446,17 +522,24 @@ defmodule MOQX.Protocol.MOQLite05Test do
 
     assert {:ok,
             %Transition{
-              state: %{group_decoders: %{}, subscriptions: %{0 => _entry}},
-              events: [
-                %MOQX.Event.SubgroupEnded{
-                  subscription: ^subscription,
-                  group_id: 7,
-                  subgroup_id: nil,
-                  outcome: :reset,
-                  error_code: 7,
-                  end_of_group?: false
+              state: %{
+                group_decoders: %{},
+                subscriptions: %{
+                  0 => %{
+                    pending_group_events: [
+                      %MOQX.Event.SubgroupEnded{
+                        subscription: ^subscription,
+                        group_id: 7,
+                        subgroup_id: nil,
+                        outcome: :reset,
+                        error_code: 7,
+                        end_of_group?: false
+                      }
+                    ]
+                  }
                 }
-              ]
+              },
+              events: []
             }} =
              MOQLite05.handle_transport(
                state,
@@ -552,5 +635,23 @@ defmodule MOQX.Protocol.MOQLite05Test do
         receive_side?: true
       }
     }
+  end
+
+  defp started_subscription do
+    operation = %MOQX.Operation.Subscribe{
+      track: %MOQX.TrackRef{namespace: ["live"], track: "video"}
+    }
+
+    {:ok, started} = MOQLite05.handle_operation(%MOQLite05.State{phase: :ready}, operation)
+    [{:subscription_started, subscription}] = started.events
+    {started.state, subscription}
+  end
+
+  defp receive_track_info(state) do
+    MOQLite05.handle_transport(
+      state,
+      {:stream_data, :track, <<8, 17, 0, 0x43, 0xE8, 0x80, 0x01, 0x5F, 0x90>>,
+       %{logical_stream: {:track, 0}}}
+    )
   end
 end

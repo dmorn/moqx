@@ -420,6 +420,16 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
               actions: [{:send_stream, {:peer_stream, 16}, ^expected, []}]
             }} = MOQLite05.handle_transport(state, {:stream_data, stream, bytes, %{}})
 
+    assert {:ok,
+            %Transition{
+              state: %{announce_streams: %{}},
+              actions: [{:send_stream, {:peer_stream, 16}, <<>>, [finish: true]}]
+            }} =
+             MOQLite05.handle_transport(
+               announced,
+               {:stream_event, stream, :peer_finished_sending, %{}}
+             )
+
     ended =
       Codec.encode_announce_broadcast(%AnnounceBroadcast{
         status: :ended,
@@ -588,6 +598,37 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
                published.state,
                %MOQX.Operation.FinishPublication{publication: publication}
              )
+  end
+
+  test "mirrors a pending controlled Subscribe FIN after cancelling its decision" do
+    {state, _publication, _track} = published_track_state(:controlled)
+    stream = peer_bidirectional_stream(30)
+
+    subscribe = %Subscribe{
+      subscribe_id: 34,
+      broadcast_path: "live",
+      track_name: "video",
+      subscriber_priority: 9
+    }
+
+    bytes = <<2, Codec.encode_subscribe(subscribe)::binary>>
+    {:ok, pending} = MOQLite05.handle_transport(state, {:stream_data, stream, bytes, %{}})
+    [%MOQX.Event.PublicationSubscriptionRequested{request: request}] = pending.events
+
+    assert {:ok,
+            %Transition{
+              state: %{pending_publisher_subscriptions: %{}},
+              actions: [
+                {:cancel_timer, {:publisher_subscription_decision, handle}},
+                {:send_stream, {:peer_stream, 30}, <<>>, [finish: true]}
+              ]
+            }} =
+             MOQLite05.handle_transport(
+               pending.state,
+               {:stream_event, stream, :peer_finished_sending, %{}}
+             )
+
+    assert request.handle == handle
   end
 
   test "connection closure releases every active subscriber handle" do

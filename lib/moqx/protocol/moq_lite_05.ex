@@ -326,6 +326,7 @@ defmodule MOQX.Protocol.MOQLite05 do
         track_buffer: <<>>,
         subscribe_buffer: <<>>,
         subscribe_end: nil,
+        subscribe_finished?: false,
         pending_group_events: [],
         accounted_ranges: [],
         processed_group_streams: 0,
@@ -362,7 +363,7 @@ defmodule MOQX.Protocol.MOQLite05 do
         events: [{:subscription_started, subscription}],
         actions: [
           {:open_stream, {:track, subscribe_id}, [direction: :bidirectional, active: true],
-           stream_bytes(0x6, Codec.encode_track(track))},
+           stream_bytes(0x6, Codec.encode_track(track)), [finish: true]},
           {:open_stream, {:subscribe, subscribe_id}, [direction: :bidirectional, active: true],
            stream_bytes(0x2, Codec.encode_subscribe(subscribe))}
         ]
@@ -1092,7 +1093,7 @@ defmodule MOQX.Protocol.MOQLite05 do
 
           Transition.ok(next_state)
         else
-          {:error, reason} -> Transition.error(state, reason)
+          {:error, reason} -> protocol_violation(state, reason)
         end
 
       :more ->
@@ -1104,12 +1105,12 @@ defmodule MOQX.Protocol.MOQLite05 do
         Transition.ok(next_state)
 
       _other ->
-        Transition.error(state, :invalid_setup_stream)
+        protocol_violation(state, :invalid_setup_stream)
     end
   end
 
   defp decode_peer_setup(state, _stream_id, _buffer),
-    do: Transition.error(state, :duplicate_setup_stream)
+    do: protocol_violation(state, :duplicate_setup_stream)
 
   defp validate_server_setup(%Setup{path: nil, role: :both}), do: :ok
   defp validate_server_setup(%Setup{}), do: {:error, :peer_setup_contains_client_parameters}
@@ -1538,12 +1539,12 @@ defmodule MOQX.Protocol.MOQLite05 do
     end)
   end
 
-  defp finish_inbound_subscription(state, stream_id, event, _metadata) do
+  defp finish_inbound_subscription(state, stream_id, event, metadata) do
     case Enum.find(state.publisher_subscriptions, fn {_id, entry} ->
            entry.stream_id == stream_id
          end) do
       {subscribe_id, entry} ->
-        actions = inbound_subscription_finish_actions(entry, event)
+        actions = inbound_subscription_finish_actions(entry, event, metadata)
 
         next_state = %{
           state
@@ -1563,11 +1564,11 @@ defmodule MOQX.Protocol.MOQLite05 do
         )
 
       nil ->
-        finish_pending_inbound_subscription(state, stream_id)
+        finish_pending_inbound_subscription(state, stream_id, event, metadata)
     end
   end
 
-  defp finish_pending_inbound_subscription(state, stream_id) do
+  defp finish_pending_inbound_subscription(state, stream_id, event, metadata) do
     case Enum.find(state.pending_publisher_subscriptions, fn {_id, entry} ->
            entry.stream_id == stream_id
          end) do
@@ -1585,16 +1586,17 @@ defmodule MOQX.Protocol.MOQLite05 do
           ],
           actions: [
             {:cancel_timer, {:publisher_subscription_decision, entry.request.handle}}
+            | mirror_peer_termination(stream_id, event, metadata)
           ]
         )
 
       nil ->
         cond do
           Map.has_key?(state.announce_streams, stream_id) ->
-            Transition.ok(%{
-              state
-              | announce_streams: Map.delete(state.announce_streams, stream_id)
-            })
+            Transition.ok(
+              %{state | announce_streams: Map.delete(state.announce_streams, stream_id)},
+              actions: mirror_peer_termination(stream_id, event, metadata)
+            )
 
           Map.has_key?(state.peer_stream_buffers, stream_id) ->
             Transition.error(state, :incomplete_peer_stream)
@@ -1605,13 +1607,15 @@ defmodule MOQX.Protocol.MOQLite05 do
     end
   end
 
-  defp inbound_subscription_finish_actions(entry, :peer_finished_sending) do
+  defp inbound_subscription_finish_actions(entry, :peer_finished_sending, _metadata) do
     active_group_abort_actions(entry) ++
       [{:send_stream, {:peer_stream, entry.stream_id}, <<>>, [finish: true]}]
   end
 
-  defp inbound_subscription_finish_actions(entry, _event),
-    do: active_group_abort_actions(entry)
+  defp inbound_subscription_finish_actions(entry, event, metadata) do
+    active_group_abort_actions(entry) ++
+      mirror_peer_termination(entry.stream_id, event, metadata)
+  end
 
   defp active_group_abort_actions(%{active_group: nil}), do: []
 
@@ -1864,14 +1868,22 @@ defmodule MOQX.Protocol.MOQLite05 do
       end
 
     {entry, pending_events} =
-      if match?(%MOQX.TrackInfo{}, entry.track_info) do
+      if entry.accepted? do
         {%{entry | pending_group_events: []}, Enum.reverse(entry.pending_group_events)}
       else
         {entry, []}
       end
 
     next_state = put_subscription(state, subscribe_id, entry)
-    Transition.ok(next_state, events: acceptance_events ++ pending_events)
+    events = acceptance_events ++ pending_events
+
+    if entry.accepted? and entry.subscribe_finished? do
+      next_state
+      |> finish_subscription(subscribe_id)
+      |> prepend_transition_events(events)
+    else
+      Transition.ok(next_state, events: events)
+    end
   end
 
   defp put_subscription(state, subscribe_id, entry) do
@@ -1897,7 +1909,7 @@ defmodule MOQX.Protocol.MOQLite05 do
     end
   end
 
-  defp receive_frame(state, %{track_info: %MOQX.TrackInfo{}}, _subscribe_id, event, events) do
+  defp receive_frame(state, %{accepted?: true}, _subscribe_id, event, events) do
     {:cont, {:ok, state, [event | events]}}
   end
 
@@ -1985,6 +1997,10 @@ defmodule MOQX.Protocol.MOQLite05 do
 
       %{subscribe_buffer: buffer} when buffer != <<>> ->
         Transition.error(state, :incomplete_subscribe_stream)
+
+      %{accepted?: false, accepted_group: group} = entry when not is_nil(group) ->
+        put_subscription(state, subscribe_id, %{entry | subscribe_finished?: true})
+        |> Transition.ok()
 
       %{accepted_group: nil, subscribe_end: last} = entry when not is_nil(last) ->
         complete_subscription(state, subscribe_id, entry)
@@ -2085,7 +2101,7 @@ defmodule MOQX.Protocol.MOQLite05 do
 
   defp emit_or_queue_group_event(state, subscribe_id, event) do
     case state.subscriptions[subscribe_id] do
-      %{track_info: %MOQX.TrackInfo{}} ->
+      %{accepted?: true} ->
         Transition.ok(state, events: [event])
 
       entry when not is_nil(entry) ->
@@ -2103,6 +2119,26 @@ defmodule MOQX.Protocol.MOQLite05 do
       actions: [{:abort_stream_sending, {:peer_stream, stream_id}, error_code}]
     )
   end
+
+  defp protocol_violation(state, reason) do
+    Transition.error(state, reason, actions: [{:close_connection, 0x3}])
+  end
+
+  defp mirror_peer_termination(stream_id, :peer_finished_sending, _metadata) do
+    [{:send_stream, {:peer_stream, stream_id}, <<>>, [finish: true]}]
+  end
+
+  defp mirror_peer_termination(stream_id, :peer_aborted_sending, metadata) do
+    [{:abort_stream_sending, {:peer_stream, stream_id}, metadata[:error_code] || 0}]
+  end
+
+  defp mirror_peer_termination(_stream_id, _event, _metadata), do: []
+
+  defp prepend_transition_events({:ok, %Transition{} = transition}, events) do
+    {:ok, %{transition | events: events ++ transition.events}}
+  end
+
+  defp prepend_transition_events(error, _events), do: error
 
   defp drop_subscription_state(state, subscribe_id) do
     group_decoders =
