@@ -49,7 +49,7 @@ defmodule MOQX.Protocol.MOQLite05Test do
     state = %MOQLite05.State{phase: :ready, role: :subscriber}
 
     assert {:error, :peer_setup_contains_client_parameters,
-            %Transition{actions: [{:close_connection, 0x3}]}} =
+            %Transition{actions: [{:close_connection, 0x0F}]}} =
              MOQLite05.handle_transport(
                state,
                {:stream_data, peer_unidirectional_stream(2),
