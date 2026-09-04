@@ -129,6 +129,12 @@ defmodule MOQX.Runtime.ConnectionDriver do
     call(pid, {:operation, %Operation.PublishObject{track: track, object: object}}, 5_000)
   end
 
+  @spec withdraw_track(MOQX.Client.t(), MOQX.PublishedTrack.t(), keyword()) ::
+          :ok | {:error, term()}
+  def withdraw_track(%MOQX.Client{pid: pid}, track, options) do
+    call(pid, {:operation, %Operation.WithdrawTrack{track: track, options: options}}, 5_000)
+  end
+
   @spec finish_publication(MOQX.Client.t(), MOQX.Publication.t(), keyword()) ::
           :ok | {:error, term()}
   def finish_publication(%MOQX.Client{pid: pid}, publication, options) do
@@ -607,6 +613,7 @@ defmodule MOQX.Runtime.ConnectionDriver do
     do: true
 
   defp operation_reply_event?({:object_published, _track}), do: true
+  defp operation_reply_event?({:track_withdrawn, _track}), do: true
   defp operation_reply_event?({:publication_finished, _publication}), do: true
   defp operation_reply_event?({:published_subscription_finished, _subscription}), do: true
   defp operation_reply_event?(:connection_ended), do: true

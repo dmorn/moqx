@@ -14,6 +14,7 @@ defmodule MOQX.Operation do
           | AcceptPublicationSubscription.t()
           | RejectPublicationSubscription.t()
           | PublishObject.t()
+          | WithdrawTrack.t()
           | FinishPublishedSubscription.t()
           | FinishPublication.t()
           | Close.t()
@@ -106,6 +107,15 @@ defmodule MOQX.Operation do
     defstruct [:track, :object]
 
     @type t :: %__MODULE__{track: MOQX.PublishedTrack.t(), object: MOQX.Object.t()}
+  end
+
+  defmodule WithdrawTrack do
+    @moduledoc "Withdraws one registered published track without ending its publication."
+
+    @enforce_keys [:track]
+    defstruct [:track, options: []]
+
+    @type t :: %__MODULE__{track: MOQX.PublishedTrack.t(), options: keyword()}
   end
 
   defmodule FinishPublication do

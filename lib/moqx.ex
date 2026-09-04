@@ -53,6 +53,16 @@ defmodule MOQX do
           | :malformed_track
           | :update_failed
 
+  @typedoc "Error returned by `withdraw_track/3`."
+  @type withdraw_track_error ::
+          :unknown_published_track
+          | :wrong_client_published_track
+          | :unsupported_completion_status
+          | :invalid_track_completion
+          | :timeout
+          | {:connection_closed, term()}
+          | {:transport_action_failed, term()}
+
   @typedoc "Option accepted by `add_track/4`."
   @type published_track_option ::
           {:retention, :live | :latest | :all}
@@ -183,6 +193,22 @@ defmodule MOQX do
           :ok | {:error, term()}
   def publish_object(client, track, object) do
     ConnectionDriver.publish_object(client, track, object)
+  end
+
+  @doc """
+  Withdraws one registered track while keeping its publication and siblings active.
+
+  The track is unavailable to new subscribers before this call returns. The
+  selected protocol maps `:status` to its native terminal code. The default
+  status is `:track_ended`.
+  """
+  @spec withdraw_track(
+          MOQX.Client.t(),
+          MOQX.PublishedTrack.t(),
+          [{:status, published_subscription_status()} | {:reason, binary()}]
+        ) :: :ok | {:error, withdraw_track_error()}
+  def withdraw_track(client, track, options \\ []) do
+    ConnectionDriver.withdraw_track(client, track, options)
   end
 
   @doc """
