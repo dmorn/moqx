@@ -15,6 +15,8 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=curley /usr/local/bin/moq /usr/local/bin/moq
+COPY --from=curley /usr/local/bin/moqx-curley-timestamp-probe \
+    /usr/local/bin/moqx-curley-timestamp-probe
 
 ENV MIX_ENV=test
 WORKDIR /workspace

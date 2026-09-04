@@ -7,6 +7,7 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
   @relay "moql://curley-moq-lite-05-relay:443/"
   @ca_file "/certs/ca.pem"
   @curley "/usr/local/bin/moq"
+  @curley_timestamp_probe "/usr/local/bin/moqx-curley-timestamp-probe"
   @h264_delimiter <<0, 0, 0, 1, 9, 0xF0, 0, 0, 0, 1, 12, 0x80>>
   @h264 Base.decode64!(
           "AAAAAWdCwAraewEQAAADABAAAAMAKPEiagAAAAFozg/IAAABBgX//0/cRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIyIGIzNTYwNWEgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MSBkZWJsb2NrPTA6MDowIGFuYWx5c2U9MDowIG1lPWRpYSBzdWJtZT0wIHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTAgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0wIDh4OGRjdD0wIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PTAgdGhyZWFkcz0xIGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MCB3ZWlnaHRwPTAga2V5aW50PTI1MCBrZXlpbnRfbWluPTEgc2NlbmVjdXQ9MCBpbnRyYV9yZWZyZXNoPTAgcmM9Y3JmIG1idHJlZT0wIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTAAgAAAAWWIhDomKAAJAuA="
@@ -97,7 +98,7 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
     end
   end
 
-  test "official Curley subscriber exports the exact timestamped MOQX frame" do
+  test "official Curley subscriber exports the exact MOQX H264 frame" do
     namespace = unique_namespace("curley-subscriber")
     assert {:ok, publisher} = connect(:publisher)
 
@@ -127,6 +128,47 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
         assert receive_port_bytes(curley, byte_size(@h264), 5_000) == @h264
       after
         Port.close(curley)
+      end
+    after
+      _result = MOQX.close(publisher)
+    end
+  end
+
+  test "Curley probe observes the MoQ Lite frame timestamp independently" do
+    namespace = unique_namespace("curley-timestamp-probe")
+    assert {:ok, publisher} = connect(:publisher)
+
+    try do
+      assert {:ok, publication} = MOQX.publish(publisher, namespace)
+
+      assert_receive {:moqx, ^publisher, %MOQX.Event.PublicationReady{publication: ^publication}},
+                     5_000
+
+      assert {:ok, track} = add_track(publisher, publication, "data")
+
+      probe =
+        open_curley_executable(@curley_timestamp_probe, [
+          "--broadcast",
+          Enum.join(namespace, "/"),
+          "--track",
+          "data"
+        ])
+
+      try do
+        assert_receive {:moqx, ^publisher,
+                        %MOQX.Event.PublicationSubscriberJoined{track: ^track}},
+                       5_000
+
+        payload = legacy_frame(123, "independent-timestamp-sentinel")
+        assert :ok = publish(publisher, track, 456_000, payload)
+
+        expected =
+          "group=0 timestamp_us=456000 payload_hex=#{Base.encode16(payload, case: :lower)}\n"
+
+        assert receive_port_bytes(probe, byte_size(expected), 5_000) == expected
+        assert_receive {^probe, {:exit_status, 0}}, 5_000
+      after
+        close_port(probe)
       end
     after
       _result = MOQX.close(publisher)
@@ -182,6 +224,13 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
 
       assert System.monotonic_time(:millisecond) - explicit_leave_started < 5_000
 
+      refute_receive {:moqx, ^publisher,
+                      %MOQX.Event.PublicationSubscriberLeft{
+                        track: ^track,
+                        subscription: ^published_subscription
+                      }},
+                     250
+
       assert {:ok, subscriber_abrupt} = connect(:subscriber)
       close_on_exit(subscriber_abrupt)
       assert {:ok, subscription_abrupt} = MOQX.subscribe(subscriber_abrupt, track_ref)
@@ -203,6 +252,13 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
                         subscription: ^published_abrupt
                       }},
                      5_000
+
+      refute_receive {:moqx, ^publisher,
+                      %MOQX.Event.PublicationSubscriberLeft{
+                        track: ^track,
+                        subscription: ^published_abrupt
+                      }},
+                     250
 
       assert {:ok, subscriber_c} = connect(:subscriber)
       close_on_exit(subscriber_c)
@@ -284,11 +340,19 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
 
   defp close_on_exit(client), do: on_exit(fn -> MOQX.close(client) end)
 
+  defp close_port(port) do
+    if Port.info(port), do: Port.close(port)
+  end
+
   defp catalog_payload do
     ~s({"video":{"renditions":{".avc3":{"codec":"avc3.42c00a","codedWidth":16,"codedHeight":16,"container":{"kind":"legacy"}}}},"audio":{"renditions":{}}})
   end
 
   defp open_curley(arguments) do
+    open_curley_executable(@curley, arguments)
+  end
+
+  defp open_curley_executable(executable, arguments) do
     args =
       [
         "--log-level",
@@ -303,7 +367,7 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
         "localhost"
       ] ++ arguments
 
-    Port.open({:spawn_executable, @curley}, [:binary, :exit_status, :use_stdio, args: args])
+    Port.open({:spawn_executable, executable}, [:binary, :exit_status, :use_stdio, args: args])
   end
 
   defp receive_curley_frame_when_routable(track, timeout) do

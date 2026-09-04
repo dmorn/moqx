@@ -629,13 +629,15 @@ scripts/run_curley_moq_lite_05_integration.sh
 
 The integration matrix verifies an exact timestamped payload through MOQX in
 both roles, then runs the official Curley CLI as an independent H.264 publisher
-and subscriber in the opposite directions. It also verifies relay fan-out and
-final-subscriber lifecycle: A can leave while B continues receiving; B's final
-explicit departure produces the upstream leave within 5 seconds; an abrupt
-final disconnect also leaves; and a later C receives a fresh group without a
-publisher restart. The configured publisher maximum latency remains the issue's
-45-second upper bound. The complete local matrix currently finishes in under a
-second after image startup.
+and subscriber in the opposite directions. A one-shot probe built against that
+same pinned Curley revision independently asserts the received raw FRAME
+timestamp while using a different timestamp inside the legacy H.264 payload.
+It also verifies relay fan-out and final-subscriber lifecycle: A can leave while
+B continues receiving; B's final explicit departure produces the upstream leave
+within 5 seconds; an abrupt final disconnect also leaves; and a later C receives
+a fresh group without a publisher restart. The configured publisher maximum
+latency remains the issue's 45-second upper bound. The complete local matrix
+currently finishes in under a second after image startup.
 
 The public `cdn.moq.dev` check is intentionally opt-in. It publishes a unique,
 anonymous broadcast below `/anon`, waits for clustered route propagation, and

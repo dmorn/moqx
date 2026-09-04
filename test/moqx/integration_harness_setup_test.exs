@@ -62,7 +62,10 @@ defmodule MOQX.IntegrationHarnessSetupTest do
 
     assert compose =~ "curley-moq-lite-05-relay:"
     assert compose =~ source_ref
-    assert dockerfile =~ "cargo build --locked --release -p moq-relay -p moq-cli"
+    assert dockerfile =~ "cargo build --locked --release"
+    assert dockerfile =~ "-p moq-relay"
+    assert dockerfile =~ "-p moq-cli"
+    assert dockerfile =~ "-p moq-native --example moqx_curley_timestamp_probe"
     assert runner =~ "up --build --wait curley-moq-lite-05-relay"
     assert runner =~ "run --rm moqx-curley-moq-lite-05-test"
     assert compose =~ "moqx-curley-moq-lite-05-public-test:"

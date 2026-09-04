@@ -12,13 +12,21 @@ RUN test -n "${MOQ_REF}"
 RUN git clone --filter=blob:none "${MOQ_REPOSITORY}" /src && \
     git -C /src checkout --detach "${MOQ_REF}"
 
+COPY docker/integration/curley/timestamp_probe.rs \
+    /src/rs/moq-native/examples/moqx_curley_timestamp_probe.rs
+
 WORKDIR /src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --locked --release -p moq-relay -p moq-cli && \
+    cargo build --locked --release \
+      -p moq-relay \
+      -p moq-cli \
+      -p moq-native --example moqx_curley_timestamp_probe && \
     cp /src/target/release/moq-relay /usr/local/bin/moq-relay && \
-    cp /src/target/release/moq /usr/local/bin/moq
+    cp /src/target/release/moq /usr/local/bin/moq && \
+    cp /src/target/release/examples/moqx_curley_timestamp_probe \
+      /usr/local/bin/moqx-curley-timestamp-probe
 
 FROM ${RUNTIME_IMAGE}
 
@@ -30,6 +38,8 @@ RUN apt-get update && \
 
 COPY --from=builder /usr/local/bin/moq-relay /usr/local/bin/moq-relay
 COPY --from=builder /usr/local/bin/moq /usr/local/bin/moq
+COPY --from=builder /usr/local/bin/moqx-curley-timestamp-probe \
+    /usr/local/bin/moqx-curley-timestamp-probe
 
 LABEL org.opencontainers.image.source="https://github.com/moq-dev/moq"
 LABEL org.opencontainers.image.revision="${MOQ_REF}"
