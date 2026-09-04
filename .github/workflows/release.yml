@@ -80,7 +80,7 @@ jobs:
           version="${TAG_NAME#v}"
           notes_file="$RUNNER_TEMP/release-notes.md"
           awk -v version="$version" '
-            $0 ~ "^## \\\\[" version "\\\\]" { printing = 1; next }
+            index($0, "## [" version "]") == 1 { printing = 1; next }
             printing && /^## \[/ { exit }
             printing { print }
           ' CHANGELOG.md > "$notes_file"
