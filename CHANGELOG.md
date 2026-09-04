@@ -19,6 +19,8 @@ All notable changes to `moqx` will be documented in this file.
 - Reconciled peer-reset MoQ Lite Group streams with publication state before
   withdrawal, preventing stale stream-abort actions from suppressing terminal
   subscriber events.
+- Fixed the tag workflow's changelog-section extraction so GitHub release notes
+  are generated reliably from version headings.
 
 ## [0.8.0] - 2026-09-04
 
