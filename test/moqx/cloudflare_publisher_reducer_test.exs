@@ -8,7 +8,8 @@ defmodule MOQX.CloudflarePublisherReducerTest do
     FinishPublishedSubscription,
     Publish,
     PublishObject,
-    RejectPublicationSubscription
+    RejectPublicationSubscription,
+    WithdrawTrack
   }
 
   alias MOQX.Protocol.CloudflareDraft14
@@ -146,6 +147,67 @@ defmodule MOQX.CloudflarePublisherReducerTest do
       })
 
     assert [{:send_stream, :control, ^expected, []}] = result.actions
+  end
+
+  test "withdrawing one draft-14 track preserves its namespace and sibling" do
+    state = %State{phase: :ready, handle_scope: make_ref()}
+    {:ok, published} = CloudflareDraft14.handle_operation(state, %Publish{namespace: ["live"]})
+    {:publication_started, publication} = List.first(published.events)
+
+    {:ok, video_added} =
+      CloudflareDraft14.handle_operation(published.state, %AddTrack{
+        publication: publication,
+        track: "video"
+      })
+
+    {:track_added, video} = List.first(video_added.events)
+
+    {:ok, audio_added} =
+      CloudflareDraft14.handle_operation(video_added.state, %AddTrack{
+        publication: publication,
+        track: "audio"
+      })
+
+    {:track_added, audio} = List.first(audio_added.events)
+
+    foreign_video = %{video | scope: make_ref()}
+
+    assert {:error, :wrong_client_published_track, %Transition{state: foreign_unchanged}} =
+             CloudflareDraft14.handle_operation(audio_added.state, %WithdrawTrack{
+               track: foreign_video
+             })
+
+    assert foreign_unchanged == audio_added.state
+
+    assert {:error, :invalid_track_completion, %Transition{state: invalid_unchanged}} =
+             CloudflareDraft14.handle_operation(audio_added.state, %WithdrawTrack{
+               track: video,
+               options: [unknown: true]
+             })
+
+    assert invalid_unchanged == audio_added.state
+
+    assert {:ok,
+            %Transition{
+              state: withdrawn,
+              events: [{:track_withdrawn, ^video}],
+              actions: []
+            }} =
+             CloudflareDraft14.handle_operation(audio_added.state, %WithdrawTrack{track: video})
+
+    assert withdrawn.publications[publication.id].tracks["audio"].track == audio
+    refute Map.has_key?(withdrawn.publications[publication.id].tracks, "video")
+
+    assert {:ok, %Transition{state: registered, events: [{:track_added, fresh_video}]}} =
+             CloudflareDraft14.handle_operation(withdrawn, %AddTrack{
+               publication: publication,
+               track: "video"
+             })
+
+    refute fresh_video == video
+
+    assert {:error, :unknown_published_track, %Transition{}} =
+             CloudflareDraft14.handle_operation(registered, %WithdrawTrack{track: video})
   end
 
   test "controlled publications expose inbound subscriptions without replying" do
@@ -363,6 +425,124 @@ defmodule MOQX.CloudflarePublisherReducerTest do
              CloudflareDraft14.handle_operation(finished, %FinishPublishedSubscription{
                subscription: published_subscription
              })
+  end
+
+  test "withdrawal cancels pending draft-14 demand and finishes active demand exactly once" do
+    state = %State{phase: :ready, handle_scope: make_ref()}
+
+    {:ok, published} =
+      CloudflareDraft14.handle_operation(state, %Publish{
+        namespace: ["live"],
+        options: [inbound_subscriptions: :controlled]
+      })
+
+    {:publication_started, publication} = List.first(published.events)
+
+    {:ok, added} =
+      CloudflareDraft14.handle_operation(published.state, %AddTrack{
+        publication: publication,
+        track: "video"
+      })
+
+    {:track_added, track} = List.first(added.events)
+
+    first_subscribe =
+      Codec.encode(%Messages.Subscribe{
+        request_id: 1,
+        track_namespace: ["live"],
+        track_name: "video"
+      })
+
+    {:ok, first_pending} =
+      CloudflareDraft14.handle_transport(
+        added.state,
+        {:stream_data, control_stream(), first_subscribe, %{}}
+      )
+
+    [%MOQX.Event.PublicationSubscriptionRequested{request: first_request}] =
+      first_pending.events
+
+    {:ok, accepted} =
+      CloudflareDraft14.handle_operation(first_pending.state, %AcceptPublicationSubscription{
+        request: first_request,
+        published_track: track
+      })
+
+    [{:published_subscription_accepted, subscription}, _joined] = accepted.events
+
+    second_subscribe =
+      Codec.encode(%Messages.Subscribe{
+        request_id: 3,
+        track_namespace: ["live"],
+        track_name: "video"
+      })
+
+    {:ok, second_pending} =
+      CloudflareDraft14.handle_transport(
+        accepted.state,
+        {:stream_data, control_stream(), second_subscribe, %{}}
+      )
+
+    [%MOQX.Event.PublicationSubscriptionRequested{request: second_request}] =
+      second_pending.events
+
+    pending_error =
+      Codec.encode(%Messages.SubscribeError{
+        request_id: 3,
+        error_code: 4,
+        reason_phrase: "track withdrawn"
+      })
+
+    active_done =
+      Codec.encode(%Messages.PublishDone{
+        request_id: 1,
+        status_code: 2,
+        stream_count: 0,
+        reason_phrase: "source ended"
+      })
+
+    assert {:ok,
+            %Transition{
+              state: withdrawn,
+              events: [
+                {:track_withdrawn, ^track},
+                %MOQX.Event.PublicationSubscriptionCancelled{
+                  request: ^second_request,
+                  reason: :track_withdrawn
+                },
+                %MOQX.Event.PublicationSubscriberLeft{
+                  track: ^track,
+                  subscription: ^subscription,
+                  request_id: 1
+                }
+              ],
+              actions: [
+                {:cancel_timer, {:publisher_subscription_decision, second_handle}},
+                {:send_stream, :control, ^pending_error, []},
+                {:send_stream, :control, ^active_done, []}
+              ]
+            }} =
+             CloudflareDraft14.handle_operation(second_pending.state, %WithdrawTrack{
+               track: track,
+               options: [status: :track_ended, reason: "source ended"]
+             })
+
+    assert second_request.handle == second_handle
+    assert withdrawn.pending_publisher_subscriptions == %{}
+    assert withdrawn.publisher_subscriptions == %{}
+
+    assert {:error, :stale_subscription_request, %Transition{}} =
+             CloudflareDraft14.handle_operation(withdrawn, %AcceptPublicationSubscription{
+               request: second_request,
+               published_track: track
+             })
+
+    assert {:ok, %Transition{events: []}} =
+             CloudflareDraft14.handle_transport(
+               withdrawn,
+               {:stream_data, control_stream(),
+                Codec.encode(%Messages.Unsubscribe{request_id: 1}), %{}}
+             )
   end
 
   test "a controlled request can be explicitly rejected only once" do

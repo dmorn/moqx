@@ -28,6 +28,7 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
                :add_track,
                :accept_publication_subscription,
                :publish_object,
+               :withdraw_track,
                :finish_published_subscription,
                :finish_publication
              ])
@@ -597,6 +598,230 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
              MOQLite05.handle_operation(
                published.state,
                %MOQX.Operation.FinishPublication{publication: publication}
+             )
+  end
+
+  test "withdrawing one track makes only that handle unavailable" do
+    {state, publication, video} = published_track_state(:automatic)
+
+    {:ok, added} =
+      MOQLite05.handle_operation(state, %MOQX.Operation.AddTrack{
+        publication: publication,
+        track: "audio",
+        options: [timescale: 48_000]
+      })
+
+    {:track_added, audio} = List.first(added.events)
+
+    assert {:ok,
+            %Transition{
+              state: withdrawn,
+              events: [{:track_withdrawn, ^video}]
+            }} =
+             MOQLite05.handle_operation(
+               added.state,
+               %MOQX.Operation.WithdrawTrack{track: video, options: [status: :track_ended]}
+             )
+
+    assert Map.has_key?(withdrawn.publications[publication.id].tracks, "audio")
+    refute Map.has_key?(withdrawn.publications[publication.id].tracks, "video")
+
+    object = %MOQX.Object{
+      group_id: 1,
+      object_id: 0,
+      timestamp: 1,
+      end_of_group?: true,
+      payload: "audio"
+    }
+
+    assert {:error, :unknown_published_track, _transition} =
+             MOQLite05.handle_operation(
+               withdrawn,
+               %MOQX.Operation.PublishObject{track: video, object: object}
+             )
+
+    assert {:ok, %Transition{events: [{:object_published, ^audio}]}} =
+             MOQLite05.handle_operation(
+               withdrawn,
+               %MOQX.Operation.PublishObject{track: audio, object: object}
+             )
+  end
+
+  test "re-registering a withdrawn name creates a fresh handle and leaves the old handle stale" do
+    {state, publication, old_track} = published_track_state(:automatic)
+
+    {:ok, withdrawn} =
+      MOQLite05.handle_operation(state, %MOQX.Operation.WithdrawTrack{track: old_track})
+
+    assert {:ok, %Transition{state: registered, events: [{:track_added, fresh_track}]}} =
+             MOQLite05.handle_operation(withdrawn.state, %MOQX.Operation.AddTrack{
+               publication: publication,
+               track: "video",
+               options: [timescale: 90_000]
+             })
+
+    refute fresh_track == old_track
+
+    object = %MOQX.Object{
+      group_id: 1,
+      object_id: 0,
+      timestamp: 1,
+      end_of_group?: true,
+      payload: "fresh"
+    }
+
+    assert {:error, :unknown_published_track, _transition} =
+             MOQLite05.handle_operation(
+               registered,
+               %MOQX.Operation.PublishObject{track: old_track, object: object}
+             )
+
+    assert {:ok, %Transition{events: [{:object_published, ^fresh_track}]}} =
+             MOQLite05.handle_operation(
+               registered,
+               %MOQX.Operation.PublishObject{track: fresh_track, object: object}
+             )
+  end
+
+  test "rejects withdrawal through a track handle owned by another client" do
+    {state, _publication, published_track} = published_track_state(:automatic)
+    foreign_track = %{published_track | scope: make_ref()}
+
+    assert {:error, :wrong_client_published_track, %Transition{state: ^state}} =
+             MOQLite05.handle_operation(state, %MOQX.Operation.WithdrawTrack{
+               track: foreign_track
+             })
+  end
+
+  test "rejects withdrawal options that MoQ Lite cannot represent" do
+    {state, _publication, published_track} = published_track_state(:automatic)
+
+    assert {:error, :unsupported_completion_status, %Transition{state: ^state}} =
+             MOQLite05.handle_operation(state, %MOQX.Operation.WithdrawTrack{
+               track: published_track,
+               options: [status: :malformed_track]
+             })
+
+    assert {:error, :invalid_track_completion, %Transition{state: ^state}} =
+             MOQLite05.handle_operation(state, %MOQX.Operation.WithdrawTrack{
+               track: published_track,
+               options: [reason: String.duplicate("x", 1_025)]
+             })
+  end
+
+  test "withdrawing a track cancels its pending request and finishes active subscribers once" do
+    {state, publication, published_track} = published_track_state(:controlled)
+    {state, first_subscription} = accept_subscription(state, published_track, 5, 24)
+    {state, second_subscription} = accept_subscription(state, published_track, 7, 32)
+
+    {:ok, publishing} =
+      MOQLite05.handle_operation(state, %MOQX.Operation.PublishObject{
+        track: published_track,
+        object: %MOQX.Object{
+          group_id: 7,
+          object_id: 0,
+          timestamp: 90_000,
+          end_of_group?: false,
+          payload: "x"
+        }
+      })
+
+    subscribe = %Subscribe{
+      subscribe_id: 6,
+      broadcast_path: "live",
+      track_name: "video",
+      subscriber_priority: 9,
+      group_start: 7
+    }
+
+    pending_stream = peer_bidirectional_stream(28)
+    bytes = <<2, Codec.encode_subscribe(subscribe)::binary>>
+
+    {:ok, pending} =
+      MOQLite05.handle_transport(publishing.state, {:stream_data, pending_stream, bytes, %{}})
+
+    [%MOQX.Event.PublicationSubscriptionRequested{request: request}] = pending.events
+
+    assert {:ok,
+            %Transition{
+              state: withdrawn,
+              events: [
+                {:track_withdrawn, ^published_track},
+                %MOQX.Event.PublicationSubscriberLeft{
+                  track: ^published_track,
+                  subscription: ^first_subscription,
+                  request_id: 5
+                },
+                %MOQX.Event.PublicationSubscriberLeft{
+                  track: ^published_track,
+                  subscription: ^second_subscription,
+                  request_id: 7
+                },
+                %MOQX.Event.PublicationSubscriptionCancelled{
+                  request: ^request,
+                  reason: :track_withdrawn
+                }
+              ],
+              actions: [
+                {:abort_stream_sending, {:group, 5, 7}, 0},
+                {:send_stream, {:peer_stream, 24}, <<1, 1, 7>>, [finish: true]},
+                {:abort_stream_sending, {:group, 7, 7}, 0},
+                {:send_stream, {:peer_stream, 32}, <<1, 1, 7>>, [finish: true]},
+                {:cancel_timer, {:publisher_subscription_decision, request_handle}},
+                {:abort_stream_sending, {:peer_stream, 28}, 0x10}
+              ]
+            }} =
+             MOQLite05.handle_operation(
+               pending.state,
+               %MOQX.Operation.WithdrawTrack{
+                 track: published_track,
+                 options: [status: :track_ended]
+               }
+             )
+
+    assert request.handle == request_handle
+    assert withdrawn.publisher_subscriptions == %{}
+    assert withdrawn.pending_publisher_subscriptions == %{}
+
+    assert {:error, :stale_subscription_request, %Transition{}} =
+             MOQLite05.handle_operation(withdrawn, %MOQX.Operation.AcceptPublicationSubscription{
+               request: request,
+               published_track: published_track
+             })
+
+    assert {:error, :unknown_published_track, _transition} =
+             MOQLite05.handle_operation(
+               withdrawn,
+               %MOQX.Operation.WithdrawTrack{track: published_track}
+             )
+
+    assert {:ok, %Transition{state: closed, events: []}} =
+             MOQLite05.handle_transport(
+               withdrawn,
+               {:stream_event, peer_bidirectional_stream(24), :peer_finished_sending, %{}}
+             )
+
+    assert closed.publisher_subscriptions == %{}
+
+    assert {:ok,
+            %Transition{
+              events: [{:publication_finished, ^publication}],
+              actions: []
+            }} =
+             MOQLite05.handle_operation(
+               withdrawn,
+               %MOQX.Operation.FinishPublication{
+                 publication: publication
+               }
+             )
+
+    assert {:ok,
+            %Transition{
+              events: [%MOQX.Event.ConnectionClosed{metadata: %{error_code: 9}}]
+            }} =
+             MOQLite05.handle_transport(
+               withdrawn,
+               {:connection_event, :conn, :closed, %{error_code: 9}}
              )
   end
 

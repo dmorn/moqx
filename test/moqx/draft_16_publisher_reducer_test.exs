@@ -15,7 +15,8 @@ defmodule MOQX.Draft16PublisherReducerTest do
     FinishPublishedSubscription,
     Publish,
     PublishObject,
-    RejectPublicationSubscription
+    RejectPublicationSubscription,
+    WithdrawTrack
   }
 
   alias MOQX.Protocol.Draft16
@@ -449,6 +450,157 @@ defmodule MOQX.Draft16PublisherReducerTest do
              Draft16.handle_operation(finished, %FinishPublication{publication: publication})
   end
 
+  test "withdrawing one draft-16 track sends PUBLISH_DONE and preserves its sibling" do
+    ready = %State{phase: :ready, max_request_id: 8, handle_scope: make_ref()}
+    {:ok, published} = Draft16.handle_operation(ready, %Publish{namespace: ["live"]})
+    {:publication_started, publication} = List.first(published.events)
+
+    {:ok, namespace_ready} =
+      Draft16.handle_transport(
+        published.state,
+        {:stream_data, control_stream(), <<0x07, 0, 2, 0, 0>>, %{}}
+      )
+
+    {:ok, video_added} =
+      Draft16.handle_operation(namespace_ready.state, %AddTrack{
+        publication: publication,
+        track: "video"
+      })
+
+    {:track_added, video} = List.first(video_added.events)
+
+    {:ok, video_ready} =
+      Draft16.handle_transport(
+        video_added.state,
+        {:stream_data, control_stream(), <<0x1E, 0, 2, 2, 0>>, %{}}
+      )
+
+    {:ok, audio_added} =
+      Draft16.handle_operation(video_ready.state, %AddTrack{
+        publication: publication,
+        track: "audio"
+      })
+
+    {:track_added, audio} = List.first(audio_added.events)
+
+    {:ok, audio_ready} =
+      Draft16.handle_transport(
+        audio_added.state,
+        {:stream_data, control_stream(), <<0x1E, 0, 2, 4, 0>>, %{}}
+      )
+
+    foreign_video = %{video | scope: make_ref()}
+
+    assert {:error, :wrong_client_published_track, %Transition{state: foreign_unchanged}} =
+             Draft16.handle_operation(audio_ready.state, %WithdrawTrack{track: foreign_video})
+
+    assert foreign_unchanged == audio_ready.state
+
+    assert {:error, :invalid_track_completion, %Transition{state: invalid_unchanged}} =
+             Draft16.handle_operation(audio_ready.state, %WithdrawTrack{
+               track: video,
+               options: [unknown: true]
+             })
+
+    assert invalid_unchanged == audio_ready.state
+
+    expected_done = Codec.publish_done(2, 2, 0, "source ended")
+
+    assert {:ok,
+            %Transition{
+              state: withdrawn,
+              events: [
+                {:track_withdrawn, ^video},
+                %PublicationSubscriberLeft{track: ^video, request_id: 2}
+              ],
+              actions: [{:send_stream, :control, ^expected_done, []}]
+            }} =
+             Draft16.handle_operation(audio_ready.state, %WithdrawTrack{
+               track: video,
+               options: [status: :track_ended, reason: "source ended"]
+             })
+
+    assert withdrawn.publications[publication.id].tracks["audio"].track == audio
+    refute Map.has_key?(withdrawn.publications[publication.id].tracks, "video")
+
+    assert {:error, :unknown_published_track, %Transition{}} =
+             Draft16.handle_operation(withdrawn, %WithdrawTrack{track: video})
+
+    assert {:ok, %Transition{events: [{:track_added, fresh_video}]}} =
+             Draft16.handle_operation(withdrawn, %AddTrack{
+               publication: publication,
+               track: "video"
+             })
+
+    refute fresh_video == video
+  end
+
+  test "withdrawal wins a race with a late draft-16 PUBLISH_OK" do
+    ready = %State{phase: :ready, max_request_id: 4, handle_scope: make_ref()}
+    {:ok, published} = Draft16.handle_operation(ready, %Publish{namespace: ["live"]})
+    {:publication_started, publication} = List.first(published.events)
+
+    {:ok, namespace_ready} =
+      Draft16.handle_transport(
+        published.state,
+        {:stream_data, control_stream(), <<0x07, 0, 2, 0, 0>>, %{}}
+      )
+
+    {:ok, added} =
+      Draft16.handle_operation(namespace_ready.state, %AddTrack{
+        publication: publication,
+        track: "video"
+      })
+
+    {:track_added, track} = List.first(added.events)
+    expected_done = Codec.publish_done(2, 2, 0, "track ended")
+
+    assert {:ok,
+            %Transition{
+              state: withdrawn,
+              events: [{:track_withdrawn, ^track}],
+              actions: [{:send_stream, :control, ^expected_done, []}]
+            }} = Draft16.handle_operation(added.state, %WithdrawTrack{track: track})
+
+    assert {:ok, %Transition{state: after_late_ok, events: [], actions: []}} =
+             Draft16.handle_transport(
+               withdrawn,
+               {:stream_data, control_stream(), <<0x1E, 0, 2, 2, 0>>, %{}}
+             )
+
+    assert after_late_ok.publications == withdrawn.publications
+  end
+
+  test "withdrawal wins a race with a late draft-16 REQUEST_ERROR" do
+    ready = %State{phase: :ready, max_request_id: 4, handle_scope: make_ref()}
+    {:ok, published} = Draft16.handle_operation(ready, %Publish{namespace: ["live"]})
+    {:publication_started, publication} = List.first(published.events)
+
+    {:ok, namespace_ready} =
+      Draft16.handle_transport(
+        published.state,
+        {:stream_data, control_stream(), <<0x07, 0, 2, 0, 0>>, %{}}
+      )
+
+    {:ok, added} =
+      Draft16.handle_operation(namespace_ready.state, %AddTrack{
+        publication: publication,
+        track: "video"
+      })
+
+    {:track_added, track} = List.first(added.events)
+    {:ok, withdrawn} = Draft16.handle_operation(added.state, %WithdrawTrack{track: track})
+    late_error = Codec.request_error(2, 0x19, "late rejection")
+
+    assert {:ok, %Transition{state: after_late_error, events: [], actions: []}} =
+             Draft16.handle_transport(
+               withdrawn.state,
+               {:stream_data, control_stream(), late_error, %{}}
+             )
+
+    assert after_late_error.publications == withdrawn.state.publications
+  end
+
   test "controlled inbound subscribe is accepted through protocol-neutral handles" do
     scope = make_ref()
     ready = %State{phase: :ready, max_request_id: 4, handle_scope: scope}
@@ -815,6 +967,114 @@ defmodule MOQX.Draft16PublisherReducerTest do
                request: second_request,
                published_track: track
              })
+  end
+
+  test "withdrawal terminates pending and active draft-16 subscribers without ending the namespace" do
+    scope = make_ref()
+    ready = %State{phase: :ready, max_request_id: 6, handle_scope: scope}
+
+    {:ok, published} =
+      Draft16.handle_operation(ready, %Publish{
+        namespace: ["live"],
+        options: [inbound_subscriptions: :controlled, subscription_decision_timeout: 250]
+      })
+
+    {:publication_started, publication} = List.first(published.events)
+
+    {:ok, namespace_ready} =
+      Draft16.handle_transport(
+        published.state,
+        {:stream_data, control_stream(), <<0x07, 0, 2, 0, 0>>, %{}}
+      )
+
+    {:ok, added} =
+      Draft16.handle_operation(namespace_ready.state, %AddTrack{
+        publication: publication,
+        track: "video"
+      })
+
+    {:track_added, track} = List.first(added.events)
+
+    {:ok, primary_ready} =
+      Draft16.handle_transport(
+        added.state,
+        {:stream_data, control_stream(), <<0x1E, 0, 2, 2, 0>>, %{}}
+      )
+
+    track_ref = %MOQX.TrackRef{namespace: ["live"], track: "video"}
+
+    {:ok, first_pending} =
+      Draft16.handle_transport(
+        primary_ready.state,
+        {:stream_data, control_stream(), Codec.subscribe(1, track_ref, []), %{}}
+      )
+
+    %PublicationSubscriptionRequested{request: first_request} = List.first(first_pending.events)
+
+    {:ok, accepted} =
+      Draft16.handle_operation(first_pending.state, %AcceptPublicationSubscription{
+        request: first_request,
+        published_track: track
+      })
+
+    [{:published_subscription_accepted, subscription}, _joined] = accepted.events
+
+    {:ok, second_pending} =
+      Draft16.handle_transport(
+        accepted.state,
+        {:stream_data, control_stream(), Codec.subscribe(3, track_ref, []), %{}}
+      )
+
+    %PublicationSubscriptionRequested{request: second_request} = List.first(second_pending.events)
+
+    primary_done = Codec.publish_done(2, 2, 0, "source ended")
+    pending_error = Codec.request_error(3, 0x10, "track withdrawn")
+    active_done = Codec.publish_done(1, 2, 0, "source ended")
+
+    assert {:ok,
+            %Transition{
+              state: withdrawn,
+              events: [
+                {:track_withdrawn, ^track},
+                %PublicationSubscriberLeft{track: ^track, request_id: 2},
+                %PublicationSubscriptionCancelled{
+                  request: ^second_request,
+                  reason: :track_withdrawn
+                },
+                %PublicationSubscriberLeft{
+                  track: ^track,
+                  subscription: ^subscription,
+                  request_id: 1
+                }
+              ],
+              actions: [
+                {:send_stream, :control, ^primary_done, []},
+                {:cancel_timer, {:publisher_subscription_decision, second_handle}},
+                {:send_stream, :control, ^pending_error, []},
+                {:send_stream, :control, ^active_done, []}
+              ]
+            }} =
+             Draft16.handle_operation(second_pending.state, %WithdrawTrack{
+               track: track,
+               options: [status: :track_ended, reason: "source ended"]
+             })
+
+    assert second_request.handle == second_handle
+    assert withdrawn.publications[publication.id].tracks == %{}
+    assert withdrawn.pending_publisher_subscriptions == %{}
+    assert withdrawn.publisher_subscriptions == %{}
+
+    assert {:error, :stale_subscription_request, %Transition{}} =
+             Draft16.handle_operation(withdrawn, %AcceptPublicationSubscription{
+               request: second_request,
+               published_track: track
+             })
+
+    assert {:ok, %Transition{events: []}} =
+             Draft16.handle_transport(
+               withdrawn,
+               {:stream_data, control_stream(), Codec.unsubscribe(1), %{}}
+             )
   end
 
   defp control_stream do

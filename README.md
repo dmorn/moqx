@@ -107,6 +107,28 @@ same public API as the other implementations:
   })
 ```
 
+One registered track can be withdrawn without ending its publication or its
+siblings:
+
+```elixir
+:ok =
+  MOQX.withdraw_track(client, video,
+    status: :track_ended,
+    reason: "source ended"
+  )
+```
+
+The handle becomes stale before the call returns. Pending requests for that
+exact track are rejected, active subscribers receive their protocol's normal
+terminal action, and `PublicationSubscriberLeft` is emitted once per active
+subscriber. Re-registering the same track name returns a fresh handle. A
+foreign handle returns `:wrong_client_published_track`; stale, repeated, and
+already-finished handles return `:unknown_published_track`. Invalid reasons or
+option keys return `:invalid_track_completion`, while an unsupported status
+returns `:unsupported_completion_status`. MoQ Lite draft-05 supports the
+`:track_ended` status; draft-14 and draft-16 map the protocol-neutral statuses
+to their native `PUBLISH_DONE` codes.
+
 `timescale` is required and positive. Publisher priority is a byte and maximum
 latency is a bounded QUIC varint. Received objects preserve FRAME timestamps
 independently from group and object identifiers. Automatic, controlled, and

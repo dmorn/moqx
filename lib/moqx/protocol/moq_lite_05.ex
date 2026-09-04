@@ -48,6 +48,7 @@ defmodule MOQX.Protocol.MOQLite05 do
               peer_setup: nil,
               handle_scope: nil,
               next_publication_id: 0,
+              next_published_track_id: 0,
               next_subscribe_id: 0,
               publications: %{},
               announce_streams: %{},
@@ -414,6 +415,8 @@ defmodule MOQX.Protocol.MOQLite05 do
       track_ref = %MOQX.TrackRef{namespace: publication.namespace, track: operation.track}
 
       published_track = %MOQX.PublishedTrack{
+        scope: state.handle_scope,
+        id: state.next_published_track_id,
         publication: publication,
         track: track_ref,
         retention: track_options.retention
@@ -421,7 +424,12 @@ defmodule MOQX.Protocol.MOQLite05 do
 
       track_entry = Map.put(track_options, :track, published_track)
       entry = %{entry | tracks: Map.put(entry.tracks, operation.track, track_entry)}
-      next_state = %{state | publications: Map.put(state.publications, publication.id, entry)}
+
+      next_state = %{
+        state
+        | next_published_track_id: state.next_published_track_id + 1,
+          publications: Map.put(state.publications, publication.id, entry)
+      }
 
       Transition.ok(next_state, events: [{:track_added, published_track}])
     else
@@ -449,6 +457,8 @@ defmodule MOQX.Protocol.MOQLite05 do
          nil <- publication.tracks[request.track.track],
          {:ok, track_options} <- published_track_options(operation.options) do
       published_track = %MOQX.PublishedTrack{
+        scope: state.handle_scope,
+        id: state.next_published_track_id,
         publication: request.publication,
         track: request.track,
         retention: track_options.retention
@@ -463,7 +473,8 @@ defmodule MOQX.Protocol.MOQLite05 do
 
       state = %{
         state
-        | publications: Map.put(state.publications, request.publication.id, publication)
+        | next_published_track_id: state.next_published_track_id + 1,
+          publications: Map.put(state.publications, request.publication.id, publication)
       }
 
       establish_publisher_subscription(
@@ -544,7 +555,8 @@ defmodule MOQX.Protocol.MOQLite05 do
         %State{phase: :ready} = state,
         %MOQX.Operation.PublishObject{} = operation
       ) do
-    with {:ok, publication} <- fetch_publication(state, operation.track.publication),
+    with :ok <- validate_published_track_scope(state, operation.track),
+         {:ok, publication} <- fetch_publication(state, operation.track.publication),
          %{track: published_track} <- publication.tracks[operation.track.track.track],
          true <- published_track == operation.track,
          :ok <- validate_published_object(operation.object),
@@ -564,6 +576,95 @@ defmodule MOQX.Protocol.MOQLite05 do
       nil -> Transition.error(state, :unknown_published_track)
       false -> Transition.error(state, :unknown_published_track)
       {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  def handle_operation(
+        %State{phase: :ready} = state,
+        %MOQX.Operation.WithdrawTrack{} = operation
+      ) do
+    with :ok <- validate_published_track_scope(state, operation.track),
+         {:ok, publication} <- fetch_publication(state, operation.track.publication),
+         %{track: published_track} <- publication.tracks[operation.track.track.track],
+         true <- published_track == operation.track,
+         :ok <- validate_withdraw_track_options(operation.options) do
+      {active, remaining_active} =
+        Enum.split_with(state.publisher_subscriptions, fn {_id, entry} ->
+          entry.track == published_track
+        end)
+
+      {pending, remaining_pending} =
+        Enum.split_with(state.pending_publisher_subscriptions, fn {_id, entry} ->
+          entry.request.track == published_track.track
+        end)
+
+      active = Enum.sort_by(active, &elem(&1, 0))
+      pending = Enum.sort_by(pending, &elem(&1, 0))
+
+      publication = %{
+        publication
+        | tracks: Map.delete(publication.tracks, operation.track.track.track)
+      }
+
+      next_state = %{
+        state
+        | publications: Map.put(state.publications, operation.track.publication.id, publication),
+          publisher_subscriptions: Map.new(remaining_active),
+          pending_publisher_subscriptions: Map.new(remaining_pending)
+      }
+
+      active_events =
+        Enum.map(active, fn {subscribe_id, entry} ->
+          %PublicationSubscriberLeft{
+            track: entry.track,
+            subscription: entry.handle,
+            request_id: subscribe_id
+          }
+        end)
+
+      pending_events =
+        Enum.map(pending, fn {_subscribe_id, entry} ->
+          %PublicationSubscriptionCancelled{
+            request: entry.request,
+            reason: :track_withdrawn
+          }
+        end)
+
+      active_actions =
+        Enum.flat_map(active, fn {_subscribe_id, entry} ->
+          last_group = entry.last_group || entry.subscribe.group_start || 0
+          response = Codec.encode_subscribe_response(%SubscribeEnd{group: last_group})
+
+          active_group_abort_actions(entry) ++
+            [{:send_stream, {:peer_stream, entry.stream_id}, response, [finish: true]}]
+        end)
+
+      pending_actions =
+        Enum.flat_map(pending, fn {_subscribe_id, entry} ->
+          cancel_decision_timer_actions(entry) ++
+            [{:abort_stream_sending, {:peer_stream, entry.stream_id}, 0x10}]
+        end)
+
+      Transition.ok(next_state,
+        events: [{:track_withdrawn, published_track}] ++ active_events ++ pending_events,
+        actions: active_actions ++ pending_actions
+      )
+    else
+      nil ->
+        Transition.error(state, :unknown_published_track)
+
+      false ->
+        Transition.error(state, :unknown_published_track)
+
+      {:error, :wrong_client_published_track} ->
+        Transition.error(state, :wrong_client_published_track)
+
+      {:error, reason}
+      when reason in [:unsupported_completion_status, :invalid_track_completion] ->
+        Transition.error(state, reason)
+
+      {:error, _reason} ->
+        Transition.error(state, :unknown_published_track)
     end
   end
 
@@ -687,6 +788,7 @@ defmodule MOQX.Protocol.MOQLite05 do
           :add_track,
           :accept_publication_subscription,
           :publish_object,
+          :withdraw_track,
           :finish_published_subscription,
           :finish_publication
         ]),
@@ -1275,6 +1377,39 @@ defmodule MOQX.Protocol.MOQLite05 do
     end
   end
 
+  defp validate_published_track_scope(
+         %State{handle_scope: scope},
+         %MOQX.PublishedTrack{scope: scope}
+       ),
+       do: :ok
+
+  defp validate_published_track_scope(_state, %MOQX.PublishedTrack{}),
+    do: {:error, :wrong_client_published_track}
+
+  defp validate_withdraw_track_options(options) when is_list(options) do
+    cond do
+      not Keyword.keyword?(options) ->
+        {:error, :invalid_track_completion}
+
+      Enum.any?(Keyword.keys(options), &(&1 not in [:status, :reason])) ->
+        {:error, :invalid_track_completion}
+
+      Keyword.get(options, :status, :track_ended) != :track_ended ->
+        {:error, :unsupported_completion_status}
+
+      not is_binary(Keyword.get(options, :reason, "track ended")) ->
+        {:error, :invalid_track_completion}
+
+      byte_size(Keyword.get(options, :reason, "track ended")) > 1_024 ->
+        {:error, :invalid_track_completion}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_withdraw_track_options(_options), do: {:error, :invalid_track_completion}
+
   defp establish_publisher_subscription(state, pending, published_track, reply_mode) do
     subscribe_id = pending.subscribe.subscribe_id
 
@@ -1500,7 +1635,7 @@ defmodule MOQX.Protocol.MOQLite05 do
 
       nil ->
         Transition.ok(state,
-          actions: [{:abort_stream_sending, {:peer_stream, stream_id}, 0}]
+          actions: [{:abort_stream_sending, {:peer_stream, stream_id}, 0x10}]
         )
     end
   end

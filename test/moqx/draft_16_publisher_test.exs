@@ -109,9 +109,9 @@ defmodule MOQX.Draft16PublisherTest do
                    1_000
 
     assert :ok = MOQX.publish_object(client, track, object)
+    assert :ok = MOQX.withdraw_track(client, track, reason: "track ended")
+    assert {:error, :unknown_published_track} = MOQX.publish_object(client, track, object)
     assert :ok = MOQX.finish_publication(client, publication)
-
-    assert {:error, :unknown_publication} = MOQX.publish_object(client, track, object)
     assert :ok = Task.await(relay, 1_000)
   end
 
