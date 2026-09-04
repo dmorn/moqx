@@ -4,6 +4,24 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-09-04
+
+### Added
+
+- Added `MOQX.withdraw_track/3` to withdraw one published track while keeping
+  its publication and sibling tracks active. The protocol-neutral lifecycle
+  covers deterministic stale and foreign handles, pending-request cancellation,
+  exact-once active-subscriber completion, and same-name re-registration across
+  Cloudflare draft-14, standard MOQT draft-16, and MoQ Lite draft-05.
+
+### Fixed
+
+- Reconciled peer-reset MoQ Lite Group streams with publication state before
+  withdrawal, preventing stale stream-abort actions from suppressing terminal
+  subscriber events.
+- Fixed the tag workflow's changelog-section extraction so GitHub release notes
+  are generated reliably from version headings.
+
 ## [0.8.0] - 2026-09-04
 
 ### Added
