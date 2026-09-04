@@ -726,6 +726,25 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
         }
       })
 
+    group_stream = local_unidirectional_stream(40)
+
+    assert {:ok, %Transition{state: after_reset, events: [], actions: []}} =
+             MOQLite05.handle_transport(
+               publishing.state,
+               {:stream_event, group_stream, :peer_aborted_receiving,
+                %{logical_stream: {:group, 5, 7}, error_code: 0x10}}
+             )
+
+    assert after_reset.publisher_subscriptions[5].active_group == nil
+    assert after_reset.publisher_subscriptions[7].active_group.id == 7
+
+    assert {:ok, %Transition{state: ^after_reset, events: [], actions: []}} =
+             MOQLite05.handle_transport(
+               after_reset,
+               {:stream_event, group_stream, :closed,
+                %{logical_stream: {:group, 5, 7}, error_code: 0x10}}
+             )
+
     subscribe = %Subscribe{
       subscribe_id: 6,
       broadcast_path: "live",
@@ -738,7 +757,7 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
     bytes = <<2, Codec.encode_subscribe(subscribe)::binary>>
 
     {:ok, pending} =
-      MOQLite05.handle_transport(publishing.state, {:stream_data, pending_stream, bytes, %{}})
+      MOQLite05.handle_transport(after_reset, {:stream_data, pending_stream, bytes, %{}})
 
     [%MOQX.Event.PublicationSubscriptionRequested{request: request}] = pending.events
 
@@ -763,7 +782,6 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
                 }
               ],
               actions: [
-                {:abort_stream_sending, {:group, 5, 7}, 0},
                 {:send_stream, {:peer_stream, 24}, <<1, 1, 7>>, [finish: true]},
                 {:abort_stream_sending, {:group, 7, 7}, 0},
                 {:send_stream, {:peer_stream, 32}, <<1, 1, 7>>, [finish: true]},
@@ -941,6 +959,20 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
         local_role: :server,
         send_side?: true,
         receive_side?: true
+      }
+    }
+  end
+
+  defp local_unidirectional_stream(stream_id) do
+    %Stream{
+      info: %Info{
+        stream_id: stream_id,
+        direction: :unidirectional,
+        initiator: :local,
+        initiator_role: :client,
+        local_role: :client,
+        send_side?: true,
+        receive_side?: false
       }
     }
   end

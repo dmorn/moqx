@@ -242,6 +242,14 @@ defmodule MOQX.Protocol.MOQLite05 do
 
   def handle_transport(
         %State{} = state,
+        {:stream_event, _stream, event, %{logical_stream: {:group, subscribe_id, group_id}}}
+      )
+      when event in [:peer_aborted_receiving, :closed] do
+    clear_active_publication_group(state, subscribe_id, group_id)
+  end
+
+  def handle_transport(
+        %State{} = state,
         {:stream_event,
          %{info: %{stream_id: stream_id, direction: :bidirectional, initiator: :peer}}, event,
          metadata}
@@ -1756,6 +1764,19 @@ defmodule MOQX.Protocol.MOQLite05 do
 
   defp active_group_abort_actions(%{active_group: group, request: request}) do
     [{:abort_stream_sending, {:group, request.handle.request_id, group.id}, 0}]
+  end
+
+  defp clear_active_publication_group(state, subscribe_id, group_id) do
+    case state.publisher_subscriptions[subscribe_id] do
+      %{active_group: %{id: ^group_id}} = entry ->
+        subscriptions =
+          Map.put(state.publisher_subscriptions, subscribe_id, %{entry | active_group: nil})
+
+        Transition.ok(%{state | publisher_subscriptions: subscriptions})
+
+      _other ->
+        Transition.ok(state)
+    end
   end
 
   defp validate_track_name(track) when is_binary(track) and track != "", do: :ok
