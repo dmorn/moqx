@@ -31,7 +31,7 @@ at commit
 
 ```elixir
 # mix.exs
-{:moqx, "~> 0.7.1"}
+{:moqx, "~> 0.8.0"}
 ```
 
 ## Cloudflare draft-14 subscriber

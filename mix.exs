@@ -4,7 +4,7 @@ defmodule MOQX.MixProject do
   def project do
     [
       app: :moqx,
-      version: "0.7.1",
+      version: "0.8.0",
       description: description(),
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
@@ -36,14 +36,14 @@ defmodule MOQX.MixProject do
   defp deps do
     [
       {:telemetry, "~> 1.4"},
-      {:quicer,
-       git: "https://github.com/dmorn/quic.git", branch: "fix/dgram-send-state-feedback"},
+      {:quicer, "~> 0.4.8"},
+      {:ex_doc, "~> 0.31", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
     ]
   end
 
   defp description do
-    "Elixir Media over QUIC transport library targeting MOQT drafts 14 and 16."
+    "Elixir Media over QUIC library for MOQT drafts 14 and 16 and MoQ Lite draft 05."
   end
 
   defp package do

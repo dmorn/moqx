@@ -7,6 +7,7 @@ defmodule MOQX.Transport.Quicer do
   """
 
   @behaviour MOQX.Transport
+  @compile {:no_warn_undefined, {:quicer, :async_send_dgram, 3}}
 
   import Bitwise, only: [&&&: 2, |||: 2]
 
@@ -163,11 +164,21 @@ defmodule MOQX.Transport.Quicer do
   end
 
   defp send_quicer_datagram(connection, data, send_flags) do
-    :quicer.async_send_dgram(connection, data,
-      report_send_state: false,
-      send_flags: send_flags
-    )
+    if function_exported?(:quicer, :async_send_dgram, 3) do
+      :quicer.async_send_dgram(connection, data,
+        report_send_state: false,
+        send_flags: send_flags
+      )
+    else
+      send_quicer_datagram_without_options(connection, data, send_flags)
+    end
   end
+
+  defp send_quicer_datagram_without_options(connection, data, 0),
+    do: :quicer.async_send_dgram(connection, data)
+
+  defp send_quicer_datagram_without_options(_connection, _data, send_flags),
+    do: {:error, {:unsupported_datagram_send_flags, send_flags}}
 
   @impl true
   def finish_sending(stream) do

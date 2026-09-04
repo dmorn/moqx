@@ -4,8 +4,20 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-09-04
+
 ### Added
 
+- Added an explicit multi-protocol runtime with independent Cloudflare
+  draft-14, standard MOQT draft-16, and MoQ Lite draft-05 implementations over
+  the same native-QUIC transport boundary.
+- Added MoQ Lite draft-05 publisher and subscriber support, including Setup,
+  Announce, Track, Subscribe, reliable Group Streams, frame timestamps, typed
+  lifecycle events, and controlled or reactive publication.
+- Added pinned Curley relay and official-client interoperability coverage plus
+  an opt-in public `cdn.moq.dev` proof. The lifecycle matrix covers fan-out,
+  explicit and abrupt final-subscriber departure, exact aggregate demand
+  edges, and later resubscription without restarting the publisher.
 - Added opaque `MOQX.PublishedSubscription` handles, per-subscriber
   `finish_subscription/3`, protocol-neutral completion statuses, and matching
   join/left lifecycle events across Cloudflare draft-14 and standard draft-16.
@@ -21,6 +33,14 @@ All notable changes to `moqx` will be documented in this file.
 
 ### Changed
 
+- **Breaking:** replaced the `0.7.x` split publisher/subscriber and native
+  message contract with protocol-neutral client, publication, track, and
+  subscription handles driven by typed events in the
+  `{:moqx, client, event}` envelope. Protocol selection is now always explicit.
+- Hex releases now use upstream `quicer` `0.4.8`. The native backend falls back
+  to its standard DATAGRAM API; optional send-state suppression and non-default
+  MsQuic send flags remain available when a compatible backend override exports
+  the extended API.
 - Publisher delivery now applies controlled subscription filters to retained
   replay and future objects. Automatic inbound subscription behavior remains
   the default for backwards compatibility.
