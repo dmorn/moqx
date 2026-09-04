@@ -19,10 +19,8 @@ WORKDIR /src
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --locked --release \
-      -p moq-relay \
-      -p moq-cli \
-      -p moq-native --example moqx_curley_timestamp_probe && \
+    cargo build --locked --release -p moq-relay -p moq-cli && \
+    cargo build --locked --release -p moq-native --example moqx_curley_timestamp_probe && \
     cp /src/target/release/moq-relay /usr/local/bin/moq-relay && \
     cp /src/target/release/moq /usr/local/bin/moq && \
     cp /src/target/release/examples/moqx_curley_timestamp_probe \
