@@ -134,7 +134,7 @@ defmodule MOQX.Catalog.Hang do
     )
   end
 
-  defp encode_media(section) do
+  defp encode_media(%Media{} = section) do
     section.extensions
     |> Map.put(
       "renditions",
@@ -145,7 +145,7 @@ defmodule MOQX.Catalog.Hang do
     |> put_optional("flip", section.flip)
   end
 
-  defp encode_track(track) do
+  defp encode_track(%Track{decoder: %Decoder{}, container: %Container{}} = track) do
     decoder =
       Enum.reduce(@decoder_fields, track.extensions, fn {field, key}, raw ->
         value = Map.fetch!(track.decoder, field)
