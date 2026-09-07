@@ -153,7 +153,14 @@ defmodule MOQX.Protocol.MOQLite05.Discovery do
 
       true ->
         events =
-          if known?, do: [], else: [%BroadcastAvailable{discovery: entry.handle, path: path}]
+          if known? do
+            [
+              %BroadcastWithdrawn{discovery: entry.handle, path: path, reason: :replaced},
+              %BroadcastAvailable{discovery: entry.handle, path: path}
+            ]
+          else
+            [%BroadcastAvailable{discovery: entry.handle, path: path}]
+          end
 
         events =
           if entry.remaining == 1,
@@ -175,12 +182,12 @@ defmodule MOQX.Protocol.MOQLite05.Discovery do
   defp update(entry, %{status: :ended, path_suffix: suffix}) do
     path = entry.handle.prefix <> suffix
 
-    events =
-      if MapSet.member?(entry.broadcasts, path),
-        do: [%BroadcastWithdrawn{discovery: entry.handle, path: path, reason: :withdrawn}],
-        else: []
-
-    {:ok, %{entry | broadcasts: MapSet.delete(entry.broadcasts, path)}, events}
+    if MapSet.member?(entry.broadcasts, path) do
+      events = [%BroadcastWithdrawn{discovery: entry.handle, path: path, reason: :withdrawn}]
+      {:ok, %{entry | broadcasts: MapSet.delete(entry.broadcasts, path)}, events}
+    else
+      {:error, :invalid_announcement}
+    end
   end
 
   defp frame(buffer) do

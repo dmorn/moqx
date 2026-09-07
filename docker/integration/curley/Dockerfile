@@ -31,4 +31,4 @@ RUN --mount=type=cache,target=/root/.cache/rebar3 \
 
 COPY . .
 
-CMD ["mix", "test", "test/integration/curley_moq_lite_05_relay_test.exs", "--include", "integration", "--include", "curley_moq_lite_05"]
+CMD ["mix", "test", "test/integration/curley_moq_lite_05_relay_test.exs", "test/integration/hang_profiles_test.exs", "--include", "integration", "--include", "curley_moq_lite_05"]

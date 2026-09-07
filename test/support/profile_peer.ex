@@ -37,7 +37,7 @@ defmodule MOQX.ProfilePeer do
 
   defp transport(options) do
     if Keyword.get(options, :native, false) do
-      certs = Path.expand(".tmp/integration-certs")
+      certs = Keyword.fetch!(options, :certs)
 
       {MOQX.Transport.Quicer, [],
        [
@@ -111,6 +111,17 @@ defmodule MOQX.ProfilePeer do
         {:ok, _, ctx} = Transport.send_stream(ctx, stream, rest)
         peer_loop(ctx, conn, stream, subscriptions)
 
+      {:broadcast, status, suffix} ->
+        broadcast =
+          Codec.encode_announce_broadcast(%Messages.AnnounceBroadcast{
+            status: status,
+            path_suffix: suffix,
+            hop_ids: []
+          })
+
+        {:ok, _, ctx} = Transport.send_stream(ctx, announce, broadcast)
+        peer_loop(ctx, conn, announce, subscriptions)
+
       :withdraw_broadcast ->
         broadcast =
           Codec.encode_announce_broadcast(%Messages.AnnounceBroadcast{
@@ -123,11 +134,8 @@ defmodule MOQX.ProfilePeer do
         peer_loop(ctx, conn, announce, subscriptions)
 
       {:finish_subscription, id, last} ->
-        {:ok, _, ctx} =
-          Transport.send_stream(
-            ctx,
-            subscriptions[id],
-            Codec.encode_subscribe_response(%Messages.SubscribeEnd{group: last}), finish: true)
+        response = Codec.encode_subscribe_response(%Messages.SubscribeEnd{group: last})
+        {:ok, _, ctx} = Transport.send_stream(ctx, subscriptions[id], response, finish: true)
 
         peer_loop(ctx, conn, announce, subscriptions)
 

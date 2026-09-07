@@ -62,6 +62,63 @@ defmodule MOQX.ProfileLifecycleTest do
     Task.await(peer)
   end
 
+  test "a replacement broadcast withdraws the previous instance before reporting availability" do
+    {client, peer} = peer()
+    {:ok, discovery} = MOQX.discover(client, "room/")
+    send(peer.pid, {:discovery, discovery})
+    assert_receive {:moqx, ^client, %MOQX.Event.BroadcastAvailable{}}, 1_000
+    assert_receive {:moqx, ^client, %MOQX.Event.DiscoveryReady{}}, 1_000
+    send(peer.pid, {:broadcast, :active, "alice"})
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.BroadcastWithdrawn{
+                      discovery: ^discovery,
+                      path: "room/alice",
+                      reason: :replaced
+                    }},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.BroadcastAvailable{discovery: ^discovery, path: "room/alice"}},
+                   1_000
+
+    assert :ok = MOQX.cancel_discovery(client, discovery)
+    MOQX.close(client)
+    send(peer.pid, :done)
+    Task.await(peer)
+  end
+
+  test "an unknown withdrawal terminates only its discovery and clears its broadcasts" do
+    {client, peer} = peer()
+    {:ok, discovery} = MOQX.discover(client, "room/")
+    send(peer.pid, {:discovery, discovery})
+    assert_receive {:moqx, ^client, %MOQX.Event.BroadcastAvailable{}}, 1_000
+    assert_receive {:moqx, ^client, %MOQX.Event.DiscoveryReady{}}, 1_000
+    send(peer.pid, {:broadcast, :ended, "unknown"})
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.BroadcastWithdrawn{
+                      discovery: ^discovery,
+                      path: "room/alice",
+                      reason: :invalid_announcement
+                    }},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.DiscoveryDone{
+                      discovery: ^discovery,
+                      reason: :invalid_announcement
+                    }},
+                   1_000
+
+    assert {:error, :unknown_discovery} = MOQX.cancel_discovery(client, discovery)
+    assert {:ok, _other} = MOQX.discover(client, "other/")
+    refute_receive {:moqx, ^client, %MOQX.Event.ProtocolFailed{}}, 50
+    MOQX.close(client)
+    send(peer.pid, :done)
+    Task.await(peer)
+  end
+
   test "a foreign client's subscription cannot cancel or update a matching local subscription" do
     {first_client, first_peer} = peer()
     {second_client, second_peer} = peer()

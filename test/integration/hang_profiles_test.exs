@@ -130,7 +130,7 @@ defmodule MOQX.Integration.HangProfilesTest do
   end
 
   test "native QUIC drains a final catalog after a conforming inclusive SUBSCRIBE_END" do
-    {client, peer} = MOQX.ProfilePeer.start(native: true)
+    {client, peer} = MOQX.ProfilePeer.start(native: true, certs: "/certs")
 
     {:ok, sub} =
       MOQX.subscribe(client, %MOQX.TrackRef{namespace: ["room"], track: "catalog.json"},
@@ -150,10 +150,10 @@ defmodule MOQX.Integration.HangProfilesTest do
   end
 
   defp connect(role) do
-    MOQX.connect("moql://localhost:4463/",
+    MOQX.connect("moql://curley-moq-lite-05-relay:443/",
       protocol: :moq_lite_05,
       role: role,
-      connect_options: [cacertfile: Path.expand(".tmp/integration-certs/ca.pem")]
+      connect_options: [cacertfile: "/certs/ca.pem"]
     )
   end
 end

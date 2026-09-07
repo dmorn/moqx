@@ -54,14 +54,14 @@ defmodule MOQX.MixProject do
         "Changelog" => "https://github.com/dmorn/moqx/blob/main/CHANGELOG.md",
         "GitHub" => "https://github.com/dmorn/moqx"
       },
-      files: ~w(lib mix.exs mix.lock README.md LICENSE CHANGELOG.md)
+      files: ~w(lib mix.exs mix.lock README.md LICENSE CHANGELOG.md docs/interop/hang-lite05.md)
     ]
   end
 
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", "CHANGELOG.md"]
+      extras: ["README.md", "CHANGELOG.md", "docs/interop/hang-lite05.md"]
     ]
   end
 

@@ -128,7 +128,10 @@ defmodule MOQX do
   `BroadcastAvailable` events enumerate initial matches, followed by
   `DiscoveryReady`; additions and withdrawals then continue live. This does not
   subscribe to track catalogs. `max_broadcasts` defaults to 1024; exceeding it
-  ends only that discovery. Other protocols return `:unsupported_operation`.
+  ends only that discovery. Replacement advertisements emit withdrawal with
+  reason `:replaced` followed by availability. An unknown withdrawal terminates
+  the discovery with `:invalid_announcement`, clearing all its broadcasts.
+  Other protocols return `:unsupported_operation`.
   """
   @spec discover(MOQX.Client.t(), binary(), keyword()) ::
           {:ok, MOQX.Discovery.t()} | {:error, term()}

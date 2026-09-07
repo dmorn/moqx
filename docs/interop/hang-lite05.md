@@ -38,16 +38,16 @@ certificates with `scripts/gen-loopback-certs.sh`):
 docker compose -p moqx44 -f docker-compose.integration.yml up -d curley-moq-lite-05-relay
 mise exec -- mix test
 mise exec -- mix credo --strict
-mise exec -- mix test test/integration/hang_profiles_test.exs --include integration
 docker run --rm --network moqx44_default \
   -v "$PWD/lib:/workspace/lib:ro" -v "$PWD/test:/workspace/test:ro" \
   -v "$PWD/.tmp/integration-certs:/certs:ro" \
   moqx-moqx-curley-moq-lite-05-test \
   mix test test/integration/curley_moq_lite_05_relay_test.exs \
+  test/integration/hang_profiles_test.exs \
   --include integration --include curley_moq_lite_05
 ```
 
-Build the test image using the existing compose `curley-moq-lite-05-test` service
+Build the test image using the existing compose `moqx-curley-moq-lite-05-test` service
 before using the Docker command on a fresh machine. These are functional
 receiver checks, not network benchmark or browser playback certification.
 
