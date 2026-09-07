@@ -21,6 +21,7 @@ defmodule MOQX.Protocol.MOQLite05 do
 
   alias MOQX.Protocol.{Capabilities, Transition, TransportSpec}
   alias MOQX.Protocol.MOQLite05.Codec
+  alias MOQX.Protocol.MOQLite05.Discovery
   alias MOQX.Protocol.MOQLite05.GroupDecoder
 
   alias MOQX.Protocol.MOQLite05.Messages.{
@@ -50,6 +51,8 @@ defmodule MOQX.Protocol.MOQLite05 do
               next_publication_id: 0,
               next_published_track_id: 0,
               next_subscribe_id: 0,
+              next_discovery_id: 0,
+              discoveries: %{},
               publications: %{},
               announce_streams: %{},
               pending_publisher_subscriptions: %{},
@@ -142,9 +145,33 @@ defmodule MOQX.Protocol.MOQLite05 do
         announce_streams: %{}
     }
 
+    {next_state, discovery_events} = Discovery.close_all(next_state)
+
     Transition.ok(next_state,
-      events: active_events ++ pending_events ++ [%ConnectionClosed{metadata: metadata}]
+      events:
+        discovery_events ++
+          active_events ++ pending_events ++ [%ConnectionClosed{metadata: metadata}]
     )
+  end
+
+  def handle_transport(
+        %State{} = state,
+        {:stream_data, _stream, data, %{logical_stream: {:discovery, id}}}
+      ) do
+    Discovery.data(state, id, data)
+  end
+
+  def handle_transport(
+        %State{} = state,
+        {:stream_event, _stream, event, %{logical_stream: {:discovery, id}}}
+      )
+      when event in [
+             :peer_finished_sending,
+             :peer_aborted_sending,
+             :peer_aborted_receiving,
+             :closed
+           ] do
+    Discovery.finish(state, id, :closed)
   end
 
   def handle_transport(
@@ -274,6 +301,13 @@ defmodule MOQX.Protocol.MOQLite05 do
     end
   end
 
+  def handle_transport(%State{} = state, {:runtime_timeout, {:subscription_drain, id}}) do
+    case state.subscriptions[id] do
+      %{draining?: true} -> Transition.error(state, :unaccounted_subscription_groups)
+      _ -> Transition.ok(state)
+    end
+  end
+
   def handle_transport(
         %State{} = state,
         {:runtime_timeout,
@@ -321,12 +355,25 @@ defmodule MOQX.Protocol.MOQLite05 do
   def handle_transport(%State{} = state, _event), do: Transition.ok(state)
 
   @impl true
+  def handle_operation(%State{phase: :ready} = state, %MOQX.Operation.Discover{} = operation),
+    do: Discovery.start(state, operation)
+
+  def handle_operation(%State{phase: :ready} = state, %MOQX.Operation.CancelDiscovery{
+        discovery: discovery
+      }),
+      do: Discovery.cancel(state, discovery)
+
   def handle_operation(%State{phase: :ready} = state, %MOQX.Operation.Subscribe{} = operation) do
     with {:ok, priority, ordered, max_latency, group_start, group_end} <-
            subscription_options(operation.options),
          {:ok, broadcast_path} <- broadcast_path(operation.track.namespace) do
       subscribe_id = state.next_subscribe_id
-      subscription = %MOQX.Subscription{id: subscribe_id, track: operation.track}
+
+      subscription = %MOQX.Subscription{
+        id: subscribe_id,
+        track: operation.track,
+        scope: state.handle_scope
+      }
 
       entry = %{
         subscription: subscription,
@@ -337,6 +384,7 @@ defmodule MOQX.Protocol.MOQLite05 do
         subscribe_buffer: <<>>,
         subscribe_end: nil,
         subscribe_finished?: false,
+        draining?: false,
         pending_group_events: [],
         accounted_ranges: [],
         processed_group_streams: 0,
@@ -388,6 +436,7 @@ defmodule MOQX.Protocol.MOQLite05 do
          {:ok, inbound_subscriptions} <- inbound_subscription_options(operation.options),
          false <- publication_namespace?(state, operation.namespace) do
       publication = %MOQX.Publication{
+        scope: state.handle_scope,
         id: state.next_publication_id,
         namespace: operation.namespace
       }
@@ -576,6 +625,19 @@ defmodule MOQX.Protocol.MOQLite05 do
              operation.object
            ) do
       next_state = %{state | publisher_subscriptions: subscriptions}
+
+      next_state =
+        if published_track.retention == :latest and operation.object.object_id == 0 and
+             operation.object.end_of_group? do
+          put_in(
+            next_state.publications[published_track.publication.id].tracks[
+              published_track.track.track
+            ][:retained_object],
+            operation.object
+          )
+        else
+          next_state
+        end
 
       Transition.ok(next_state,
         events: [{:object_published, published_track}],
@@ -791,6 +853,8 @@ defmodule MOQX.Protocol.MOQLite05 do
     %Capabilities{
       operations:
         MapSet.new([
+          :discover,
+          :cancel_discovery,
           :subscribe,
           :update_subscription,
           :publish,
@@ -1457,8 +1521,26 @@ defmodule MOQX.Protocol.MOQLite05 do
           [{:published_subscription_accepted, published_subscription}]
       end
 
-    actions =
-      cancel_decision_timer_actions(pending)
+    retained =
+      get_in(
+        state.publications[published_track.publication.id].tracks[published_track.track.track],
+        [:retained_object]
+      )
+
+    {next_state, replay_actions} =
+      if retained do
+        {:ok, replayed, replay_actions} =
+          publish_object_actions(%{subscribe_id => active}, published_track, retained)
+
+        {%{
+           next_state
+           | publisher_subscriptions: Map.merge(next_state.publisher_subscriptions, replayed)
+         }, replay_actions}
+      else
+        {next_state, []}
+      end
+
+    actions = cancel_decision_timer_actions(pending) ++ replay_actions
 
     Transition.ok(next_state,
       events:
@@ -2110,6 +2192,7 @@ defmodule MOQX.Protocol.MOQLite05 do
         |> Map.put(:group_decoders, Map.delete(state.group_decoders, stream_id))
 
       emit_or_queue_group_event(next_state, decoder.group.subscribe_id, event)
+      |> finish_draining_subscription(decoder.group.subscribe_id)
     else
       {:error, reason} -> Transition.error(state, reason)
       nil -> Transition.error(state, :unknown_group_subscription)
@@ -2141,6 +2224,7 @@ defmodule MOQX.Protocol.MOQLite05 do
           |> Map.put(:group_decoders, Map.delete(state.group_decoders, stream_id))
 
         emit_or_queue_group_event(next_state, decoder.group.subscribe_id, ended)
+        |> finish_draining_subscription(decoder.group.subscribe_id)
 
       nil ->
         Transition.error(state, :unknown_group_subscription)
@@ -2167,13 +2251,42 @@ defmodule MOQX.Protocol.MOQLite05 do
         if range_covered?(entry.accounted_ranges, first, last) do
           complete_subscription(state, subscribe_id, entry)
         else
-          Transition.error(state, :unaccounted_subscription_groups)
+          await_subscription_groups(state, subscribe_id, entry)
         end
 
       _entry ->
         Transition.error(state, :subscribe_stream_ended_without_end)
     end
   end
+
+  defp await_subscription_groups(state, id, entry) do
+    actions = if entry.draining?, do: [], else: [{:start_timer, {:subscription_drain, id}, 5_000}]
+    entry = %{entry | subscribe_finished?: true, draining?: true}
+    Transition.ok(put_subscription(state, id, entry), actions: actions)
+  end
+
+  defp finish_draining_subscription({:ok, transition}, id) do
+    case transition.state.subscriptions[id] do
+      %{subscribe_finished?: true} ->
+        case finish_subscription(transition.state, id) do
+          {:ok, next} ->
+            {:ok,
+             %{
+               next
+               | events: transition.events ++ next.events,
+                 actions: transition.actions ++ next.actions
+             }}
+
+          error ->
+            error
+        end
+
+      _ ->
+        {:ok, transition}
+    end
+  end
+
+  defp finish_draining_subscription(error, _id), do: error
 
   defp complete_subscription(state, subscribe_id, entry) do
     completion = %MOQX.Subscription.Completion{
@@ -2187,7 +2300,8 @@ defmodule MOQX.Protocol.MOQLite05 do
     next_state = %{state | subscriptions: Map.delete(state.subscriptions, subscribe_id)}
 
     Transition.ok(next_state,
-      events: [%SubscriptionDone{subscription: entry.subscription, completion: completion}]
+      events: [%SubscriptionDone{subscription: entry.subscription, completion: completion}],
+      actions: [{:cancel_timer, {:subscription_drain, subscribe_id}}]
     )
   end
 

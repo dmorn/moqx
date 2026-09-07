@@ -10,7 +10,6 @@ defmodule MOQX.Protocol.Draft16 do
   @behaviour MOQX.Protocol
 
   alias MOQX.Event.{
-    CatalogReceived,
     ConnectionClosed,
     ObjectReceived,
     ObjectStatus,
@@ -178,7 +177,7 @@ defmodule MOQX.Protocol.Draft16 do
          :ok <- validate_parameters(options),
          :ok <- validate_request_credit(state) do
       request_id = state.next_request_id
-      subscription = %MOQX.Subscription{id: request_id, track: track}
+      subscription = %MOQX.Subscription{id: request_id, track: track, scope: state.handle_scope}
 
       lifecycle = %SubscriptionState{
         subscription: subscription,
@@ -265,7 +264,12 @@ defmodule MOQX.Protocol.Draft16 do
          false <- publication_namespace?(state, namespace),
          :ok <- validate_request_credit(state) do
       request_id = state.next_request_id
-      publication = %MOQX.Publication{id: request_id, namespace: namespace}
+
+      publication = %MOQX.Publication{
+        id: request_id,
+        namespace: namespace,
+        scope: state.handle_scope
+      }
 
       entry = %{
         publication: publication,
@@ -545,7 +549,7 @@ defmodule MOQX.Protocol.Draft16 do
           :reject_subscription
         ]),
       delivery_modes: MapSet.new([:subgroup, :datagram]),
-      metadata: %{catalog_track: "catalog", draft: 16}
+      metadata: %{draft: 16}
     }
   end
 
@@ -821,20 +825,6 @@ defmodule MOQX.Protocol.Draft16 do
         Transition.ok(state,
           events: [%ObjectStatus{object: public_object(subscription, decoded)}]
         )
-
-      %MOQX.Subscription{track: %{track: "catalog"}} = subscription ->
-        case MOQX.Catalog.decode(decoded.payload,
-               format: :moqtail_cmsf,
-               namespace: subscription.track.namespace
-             ) do
-          {:ok, catalog} ->
-            Transition.ok(state,
-              events: [%CatalogReceived{catalog: catalog, subscription: subscription}]
-            )
-
-          {:error, reason} ->
-            Transition.error(state, {:invalid_catalog, reason})
-        end
 
       %MOQX.Subscription{} = subscription ->
         Transition.ok(state,

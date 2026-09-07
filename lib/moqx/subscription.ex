@@ -2,7 +2,11 @@ defmodule MOQX.Subscription do
   @moduledoc "Public handle for one active track subscription."
 
   @enforce_keys [:id, :track]
-  defstruct [:id, :track]
+  defstruct [:id, :track, :scope]
 
-  @type t :: %__MODULE__{id: non_neg_integer(), track: MOQX.TrackRef.t()}
+  @opaque t :: %__MODULE__{
+            id: non_neg_integer(),
+            scope: reference() | nil | :uninitialized,
+            track: MOQX.TrackRef.t()
+          }
 end

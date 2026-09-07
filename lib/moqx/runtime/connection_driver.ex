@@ -10,6 +10,7 @@ defmodule MOQX.Runtime.ConnectionDriver do
   alias MOQX.Operation
   alias MOQX.Protocol.Transition
   alias MOQX.Runtime.ConnectionDriver.StreamEntry
+  alias MOQX.Runtime.Profiles
   alias MOQX.Transport
 
   defstruct [
@@ -20,6 +21,7 @@ defmodule MOQX.Runtime.ConnectionDriver do
     :protocol_state,
     :context,
     :connection,
+    profiles: %Profiles{},
     streams: %{},
     timers: %{}
   ]
@@ -62,6 +64,14 @@ defmodule MOQX.Runtime.ConnectionDriver do
     call(pid, {:operation, %Operation.Subscribe{track: track, options: options}}, 5_000)
   end
 
+  def discover(%MOQX.Client{pid: pid}, prefix, options) do
+    call(pid, {:operation, %Operation.Discover{prefix: prefix, options: options}}, 5_000)
+  end
+
+  def cancel_discovery(%MOQX.Client{pid: pid}, discovery) do
+    call(pid, {:operation, %Operation.CancelDiscovery{discovery: discovery}}, 5_000)
+  end
+
   @spec update_subscription(MOQX.Client.t(), MOQX.Subscription.t(), keyword()) ::
           :ok | {:error, term()}
   def update_subscription(%MOQX.Client{pid: pid}, subscription, options) do
@@ -78,6 +88,10 @@ defmodule MOQX.Runtime.ConnectionDriver do
           {:ok, MOQX.Publication.t()} | {:error, term()}
   def publish(%MOQX.Client{pid: pid}, namespace, options) do
     call(pid, {:operation, %Operation.Publish{namespace: namespace, options: options}}, 5_000)
+  end
+
+  def publish_catalog(%MOQX.Client{pid: pid}, track, catalog) do
+    call(pid, {:operation, %Operation.PublishCatalog{track: track, catalog: catalog}}, 5_000)
   end
 
   @spec add_track(MOQX.Client.t(), MOQX.Publication.t(), binary(), keyword()) ::
@@ -242,9 +256,19 @@ defmodule MOQX.Runtime.ConnectionDriver do
   end
 
   defp handle_message(state, waiter, {:moqx_call, caller, ref, {:operation, operation}}) do
-    case state.protocol.handle_operation(state.protocol_state, operation) do
+    result =
+      with {:ok, wire_operation} <-
+             Profiles.prepare(operation, state.client.protocol, state.profiles) do
+        state.protocol.handle_operation(state.protocol_state, wire_operation)
+      end
+
+    case result do
       {:ok, %Transition{} = protocol_transition} ->
-        reply_operation(state, waiter, caller, ref, protocol_transition)
+        reply_operation(state, waiter, caller, ref, operation, protocol_transition)
+
+      {:error, reason} ->
+        send(caller, {ref, {:error, reason}})
+        {state, waiter}
 
       {:error, reason, %Transition{} = protocol_transition} ->
         state = %{state | protocol_state: protocol_transition.state}
@@ -282,10 +306,11 @@ defmodule MOQX.Runtime.ConnectionDriver do
     end
   end
 
-  defp reply_operation(state, waiter, caller, ref, protocol_transition) do
+  defp reply_operation(state, waiter, caller, ref, operation, protocol_transition) do
     stop? = :connection_ended in protocol_transition.events
     {reply, public_events} = operation_reply(protocol_transition.events)
     protocol_transition = %{protocol_transition | events: public_events}
+    state = %{state | profiles: Profiles.commit(state.profiles, operation, reply)}
 
     case transition(state, {:ok, protocol_transition}) do
       {:ok, state} ->
@@ -392,8 +417,7 @@ defmodule MOQX.Runtime.ConnectionDriver do
     state = %{state | protocol_state: protocol_transition.state}
 
     with {:ok, state} <- apply_actions(state, protocol_transition.actions) do
-      deliver_events(state, protocol_transition.events)
-      {:ok, state}
+      {:ok, deliver_events(state, protocol_transition.events)}
     end
   end
 
@@ -566,10 +590,16 @@ defmodule MOQX.Runtime.ConnectionDriver do
   end
 
   defp deliver_events(state, events) do
-    Enum.each(events, fn
-      :ready -> :ok
-      {:subscription_started, _subscription} -> :ok
-      event -> send(state.event_recipient, {:moqx, state.client, event})
+    Enum.reduce(events, state, fn event, state ->
+      {profiles, events} = Profiles.event(state.profiles, event)
+
+      Enum.each(events, fn
+        :ready -> :ok
+        {:subscription_started, _subscription} -> :ok
+        event -> send(state.event_recipient, {:moqx, state.client, event})
+      end)
+
+      %{state | profiles: profiles}
     end)
   end
 
@@ -578,6 +608,9 @@ defmodule MOQX.Runtime.ConnectionDriver do
     |> Enum.find(&operation_reply_event?/1)
     |> operation_reply(events)
   end
+
+  defp operation_reply({:discovery_started, discovery} = event, events),
+    do: {{:ok, discovery}, List.delete(events, event)}
 
   defp operation_reply({:subscription_started, subscription} = event, events),
     do: {{:ok, subscription}, List.delete(events, event)}
@@ -602,6 +635,7 @@ defmodule MOQX.Runtime.ConnectionDriver do
 
   defp operation_reply(nil, events), do: {:ok, events}
 
+  defp operation_reply_event?({:discovery_started, _discovery}), do: true
   defp operation_reply_event?({:subscription_started, _subscription}), do: true
   defp operation_reply_event?({:subscription_ended, _subscription}), do: true
   defp operation_reply_event?({:subscription_updated, _subscription}), do: true

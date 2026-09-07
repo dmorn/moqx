@@ -31,11 +31,12 @@ native QUIC.
   preserves stream-local order and ends with a typed complete/reset/closed
   boundary; no global coordinate ordering or implicit reorder buffer is
   provided.
-- Catalogs are normalized without merging deployment conventions. Cloudflare
-  draft-14 keeps its `.catalog`, `selectionParams`, and separate `initTrack`
-  shape; draft-16 decodes Moqtail's current `catalog` shape with top-level
-  media fields and inline `initData`. The catalog subscription namespace is
-  retained for exact media-track addressing.
+- Application profiles are independent of wire protocols and scoped to individual
+  subscription/publication handles. Raw objects are the default. Explicit
+  Cloudflare CMSF and Moqtail CMSF profiles preserve their distinct initialization
+  conventions. HANG over Lite05 has typed live snapshots, bounded plain/DEFLATE
+  catalogs and separate broadcast-prefix discovery. The catalog namespace anchors
+  relative media addresses; unknown metadata is preserved without playback claims.
 - The protocol-neutral connection driver owns the transport context, feeds
   normalized events to the selected implementation, and applies returned
   transport actions.

@@ -14,7 +14,11 @@ defmodule MOQX.Integration.MoqtailDraft16CatalogTest do
       track = %MOQX.TrackRef{namespace: ["moqtail", "testsrc"], track: "catalog"}
 
       assert {:ok, %MOQX.Subscription{} = subscription} =
-               MOQX.subscribe(client, track, start: :next_group, priority: 127)
+               MOQX.subscribe(client, track,
+                 profile: :moqtail_cmsf,
+                 start: :next_group,
+                 priority: 127
+               )
 
       assert_receive {:moqx, ^client,
                       %MOQX.Event.SubscriptionAccepted{subscription: ^subscription}},

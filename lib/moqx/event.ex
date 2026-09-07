@@ -11,6 +11,11 @@ defmodule MOQX.Event do
           | MOQX.Event.ObjectStatus.t()
           | MOQX.Event.SubgroupEnded.t()
           | MOQX.Event.CatalogReceived.t()
+          | MOQX.Event.CatalogFailed.t()
+          | MOQX.Event.DiscoveryReady.t()
+          | MOQX.Event.BroadcastAvailable.t()
+          | MOQX.Event.BroadcastWithdrawn.t()
+          | MOQX.Event.DiscoveryDone.t()
           | MOQX.Event.PublicationReady.t()
           | MOQX.Event.PublicationFailed.t()
           | MOQX.Event.PublicationTrackFailed.t()
@@ -132,7 +137,7 @@ end
 defmodule MOQX.Event.CatalogReceived do
   @moduledoc "A catalog object was decoded."
   @enforce_keys [:catalog]
-  defstruct [:catalog, :subscription]
+  defstruct [:catalog, :subscription, :group_id, added: [], removed: [], changed: []]
 
   @type t :: %__MODULE__{
           catalog: MOQX.Catalog.t(),
@@ -221,4 +226,11 @@ defmodule MOQX.Event.ProtocolFailed do
   @enforce_keys [:reason]
   defstruct [:reason]
   @type t :: %__MODULE__{reason: term()}
+end
+
+defmodule MOQX.Event.CatalogFailed do
+  @moduledoc "A catalog update was rejected; the subscription remains available for subsequent updates."
+  @enforce_keys [:subscription, :error]
+  defstruct [:subscription, :error]
+  @type t :: %__MODULE__{subscription: MOQX.Subscription.t(), error: MOQX.Catalog.Error.t()}
 end
