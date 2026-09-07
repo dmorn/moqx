@@ -108,7 +108,7 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
       assert_receive {:moqx, ^publisher, %MOQX.Event.PublicationReady{publication: ^publication}},
                      5_000
 
-      assert {:ok, catalog} = add_track(publisher, publication, "catalog.json")
+      assert {:ok, catalog} = MOQX.add_catalog(publisher, publication, profile: :hang)
       assert {:ok, video} = add_track(publisher, publication, ".avc3")
 
       curley = open_curley(["--broadcast", Enum.join(namespace, "/"), "export", "h264"])
@@ -118,7 +118,8 @@ defmodule MOQX.Integration.CurleyMOQLite05RelayTest do
                         %MOQX.Event.PublicationSubscriberJoined{track: ^catalog}},
                        5_000
 
-        assert :ok = publish(publisher, catalog, 0, catalog_payload())
+        {:ok, catalog_value} = MOQX.Catalog.decode(catalog_payload(), format: :hang)
+        assert :ok = MOQX.publish_catalog(publisher, catalog, catalog_value)
 
         assert_receive {:moqx, ^publisher,
                         %MOQX.Event.PublicationSubscriberJoined{track: ^video}},

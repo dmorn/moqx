@@ -17,7 +17,7 @@ endpoint = "moqt://draft-14.cloudflare.mediaoverquic.com:443"
 
 try do
   {:ok, _catalog_subscription} =
-    MOQX.subscribe(client, %TrackRef{namespace: ["bbb"], track: ".catalog"})
+    MOQX.subscribe(client, %TrackRef{namespace: ["bbb"], track: ".catalog"}, profile: :cloudflare_cmsf)
 
   catalog =
     receive do

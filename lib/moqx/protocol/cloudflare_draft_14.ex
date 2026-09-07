@@ -1,6 +1,6 @@
 defmodule MOQX.Protocol.CloudflareDraft14 do
   @moduledoc """
-  Cloudflare's deployed MOQT draft-14 lifecycle and catalog convention.
+  Cloudflare's deployed MOQT draft-14 lifecycle.
 
   The implementation uses the shared draft-14 wire package, while retaining
   ownership of setup policy, supported operations and public events.
@@ -28,7 +28,6 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
   alias MOQX.Protocol.MOQTDraft14.SubgroupDecoder
 
   alias MOQX.Event.{
-    CatalogReceived,
     ConnectionClosed,
     ObjectReceived,
     ObjectStatus,
@@ -223,7 +222,12 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
          {:ok, inbound_subscriptions} <- inbound_subscription_options(options),
          false <- publication_namespace?(state, namespace) do
       request_id = state.next_request_id
-      publication = %MOQX.Publication{id: request_id, namespace: namespace}
+
+      publication = %MOQX.Publication{
+        id: request_id,
+        namespace: namespace,
+        scope: state.handle_scope
+      }
 
       entry = %{
         publication: publication,
@@ -420,7 +424,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
 
   defp start_subscription(state, track, options, delivery_timeout) do
     request_id = state.next_request_id
-    subscription = %MOQX.Subscription{id: request_id, track: track}
+    subscription = %MOQX.Subscription{id: request_id, track: track, scope: state.handle_scope}
 
     lifecycle = %SubscriptionState{
       subscription: subscription,
@@ -468,7 +472,7 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
           :finish_subscription
         ]),
       delivery_modes: MapSet.new([:subgroup]),
-      metadata: %{catalog_track: ".catalog"}
+      metadata: %{}
     }
   end
 
@@ -689,26 +693,12 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     end
   end
 
-  defp object_event(state, %{track_alias: alias_id, payload: payload} = decoded) do
+  defp object_event(state, %{track_alias: alias_id} = decoded) do
     case state.aliases[alias_id] do
       %MOQX.Subscription{} = subscription when not is_nil(decoded.status) ->
         Transition.ok(state,
           events: [%ObjectStatus{object: public_object(subscription, decoded)}]
         )
-
-      %MOQX.Subscription{track: %{track: ".catalog"}} = subscription ->
-        case MOQX.Catalog.decode(payload,
-               format: :cloudflare,
-               namespace: subscription.track.namespace
-             ) do
-          {:ok, catalog} ->
-            Transition.ok(state,
-              events: [%CatalogReceived{catalog: catalog, subscription: subscription}]
-            )
-
-          {:error, reason} ->
-            Transition.error(state, {:invalid_catalog, reason})
-        end
 
       %MOQX.Subscription{} = subscription ->
         Transition.ok(state,
@@ -1566,9 +1556,9 @@ defmodule MOQX.Protocol.CloudflareDraft14 do
     }
   end
 
-  defp fetch_publication(state, %MOQX.Publication{id: id, namespace: namespace}) do
+  defp fetch_publication(state, %MOQX.Publication{id: id} = publication) do
     case state.publications[id] do
-      %{publication: %{namespace: ^namespace}} = entry -> {:ok, entry}
+      %{publication: ^publication} = entry -> {:ok, entry}
       _other -> {:error, :unknown_publication}
     end
   end

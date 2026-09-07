@@ -1,8 +1,26 @@
 defmodule MOQX.Catalog.Track do
-  @moduledoc "A track advertised by a decoded CMSF catalog."
+  @moduledoc """
+  A track advertised by a CMSF or HANG catalog.
+
+  HANG `decoder.description` and CMAF `container.init` contain decoded bytes.
+  `metadata_status` is `:recognized`, `:unknown_codec`, or `:unknown_container`;
+  callers must still determine whether their decoder supports the configuration.
+  Unknown rendition fields remain in `extensions`. A relative broadcast address
+  that escapes the root or lacks a catalog namespace sets `address_error`;
+  `track_ref/2` then returns `{:error, reason}` instead of an invented address.
+  """
 
   @enforce_keys [:name, :raw]
   defstruct [
+    :metadata_status,
+    :address_error,
+    :decoder,
+    :container,
+    :broadcast,
+    :timeline,
+    :jitter,
+    :stalled,
+    :extensions,
     :namespace,
     :name,
     :init_track,
@@ -65,8 +83,13 @@ defmodule MOQX.Catalog.Track do
   end
 
   @doc "Builds the protocol-neutral address advertised by this catalog track."
-  @spec track_ref(t(), binary() | nil) :: MOQX.TrackRef.t()
-  def track_ref(%__MODULE__{} = track, fallback_namespace \\ nil) do
+  @spec track_ref(t(), binary() | [binary()] | nil) :: MOQX.TrackRef.t() | {:error, atom()}
+  def track_ref(track, fallback_namespace \\ nil)
+
+  def track_ref(%__MODULE__{address_error: error}, _namespace) when not is_nil(error),
+    do: {:error, error}
+
+  def track_ref(%__MODULE__{} = track, fallback_namespace) do
     namespace = track.namespace || fallback_namespace || ""
 
     %MOQX.TrackRef{

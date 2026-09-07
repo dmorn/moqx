@@ -4,6 +4,29 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Explicit per-handle catalog profiles: Cloudflare CMSF, Moqtail CMSF, and pinned
+  HANG over Lite05, with public retained catalog publication, typed live snapshots,
+  bounded plain/raw-DEFLATE decoding, metadata round trips and scoped failures.
+- Lite05 broadcast-prefix discovery with initial readiness, live additions and
+  withdrawals, cancellation and disconnect cleanup.
+
+### Changed
+
+- **Breaking:** catalog-named tracks are opaque by default. CMSF consumers must
+  pass `profile: :cloudflare_cmsf` or `profile: :moqtail_cmsf` to `subscribe/3`.
+
+### Fixed
+
+- Scope publication/subscription handles to their owning connection.
+- Drain outstanding Lite05 groups after an inclusive SUBSCRIBE_END and retain
+  complete singleton snapshots for late subscribers.
+- Preserve data-before-FIN ordering in the deterministic support transport.
+
+The pinned Curley relay uses an incompatible exclusive SUBSCRIBE_END boundary;
+see `docs/interop/hang-lite05.md` for the exact certification boundary.
+
 ## [0.8.1] - 2026-09-04
 
 ### Added

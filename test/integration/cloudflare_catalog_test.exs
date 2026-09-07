@@ -12,7 +12,9 @@ defmodule MOQX.Integration.CloudflareCatalogTest do
              )
 
     track = %MOQX.TrackRef{namespace: ["bbb"], track: ".catalog"}
-    assert {:ok, %MOQX.Subscription{track: ^track}} = MOQX.subscribe(client, track)
+
+    assert {:ok, %MOQX.Subscription{track: ^track}} =
+             MOQX.subscribe(client, track, profile: :cloudflare_cmsf)
 
     assert_receive {:moqx, ^client,
                     %MOQX.Event.CatalogReceived{catalog: %MOQX.Catalog{} = catalog}},

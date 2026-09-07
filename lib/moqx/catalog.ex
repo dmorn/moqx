@@ -1,12 +1,20 @@
 defmodule MOQX.Catalog do
   @moduledoc """
-  A decoded Common Media Server Data Format catalog.
+  A decoded CMSF or HANG catalog.
 
-  Unknown fields remain available in `raw`, allowing deployed catalog variants
-  to evolve without forcing callers back to raw JSON.
+  CMSF preserves the Cloudflare and Moqtail initialization conventions in
+  normalized `tracks` and the original `raw` map. HANG uses typed `media`
+  sections keyed by `:audio`/`:video`, with rendition tracks, decoder bytes,
+  container initialization and extension maps. `tracks` is a flattened view;
+  HANG encoding uses `media` and `extensions`, while CMSF encoding uses `raw`.
+
+  HANG is pinned to the specification revision in `docs/interop/hang-lite05.md`.
+  Unknown codecs and containers are preserved with an explicit metadata status;
+  recognition does not imply playback support. Timeline retrieval and media
+  decoding belong to the caller.
   """
 
-  alias MOQX.Catalog.Track
+  alias MOQX.Catalog.{Compression, Hang, Track}
 
   @enforce_keys [:tracks, :raw]
   defstruct [
@@ -18,11 +26,13 @@ defmodule MOQX.Catalog do
     :supports_delta_updates,
     :common_track_fields,
     :tracks,
-    :raw
+    :raw,
+    media: %{},
+    extensions: %{}
   ]
 
   @type t :: %__MODULE__{
-          format: :cloudflare | :moqtail_cmsf,
+          format: :cloudflare | :moqtail_cmsf | :hang,
           namespace: [binary()] | nil,
           version: non_neg_integer() | nil,
           streaming_format: non_neg_integer() | nil,
@@ -30,21 +40,62 @@ defmodule MOQX.Catalog do
           supports_delta_updates: boolean() | nil,
           common_track_fields: map(),
           tracks: [Track.t()],
+          media: %{optional(:audio | :video) => MOQX.Catalog.Media.t()},
+          extensions: map(),
           raw: map()
         }
 
   @type decode_option ::
-          {:format, :cloudflare | :moqtail_cmsf}
+          {:format, :cloudflare | :moqtail_cmsf | :hang}
           | {:namespace, [binary()]}
+          | {:compression, :none | :deflate}
+          | {:max_bytes, pos_integer()}
+          | {:max_encoded_bytes, pos_integer()}
 
   @doc """
   Decodes one supported catalog into protocol-neutral values.
 
-  Protocol implementations pass their expected `:format` explicitly.
-  Standalone callers may omit it and use shape inference.
+  Select `format: :hang` explicitly; CMSF callers may use shape inference.
+  Both encoded input and expanded JSON default to a 1 MiB limit. Override with
+  positive `:max_encoded_bytes` and `:max_bytes`. `compression: :deflate` uses
+  HANG raw DEFLATE sync-flush framing, not gzip or a zlib container.
+  `:namespace` anchors relative HANG broadcast references. Above-root or
+  unanchored references remain explicit address errors in the track.
   """
   @spec decode(binary(), [decode_option()]) :: {:ok, t()} | {:error, MOQX.Catalog.Error.t()}
   def decode(payload, options \\ []) when is_binary(payload) do
+    with {:ok, payload} <- Compression.decode(payload, options) do
+      if Keyword.get(options, :format) == :hang do
+        Hang.decode(payload, options)
+      else
+        decode_cmsf(payload, options)
+      end
+    end
+  end
+
+  @doc "Encodes a typed catalog. HANG media fields and extension maps are authoritative."
+  @spec encode(t(), keyword()) :: {:ok, binary()} | {:error, MOQX.Catalog.Error.t()}
+  def encode(catalog, options \\ []) do
+    result =
+      case catalog do
+        %__MODULE__{format: :hang} -> Hang.encode(catalog)
+        %__MODULE__{raw: raw} -> {:ok, JSON.encode!(raw)}
+      end
+
+    with {:ok, payload} <- result, do: Compression.encode(payload, options)
+  rescue
+    _error in [
+      ArgumentError,
+      KeyError,
+      BadMapError,
+      Protocol.UndefinedError,
+      FunctionClauseError,
+      CaseClauseError
+    ] ->
+      {:error, %MOQX.Catalog.Error{path: [], reason: :invalid_shape}}
+  end
+
+  defp decode_cmsf(payload, options) do
     with {:ok, %{"tracks" => tracks} = decoded} when is_list(tracks) <- JSON.decode(payload),
          common when is_map(common) <- Map.get(decoded, "commonTrackFields", %{}),
          format = Keyword.get(options, :format) || catalog_format(decoded, tracks),
@@ -99,7 +150,7 @@ defmodule MOQX.Catalog do
   end
 
   @doc "Builds the protocol-neutral address of one track in this catalog."
-  @spec track_ref(t(), Track.t()) :: MOQX.TrackRef.t()
+  @spec track_ref(t(), Track.t()) :: MOQX.TrackRef.t() | {:error, atom()}
   def track_ref(%__MODULE__{} = catalog, %Track{} = track) do
     Track.track_ref(track, catalog.namespace)
   end

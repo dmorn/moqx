@@ -6,7 +6,9 @@ defmodule MOQX.Operation do
   """
 
   @type t ::
-          Subscribe.t()
+          Discover.t()
+          | CancelDiscovery.t()
+          | Subscribe.t()
           | UpdateSubscription.t()
           | Unsubscribe.t()
           | Publish.t()
@@ -14,10 +16,25 @@ defmodule MOQX.Operation do
           | AcceptPublicationSubscription.t()
           | RejectPublicationSubscription.t()
           | PublishObject.t()
+          | PublishCatalog.t()
           | WithdrawTrack.t()
           | FinishPublishedSubscription.t()
           | FinishPublication.t()
           | Close.t()
+
+  defmodule Discover do
+    @moduledoc "Starts live broadcast-prefix discovery."
+    @enforce_keys [:prefix]
+    defstruct [:prefix, options: []]
+    @type t :: %__MODULE__{prefix: binary(), options: keyword()}
+  end
+
+  defmodule CancelDiscovery do
+    @moduledoc "Cancels one broadcast discovery."
+    @enforce_keys [:discovery]
+    defstruct [:discovery]
+    @type t :: %__MODULE__{discovery: MOQX.Discovery.t()}
+  end
 
   defmodule Subscribe do
     @moduledoc "Subscribes to one application-level track address."
@@ -107,6 +124,13 @@ defmodule MOQX.Operation do
     defstruct [:track, :object]
 
     @type t :: %__MODULE__{track: MOQX.PublishedTrack.t(), object: MOQX.Object.t()}
+  end
+
+  defmodule PublishCatalog do
+    @moduledoc "Publishes one complete application-profile catalog snapshot."
+    @enforce_keys [:track, :catalog]
+    defstruct [:track, :catalog]
+    @type t :: %__MODULE__{track: MOQX.PublishedTrack.t(), catalog: MOQX.Catalog.t()}
   end
 
   defmodule WithdrawTrack do

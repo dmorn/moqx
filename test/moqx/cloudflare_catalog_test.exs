@@ -117,7 +117,7 @@ defmodule MOQX.CloudflareCatalogTest do
              MOQX.subscribe(client, track, start: :beginning)
 
     assert {:ok, %MOQX.Subscription{track: ^track}} =
-             MOQX.subscribe(client, track, start: :next_group)
+             MOQX.subscribe(client, track, profile: :cloudflare_cmsf, start: :next_group)
 
     assert_receive {:moqx, ^client,
                     %MOQX.Event.CatalogReceived{
@@ -194,6 +194,77 @@ defmodule MOQX.CloudflareCatalogTest do
     assert :ok = MOQX.close(client)
 
     assert :ok = Task.await(relay, 1_000)
+  end
+
+  test "raw and CMSF subscriptions to the same track have isolated interpretation and errors" do
+    {:ok, network} = Support.start_network()
+    parent = self()
+
+    relay =
+      Task.async(fn ->
+        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_14)
+        {:ok, listener, ctx} = Transport.listen(ctx, 0)
+        {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
+        send(parent, {:relay_ready, port})
+        {:ok, conn, ctx} = Transport.accept(ctx, listener, [], 1_000)
+        {:ok, conn, ctx} = Transport.handshake(ctx, conn, 1_000)
+        {:ok, control, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
+        {:ok, _setup, ctx} = Transport.recv_stream(ctx, control, 16)
+
+        {:ok, _, ctx} =
+          Transport.send_stream(ctx, control, <<0x21, 0, 9, 0xC0000000FF00000E::64, 0>>)
+
+        ctx =
+          Enum.reduce(0..2, ctx, fn alias_id, ctx ->
+            {:ok, <<3, length::16>>, ctx} = Transport.recv_stream(ctx, control, 3)
+            {:ok, _request, ctx} = Transport.recv_stream(ctx, control, length)
+
+            {:ok, _, ctx} =
+              Transport.send_stream(
+                ctx,
+                control,
+                <<4, 0, 8, alias_id * 2, alias_id, 0, 0, 1, 0, 0, 0>>
+              )
+
+            ctx
+          end)
+
+        ctx = send_objects(ctx, conn, 0, 0, [{0, "opaque-not-json"}])
+        ctx = send_objects(ctx, conn, 1, 0, [{0, "secret-invalid-json"}])
+        ctx = send_objects(ctx, conn, 2, 0, [{0, catalog_payload()}])
+        _ctx = send_objects(ctx, conn, 1, 1, [{0, catalog_payload()}])
+        assert_receive :done, 2_000
+      end)
+
+    assert_receive {:relay_ready, port}, 1_000
+
+    assert {:ok, client} =
+             MOQX.connect("moqt://localhost:#{port}",
+               protocol: :cloudflare_draft_14,
+               transport: {Support, network: network, profile: :draft_14}
+             )
+
+    track = %MOQX.TrackRef{namespace: ["bbb"], track: ".catalog"}
+    assert {:ok, raw} = MOQX.subscribe(client, track)
+    assert {:ok, first} = MOQX.subscribe(client, track, profile: :cloudflare_cmsf)
+    assert {:ok, second} = MOQX.subscribe(client, track, profile: :cloudflare_cmsf)
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.ObjectReceived{
+                      object: %MOQX.Object{subscription: ^raw, payload: "opaque-not-json"}
+                    }},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.CatalogFailed{subscription: ^first, error: error}},
+                   1_000
+
+    refute inspect(error) =~ "secret"
+    assert_receive {:moqx, ^client, %MOQX.Event.CatalogReceived{subscription: ^second}}, 1_000
+    assert_receive {:moqx, ^client, %MOQX.Event.CatalogReceived{subscription: ^first}}, 1_000
+    assert :ok = MOQX.close(client)
+    send(relay.pid, :done)
+    Task.await(relay)
   end
 
   defp catalog_payload do

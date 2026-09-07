@@ -21,7 +21,10 @@ defmodule MOQX do
 
   @typedoc "Option accepted by `subscribe/3`."
   @type subscription_option ::
-          {:start, subscription_start()}
+          {:profile, MOQX.Profile.t()}
+          | {:max_catalog_bytes, pos_integer()}
+          | {:max_catalog_encoded_bytes, pos_integer()}
+          | {:start, subscription_start()}
           | {:filter, MOQX.SubscriptionFilter.t()}
           | {:priority, 0..255}
           | {:group_order, :ascending | :descending}
@@ -99,6 +102,16 @@ defmodule MOQX do
   @doc """
   Subscribes to a protocol-neutral track address.
 
+  `:profile` defaults to `:none`: even catalog-named tracks emit opaque
+  `ObjectReceived` events. Select `:cloudflare_cmsf`, `:moqtail_cmsf`, or `:hang`
+  explicitly for `CatalogReceived` snapshots. The byte-limit options default to
+  1 MiB each. HANG `catalog.json.z` selects raw DEFLATE; other HANG track names
+  select plain JSON. Malformed updates emit `CatalogFailed` on this handle and
+  preserve the last valid snapshot; a newer valid group can recover. HANG
+  snapshots replace the whole catalog, report added/removed/changed track refs,
+  and ignore older groups. Duplicate groups and nonzero object IDs are errors.
+  Profile selection is immutable for the subscription lifetime.
+
   The `:start` option accepts `:next_object` or `:next_group` and defaults to
   `:next_object`. Protocol implementations map that application policy to
   their native subscription filter and reject unsupported policies explicitly.
@@ -108,6 +121,24 @@ defmodule MOQX do
   def subscribe(client, track, options \\ []) do
     ConnectionDriver.subscribe(client, track, options)
   end
+
+  @doc """
+  Discovers matching Lite05 broadcasts using a literal path prefix.
+
+  `BroadcastAvailable` events enumerate initial matches, followed by
+  `DiscoveryReady`; additions and withdrawals then continue live. This does not
+  subscribe to track catalogs. `max_broadcasts` defaults to 1024; exceeding it
+  ends only that discovery. Other protocols return `:unsupported_operation`.
+  """
+  @spec discover(MOQX.Client.t(), binary(), keyword()) ::
+          {:ok, MOQX.Discovery.t()} | {:error, term()}
+  def discover(client, prefix, options \\ []),
+    do: ConnectionDriver.discover(client, prefix, options)
+
+  @doc "Cancels one discovery, withdrawing its reported broadcasts before `DiscoveryDone`."
+  @spec cancel_discovery(MOQX.Client.t(), MOQX.Discovery.t()) :: :ok | {:error, term()}
+  def cancel_discovery(client, discovery),
+    do: ConnectionDriver.cancel_discovery(client, discovery)
 
   @doc "Updates an active subscription's draft-neutral filter and delivery parameters."
   @spec update_subscription(
@@ -146,6 +177,40 @@ defmodule MOQX do
   def add_track(client, publication, track, options \\ []) when is_binary(track) do
     ConnectionDriver.add_track(client, publication, track, options)
   end
+
+  @doc """
+  Registers a retained catalog track under a ready publication.
+
+  Requires an explicit `:profile`. HANG supports `compression: :none` (default,
+  `catalog.json`) and `:deflate` (`catalog.json.z`). Register both to serve both
+  forms. Each handle has independent update numbering and retains its latest
+  snapshot for late subscribers. CMSF uses its profile's conventional name.
+  """
+  @spec add_catalog(MOQX.Client.t(), MOQX.Publication.t(), keyword()) ::
+          {:ok, MOQX.PublishedTrack.t()} | {:error, term()}
+  def add_catalog(client, publication, options) do
+    profile = Keyword.get(options, :profile)
+    compression = Keyword.get(options, :compression, :none)
+
+    with :ok <- MOQX.Profile.validate(profile, client.protocol),
+         {:ok, name} <- MOQX.Profile.track_name(profile, compression) do
+      options = options |> Keyword.put(:retention, :latest) |> Keyword.put(:timescale, 1_000_000)
+      add_track(client, publication, name, options)
+    end
+  end
+
+  @doc """
+  Publishes a complete catalog snapshot on a handle returned by `add_catalog/3`.
+
+  Groups increase from zero independently per handle. Every update is one
+  object, immediately finished, and retained for late subscribers. A failed
+  validation does not consume a group number. This is transport admission;
+  `CatalogReceived` at a receiver proves delivery.
+  """
+  @spec publish_catalog(MOQX.Client.t(), MOQX.PublishedTrack.t(), MOQX.Catalog.t()) ::
+          :ok | {:error, term()}
+  def publish_catalog(client, track, catalog),
+    do: ConnectionDriver.publish_catalog(client, track, catalog)
 
   @doc """
   Accepts one pending inbound publisher subscription.

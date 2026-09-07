@@ -22,6 +22,8 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
 
     assert capabilities.operations ==
              MapSet.new([
+               :discover,
+               :cancel_discovery,
                :subscribe,
                :update_subscription,
                :publish,

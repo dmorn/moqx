@@ -44,7 +44,9 @@ defmodule MOQX.Integration.MoqRsRelayRoundtripTest do
 
       try do
         catalog_ref = %MOQX.TrackRef{namespace: namespace, track: ".catalog"}
-        assert {:ok, catalog_subscription} = MOQX.subscribe(subscriber, catalog_ref)
+
+        assert {:ok, catalog_subscription} =
+                 MOQX.subscribe(subscriber, catalog_ref, profile: :cloudflare_cmsf)
 
         assert_receive {:moqx, ^subscriber,
                         %MOQX.Event.SubscriptionAccepted{

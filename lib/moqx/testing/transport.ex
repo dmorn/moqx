@@ -527,7 +527,8 @@ defmodule MOQX.Testing.Transport do
       buffer: <<>>,
       recvs: :queue.new(),
       active: false,
-      send_finished?: false
+      send_finished?: false,
+      pending_fin?: false
     }
 
     %Stream{
@@ -606,8 +607,7 @@ defmodule MOQX.Testing.Transport do
         stream_loop(state)
 
       {:peer_finished_sending} ->
-        send_stream_event(state, :peer_finished_sending, %{})
-        stream_loop(state)
+        stream_loop(deliver_fin(%{state | pending_fin?: true}))
 
       {:peer_aborted_sending, error_code} ->
         send_stream_event(state, :peer_aborted_sending, %{error_code: error_code})
@@ -619,13 +619,13 @@ defmodule MOQX.Testing.Transport do
 
       {:set_active, caller, ref, active} ->
         send(caller, {ref, :ok})
-        stream_loop(deliver_active_data(%{state | active: active}))
+        stream_loop(deliver_fin(deliver_active_data(%{state | active: active})))
 
       {:recv_data, caller, ref, byte_count} ->
         case take_bytes(state.buffer, byte_count) do
           {:ok, data, remaining} ->
             send(caller, {ref, {:ok, data}})
-            stream_loop(%{state | buffer: remaining})
+            stream_loop(deliver_fin(%{state | buffer: remaining}))
 
           :not_enough_data ->
             stream_loop(%{state | recvs: :queue.in({caller, ref, byte_count}, state.recvs)})
@@ -673,6 +673,13 @@ defmodule MOQX.Testing.Transport do
   end
 
   defp deliver_active_data(state), do: state
+
+  defp deliver_fin(%{pending_fin?: true, buffer: <<>>} = state) do
+    send_stream_event(state, :peer_finished_sending, %{})
+    %{state | pending_fin?: false}
+  end
+
+  defp deliver_fin(state), do: state
 
   defp send_stream_event(state, event, metadata) do
     if state.owner do

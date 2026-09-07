@@ -27,6 +27,45 @@ The draft-16 interoperability reference is Moqtail's `draft-16` branch pinned
 at commit
 [`c2ff7253479c6a0d7c8282a1cad289d591ebc302`](https://github.com/moqtail/moqtail/commit/c2ff7253479c6a0d7c8282a1cad289d591ebc302).
 
+## Application catalog profiles
+
+Wire protocol selection is connection-scoped; catalog profiles are selected per
+subscription or published catalog. Raw objects are the default, including on
+`.catalog`, `catalog`, and `catalog.json` tracks. Existing CMSF consumers must
+add an explicit profile to their `MOQX.subscribe/3` call.
+
+| Profile | Cloudflare draft-14 | MOQT draft-16 | MoQ Lite 05 | Catalog track |
+| --- | --- | --- | --- | --- |
+| `:none` | yes | yes | yes | any, opaque |
+| `:cloudflare_cmsf` | yes | yes | yes | `.catalog` |
+| `:moqtail_cmsf` | yes | yes | yes | `catalog` |
+| `:hang` | rejected | rejected | yes | `catalog.json` / `catalog.json.z` |
+
+The matrix describes codec composition, not certification against every relay.
+HANG metadata is pinned, typed, and round-trippable, including unknown extension
+maps, hexadecimal decoder descriptions and base64 CMAF initialization. Unknown
+codec/container metadata does not imply playback support.
+
+```elixir
+{:ok, publication} = MOQX.publish(publisher, ["live", "alice.hang"])
+# Wait for PublicationReady before registering tracks.
+{:ok, track} = MOQX.add_catalog(publisher, publication, profile: :hang)
+{:ok, catalog} = MOQX.Catalog.decode("{}", format: :hang)
+:ok = MOQX.publish_catalog(publisher, track, catalog)
+{:ok, subscription} = MOQX.subscribe(subscriber, track.track, profile: :hang)
+# CatalogReceived is receiver evidence; successful publish is local admission.
+{:ok, discovery} = MOQX.discover(subscriber, "live/")
+# BroadcastAvailable events precede DiscoveryReady; updates continue live.
+:ok = MOQX.cancel_discovery(subscriber, discovery)
+```
+
+Each published snapshot uses a new group and is retained for late subscribers.
+HANG subscriptions replace their live snapshot and report track additions,
+removals and metadata changes. Malformed catalogs fail only the affected update;
+newer valid snapshots recover. Both encoded and expanded payloads default to
+1 MiB limits. See module docs for options and address-error behavior, and
+[the pinned interoperability evidence and limitations](docs/interop/hang-lite05.md).
+
 ## Installation
 
 ```elixir
@@ -46,7 +85,7 @@ implicitly. Cloudflare's public Big Buck Bunny catalog can be requested with:
   )
 
 catalog_track = %MOQX.TrackRef{namespace: ["bbb"], track: ".catalog"}
-{:ok, subscription} = MOQX.subscribe(client, catalog_track)
+{:ok, subscription} = MOQX.subscribe(client, catalog_track, profile: :cloudflare_cmsf)
 
 receive do
   {:moqx, ^client,
@@ -140,7 +179,7 @@ The default subscriber request resolves the publisher's latest group.
 Draft-05 can also represent absolute group starts and ranges whose object
 coordinate is zero. Unsupported relative starts, non-zero object coordinates,
 parameters, and delivery modes return typed errors rather than changing their
-meaning. WebTransport, Fetch, Probe, datagram delivery, catalogs, and draft-06
+meaning. WebTransport, Fetch, Probe, datagram delivery, and draft-06
 are not part of this implementation.
 
 The native-QUIC endpoint scheme is `moql://`; the older `moqt://` spelling
@@ -169,6 +208,7 @@ catalog_track =
 
 {:ok, subscription} =
   MOQX.subscribe(client, catalog_track,
+    profile: :moqtail_cmsf,
     start: :next_group,
     priority: 127
   )
@@ -246,9 +286,8 @@ evidence.
 
 This path negotiates ALPN `moqt-16`, sends native-QUIC `PATH` and `AUTHORITY`
 setup parameters, and decodes draft-16 subgroup streams and object datagrams.
-Objects preserve extension headers and end-of-group metadata. Objects on the
-`catalog` track are decoded as current Moqtail CMSF values. Other tracks remain
-ordinary `ObjectReceived` events.
+Objects preserve extension headers and end-of-group metadata. Objects remain opaque by default. Select `profile: :moqtail_cmsf` on a
+subscription to decode current Moqtail CMSF values as `CatalogReceived` events.
 
 Draft-16 also accepts the complete protocol-neutral filter model:
 
