@@ -259,7 +259,7 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
                 }
               ],
               actions: [
-                {:send_stream, {:peer_stream, 8}, <<1, 1, 9>>, [finish: true]}
+                {:send_stream, {:peer_stream, 8}, <<1, 1, 10>>, [finish: true]}
               ]
             }} =
              MOQLite05.handle_operation(
@@ -594,7 +594,7 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
                 {:publication_finished, ^publication}
               ],
               actions: [
-                {:send_stream, {:peer_stream, 24}, <<1, 1, 7>>, [finish: true]}
+                {:send_stream, {:peer_stream, 24}, <<1, 1, 8>>, [finish: true]}
               ]
             }} =
              MOQLite05.handle_operation(
@@ -784,9 +784,9 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
                 }
               ],
               actions: [
-                {:send_stream, {:peer_stream, 24}, <<1, 1, 7>>, [finish: true]},
+                {:send_stream, {:peer_stream, 24}, <<1, 1, 8>>, [finish: true]},
                 {:abort_stream_sending, {:group, 7, 7}, 0},
-                {:send_stream, {:peer_stream, 32}, <<1, 1, 7>>, [finish: true]},
+                {:send_stream, {:peer_stream, 32}, <<1, 1, 8>>, [finish: true]},
                 {:cancel_timer, {:publisher_subscription_decision, request_handle}},
                 {:abort_stream_sending, {:peer_stream, 28}, 0x10}
               ]

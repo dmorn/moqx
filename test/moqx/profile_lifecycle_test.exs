@@ -296,7 +296,30 @@ defmodule MOQX.ProfileLifecycleTest do
     Task.await(peer)
   end
 
-  test "final catalog drains after the subscribe stream finishes before its group arrives" do
+  test "publishing reserves an encodable exclusive end boundary" do
+    {client, peer} = peer()
+    {:ok, publication} = MOQX.publish(client, ["room"])
+    {:ok, track} = MOQX.add_track(client, publication, "data", timescale: 1000)
+
+    object = %MOQX.Object{
+      group_id: 4_611_686_018_427_387_903,
+      object_id: 0,
+      timestamp: 0,
+      payload: "x",
+      end_of_group?: true
+    }
+
+    assert {:error, :invalid_group_id} = MOQX.publish_object(client, track, object)
+
+    assert :ok =
+             MOQX.publish_object(client, track, %{object | group_id: 4_611_686_018_427_387_902})
+
+    MOQX.close(client)
+    send(peer.pid, :done)
+    Task.await(peer)
+  end
+
+  test "an empty exclusive range completes without waiting for group zero" do
     {client, peer} = peer()
 
     {:ok, sub} =
@@ -307,6 +330,24 @@ defmodule MOQX.ProfileLifecycleTest do
     send(peer.pid, {:accept, sub.id})
     assert_receive {:moqx, ^client, %MOQX.Event.SubscriptionAccepted{subscription: ^sub}}, 1_000
     send(peer.pid, {:finish_subscription, sub.id, 0})
+    assert_receive {:moqx, ^client, %MOQX.Event.SubscriptionDone{subscription: ^sub}}, 1_000
+    refute_receive {:moqx, ^client, %MOQX.Event.CatalogReceived{}}, 50
+    MOQX.close(client)
+    send(peer.pid, :done)
+    Task.await(peer)
+  end
+
+  test "final catalog drains after the subscribe stream finishes before its group arrives" do
+    {client, peer} = peer()
+
+    {:ok, sub} =
+      MOQX.subscribe(client, %MOQX.TrackRef{namespace: ["room"], track: "catalog.json"},
+        profile: :hang
+      )
+
+    send(peer.pid, {:accept, sub.id})
+    assert_receive {:moqx, ^client, %MOQX.Event.SubscriptionAccepted{subscription: ^sub}}, 1_000
+    send(peer.pid, {:finish_subscription, sub.id, 1})
     refute_receive {:moqx, ^client, %MOQX.Event.ProtocolFailed{}}, 50
     send(peer.pid, {:object, sub.id, 0, "{}"})
     assert_receive {:moqx, ^client, %MOQX.Event.CatalogReceived{subscription: ^sub}}, 1_000

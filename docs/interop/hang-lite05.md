@@ -51,21 +51,38 @@ Build the test image using the existing compose `moqx-curley-moq-lite-05-test` s
 before using the Docker command on a fresh machine. These are functional
 receiver checks, not network benchmark or browser playback certification.
 
-## Known peer completion gap
+## Corrected Lite05 completion contract
 
-Published Lite05 section 7.12 defines the SUBSCRIBE_END group as **inclusive**.
-The pinned Curley implementation instead emits/consumes an **exclusive** group
-boundary (`moq-lite/src/ietf/publisher.rs` and `subscriber.rs`). MOQX preserves
-published draft semantics. An experiment sending one final catalog and
-immediately finishing through this relay delivered the catalog but then timed
-out waiting for the extra group implied by the relay's END value.
+MOQX 0.9.0 follows the **exclusive** SUBSCRIBE_END boundary deployed by moq.dev:
+END is the first sequence that will never be delivered; 0 represents no groups.
+The submitted IETF `draft-lcurley-moq-lite-05` section 7.12 still says inclusive.
+This is a deliberate, maintainer-approved deviation from that submitted text,
+not automatic peer detection or a draft-06 upgrade.
 
-The native-QUIC fixture separately verifies a conforming inclusive END arriving
-before the final Group stream: CatalogReceived is followed by SubscriptionDone.
-Outstanding groups have a five-second drain deadline. Successful catalog/media
-exchange with this peer does **not** certify its terminal subscription boundary.
-No automatic peer inference, ALPN relabeling, or compatibility variant is added.
+Upstream already tracked the disagreement in
+[issue #2309](https://github.com/moq-dev/moq/issues/2309) and fixed its JavaScript
+implementation and working draft in
+[PR #2333](https://github.com/moq-dev/moq/pull/2333), merge commit
+`fccda01366197c9be47e55783a799b438d31c554`. The change explicitly tests Lite05,
+including empty tracks and out-of-order group arrival. The pinned relay revision
+above already includes this decision. Its source paths are
+`rs/moq-net/src/lite/publisher.rs` and `rs/moq-net/src/lite/subscriber.rs`.
+The working draft records the correction under -06 because -05 had already
+been submitted; the deployed -05 implementation nevertheless uses it.
 
-The public API change is prepared for the next release; this branch does not
-publish a Hex release. Downstream consumers should use a released version after
-merge, or explicitly pin the reviewed commit for evaluation.
+The earlier MOQX experiment timed out because MOQX still followed the submitted
+inclusive wording. That experiment is superseded by the exclusive-boundary
+implementation and completion regression suite. See ADR-0014 and code comments
+beside both sender and receiver logic.
+
+The native-QUIC fixture verifies END 1 arriving before group 0: the final catalog
+is delivered and SubscriptionDone follows. Pinned-relay tests verify immediate
+final-catalog completion through finish_subscription and withdraw_track.
+The finish_publication check first confirms receiver delivery: namespace withdrawal
+can remove the relay route while groups are in flight, so it is not a delivery
+barrier. All three publisher paths encode the same exclusive boundary. A separate case finishes an empty track
+without delivering or waiting for an invented group 0. Outstanding groups below
+the exclusive boundary retain a five-second drain deadline.
+
+No duplicate upstream bug report is needed: #2309 already describes the issue
+and #2333 records the chosen resolution. No online-relay deployment claim is made.

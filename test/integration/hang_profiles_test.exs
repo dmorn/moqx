@@ -129,7 +129,7 @@ defmodule MOQX.Integration.HangProfilesTest do
                    10_000
   end
 
-  test "native QUIC drains a final catalog after a conforming inclusive SUBSCRIBE_END" do
+  test "native QUIC drains a final catalog after a corrected exclusive SUBSCRIBE_END" do
     {client, peer} = MOQX.ProfilePeer.start(native: true, certs: "/certs")
 
     {:ok, sub} =
@@ -139,7 +139,7 @@ defmodule MOQX.Integration.HangProfilesTest do
 
     send(peer.pid, {:accept, sub.id})
     assert_receive {:moqx, ^client, %MOQX.Event.SubscriptionAccepted{subscription: ^sub}}, 5_000
-    send(peer.pid, {:finish_subscription, sub.id, 0})
+    send(peer.pid, {:finish_subscription, sub.id, 1})
     refute_receive {:moqx, ^client, %MOQX.Event.ProtocolFailed{}}, 50
     send(peer.pid, {:object, sub.id, 0, "{}"})
     assert_receive {:moqx, ^client, %MOQX.Event.CatalogReceived{subscription: ^sub}}, 5_000
@@ -147,6 +147,84 @@ defmodule MOQX.Integration.HangProfilesTest do
     MOQX.close(client)
     send(peer.pid, :done)
     Task.await(peer)
+  end
+
+  for finish <- [:subscription, :track, :publication] do
+    @finish finish
+    test "pinned relay accounts for the final catalog during #{finish} completion" do
+      {:ok, publisher} = connect(:publisher)
+      {:ok, subscriber} = connect(:subscriber)
+
+      on_exit(fn ->
+        MOQX.close(publisher)
+        MOQX.close(subscriber)
+      end)
+
+      namespace = ["hang-end", Integer.to_string(System.unique_integer([:positive]))]
+      {:ok, publication} = MOQX.publish(publisher, namespace)
+      {:ok, track} = MOQX.add_catalog(publisher, publication, profile: :hang)
+      {:ok, sub} = MOQX.subscribe(subscriber, track.track, profile: :hang)
+
+      assert_receive {:moqx, ^publisher,
+                      %MOQX.Event.PublicationSubscriberJoined{
+                        track: ^track,
+                        subscription: outbound
+                      }},
+                     5_000
+
+      {:ok, empty} = MOQX.Catalog.decode("{}", format: :hang)
+      assert :ok = MOQX.publish_catalog(publisher, track, empty)
+
+      # Namespace withdrawal can remove the relay route before in-flight groups
+      # arrive. Confirm delivery before withdrawing the whole publication;
+      # subscription finish and track withdrawal below deliberately stay immediate.
+      if @finish == :publication do
+        assert_receive {:moqx, ^subscriber,
+                        %MOQX.Event.CatalogReceived{subscription: ^sub, group_id: 0}},
+                       5_000
+      end
+
+      result =
+        case @finish do
+          :subscription -> MOQX.finish_subscription(publisher, outbound)
+          :track -> MOQX.withdraw_track(publisher, track)
+          :publication -> MOQX.finish_publication(publisher, publication)
+        end
+
+      assert :ok = result
+
+      if @finish != :publication do
+        assert_receive {:moqx, ^subscriber,
+                        %MOQX.Event.CatalogReceived{subscription: ^sub, group_id: 0}},
+                       5_000
+      end
+
+      assert_receive {:moqx, ^subscriber, %MOQX.Event.SubscriptionDone{subscription: ^sub}}, 5_000
+    end
+  end
+
+  test "pinned relay completes an empty track without inventing a group zero" do
+    {:ok, publisher} = connect(:publisher)
+    {:ok, subscriber} = connect(:subscriber)
+
+    on_exit(fn ->
+      MOQX.close(publisher)
+      MOQX.close(subscriber)
+    end)
+
+    {:ok, publication} =
+      MOQX.publish(publisher, ["empty-end", Integer.to_string(System.unique_integer([:positive]))])
+
+    {:ok, track} = MOQX.add_catalog(publisher, publication, profile: :hang)
+    {:ok, sub} = MOQX.subscribe(subscriber, track.track, profile: :hang)
+
+    assert_receive {:moqx, ^publisher,
+                    %MOQX.Event.PublicationSubscriberJoined{subscription: outbound}},
+                   5_000
+
+    assert :ok = MOQX.finish_subscription(publisher, outbound)
+    assert_receive {:moqx, ^subscriber, %MOQX.Event.SubscriptionDone{subscription: ^sub}}, 5_000
+    refute_receive {:moqx, ^subscriber, %MOQX.Event.CatalogReceived{subscription: ^sub}}, 50
   end
 
   defp connect(role) do
