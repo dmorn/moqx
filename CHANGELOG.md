@@ -19,6 +19,9 @@ All notable changes to `moqx` will be documented in this file.
 
 ### Fixed
 
+- Accept fractional HANG jitter and select/rank H.264 renditions from typed
+  HANG decoder/container metadata without coercing it into CMSF fields.
+
 - Scope publication/subscription handles to their owning connection.
 - Drain outstanding Lite05 groups after an inclusive SUBSCRIBE_END and retain
   complete singleton snapshots for late subscribers.

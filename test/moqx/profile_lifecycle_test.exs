@@ -1,6 +1,30 @@
 defmodule MOQX.ProfileLifecycleTest do
   use ExUnit.Case, async: true
 
+  test "HANG delivers catalogs with fractional jitter through the selected profile" do
+    {client, peer} = peer()
+
+    {:ok, sub} =
+      MOQX.subscribe(client, %MOQX.TrackRef{namespace: ["room"], track: "catalog.json"},
+        profile: :hang
+      )
+
+    send(peer.pid, {:accept, sub.id})
+    assert_receive {:moqx, ^client, %MOQX.Event.SubscriptionAccepted{subscription: ^sub}}, 1_000
+    payload = ~s({"video":{"renditions":{"v":{"codec":"avc1.42001e","jitter":16.667}}}})
+    send(peer.pid, {:object, sub.id, 0, payload})
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.CatalogReceived{subscription: ^sub, catalog: catalog}},
+                   1_000
+
+    assert catalog.media.video.renditions["v"].jitter == 16.667
+    assert :ok = MOQX.unsubscribe(client, sub)
+    MOQX.close(client)
+    send(peer.pid, :done)
+    Task.await(peer)
+  end
+
   test "HANG snapshots replace live metadata, reject stale groups, and recover after malformed updates" do
     {client, peer} = peer()
     track = %MOQX.TrackRef{namespace: ["room", "alice"], track: "catalog.json"}

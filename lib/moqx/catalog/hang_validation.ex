@@ -38,6 +38,7 @@ defmodule MOQX.Catalog.HangValidation do
          :ok <- field(raw, "broadcast", path, &relative_path?/1),
          :ok <- field(raw, "stalled", path, &is_boolean/1),
          :ok <- field(raw, "optimizeForLatency", path, &is_boolean/1),
+         :ok <- field(raw, "jitter", path, &(is_number(&1) and &1 >= 0)),
          :ok <- field(raw, "framerate", path, &(is_number(&1) and &1 > 0)),
          :ok <-
            each(
@@ -46,8 +47,7 @@ defmodule MOQX.Catalog.HangValidation do
                "codedHeight",
                "displayAspectWidth",
                "displayAspectHeight",
-               "bitrate",
-               "jitter"
+               "bitrate"
              ],
              &field(raw, &1, path, fn n -> integer?(n, 0) end)
            ) do

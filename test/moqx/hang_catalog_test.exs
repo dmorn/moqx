@@ -1,6 +1,84 @@
 defmodule MOQX.HangCatalogTest do
   use ExUnit.Case, async: true
 
+  test "H.264 selectors rank typed HANG renditions without coercing them to CMSF" do
+    video = %{
+      "a-low" => %{
+        "codec" => "avc1.64001f",
+        "codedWidth" => 1280,
+        "codedHeight" => 720,
+        "container" => %{"kind" => "cmaf", "init" => "aW5pdA=="}
+      },
+      "z-high" => %{
+        "codec" => "avc3.640028",
+        "codedWidth" => 1920,
+        "codedHeight" => 1080,
+        "container" => %{"kind" => "cmaf", "init" => "aW5pdA=="}
+      },
+      "legacy" => %{"codec" => "avc1.42001e", "codedWidth" => 640, "codedHeight" => 360},
+      "loc" => %{"codec" => "avc1.42001e", "container" => %{"kind" => "loc"}},
+      "ignored-av1" => %{"codec" => "av01.0.08M.10", "codedWidth" => 3840, "codedHeight" => 2160},
+      "ignored-container" => %{"codec" => "avc1.640028", "container" => %{"kind" => "future"}},
+      "ignored-codec" => %{"codec" => "avc1future"}
+    }
+
+    payload =
+      JSON.encode!(%{
+        "video" => %{"renditions" => video},
+        "audio" => %{
+          "renditions" => %{
+            "ignored-audio" => %{
+              "codec" => "avc1.640028",
+              "sampleRate" => 48_000,
+              "numberOfChannels" => 2
+            }
+          }
+        }
+      })
+
+    assert {:ok, catalog} = MOQX.Catalog.decode(payload, format: :hang)
+
+    assert Enum.map(MOQX.Catalog.h264_tracks(catalog), & &1.name) == [
+             "z-high",
+             "a-low",
+             "legacy",
+             "loc"
+           ]
+
+    assert {:ok, selected} = MOQX.Catalog.select_h264(catalog)
+    assert selected.name == "z-high"
+    assert selected.decoder.coded_width == 1920
+    assert selected.container.init == "init"
+    assert selected.packaging == nil
+    assert selected.init_data == nil
+    assert selected.width == nil
+  end
+
+  test "HANG jitter preserves fractional milliseconds and rejects negative or nonnumeric values" do
+    for jitter <- [0, 0.0, 16.667, 23.22] do
+      payload =
+        JSON.encode!(%{
+          "video" => %{"renditions" => %{"v" => %{"codec" => "avc1.42001e", "jitter" => jitter}}}
+        })
+
+      assert {:ok, catalog} = MOQX.Catalog.decode(payload, format: :hang)
+      assert catalog.media.video.renditions["v"].jitter === jitter
+      assert {:ok, encoded} = MOQX.Catalog.encode(catalog)
+      assert JSON.decode!(encoded)["video"]["renditions"]["v"]["jitter"] === jitter
+    end
+
+    for jitter <- [-0.1, -1, "16.667", nil] do
+      payload =
+        JSON.encode!(%{
+          "video" => %{"renditions" => %{"v" => %{"codec" => "avc1.42001e", "jitter" => jitter}}}
+        })
+
+      assert {:error,
+              %MOQX.Catalog.Error{path: [:video, :renditions, 0, :jitter], reason: :invalid_type}} =
+               MOQX.Catalog.decode(payload, format: :hang)
+    end
+  end
+
   test "HANG preserves typed rendition metadata, initialization and extensions through encoding" do
     json =
       ~s({"video":{"renditions":{"720p":{"codec":"avc1.64001f","codedWidth":1280,"codedHeight":720,"description":"01AB","container":{"kind":"cmaf","init":"aW5pdA==","vendor":7},"vendor":{"enabled":true}}},"display":{"width":1280,"height":720},"rotation":90,"vendor":"section"},"audio":{"renditions":{"opus":{"codec":"opus","sampleRate":48000,"numberOfChannels":2}}},"vendor":"root"})

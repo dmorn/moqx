@@ -14,7 +14,7 @@ defmodule MOQX.Catalog do
   decoding belong to the caller.
   """
 
-  alias MOQX.Catalog.{Compression, Hang, Track}
+  alias MOQX.Catalog.{Compression, Container, Decoder, Hang, Track}
 
   @enforce_keys [:tracks, :raw]
   defstruct [
@@ -130,7 +130,15 @@ defmodule MOQX.Catalog do
     end
   end
 
-  @doc "Returns H.264/AVC tracks ordered from highest to lowest advertised resolution."
+  @doc """
+  Returns H.264/AVC tracks ordered from highest to lowest advertised resolution.
+
+  CMSF requires supported packaging and initialization metadata. HANG uses its
+  typed decoder dimensions and known `legacy`, `loc`, or `cmaf` containers;
+  unknown codecs/containers are excluded. This selects advertised metadata,
+  not a guarantee of decoder or `MOQX.CMAF.capture/4` support. Ties use bitrate
+  descending, then track name ascending.
+  """
   @spec h264_tracks(t()) :: [Track.t()]
   def h264_tracks(%__MODULE__{tracks: tracks}) do
     tracks
@@ -208,6 +216,14 @@ defmodule MOQX.Catalog do
     {:error, %MOQX.Catalog.Error{path: [:format], reason: :unsupported, value: format}}
   end
 
+  defp avc_track?(%Track{
+         role: "video",
+         decoder: %Decoder{codec: codec},
+         container: %Container{kind: kind}
+       })
+       when is_binary(codec) and kind in ["legacy", "loc", "cmaf"],
+       do: String.starts_with?(String.downcase(codec), ["avc1.", "avc3."])
+
   defp avc_track?(%Track{codec: codec, packaging: "cmaf"} = track) when is_binary(codec),
     do:
       video_role?(track) and initializable?(track) and
@@ -225,6 +241,10 @@ defmodule MOQX.Catalog do
 
   defp initializable?(%Track{init_data: init_data, init_track: init_track}),
     do: is_binary(init_data) or is_binary(init_track)
+
+  defp resolution_area(%Track{decoder: %Decoder{coded_width: width, coded_height: height}})
+       when is_integer(width) and is_integer(height),
+       do: width * height
 
   defp resolution_area(%Track{width: width, height: height})
        when is_integer(width) and is_integer(height),

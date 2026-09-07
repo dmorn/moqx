@@ -5,6 +5,7 @@ defmodule MOQX.Catalog.Track do
   HANG `decoder.description` and CMAF `container.init` contain decoded bytes.
   `metadata_status` is `:recognized`, `:unknown_codec`, or `:unknown_container`;
   callers must still determine whether their decoder supports the configuration.
+  `jitter` preserves non-negative, possibly fractional milliseconds.
   Unknown rendition fields remain in `extensions`. A relative broadcast address
   that escapes the root or lacks a catalog namespace sets `address_error`;
   `track_ref/2` then returns `{:error, reason}` instead of an invented address.
