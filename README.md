@@ -182,6 +182,12 @@ parameters, and delivery modes return typed errors rather than changing their
 meaning. WebTransport, Fetch, Probe, datagram delivery, and draft-06
 are not part of this implementation.
 
+Lite05 completion follows moq.dev's corrected exclusive SUBSCRIBE_END contract:
+END `N` permits groups below `N`; END `0` means an empty track. This deliberately
+differs from the submitted IETF -05 text, following upstream PR #2333 with
+maintainer approval. The wire decision and references are documented in
+[the interoperability notes](docs/interop/hang-lite05.md) and in code.
+
 The native-QUIC endpoint scheme is `moql://`; the older `moqt://` spelling
 remains accepted for existing callers. MoQ Lite draft-05 requires the QUIC
 DATAGRAM transport parameter even when an application only publishes reliable

@@ -97,7 +97,14 @@ defmodule MOQX.Protocol.MOQLite05.Messages do
   end
 
   defmodule SubscribeEnd do
-    @moduledoc "Publisher declaration of the last group that may be delivered."
+    @moduledoc """
+    Exclusive end of a subscription: the first group that will never be delivered.
+
+    Zero represents an empty track. MOQX follows the deployed Lite05 correction
+    in https://github.com/moq-dev/moq/pull/2333, approved by the maintainer, rather
+    than the inclusive wording in submitted draft-lcurley-moq-lite-05 section
+    7.12. See ADR-0014 and the shared publisher/subscriber completion logic.
+    """
     @enforce_keys [:group]
     defstruct @enforce_keys
     @type t :: %__MODULE__{group: non_neg_integer()}

@@ -4,6 +4,8 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-07
+
 ### Added
 
 - Explicit per-handle catalog profiles: Cloudflare CMSF, Moqtail CMSF, and pinned
@@ -23,12 +25,15 @@ All notable changes to `moqx` will be documented in this file.
   HANG decoder/container metadata without coercing it into CMSF fields.
 
 - Scope publication/subscription handles to their owning connection.
-- Drain outstanding Lite05 groups after an inclusive SUBSCRIBE_END and retain
+- Drain outstanding Lite05 groups after an exclusive SUBSCRIBE_END and retain
   complete singleton snapshots for late subscribers.
 - Preserve data-before-FIN ordering in the deterministic support transport.
 
-The pinned Curley relay uses an incompatible exclusive SUBSCRIBE_END boundary;
-see `docs/interop/hang-lite05.md` for the exact certification boundary.
+- Follow upstream's corrected exclusive Lite05 SUBSCRIBE_END contract across
+  subscription finish, track withdrawal and publication finish. END 0 denotes
+  an empty track; the final delivered group is followed by END (max group + 1).
+  This maintainer-approved decision differs from the submitted IETF -05 text
+  and is documented in code and ADR-0014 with upstream issue/PR references.
 
 ## [0.8.1] - 2026-09-04
 

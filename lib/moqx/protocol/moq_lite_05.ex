@@ -703,8 +703,7 @@ defmodule MOQX.Protocol.MOQLite05 do
 
       active_actions =
         Enum.flat_map(active, fn {_subscribe_id, entry} ->
-          last_group = entry.last_group || entry.subscribe.group_start || 0
-          response = Codec.encode_subscribe_response(%SubscribeEnd{group: last_group})
+          response = subscribe_end_response(entry)
 
           active_group_abort_actions(entry) ++
             [{:send_stream, {:peer_stream, entry.stream_id}, response, [finish: true]}]
@@ -749,8 +748,7 @@ defmodule MOQX.Protocol.MOQLite05 do
          true <- scope == state.handle_scope,
          %{handle: ^handle} = entry <- state.publisher_subscriptions[subscribe_id],
          :ok <- validate_finish_subscription_options(operation.options) do
-      last_group = entry.last_group || entry.subscribe.group_start || 0
-      response = Codec.encode_subscribe_response(%SubscribeEnd{group: last_group})
+      response = subscribe_end_response(entry)
 
       next_state = %{
         state
@@ -1365,10 +1363,21 @@ defmodule MOQX.Protocol.MOQLite05 do
       end)
   end
 
+  # Deliberate Lite05 compatibility decision, approved by the maintainer:
+  # follow moq-dev/moq#2333 (fccda01366197c9be47e55783a799b438d31c554),
+  # https://github.com/moq-dev/moq/pull/2333, rather than the submitted IETF
+  # draft-lcurley-moq-lite-05 section 7.12's stale inclusive wording.
+  # END is the first sequence that will never be delivered: max group + 1,
+  # or 0 for an empty stream. This applies to every publisher completion path
+  # and matches the subscriber range check below. See docs/adr/0014-*.
+  defp subscribe_end_response(entry) do
+    boundary = if is_nil(entry.last_group), do: 0, else: entry.last_group + 1
+    Codec.encode_subscribe_response(%SubscribeEnd{group: boundary})
+  end
+
   defp publication_finish_actions(active, pending) do
     Enum.flat_map(active, fn {_subscribe_id, entry} ->
-      last_group = entry.last_group || entry.subscribe.group_start || 0
-      response = Codec.encode_subscribe_response(%SubscribeEnd{group: last_group})
+      response = subscribe_end_response(entry)
 
       active_group_abort_actions(entry) ++
         [{:send_stream, {:peer_stream, entry.stream_id}, response, [finish: true]}]
@@ -1930,13 +1939,19 @@ defmodule MOQX.Protocol.MOQLite05 do
     do: {:error, :invalid_publisher_max_latency}
 
   defp validate_published_object(%MOQX.Object{} = object) do
-    with :ok <- validate_non_negative(object.group_id, :invalid_group_id),
+    with :ok <- validate_group_id(object.group_id),
          :ok <- validate_non_negative(object.object_id, :invalid_object_id),
          :ok <- validate_non_negative(object.timestamp, :invalid_timestamp),
          :ok <- validate_payload(object.payload) do
       validate_object_status(object.status)
     end
   end
+
+  # Leave room for max_group + 1 in the SUBSCRIBE_END QUIC varint.
+  defp validate_group_id(value) when is_integer(value) and value >= 0 and value < @max_varint,
+    do: :ok
+
+  defp validate_group_id(_value), do: {:error, :invalid_group_id}
 
   defp validate_non_negative(value, _reason) when is_integer(value) and value >= 0, do: :ok
   defp validate_non_negative(_value, reason), do: {:error, reason}
@@ -2028,7 +2043,7 @@ defmodule MOQX.Protocol.MOQLite05 do
             do: nil,
             else: %{id: object.group_id, timestamp: object.timestamp, next_id: 1}
           ),
-        last_group: object.group_id
+        last_group: max(entry.last_group || 0, object.group_id)
     }
 
     {:ok, entry, {:open_stream, key, [direction: :unidirectional], bytes, [finish: finish?]}}
@@ -2053,7 +2068,7 @@ defmodule MOQX.Protocol.MOQLite05 do
             do: nil,
             else: %{active | timestamp: object.timestamp, next_id: object.object_id + 1}
           ),
-        last_group: object.group_id
+        last_group: max(entry.last_group || 0, object.group_id)
     }
 
     {:ok, entry,
@@ -2248,7 +2263,13 @@ defmodule MOQX.Protocol.MOQLite05 do
 
       %{accepted_group: first, subscribe_end: last} = entry
       when not is_nil(first) and not is_nil(last) ->
-        if range_covered?(entry.accounted_ranges, first, last) do
+        # SUBSCRIBE_END is exclusive in the deployed Lite05 contract. The
+        # submitted IETF -05 text says inclusive, but upstream deliberately
+        # corrected this before finalizing its -05 ALPN (moq-dev/moq#2333,
+        # merge fccda01366197c9be47e55783a799b438d31c554). The maintainer
+        # approved following that correction; do not reintroduce last + 1
+        # waiting based on the stale submitted text. See ADR-0014.
+        if exclusive_range_covered?(entry.accounted_ranges, first, last) do
           complete_subscription(state, subscribe_id, entry)
         else
           await_subscription_groups(state, subscribe_id, entry)
@@ -2443,6 +2464,13 @@ defmodule MOQX.Protocol.MOQLite05 do
 
     %{entry | accounted_ranges: ranges}
   end
+
+  defp exclusive_range_covered?(_ranges, first, first), do: true
+
+  defp exclusive_range_covered?(ranges, first, boundary) when boundary > first,
+    do: range_covered?(ranges, first, boundary - 1)
+
+  defp exclusive_range_covered?(_ranges, _first, _boundary), do: false
 
   defp range_covered?(ranges, first, last) do
     Enum.any?(ranges, fn {range_first, range_last} ->
