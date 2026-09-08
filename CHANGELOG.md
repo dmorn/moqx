@@ -4,6 +4,39 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-08
+
+### Added
+
+- Opt-in, bounded Lite05 missing-track metadata demand with typed request and
+  terminal events, explicit rejection, owner/deadline/cancellation handling,
+  and provisioning through track registration or reactive subscription acceptance.
+  Metadata availability remains separate from controlled subscription admission.
+- `MOQX.publish_empty_group/3` publishes a genuine header-only Lite Group plus
+  FIN, without requiring HANG or substituting an empty object payload.
+  `SubgroupEnded.object_count` distinguishes complete empty groups from media
+  groups and incomplete/reset streams. Range bounds, retained replay, multiple
+  subscribers and forward/backward timestamps preserve their documented semantics.
+
+### Fixed
+
+- Return the usable locally committed track handle even if a pending metadata
+  reply fails. Each reply reports transport admission or its actual failure
+  independently; best-effort cleanup cannot suppress terminal outcomes or skip
+  sibling replies. Ordinary transport actions retain fail-fast behavior.
+- Isolate late Lite Track/Subscribe responses and group events after subscription
+  rejection or cancellation, preserving active catalog/media siblings without
+  reviving retired subscriptions. Never-issued identities still fail explicitly.
+
+### Interoperability
+
+- Verified absent-track provisioning, explicit rejection and timeout through the
+  pinned native Lite relay, plus empty-group epoch transitions and completion.
+  A pinned HANG Opus consumer produced real decoder reset/resumption evidence.
+  Public-player evidence remains mixed: an intermittent backward-epoch decoder
+  error is unresolved. See `docs/interop/hang-lite05.md` for precise scope and
+  limitations; this release does not claim stable general playback certification.
+
 ## [0.9.0] - 2026-09-07
 
 ### Added
