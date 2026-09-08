@@ -175,9 +175,9 @@ defmodule MOQX do
   The connection's `events_to` recipient owns provisioning. Registering the
   requested track through `add_track/4` or reactive `accept_subscription/3`
   resolves all its pending metadata requests; `reject_track_request/3` rejects
-  only one. Normal terminal paths emit `PublicationTrackRequestDone` once.
-  A transport-action failure can instead return an operation error or emit
-  `ProtocolFailed` without the terminal notification; callers must handle both.
+  only one. Terminal paths emit `PublicationTrackRequestDone` once, including
+  `:reply_failed` with the transport error when a metadata reply fails. Stream
+  cleanup is best-effort and cannot suppress the request's terminal outcome.
   Unknown publications, default-rejected requests and capacity overflow reset
   immediately without allocating application handles. Deadline, cancellation,
   publication finish and connection close invalidate pending handles. Owner exit
@@ -225,6 +225,13 @@ defmodule MOQX do
   mode it cannot represent. MoQ Lite draft-05 additionally requires a positive
   `:timescale` and accepts `:publisher_priority` and
   `:publisher_max_latency` for its immutable `TRACK_INFO`.
+
+  Lite registration commits locally and returns a usable track even if one of
+  its pending metadata replies fails. Each reply is attempted independently:
+  `PublicationTrackRequestDone` reports `:registered` only after transport
+  admission, or `:reply_failed` with its error. Neither outcome proves peer
+  delivery or authorizes a subscription. Reactive `accept_subscription/3` uses
+  the same isolated metadata-reply behavior without skipping admission actions.
   """
   @spec add_track(MOQX.Client.t(), MOQX.Publication.t(), binary(), [published_track_option()]) ::
           {:ok, MOQX.PublishedTrack.t()} | {:error, term()}

@@ -7,6 +7,12 @@ defmodule MOQX.Protocol do
   commands, events, and error semantics. The runtime owns the
   `MOQX.Transport` context and applies the transport actions returned in
   `MOQX.Protocol.Transition` values.
+
+  An explicit `{:attempt_actions, key, actions}` batch reports its first failure
+  or success immediately through `handle_transport/2` as `{:action_result, key,
+  result}`. The runtime reports mechanics only; the protocol owns the meaning
+  and recovery transition. Ordinary actions remain fail-fast, with application
+  events emitted only after their transition actions succeed.
   """
 
   alias MOQX.Protocol.{Capabilities, Transition, TransportSpec}
@@ -24,7 +30,9 @@ defmodule MOQX.Protocol do
 
   @callback handle_operation(state(), MOQX.Operation.t()) :: Transition.result()
 
-  @type runtime_event :: {:runtime_timeout, term()}
+  @type action_result :: :ok | {:error, term()}
+  @type runtime_event ::
+          {:runtime_timeout, term()} | {:action_result, term(), action_result()}
 
   @callback handle_transport(state(), MOQX.Transport.event() | runtime_event()) ::
               Transition.result()

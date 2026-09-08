@@ -45,11 +45,20 @@ possible track. Applications still decide provisioning, admission and retry.
 The library cannot promise a terminal notification to an owner that exited,
 and a registered outcome is transport admission, not peer media delivery.
 
-The current driver delivers events after all transition IO succeeds. An action
-failure can therefore surface as an operation error or `ProtocolFailed` without
-the request's terminal notification. Closing this failure-event boundary is a
-release gate for strict terminal-event guarantees; normal-path tests do not
-prove that stronger contract.
+Local track registration is a commit separate from independent metadata replies.
+It returns a usable track handle even if a reply fails. Each pending request
+reports `:registered` only after transport admission, or `:reply_failed` with
+the actual transport error; failed replies do not skip siblings or reactive
+subscription admission actions. Metadata does not implicitly approve admission.
+
+The runtime provides an explicit `{:attempt_actions, key, actions}` batch and
+mechanically reports `{:action_result, key, result}` to the protocol. Lite owns
+the interpretation and recovery. Ordinary actions retain fail-fast behavior;
+there is no general success-before-IO policy. Metadata stream cleanup attempts
+each remaining half independently and is best-effort: failed cleanup cannot
+suppress the primary terminal outcome or cause a duplicate on later timeout or
+peer cancellation. A failed backend cleanup cannot guarantee transport resource
+release before peer or connection shutdown.
 
 ## References
 

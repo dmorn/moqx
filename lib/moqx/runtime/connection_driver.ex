@@ -451,6 +451,21 @@ defmodule MOQX.Runtime.ConnectionDriver do
     apply_action(state, {:open_stream, key, options, initial_data, []})
   end
 
+  # Only explicitly isolated action batches use result feedback. Ordinary
+  # transition actions still stop on failure and never emit success before IO.
+  defp apply_action(state, {:attempt_actions, key, actions}) do
+    {result, state} =
+      case apply_actions(state, actions) do
+        {:ok, state} -> {:ok, state}
+        {:error, reason, state} -> {{:error, reason}, state}
+      end
+
+    transition(
+      state,
+      state.protocol.handle_transport(state.protocol_state, {:action_result, key, result})
+    )
+  end
+
   defp apply_action(state, {:open_stream, key, options, initial_data, send_options}) do
     active = Keyword.get(options, :active, false)
 

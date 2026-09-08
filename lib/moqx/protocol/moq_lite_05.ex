@@ -321,6 +321,18 @@ defmodule MOQX.Protocol.MOQLite05 do
 
   def handle_transport(
         %State{} = state,
+        {:action_result, {:track_metadata_reply, handle}, result}
+      ),
+      do: MetadataDemand.reply_result(state, handle, result)
+
+  def handle_transport(
+        %State{} = state,
+        {:action_result, {:track_metadata_cleanup, _handle}, _result}
+      ),
+      do: Transition.ok(state)
+
+  def handle_transport(
+        %State{} = state,
         {:runtime_timeout,
          {:publisher_subscription_decision,
           %MOQX.PublicationSubscriptionRequest.Handle{

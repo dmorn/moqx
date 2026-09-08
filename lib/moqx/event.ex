@@ -41,26 +41,33 @@ defmodule MOQX.Event.PublicationTrackRequestDone do
   @moduledoc """
   One track metadata request reached its terminal outcome.
 
-  `:registered` means immutable metadata was submitted to the transport, not
-  that media was authorized or delivered. Owner exit terminates the connection;
+  `:registered` means the transport admitted the immutable metadata reply, not
+  that the peer received it or media was authorized or delivered. `:reply_failed`
+  carries the transport failure in `error`; other outcomes leave `error` nil.
+  Owner exit terminates the connection;
   no event can be delivered to an owner which has exited.
 
-  Terminal handles cannot be decided again. The current driver emits events
-  only after transport actions succeed; an action failure can instead surface
-  as an operation error or `ProtocolFailed` without this notification.
+  Terminal handles cannot be decided again. Each request has one outcome even
+  if its reply or best-effort stream cleanup fails. A failed reply does not
+  roll back track registration or prevent sibling metadata replies.
   """
   @enforce_keys [:request, :reason]
-  defstruct [:request, :reason]
+  defstruct [:request, :reason, :error]
 
   @type reason ::
           :registered
+          | :reply_failed
           | :rejected
           | :timed_out
           | :peer_cancelled
           | :invalid_request
           | :publication_finished
           | :connection_closed
-  @type t :: %__MODULE__{request: MOQX.PublicationTrackRequest.t(), reason: reason()}
+  @type t :: %__MODULE__{
+          request: MOQX.PublicationTrackRequest.t(),
+          reason: reason(),
+          error: term()
+        }
 end
 
 defmodule MOQX.Event.SubscriptionUpdated do

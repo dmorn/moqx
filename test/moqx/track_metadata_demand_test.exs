@@ -1,10 +1,463 @@
 defmodule MOQX.TrackMetadataDemandTest do
   use ExUnit.Case, async: true
 
+  defmodule FailFirstTrackInfo do
+    alias MOQX.Protocol.MOQLite05.Codec
+    alias MOQX.Testing.Transport, as: Support
+
+    for {name, arity} <- Support.__info__(:functions), name != :send_stream do
+      args = Macro.generate_arguments(arity, __MODULE__)
+
+      def unquote(name)(unquote_splicing(args)),
+        do: apply(Support, unquote(name), [unquote_splicing(args)])
+    end
+
+    def send_stream(%{stream_id: 1} = stream, data, options) do
+      case Codec.decode_track_info(IO.iodata_to_binary(data)) do
+        {:ok, %{timescale: 1000, publisher_priority: 17}} ->
+          {:error, :injected_track_info_failure}
+
+        _ ->
+          Support.send_stream(stream, data, options)
+      end
+    end
+
+    def send_stream(stream, data, options),
+      do: Support.send_stream(stream, data, options)
+  end
+
+  defmodule FailSecondTrackInfo do
+    alias MOQX.Protocol.MOQLite05.Codec
+    alias MOQX.Testing.Transport, as: Support
+
+    for {name, arity} <- Support.__info__(:functions), name != :send_stream do
+      args = Macro.generate_arguments(arity, __MODULE__)
+
+      def unquote(name)(unquote_splicing(args)),
+        do: apply(Support, unquote(name), [unquote_splicing(args)])
+    end
+
+    def send_stream(%{stream_id: 5} = stream, data, options) do
+      case Codec.decode_track_info(IO.iodata_to_binary(data)) do
+        {:ok, %{timescale: 1000, publisher_priority: 17}} ->
+          {:error, :injected_track_info_failure}
+
+        _ ->
+          Support.send_stream(stream, data, options)
+      end
+    end
+
+    def send_stream(stream, data, options),
+      do: Support.send_stream(stream, data, options)
+  end
+
+  defmodule FailReplyAndReceivingCleanup do
+    alias MOQX.Testing.Transport, as: Support
+
+    for {name, arity} <- Support.__info__(:functions),
+        name not in [:send_stream, :abort_receiving] do
+      args = Macro.generate_arguments(arity, __MODULE__)
+
+      def unquote(name)(unquote_splicing(args)),
+        do: apply(Support, unquote(name), [unquote_splicing(args)])
+    end
+
+    defdelegate send_stream(stream, data, options), to: FailFirstTrackInfo
+    def abort_receiving(%{stream_id: 1}, _code), do: {:error, :injected_cleanup_failure}
+    def abort_receiving(stream, code), do: Support.abort_receiving(stream, code)
+  end
+
+  defmodule FailReplyAndBothCleanups do
+    alias MOQX.Testing.Transport, as: Support
+
+    for {name, arity} <- Support.__info__(:functions), name != :abort_sending do
+      args = Macro.generate_arguments(arity, __MODULE__)
+
+      def unquote(name)(unquote_splicing(args)),
+        do: apply(FailReplyAndReceivingCleanup, unquote(name), [unquote_splicing(args)])
+    end
+
+    def abort_sending(%{stream_id: 1}, _code), do: {:error, :injected_reset_failure}
+    def abort_sending(stream, code), do: Support.abort_sending(stream, code)
+  end
+
+  defmodule FailOrdinaryGroup do
+    alias MOQX.Testing.Transport, as: Support
+
+    for {name, arity} <- Support.__info__(:functions), name != :send_stream do
+      args = Macro.generate_arguments(arity, __MODULE__)
+
+      def unquote(name)(unquote_splicing(args)),
+        do: apply(Support, unquote(name), [unquote_splicing(args)])
+    end
+
+    def send_stream(stream, data, options) do
+      if String.contains?(IO.iodata_to_binary(data), "ordinary-failure"),
+        do: {:error, :injected_ordinary_failure},
+        else: Support.send_stream(stream, data, options)
+    end
+  end
+
   alias MOQX.Protocol.MOQLite05.Codec
   alias MOQX.Protocol.MOQLite05.Messages.{Subscribe, Track}
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
+
+  test "ordinary publication transport failure remains an error outside scoped metadata replies" do
+    {client, relay} = connect(backend: FailOrdinaryGroup)
+    {:ok, publication} = MOQX.publish(client, ["live"])
+    {:ok, track} = MOQX.add_track(client, publication, "video", timescale: 1000)
+    send(relay.pid, {:subscribe, "video"})
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationSubscriberJoined{track: ^track}}, 1_000
+
+    assert {:error, :injected_ordinary_failure} =
+             MOQX.publish_object(client, track, %MOQX.Object{
+               group_id: 0,
+               object_id: 0,
+               timestamp: 1,
+               payload: "ordinary-failure",
+               end_of_group?: true
+             })
+
+    :ok = MOQX.close(client)
+    send(relay.pid, :stop)
+    Task.await(relay)
+  end
+
+  test "both cleanup failures preserve exactly one failed reply and a successful sibling" do
+    {client, relay} = connect(backend: FailReplyAndBothCleanups)
+
+    {:ok, publication} =
+      MOQX.publish(client, ["live"],
+        missing_track_metadata: :controlled,
+        track_metadata_timeout: 200
+      )
+
+    send(relay.pid, {:request_open, :first, "video"})
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: first}}, 1_000
+    send(relay.pid, {:request, :second, "video"})
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: second}}, 1_000
+
+    {:ok, track} =
+      MOQX.add_track(client, publication, "video", timescale: 1000, publisher_priority: 17)
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationTrackRequestDone{
+                      request: ^first,
+                      reason: :reply_failed,
+                      error: :injected_track_info_failure
+                    }},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationTrackRequestDone{request: ^second, reason: :registered}},
+                   1_000
+
+    send(relay.pid, {:read, :second, 6})
+    assert_receive {:bytes, :second, <<5, 17, 0, 0, 0x43, 0xE8>>}, 1_000
+    :ok = MOQX.withdraw_track(client, track)
+    send(relay.pid, {:cancel, :first})
+    send(relay.pid, {:request, :barrier, "missing"})
+
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: barrier}},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationTrackRequestDone{request: ^barrier, reason: :timed_out}},
+                   1_000
+
+    refute_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequestDone{}}, 20
+    refute_receive {:moqx, ^client, %MOQX.Event.ProtocolFailed{}}, 20
+    :ok = MOQX.close(client)
+    send(relay.pid, :stop)
+    Task.await(relay)
+  end
+
+  test "rejected cancelled and malformed requests retain terminal outcomes when cleanup fails" do
+    for outcome <- [:rejected, :peer_cancelled, :invalid_request] do
+      {client, relay} = connect(backend: FailReplyAndReceivingCleanup)
+      {:ok, _} = MOQX.publish(client, ["live"], missing_track_metadata: :controlled)
+      send(relay.pid, {:request_open, :video, "video"})
+
+      assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: request}},
+                     1_000
+
+      case outcome do
+        :rejected ->
+          assert :ok =
+                   MOQX.reject_track_request(client, request, %MOQX.SubscriptionRejection{
+                     code: :unauthorized
+                   })
+
+        :peer_cancelled ->
+          send(relay.pid, {:cancel, :video})
+
+        :invalid_request ->
+          send(relay.pid, {:extra, :video})
+      end
+
+      assert_receive {:moqx, ^client,
+                      %MOQX.Event.PublicationTrackRequestDone{request: ^request, reason: ^outcome}},
+                     1_000
+
+      refute_receive {:moqx, ^client, %MOQX.Event.ProtocolFailed{}}, 20
+      :ok = MOQX.close(client)
+      send(relay.pid, :stop)
+      Task.await(relay)
+    end
+  end
+
+  test "runtime timeout and publication finish notify terminal demand even when stream cleanup fails" do
+    for outcome <- [:timed_out, :publication_finished] do
+      {client, relay} = connect(backend: FailReplyAndReceivingCleanup)
+
+      {:ok, publication} =
+        MOQX.publish(client, ["live"],
+          missing_track_metadata: :controlled,
+          track_metadata_timeout: 50
+        )
+
+      send(relay.pid, {:request_open, :video, "video"})
+
+      assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: request}},
+                     1_000
+
+      if outcome == :publication_finished,
+        do: assert(:ok == MOQX.finish_publication(client, publication))
+
+      assert_receive {:moqx, ^client,
+                      %MOQX.Event.PublicationTrackRequestDone{request: ^request, reason: ^outcome}},
+                     1_000
+
+      refute_receive {:moqx, ^client, %MOQX.Event.ProtocolFailed{}}, 20
+
+      assert {:error, :stale_track_request} =
+               MOQX.reject_track_request(client, request, %MOQX.SubscriptionRejection{
+                 code: :unauthorized
+               })
+
+      :ok = MOQX.close(client)
+      send(relay.pid, :stop)
+      Task.await(relay)
+    end
+  end
+
+  test "failed STOP_SENDING cleanup still attempts RESET and preserves the primary reply outcome" do
+    {client, relay} = connect(backend: FailReplyAndReceivingCleanup)
+    {:ok, publication} = MOQX.publish(client, ["live"], missing_track_metadata: :controlled)
+    send(relay.pid, {:request_open, :video, "video"})
+
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: request}},
+                   1_000
+
+    assert {:ok, track} =
+             MOQX.add_track(client, publication, "video", timescale: 1000, publisher_priority: 17)
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationTrackRequestDone{
+                      request: ^request,
+                      reason: :reply_failed,
+                      error: :injected_track_info_failure
+                    }},
+                   1_000
+
+    send(relay.pid, {:abort, :video, 0})
+    assert_receive {:aborted, :video}, 1_000
+    assert :ok = MOQX.withdraw_track(client, track)
+    refute_receive {:moqx, ^client, %MOQX.Event.ProtocolFailed{}}, 20
+    :ok = MOQX.close(client)
+    send(relay.pid, :stop)
+    Task.await(relay)
+  end
+
+  test "reactive admission returns usable track and subscription handles despite metadata reply failure" do
+    {client, relay} = connect(backend: FailFirstTrackInfo)
+
+    {:ok, _} =
+      MOQX.publish(client, ["live"],
+        missing_track_metadata: :controlled,
+        inbound_subscriptions: :controlled,
+        subscription_decision_timeout: 100,
+        track_metadata_timeout: 200
+      )
+
+    send(relay.pid, {:request, :video, "video"})
+
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: metadata}},
+                   1_000
+
+    send(relay.pid, {:subscribe, "video"})
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriptionRequested{request: admission}},
+                   1_000
+
+    refute_receive {:moqx, ^client, %MOQX.Event.PublicationSubscriberJoined{}}, 20
+
+    assert {:ok, track, subscription} =
+             MOQX.accept_subscription(client, admission, timescale: 1000, publisher_priority: 17)
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationTrackRequestDone{
+                      request: ^metadata,
+                      reason: :reply_failed
+                    }},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriberJoined{
+                      track: ^track,
+                      subscription: ^subscription
+                    }},
+                   1_000
+
+    assert :ok =
+             MOQX.publish_object(client, track, %MOQX.Object{
+               group_id: 0,
+               object_id: 0,
+               timestamp: 1,
+               payload: "usable",
+               end_of_group?: true
+             })
+
+    assert :ok = MOQX.finish_subscription(client, subscription)
+    assert :ok = MOQX.withdraw_track(client, track)
+    send(relay.pid, {:request, :barrier, "missing"})
+
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: barrier}},
+                   1_000
+
+    assert_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationTrackRequestDone{request: ^barrier, reason: :timed_out}},
+                   1_000
+
+    refute_receive {:moqx, ^client,
+                    %MOQX.Event.PublicationSubscriptionCancelled{request: ^admission}},
+                   20
+
+    refute_receive {:moqx, ^client, %MOQX.Event.ProtocolFailed{}}, 20
+    :ok = MOQX.close(client)
+    send(relay.pid, :stop)
+    Task.await(relay)
+  end
+
+  test "failed first or later metadata replies do not suppress successful siblings or consume capacity" do
+    for {backend, failed_key, good_key} <- [
+          {FailFirstTrackInfo, :first, :second},
+          {FailSecondTrackInfo, :second, :first}
+        ] do
+      {client, relay} = connect(backend: backend)
+
+      {:ok, publication} =
+        MOQX.publish(client, ["live"],
+          missing_track_metadata: :controlled,
+          max_pending_track_metadata: 2,
+          track_metadata_timeout: 200
+        )
+
+      send(relay.pid, {:request, :first, "video"})
+
+      assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: first}},
+                     1_000
+
+      send(relay.pid, {:request, :second, "video"})
+
+      assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: second}},
+                     1_000
+
+      requests = %{first: first, second: second}
+      failed = requests[failed_key]
+      good = requests[good_key]
+
+      assert {:ok, track} =
+               MOQX.add_track(client, publication, "video",
+                 timescale: 1000,
+                 publisher_priority: 17
+               )
+
+      assert_receive {:moqx, ^client,
+                      %MOQX.Event.PublicationTrackRequestDone{
+                        request: ^failed,
+                        reason: :reply_failed,
+                        error: :injected_track_info_failure
+                      }},
+                     1_000
+
+      assert_receive {:moqx, ^client,
+                      %MOQX.Event.PublicationTrackRequestDone{
+                        request: ^good,
+                        reason: :registered,
+                        error: nil
+                      }},
+                     1_000
+
+      send(relay.pid, {:read, good_key, 6})
+      assert_receive {:bytes, ^good_key, <<5, 17, 0, 0, 0x43, 0xE8>>}, 1_000
+      assert :ok = MOQX.withdraw_track(client, track)
+      send(relay.pid, {:request, :retry, "video"})
+
+      assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: retry}},
+                     1_000
+
+      assert_receive {:moqx, ^client,
+                      %MOQX.Event.PublicationTrackRequestDone{request: ^retry, reason: :timed_out}},
+                     1_000
+
+      refute_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequestDone{}}, 20
+      refute_receive {:moqx, ^client, %MOQX.Event.ProtocolFailed{}}, 20
+      :ok = MOQX.close(client)
+      send(relay.pid, :stop)
+      Task.await(relay)
+    end
+  end
+
+  test "a failed metadata reply leaves a usable committed track handle and a truthful terminal outcome" do
+    {client, relay} = connect(backend: FailFirstTrackInfo)
+    {:ok, publication} = MOQX.publish(client, ["live"], missing_track_metadata: :controlled)
+    send(relay.pid, {:request, :video, "video"})
+
+    assert_receive {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: request}},
+                   1_000
+
+    assert {:ok, track} =
+             MOQX.add_track(client, publication, "video",
+               timescale: 1000,
+               publisher_priority: 17,
+               retention: :latest
+             )
+
+    assert_receive {:moqx, ^client,
+                    %{
+                      __struct__: MOQX.Event.PublicationTrackRequestDone,
+                      request: ^request,
+                      reason: :reply_failed,
+                      error: :injected_track_info_failure
+                    }},
+                   1_000
+
+    assert :ok =
+             MOQX.publish_object(client, track, %MOQX.Object{
+               group_id: 0,
+               object_id: 0,
+               timestamp: 1,
+               payload: "usable",
+               end_of_group?: true
+             })
+
+    assert :ok = MOQX.withdraw_track(client, track)
+    assert {:ok, replacement} = MOQX.add_track(client, publication, "video", timescale: 1000)
+    refute replacement == track
+
+    assert {:error, :stale_track_request} =
+             MOQX.reject_track_request(client, request, %MOQX.SubscriptionRejection{
+               code: :unauthorized
+             })
+
+    refute_receive {:moqx, ^client, %MOQX.Event.ProtocolFailed{}}, 20
+    :ok = MOQX.close(client)
+    send(relay.pid, :stop)
+    Task.await(relay)
+  end
 
   test "registering an absent track answers its metadata demand without subscribing" do
     {client, relay} = connect()
@@ -115,7 +568,8 @@ defmodule MOQX.TrackMetadataDemandTest do
       MOQX.connect("moqt://localhost:#{port}",
         protocol: :moq_lite_05,
         role: :publisher,
-        transport: {Support, network: network, profile: :moq_lite_05},
+        transport:
+          {Keyword.get(options, :backend, Support), network: network, profile: :moq_lite_05},
         events_to: Keyword.get(options, :events_to, self())
       )
 

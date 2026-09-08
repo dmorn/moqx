@@ -61,17 +61,10 @@ defmodule MOQX.Protocol.MOQLite05.MetadataDemand do
       end)
 
   def registered(state, track_entry) do
-    {pending, remaining} =
-      Enum.split_with(state.pending_track_requests, fn {_, entry} ->
+    pending =
+      Enum.filter(state.pending_track_requests, fn {_, entry} ->
         entry.request.publication == track_entry.track.publication &&
           entry.request.track == track_entry.track.track
-      end)
-
-    state = %{state | pending_track_requests: Map.new(remaining)}
-
-    events =
-      Enum.map(pending, fn {_, entry} ->
-        %PublicationTrackRequestDone{request: entry.request, reason: :registered}
       end)
 
     actions =
@@ -89,12 +82,45 @@ defmodule MOQX.Protocol.MOQLite05.MetadataDemand do
 
         [
           {:cancel_timer, {:track_metadata, entry.request.handle}},
-          {:send_stream, {:peer_stream, entry.stream_id}, Codec.encode_track_info(info),
-           [finish: true]}
+          {:attempt_actions, {:track_metadata_reply, entry.request.handle},
+           [
+             {:send_stream, {:peer_stream, entry.stream_id}, Codec.encode_track_info(info),
+              [finish: true]}
+           ]}
         ]
       end)
 
-    {state, events, actions}
+    {state, [], actions}
+  end
+
+  def reply_result(state, handle, result) do
+    case Enum.find(state.pending_track_requests, fn {_, entry} ->
+           entry.request.handle == handle
+         end) do
+      {id, entry} ->
+        {reason, error, actions} =
+          case result do
+            :ok -> {:registered, nil, []}
+            {:error, error} -> {:reply_failed, error, cleanup_actions(entry, 0)}
+          end
+
+        Transition.ok(
+          %{state | pending_track_requests: Map.delete(state.pending_track_requests, id)},
+          events: [
+            %PublicationTrackRequestDone{request: entry.request, reason: reason, error: error}
+          ],
+          actions: actions
+        )
+
+      nil ->
+        Transition.ok(state)
+    end
+  end
+
+  defp cleanup_actions(entry, code) do
+    Enum.map(abort_actions(entry, code), fn action ->
+      {:attempt_actions, {:track_metadata_cleanup, entry.request.handle}, [action]}
+    end)
   end
 
   def timeout(state, handle) do
@@ -105,7 +131,7 @@ defmodule MOQX.Protocol.MOQLite05.MetadataDemand do
         Transition.ok(
           %{state | pending_track_requests: Map.delete(state.pending_track_requests, id)},
           events: [%PublicationTrackRequestDone{request: entry.request, reason: :timed_out}],
-          actions: abort_actions(entry, 2)
+          actions: cleanup_actions(entry, 2)
         )
 
       nil ->
@@ -120,7 +146,8 @@ defmodule MOQX.Protocol.MOQLite05.MetadataDemand do
           %{state | pending_track_requests: Map.delete(state.pending_track_requests, id)},
           events: [%PublicationTrackRequestDone{request: request, reason: :rejected}],
           actions: [
-            {:cancel_timer, {:track_metadata, request.handle}} | abort_actions(entry, error_code)
+            {:cancel_timer, {:track_metadata, request.handle}}
+            | cleanup_actions(entry, error_code)
           ]
         )
 
@@ -142,8 +169,8 @@ defmodule MOQX.Protocol.MOQLite05.MetadataDemand do
         actions =
           case event do
             :closed -> []
-            :peer_aborted_sending -> abort_actions(%{entry | receive_finished?: true}, 0)
-            _ -> abort_actions(entry, 0)
+            :peer_aborted_sending -> cleanup_actions(%{entry | receive_finished?: true}, 0)
+            _ -> cleanup_actions(entry, 0)
           end
 
         Transition.ok(
@@ -167,7 +194,7 @@ defmodule MOQX.Protocol.MOQLite05.MetadataDemand do
           %{state | pending_track_requests: Map.delete(state.pending_track_requests, id)},
           events: [%PublicationTrackRequestDone{request: entry.request, reason: :invalid_request}],
           actions: [
-            {:cancel_timer, {:track_metadata, entry.request.handle}} | abort_actions(entry, 2)
+            {:cancel_timer, {:track_metadata, entry.request.handle}} | cleanup_actions(entry, 2)
           ]
         )
 
@@ -189,7 +216,7 @@ defmodule MOQX.Protocol.MOQLite05.MetadataDemand do
 
     actions =
       Enum.flat_map(pending, fn {_, entry} ->
-        [{:cancel_timer, {:track_metadata, entry.request.handle}} | abort_actions(entry, 0x10)]
+        [{:cancel_timer, {:track_metadata, entry.request.handle}} | cleanup_actions(entry, 0x10)]
       end)
 
     {%{state | pending_track_requests: Map.new(remaining)}, events, actions}

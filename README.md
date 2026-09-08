@@ -209,13 +209,14 @@ registers their track. No application factory or retry loop runs inside MOQX.
 `reject_track_request/3` accepts a `SubscriptionRejection` and affects only the
 chosen request. Lite transmits its code, not its textual reason. Decided,
 cancelled, and foreign handles return `:stale_track_request`. Each admitted
-request normally emits one `PublicationTrackRequestDone`: `:registered`, `:rejected`,
+request emits one `PublicationTrackRequestDone`: `:registered`, `:reply_failed`, `:rejected`,
 `:timed_out`, `:peer_cancelled`, `:invalid_request`, `:publication_finished`, or
 `:connection_closed`. An exited owner cannot receive terminal events.
-The current driver emits events only after IO succeeds: a transport-action
-failure can instead surface as an operation error or `ProtocolFailed`, omitting
-the terminal notification. Strict terminal-event delivery across that boundary
-remains a release gate, not a guarantee inferred from normal lifecycle tests.
+Registration commits locally and returns a usable track even if an individual
+metadata reply fails. Each pending reply is attempted independently. `:registered`
+means transport admission, not peer delivery; `:reply_failed` carries the transport
+error in `error`. Best-effort stream cleanup cannot suppress these outcomes or
+skip sibling replies. Ordinary non-metadata transport actions remain fail-fast.
 
 The default `missing_track_metadata: :reject` keeps immediate missing-track
 rejection. Unknown broadcasts and capacity overflow also reset immediately
