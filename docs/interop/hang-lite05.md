@@ -104,6 +104,19 @@ cancellation regression confirms that late FIN, data+FIN, reset and newly
 arriving groups for a cancelled subscription cannot poison a surviving catalog
 subscription. Never-issued subscription IDs still produce a protocol error.
 
+An additional public API regression discovered during
+[PR #50](https://github.com/dmorn/moqx/pull/50) review covers independent response
+stream ordering: a rejected SUBSCRIBE emits `SubscriptionFailed` before delayed
+TRACK_INFO arrives, and a rejected TRACK request can precede its delayed
+SUBSCRIBE response. Both previously emitted fatal `ProtocolFailed`
+(`unknown_track_stream` / `unknown_subscribe_stream`) and lost the active HANG
+catalog sibling. The test first reproduced each failure, then verified the
+sibling's next catalog snapshot after correction. Both local-cancellation
+variants are covered too. Retired IDs are recognized using the existing
+monotonic allocation range, not an unbounded tombstone map; never-issued IDs
+are not included in the ignore path. This is a subscription-consumer isolation
+fix independent of PR #50's publisher-side metadata-demand registration work.
+
 `test/integration/lite_empty_group_test.exs` passed against the pinned local
 relay and `cdn.moq.dev` over verified native QUIC. Two subscriptions receive
 media at timestamp 1000, an empty group, media at 2000, an empty group, media at

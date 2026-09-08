@@ -1,5 +1,14 @@
 defmodule MOQX.Protocol.MOQLite05 do
-  @moduledoc "MoQ Lite draft-05 over native QUIC."
+  @moduledoc """
+  MoQ Lite draft-05 over native QUIC.
+
+  TRACK and SUBSCRIBE responses arrive on independent streams. Once a locally
+  allocated subscription is cancelled, rejected or completed, late data on its
+  response streams is discarded without reviving that subscription or failing
+  its siblings. The existing monotonic subscription ID allocation identifies
+  retired handles; no growing tombstone collection is needed. Never-issued
+  response IDs retain their explicit protocol-error behavior.
+  """
 
   @behaviour MOQX.Protocol
 
@@ -179,6 +188,13 @@ defmodule MOQX.Protocol.MOQLite05 do
         {:stream_data, _stream, data, %{logical_stream: {:track, subscribe_id}}}
       ) do
     case state.subscriptions[subscribe_id] do
+      nil
+      when is_integer(subscribe_id) and subscribe_id >= 0 and
+             subscribe_id < state.next_subscribe_id ->
+        # TRACK and SUBSCRIBE have independent response streams. A previously
+        # allocated subscription may have terminated before this response arrives.
+        Transition.ok(state)
+
       nil ->
         Transition.error(state, :unknown_track_stream)
 
@@ -236,6 +252,12 @@ defmodule MOQX.Protocol.MOQLite05 do
         {:stream_data, _stream, data, %{logical_stream: {:subscribe, subscribe_id}}}
       ) do
     case state.subscriptions[subscribe_id] do
+      nil
+      when is_integer(subscribe_id) and subscribe_id >= 0 and
+             subscribe_id < state.next_subscribe_id ->
+        # A failed TRACK response or local cancellation can precede this stream.
+        Transition.ok(state)
+
       nil ->
         Transition.error(state, :unknown_subscribe_stream)
 
