@@ -16,6 +16,7 @@ defmodule MOQX.Operation do
           | AcceptPublicationSubscription.t()
           | RejectPublicationSubscription.t()
           | PublishObject.t()
+          | PublishEmptyGroup.t()
           | PublishCatalog.t()
           | WithdrawTrack.t()
           | FinishPublishedSubscription.t()
@@ -131,6 +132,13 @@ defmodule MOQX.Operation do
     @enforce_keys [:track, :catalog]
     defstruct [:track, :catalog]
     @type t :: %__MODULE__{track: MOQX.PublishedTrack.t(), catalog: MOQX.Catalog.t()}
+  end
+
+  defmodule PublishEmptyGroup do
+    @moduledoc "Publishes one complete group containing zero objects."
+    @enforce_keys [:track, :group_id]
+    defstruct [:track, :group_id]
+    @type t :: %__MODULE__{track: MOQX.PublishedTrack.t(), group_id: non_neg_integer()}
   end
 
   defmodule WithdrawTrack do

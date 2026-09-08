@@ -86,3 +86,44 @@ the exclusive boundary retain a five-second drain deadline.
 
 No duplicate upstream bug report is needed: #2309 already describes the issue
 and #2333 records the chosen resolution. No online-relay deployment claim is made.
+
+## Empty-group epochs, 2026-09-08
+
+`MOQX.publish_empty_group/3` publishes a Group header followed by FIN with zero
+frames. It is independent of HANG profile selection. On Lite receivers,
+`SubgroupEnded.object_count` distinguishes a complete empty group (zero) from
+an object carrying an empty payload (one); a reset is never a complete epoch
+boundary, regardless of its count. See the public module documentation for
+group ordering, validation, retention and delivery guarantees.
+
+The hermetic public API/transport tests check exact header-only bytes, FIN,
+exclusive END, subscriber ranges, retained empty snapshots replacing stale
+media, invalid IDs/handles, open-group rejection, withdrawal and track reuse.
+Separate public receive tests distinguish empty/non-empty/reset streams. A
+cancellation regression confirms that late FIN, data+FIN, reset and newly
+arriving groups for a cancelled subscription cannot poison a surviving catalog
+subscription. Never-issued subscription IDs still produce a protocol error.
+
+`test/integration/lite_empty_group_test.exs` passed against the pinned local
+relay and `cdn.moq.dev` over verified native QUIC. Two subscriptions receive
+media at timestamp 1000, an empty group, media at 2000, an empty group, media at
+100, then another empty group. Cancelling one leaves the other operational;
+a timestamp-only legacy media-end marker remains a one-object group. Immediate
+track withdrawal after the final empty group drains that group before
+SubscriptionDone. The test uses receiver observations as phase barriers, not
+arbitrary sleeps or inferred backend delivery acknowledgements. It does not
+assert global group arrival order: production consumers must apply their own
+ordering policy as required by ADR-0011.
+
+```sh
+MOQX_LITE_ENDPOINT=moql://127.0.0.1:24463/ \
+MOQX_LITE_CA_FILE=/path/to/ca.pem \
+mise exec -- mix test test/integration/lite_empty_group_test.exs --include integration
+```
+
+The public endpoint run used `moql://cdn.moq.dev:443/anon` and the system CA
+bundle. Its deployed revision is unknown; only the local relay is pinned.
+These tests use synthetic codec payloads and prove wire/event fidelity, not
+actual codec decoder reset or playback. End-to-end HANG decoder-reset proof
+and Hex publication remain separate release gates for issue #48; no released
+API or completed downstream discontinuity support is claimed by this evidence.

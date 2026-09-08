@@ -143,6 +143,12 @@ defmodule MOQX.Runtime.ConnectionDriver do
     call(pid, {:operation, %Operation.PublishObject{track: track, object: object}}, 5_000)
   end
 
+  @spec publish_empty_group(MOQX.Client.t(), MOQX.PublishedTrack.t(), non_neg_integer()) ::
+          :ok | {:error, term()}
+  def publish_empty_group(%MOQX.Client{pid: pid}, track, group_id) do
+    call(pid, {:operation, %Operation.PublishEmptyGroup{track: track, group_id: group_id}}, 5_000)
+  end
+
   @spec withdraw_track(MOQX.Client.t(), MOQX.PublishedTrack.t(), keyword()) ::
           :ok | {:error, term()}
   def withdraw_track(%MOQX.Client{pid: pid}, track, options) do
