@@ -13,6 +13,7 @@ defmodule MOQX.Operation do
           | Unsubscribe.t()
           | Publish.t()
           | AddTrack.t()
+          | RejectTrackRequest.t()
           | AcceptPublicationSubscription.t()
           | RejectPublicationSubscription.t()
           | PublishObject.t()
@@ -71,6 +72,17 @@ defmodule MOQX.Operation do
     defstruct [:namespace, options: []]
 
     @type t :: %__MODULE__{namespace: [binary()], options: keyword()}
+  end
+
+  defmodule RejectTrackRequest do
+    @moduledoc "Rejects one pending request for track metadata."
+    @enforce_keys [:request, :rejection]
+    defstruct @enforce_keys
+
+    @type t :: %__MODULE__{
+            request: MOQX.PublicationTrackRequest.t(),
+            rejection: MOQX.SubscriptionRejection.t()
+          }
   end
 
   defmodule AddTrack do

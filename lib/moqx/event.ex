@@ -21,11 +21,53 @@ defmodule MOQX.Event do
           | MOQX.Event.PublicationTrackFailed.t()
           | MOQX.Event.PublicationCancelled.t()
           | MOQX.Event.PublicationSubscriptionRequested.t()
+          | MOQX.Event.PublicationTrackRequested.t()
+          | MOQX.Event.PublicationTrackRequestDone.t()
           | MOQX.Event.PublicationSubscriptionCancelled.t()
           | MOQX.Event.PublicationSubscriberJoined.t()
           | MOQX.Event.PublicationSubscriberLeft.t()
           | MOQX.Event.ConnectionClosed.t()
           | MOQX.Event.ProtocolFailed.t()
+end
+
+defmodule MOQX.Event.PublicationTrackRequested do
+  @moduledoc "An absent track's metadata is waiting for application provisioning."
+  @enforce_keys [:request]
+  defstruct [:request]
+  @type t :: %__MODULE__{request: MOQX.PublicationTrackRequest.t()}
+end
+
+defmodule MOQX.Event.PublicationTrackRequestDone do
+  @moduledoc """
+  One track metadata request reached its terminal outcome.
+
+  `:registered` means the transport admitted the immutable metadata reply, not
+  that the peer received it or media was authorized or delivered. `:reply_failed`
+  carries the transport failure in `error`; other outcomes leave `error` nil.
+  Owner exit terminates the connection;
+  no event can be delivered to an owner which has exited.
+
+  Terminal handles cannot be decided again. Each request has one outcome even
+  if its reply or best-effort stream cleanup fails. A failed reply does not
+  roll back track registration or prevent sibling metadata replies.
+  """
+  @enforce_keys [:request, :reason]
+  defstruct [:request, :reason, :error]
+
+  @type reason ::
+          :registered
+          | :reply_failed
+          | :rejected
+          | :timed_out
+          | :peer_cancelled
+          | :invalid_request
+          | :publication_finished
+          | :connection_closed
+  @type t :: %__MODULE__{
+          request: MOQX.PublicationTrackRequest.t(),
+          reason: reason(),
+          error: term()
+        }
 end
 
 defmodule MOQX.Event.SubscriptionUpdated do

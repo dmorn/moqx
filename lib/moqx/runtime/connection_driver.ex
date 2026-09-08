@@ -90,6 +90,14 @@ defmodule MOQX.Runtime.ConnectionDriver do
     call(pid, {:operation, %Operation.Publish{namespace: namespace, options: options}}, 5_000)
   end
 
+  def reject_track_request(%MOQX.Client{pid: pid}, request, rejection) do
+    call(
+      pid,
+      {:operation, %Operation.RejectTrackRequest{request: request, rejection: rejection}},
+      5_000
+    )
+  end
+
   def publish_catalog(%MOQX.Client{pid: pid}, track, catalog) do
     call(pid, {:operation, %Operation.PublishCatalog{track: track, catalog: catalog}}, 5_000)
   end
@@ -447,6 +455,21 @@ defmodule MOQX.Runtime.ConnectionDriver do
 
   defp apply_action(state, {:open_stream, key, options, initial_data}) do
     apply_action(state, {:open_stream, key, options, initial_data, []})
+  end
+
+  # Only explicitly isolated action batches use result feedback. Ordinary
+  # transition actions still stop on failure and never emit success before IO.
+  defp apply_action(state, {:attempt_actions, key, actions}) do
+    {result, state} =
+      case apply_actions(state, actions) do
+        {:ok, state} -> {:ok, state}
+        {:error, reason, state} -> {{:error, reason}, state}
+      end
+
+    transition(
+      state,
+      state.protocol.handle_transport(state.protocol_state, {:action_result, key, result})
+    )
   end
 
   defp apply_action(state, {:open_stream, key, options, initial_data, send_options}) do

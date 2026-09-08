@@ -32,6 +32,7 @@ defmodule MOQX.Protocol.MOQLite05 do
   alias MOQX.Protocol.MOQLite05.Codec
   alias MOQX.Protocol.MOQLite05.Discovery
   alias MOQX.Protocol.MOQLite05.GroupDecoder
+  alias MOQX.Protocol.MOQLite05.MetadataDemand
 
   alias MOQX.Protocol.MOQLite05.Messages.{
     AnnounceBroadcast,
@@ -61,6 +62,8 @@ defmodule MOQX.Protocol.MOQLite05 do
               next_published_track_id: 0,
               next_subscribe_id: 0,
               next_discovery_id: 0,
+              next_track_request_id: 0,
+              pending_track_requests: %{},
               discoveries: %{},
               publications: %{},
               announce_streams: %{},
@@ -155,10 +158,12 @@ defmodule MOQX.Protocol.MOQLite05 do
     }
 
     {next_state, discovery_events} = Discovery.close_all(next_state)
+    {next_state, metadata_events} = MetadataDemand.close_all(next_state)
 
     Transition.ok(next_state,
       events:
-        discovery_events ++
+        metadata_events ++
+          discovery_events ++
           active_events ++ pending_events ++ [%ConnectionClosed{metadata: metadata}]
     )
   end
@@ -310,7 +315,10 @@ defmodule MOQX.Protocol.MOQLite05 do
              :peer_aborted_receiving,
              :closed
            ] do
-    finish_inbound_subscription(state, stream_id, event, metadata)
+    case MetadataDemand.peer_event(state, stream_id, event) do
+      :unknown -> finish_inbound_subscription(state, stream_id, event, metadata)
+      result -> result
+    end
   end
 
   def handle_transport(
@@ -330,6 +338,21 @@ defmodule MOQX.Protocol.MOQLite05 do
       _ -> Transition.ok(state)
     end
   end
+
+  def handle_transport(%State{} = state, {:runtime_timeout, {:track_metadata, handle}}),
+    do: MetadataDemand.timeout(state, handle)
+
+  def handle_transport(
+        %State{} = state,
+        {:action_result, {:track_metadata_reply, handle}, result}
+      ),
+      do: MetadataDemand.reply_result(state, handle, result)
+
+  def handle_transport(
+        %State{} = state,
+        {:action_result, {:track_metadata_cleanup, _handle}, _result}
+      ),
+      do: Transition.ok(state)
 
   def handle_transport(
         %State{} = state,
@@ -457,6 +480,7 @@ defmodule MOQX.Protocol.MOQLite05 do
 
   def handle_operation(%State{phase: :ready} = state, %MOQX.Operation.Publish{} = operation) do
     with {:ok, _path} <- broadcast_path(operation.namespace),
+         :ok <- MetadataDemand.validate_options(operation.options),
          {:ok, inbound_subscriptions} <- inbound_subscription_options(operation.options),
          false <- publication_namespace?(state, operation.namespace) do
       publication = %MOQX.Publication{
@@ -488,6 +512,18 @@ defmodule MOQX.Protocol.MOQLite05 do
     end
   end
 
+  def handle_operation(
+        %State{phase: :ready} = state,
+        %MOQX.Operation.RejectTrackRequest{} = operation
+      ) do
+    with %MOQX.SubscriptionRejection{code: code} <- operation.rejection,
+         {:ok, error_code} <- rejection_error_code(code) do
+      MetadataDemand.reject(state, operation.request, error_code)
+    else
+      _ -> Transition.error(state, :invalid_subscription_rejection)
+    end
+  end
+
   def handle_operation(%State{phase: :ready} = state, %MOQX.Operation.AddTrack{} = operation) do
     with %{publication: publication} = entry <- state.publications[operation.publication.id],
          true <- publication == operation.publication,
@@ -513,7 +549,12 @@ defmodule MOQX.Protocol.MOQLite05 do
           publications: Map.put(state.publications, publication.id, entry)
       }
 
-      Transition.ok(next_state, events: [{:track_added, published_track}])
+      {next_state, events, actions} = MetadataDemand.registered(next_state, track_entry)
+
+      Transition.ok(next_state,
+        events: [{:track_added, published_track} | events],
+        actions: actions
+      )
     else
       nil -> Transition.error(state, :unknown_publication)
       false -> Transition.error(state, :unknown_publication)
@@ -559,12 +600,17 @@ defmodule MOQX.Protocol.MOQLite05 do
           publications: Map.put(state.publications, request.publication.id, publication)
       }
 
-      establish_publisher_subscription(
-        state,
-        pending,
-        published_track,
-        operation.reply_mode
-      )
+      {state, metadata_events, metadata_actions} = MetadataDemand.registered(state, track_entry)
+
+      {:ok, transition} =
+        establish_publisher_subscription(state, pending, published_track, operation.reply_mode)
+
+      {:ok,
+       %{
+         transition
+         | events: metadata_events ++ transition.events,
+           actions: metadata_actions ++ transition.actions
+       }}
     else
       nil -> Transition.error(state, :stale_subscription_request)
       false -> Transition.error(state, :stale_subscription_request)
@@ -925,8 +971,10 @@ defmodule MOQX.Protocol.MOQLite05 do
   end
 
   def handle_operation(%State{} = state, %MOQX.Operation.Close{}) do
+    {state, events} = MetadataDemand.close_all(state)
+
     Transition.ok(%{state | phase: :closed},
-      events: [:connection_ended],
+      events: [:connection_ended | events],
       actions: [{:close_connection, 0}]
     )
   end
@@ -1089,6 +1137,13 @@ defmodule MOQX.Protocol.MOQLite05 do
   end
 
   defp handle_peer_stream_data(state, stream_id, data) do
+    case MetadataDemand.data(state, stream_id, data) do
+      :unknown -> handle_peer_subscription_data(state, stream_id, data)
+      result -> result
+    end
+  end
+
+  defp handle_peer_subscription_data(state, stream_id, data) do
     case publisher_stream_entry(state, stream_id) do
       {collection, subscribe_id, entry} ->
         handle_subscribe_update(state, collection, subscribe_id, entry, stream_id, data)
@@ -1134,14 +1189,8 @@ defmodule MOQX.Protocol.MOQLite05 do
       )
     else
       {:error, :track_not_found} ->
-        next_state = %{
-          state
-          | peer_stream_buffers: Map.delete(state.peer_stream_buffers, stream_id)
-        }
-
-        Transition.ok(next_state,
-          actions: [{:abort_stream_sending, {:peer_stream, stream_id}, 0x10}]
-        )
+        {:ok, track} = Codec.decode_track(payload)
+        MetadataDemand.request(state, stream_id, track)
 
       {:error, reason} ->
         Transition.error(state, reason)
@@ -1431,6 +1480,9 @@ defmodule MOQX.Protocol.MOQLite05 do
   end
 
   defp finish_publication(state, publication) do
+    {state, metadata_events, metadata_actions} =
+      MetadataDemand.finish_publication(state, publication)
+
     {active, remaining_active} =
       Enum.split_with(state.publisher_subscriptions, fn {_id, entry} ->
         entry.track.publication == publication
@@ -1453,9 +1505,11 @@ defmodule MOQX.Protocol.MOQLite05 do
 
     Transition.ok(next_state,
       events:
-        publication_finish_events(active, pending) ++ [{:publication_finished, publication}],
+        metadata_events ++
+          publication_finish_events(active, pending) ++ [{:publication_finished, publication}],
       actions:
-        publication_finish_actions(active, pending) ++
+        metadata_actions ++
+          publication_finish_actions(active, pending) ++
           announce_publication_actions(state.announce_streams, publication, :ended)
     )
   end

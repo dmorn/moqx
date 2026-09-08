@@ -175,6 +175,69 @@ reactive inbound subscription handling use the existing opaque request and
 published-subscription handles; a Group Stream is kept open across objects
 until `end_of_group?: true`.
 
+### Demand-driven Lite track provisioning
+
+Relays may fetch immutable TrackInfo before issuing a subscription. To create
+absent tracks on demand, opt into metadata provisioning separately from admission:
+
+```elixir
+{:ok, publication} =
+  MOQX.publish(client, ["live"],
+    missing_track_metadata: :controlled,
+    track_metadata_timeout: 5_000,
+    max_pending_track_metadata: 128,
+    inbound_subscriptions: :controlled
+  )
+
+receive do
+  {:moqx, ^client, %MOQX.Event.PublicationTrackRequested{request: request}} ->
+    # The application chooses whether/how to provision this exact track.
+    {:ok, track} =
+      MOQX.add_track(client, request.publication, request.track.track, timescale: 90_000)
+end
+```
+
+The connection's event recipient owns these requests and its exit closes the
+connection. Metadata handles are connection-scoped, per request, and bounded by
+a per-publication limit and a deadline starting on receipt. Registering a track
+answers every pending metadata request for that exact publication/name using
+the registered properties. It **does not approve a subscription**: applications
+must still handle `PublicationSubscriptionRequested` explicitly. Reactive
+`accept_subscription/3` also resolves concurrent metadata requests when it
+registers their track. No application factory or retry loop runs inside MOQX.
+
+`reject_track_request/3` accepts a `SubscriptionRejection` and affects only the
+chosen request. Lite transmits its code, not its textual reason. Decided,
+cancelled, and foreign handles return `:stale_track_request`. Each admitted
+request emits one `PublicationTrackRequestDone`: `:registered`, `:reply_failed`, `:rejected`,
+`:timed_out`, `:peer_cancelled`, `:invalid_request`, `:publication_finished`, or
+`:connection_closed`. An exited owner cannot receive terminal events.
+Registration commits locally and returns a usable track even if an individual
+metadata reply fails. Each pending reply is attempted independently. `:registered`
+means transport admission, not peer delivery; `:reply_failed` carries the transport
+error in `error`. Best-effort stream cleanup cannot suppress these outcomes or
+skip sibling replies. Ordinary non-metadata transport actions remain fail-fast.
+
+The default `missing_track_metadata: :reject` keeps immediate missing-track
+rejection. Unknown broadcasts and capacity overflow also reset immediately
+without creating application handles. Other protocols reject the Lite metadata
+options explicitly. Existing applications need no migration unless they choose
+this opt-in provisioning lifecycle.
+
+The pinned-relay contract is executable with:
+
+```sh
+MOQX_LITE_ENDPOINT=moql://127.0.0.1:24463/ \
+MOQX_LITE_CA_FILE=/path/to/ca.pem \
+mise exec -- mix test test/integration/moq_lite_05_metadata_demand_test.exs --include integration
+```
+
+Caller-managed relay: `moq-dev/moq` revision
+`fd477082c43c3c0738fb62d077d85ea078f10045`, native ALPN `moq-lite-05`, verified
+TLS. Tests cover acceptance with exact metadata/payload/timestamp and completion,
+explicit rejection, and timeout. This is functional evidence, not throughput or
+application playback certification. See ADR-0015 for the ownership boundary.
+
 The default subscriber request resolves the publisher's latest group.
 Draft-05 can also represent absolute group starts and ranges whose object
 coordinate is zero. Unsupported relative starts, non-zero object coordinates,
