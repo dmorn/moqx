@@ -135,6 +135,9 @@ defmodule MOQX.CloudflarePublisherTest do
                timeout: 1_000
              )
 
+    assert {:error, :unsupported_operation} =
+             MOQX.publish(client, ["live", "camera-1"], missing_track_metadata: :controlled)
+
     assert {:ok, publication} = MOQX.publish(client, ["live", "camera-1"])
     assert_receive :namespace_seen, 1_000
 

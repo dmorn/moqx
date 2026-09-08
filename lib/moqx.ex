@@ -160,12 +160,63 @@ defmodule MOQX do
     ConnectionDriver.unsubscribe(client, subscription)
   end
 
-  @doc "Advertises a namespace through the selected protocol implementation."
+  @doc """
+  Advertises a namespace through the selected protocol implementation.
+
+  Lite05 supports `missing_track_metadata: :reject | :controlled` (default
+  `:reject`). Controlled metadata demand emits `PublicationTrackRequested` when
+  a peer asks for an absent track under this publication. `track_metadata_timeout`
+  defaults to 5,000 milliseconds (integer, 0..4_294_967_295);
+  `max_pending_track_metadata` defaults to 128 (positive integer, per publication).
+  The decision window begins on request receipt. Invalid bounds return
+  `:invalid_track_metadata_options` before advertising. Other protocols reject
+  these options with `:unsupported_operation`.
+
+  The connection's `events_to` recipient owns provisioning. Registering the
+  requested track through `add_track/4` or reactive `accept_subscription/3`
+  resolves all its pending metadata requests; `reject_track_request/3` rejects
+  only one. Normal terminal paths emit `PublicationTrackRequestDone` once.
+  A transport-action failure can instead return an operation error or emit
+  `ProtocolFailed` without the terminal notification; callers must handle both.
+  Unknown publications, default-rejected requests and capacity overflow reset
+  immediately without allocating application handles. Deadline, cancellation,
+  publication finish and connection close invalidate pending handles. Owner exit
+  closes the whole connection and its resources, not merely one publication.
+
+  Metadata demand does not change `inbound_subscriptions`: controlled media
+  subscriptions still need explicit acceptance. No implicit track factory,
+  application retry, or subscription approval is performed.
+  """
   @spec publish(MOQX.Client.t(), [binary()], keyword()) ::
           {:ok, MOQX.Publication.t()} | {:error, term()}
   def publish(client, namespace, options \\ []) when is_list(namespace) do
-    ConnectionDriver.publish(client, namespace, options)
+    metadata_options = [
+      :missing_track_metadata,
+      :track_metadata_timeout,
+      :max_pending_track_metadata
+    ]
+
+    if client.protocol != :moq_lite_05 and
+         Enum.any?(metadata_options, &Keyword.has_key?(options, &1)) do
+      {:error, :unsupported_operation}
+    else
+      ConnectionDriver.publish(client, namespace, options)
+    end
   end
+
+  @doc """
+  Rejects one pending track metadata request, without affecting sibling requests
+  or subscription authorization. Lite05 sends only the rejection code on wire;
+  textual reasons stay local. Decided, cancelled and foreign requests return
+  `:stale_track_request`.
+  """
+  @spec reject_track_request(
+          MOQX.Client.t(),
+          MOQX.PublicationTrackRequest.t(),
+          MOQX.SubscriptionRejection.t()
+        ) :: :ok | {:error, term()}
+  def reject_track_request(client, request, rejection),
+    do: ConnectionDriver.reject_track_request(client, request, rejection)
 
   @doc """
   Registers a track under an active publication.

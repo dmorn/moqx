@@ -81,6 +81,9 @@ defmodule MOQX.Draft16PublisherTest do
                timeout: 1_000
              )
 
+    assert {:error, :unsupported_operation} =
+             MOQX.publish(client, ["live", "camera"], missing_track_metadata: :controlled)
+
     assert {:ok, publication} = MOQX.publish(client, ["live", "camera"])
 
     assert_receive {:moqx, ^client, %MOQX.Event.PublicationReady{publication: ^publication}},

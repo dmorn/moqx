@@ -90,6 +90,14 @@ defmodule MOQX.Runtime.ConnectionDriver do
     call(pid, {:operation, %Operation.Publish{namespace: namespace, options: options}}, 5_000)
   end
 
+  def reject_track_request(%MOQX.Client{pid: pid}, request, rejection) do
+    call(
+      pid,
+      {:operation, %Operation.RejectTrackRequest{request: request, rejection: rejection}},
+      5_000
+    )
+  end
+
   def publish_catalog(%MOQX.Client{pid: pid}, track, catalog) do
     call(pid, {:operation, %Operation.PublishCatalog{track: track, catalog: catalog}}, 5_000)
   end
