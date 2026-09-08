@@ -4,7 +4,7 @@ defmodule MOQX.MixProject do
   def project do
     [
       app: :moqx,
-      version: "0.9.0",
+      version: "0.10.0",
       description: description(),
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
