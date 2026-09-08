@@ -124,6 +124,59 @@ mise exec -- mix test test/integration/lite_empty_group_test.exs --include integ
 The public endpoint run used `moql://cdn.moq.dev:443/anon` and the system CA
 bundle. Its deployed revision is unknown; only the local relay is pinned.
 These tests use synthetic codec payloads and prove wire/event fidelity, not
-actual codec decoder reset or playback. End-to-end HANG decoder-reset proof
-and Hex publication remain separate release gates for issue #48; no released
-API or completed downstream discontinuity support is claimed by this evidence.
+actual codec decoder reset or playback. The separate browser experiment below
+provides that narrower decoder-reset proof using actual Opus packets. Hex
+publication remains a release gate for issue #48; no released API or completed
+downstream discontinuity support is claimed by this evidence.
+
+### Actual pinned reference Opus decoder reset
+
+A separate observation-only browser harness used Chrome **152.0.7977.76** and
+the pinned reference `moq-watch`, without modifying its implementation. The
+publisher used MOQX public APIs directly, not plugin wire construction. Its
+synthetic Opus fixture SHA-256 was
+`268347d3b6167caa995fe4ae636d95cc7f9b3529214b488807a90dce3e454358`.
+FFprobe extracted the first 50 packets, each producing 960 decoded frames per
+channel at 48 kHz. The same real codec packets were sent in three groups with
+timestamp ranges 5,000,000..5,980,000, 10,000,000..10,980,000, and 0..980,000
+microseconds. `publish_empty_group/3` inserted group 1 between media groups 0/2
+and group 3 between media groups 2/4. The HANG catalog declared Opus, stereo,
+48 kHz, and the legacy container.
+
+The harness wrapped browser `AudioDecoder` only to observe native `reset`,
+`configure`, `decode`, and actual `AudioData` output calls. It also observed the
+reference container's returned discontinuity metadata. It did not simulate
+decoder output or inject a reset. Epoch advancement waited for all 50 decoded,
+non-silent outputs from the preceding epoch; within each epoch, packets used
+the media clock. Neither phase barrier nor pacing adds a protocol delay.
+
+The local run used the same pinned relay image, browser WebTransport on
+`https://127.0.0.1:24464/`, and native MOQX on `moql://127.0.0.1:24464/`.
+Browser certificate hashing and native CA verification were enabled. It
+observed exactly **150 AudioData outputs**, **two native decoder resets** after
+outputs 50 and 100, and **three Opus configurations**. Each epoch's first decoded
+timestamp matched its new origin, including the backward jump to zero. PCM
+peaks reached approximately **0.08912**; there were no decoder errors, and the
+publisher exited normally. This proves a real pinned HANG audio consumer
+resets and resumes decoding across the published empty-group boundaries; it
+does not certify H.264/CMAF discontinuities or audiovisual synchronization.
+
+The public endpoint also produced an equivalent 150-output/two-reset passing
+trace with system-trusted TLS, but evidence is **mixed**, not a claim of stable
+public interoperability. One preceding public full-packet run observed reset
+counts at outputs 50, 100, and 100, followed by a synchronous `AudioDecoder.decode`
+`DataError` at the backward epoch and no third-epoch output. A traced rerun
+passed without changing publisher or reference logic. The precise cause of
+that intermittent failure is not established: these observations do not
+attribute it to MOQX, the relay, browser, or reference reorder/decoder logic.
+Do not convert the passing retry into a claim that the failure was fixed.
+
+Task-local runnable proof material is retained at
+`/private/tmp/moqx-epoch-browser.NVS4p1`: `publish.exs`, `main.ts`, `check.mjs`,
+and `vite.config.ts`. `local-complete-proof.json` and `public-trace-proof.json`
+contain the exact passing decoder and container observations. The failed
+full-packet run is preserved in the execution transcript (no JSON artifact was
+written by that earlier checker version). The weaker initial public run,
+`public-proof.json`, used a 20-output phase threshold and is not the full-packet
+proof. The local server uses port 5187; no shared reference or plugin files
+were modified by the experiment.
