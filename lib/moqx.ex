@@ -264,6 +264,42 @@ defmodule MOQX do
   end
 
   @doc """
+  Publishes a complete group containing zero objects on a registered Lite track.
+
+  Unlike an object with an empty payload, this sends only a group header and FIN.
+  `group_id` must be in `0..4_611_686_018_427_387_902`, leaving room for the
+  exclusive SUBSCRIBE_END bound. A new group must have a greater ID than the
+  previous published group, and an open non-empty group must first be finished
+  with an object whose `end_of_group?` is true. These publication-wide checks
+  also apply to `publish_object/3`, even with zero subscribers. Multiple objects
+  within an open group keep consecutive object IDs starting at zero.
+
+  An empty group has no timestamp. Subsequent groups may use earlier or later
+  timestamps; MOQX never interprets or rewrites codec epochs. HANG consumers own
+  decoder reset and any cross-group ordering. Receiver events preserve arrival
+  order, not global group order (see `MOQX.Event.SubgroupEnded`).
+
+  Only matching subscriber ranges receive the group; completion counts it in
+  the exclusive END bound. `retention: :latest` retains this header-only group
+  in place of the previous single-object snapshot, so late subscribers do not
+  receive stale pre-discontinuity media. This does not add an archive or
+  multi-object group cache; other retention modes retain their existing behavior.
+
+  Invalid IDs return `:invalid_group_id`, non-increasing IDs return
+  `:invalid_group_sequence`, and an open group returns `:unfinished_group`.
+  Foreign-client handles return `:wrong_client_published_track`; removed tracks
+  return `:unknown_published_track` (or `:unknown_publication` once the entire
+  publication has ended). A replacement track starts a fresh sequence.
+  Other protocol implementations return `{:error, :unsupported_operation}`.
+  Success means backend admission, not peer delivery or decoder reset.
+  """
+  @spec publish_empty_group(MOQX.Client.t(), MOQX.PublishedTrack.t(), non_neg_integer()) ::
+          :ok | {:error, term()}
+  def publish_empty_group(client, track, group_id) do
+    ConnectionDriver.publish_empty_group(client, track, group_id)
+  end
+
+  @doc """
   Withdraws one registered track while keeping its publication and siblings active.
 
   The track is unavailable to new subscribers before this call returns. The

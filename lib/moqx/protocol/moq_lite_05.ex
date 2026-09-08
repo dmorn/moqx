@@ -1,5 +1,14 @@
 defmodule MOQX.Protocol.MOQLite05 do
-  @moduledoc "MoQ Lite draft-05 over native QUIC."
+  @moduledoc """
+  MoQ Lite draft-05 over native QUIC.
+
+  TRACK and SUBSCRIBE responses arrive on independent streams. Once a locally
+  allocated subscription is cancelled, rejected or completed, late data on its
+  response streams is discarded without reviving that subscription or failing
+  its siblings. The existing monotonic subscription ID allocation identifies
+  retired handles; no growing tombstone collection is needed. Never-issued
+  response IDs retain their explicit protocol-error behavior.
+  """
 
   @behaviour MOQX.Protocol
 
@@ -179,6 +188,13 @@ defmodule MOQX.Protocol.MOQLite05 do
         {:stream_data, _stream, data, %{logical_stream: {:track, subscribe_id}}}
       ) do
     case state.subscriptions[subscribe_id] do
+      nil
+      when is_integer(subscribe_id) and subscribe_id >= 0 and
+             subscribe_id < state.next_subscribe_id ->
+        # TRACK and SUBSCRIBE have independent response streams. A previously
+        # allocated subscription may have terminated before this response arrives.
+        Transition.ok(state)
+
       nil ->
         Transition.error(state, :unknown_track_stream)
 
@@ -236,6 +252,12 @@ defmodule MOQX.Protocol.MOQLite05 do
         {:stream_data, _stream, data, %{logical_stream: {:subscribe, subscribe_id}}}
       ) do
     case state.subscriptions[subscribe_id] do
+      nil
+      when is_integer(subscribe_id) and subscribe_id >= 0 and
+             subscribe_id < state.next_subscribe_id ->
+        # A failed TRACK response or local cancellation can precede this stream.
+        Transition.ok(state)
+
       nil ->
         Transition.error(state, :unknown_subscribe_stream)
 
@@ -296,6 +318,7 @@ defmodule MOQX.Protocol.MOQLite05 do
         {:stream_event, %{info: %{stream_id: stream_id}}, :peer_finished_sending, _metadata}
       ) do
     case Map.fetch(state.group_decoders, stream_id) do
+      {:ok, :discarding} -> forget_group_stream(state, stream_id)
       {:ok, decoder} -> finish_group_stream(state, stream_id, decoder)
       :error -> Transition.ok(state)
     end
@@ -346,6 +369,7 @@ defmodule MOQX.Protocol.MOQLite05 do
       )
       when event in [:peer_aborted_sending, :closed] do
     case Map.fetch(state.group_decoders, stream_id) do
+      {:ok, :discarding} -> forget_group_stream(state, stream_id)
       {:ok, %{group: nil}} -> Transition.error(state, :incomplete_group_stream)
       {:ok, decoder} -> reset_group_stream(state, stream_id, decoder, event, metadata)
       :error -> Transition.ok(state)
@@ -615,9 +639,11 @@ defmodule MOQX.Protocol.MOQLite05 do
       ) do
     with :ok <- validate_published_track_scope(state, operation.track),
          {:ok, publication} <- fetch_publication(state, operation.track.publication),
-         %{track: published_track} <- publication.tracks[operation.track.track.track],
+         %{track: published_track} = track_entry <-
+           publication.tracks[operation.track.track.track],
          true <- published_track == operation.track,
          :ok <- validate_published_object(operation.object),
+         {:ok, progress} <- publication_progress(track_entry, operation.object),
          {:ok, subscriptions, actions} <-
            publish_object_actions(
              state.publisher_subscriptions,
@@ -627,12 +653,20 @@ defmodule MOQX.Protocol.MOQLite05 do
       next_state = %{state | publisher_subscriptions: subscriptions}
 
       next_state =
+        put_in(
+          next_state.publications[published_track.publication.id].tracks[
+            published_track.track.track
+          ][:progress],
+          progress
+        )
+
+      next_state =
         if published_track.retention == :latest and operation.object.object_id == 0 and
              operation.object.end_of_group? do
           put_in(
             next_state.publications[published_track.publication.id].tracks[
               published_track.track.track
-            ][:retained_object],
+            ][:retained_item],
             operation.object
           )
         else
@@ -643,6 +677,49 @@ defmodule MOQX.Protocol.MOQLite05 do
         events: [{:object_published, published_track}],
         actions: actions
       )
+    else
+      nil -> Transition.error(state, :unknown_published_track)
+      false -> Transition.error(state, :unknown_published_track)
+      {:error, reason} -> Transition.error(state, reason)
+    end
+  end
+
+  def handle_operation(
+        %State{phase: :ready} = state,
+        %MOQX.Operation.PublishEmptyGroup{} = operation
+      ) do
+    with :ok <- validate_published_track_scope(state, operation.track),
+         {:ok, publication} <- fetch_publication(state, operation.track.publication),
+         %{track: published_track} = track_entry <-
+           publication.tracks[operation.track.track.track],
+         true <- published_track == operation.track,
+         :ok <- validate_group_id(operation.group_id),
+         {:ok, progress} <- publication_progress(track_entry, operation),
+         {:ok, subscriptions, actions} <-
+           publish_object_actions(state.publisher_subscriptions, published_track, operation) do
+      next_state = %{state | publisher_subscriptions: subscriptions}
+
+      next_state =
+        put_in(
+          next_state.publications[published_track.publication.id].tracks[
+            published_track.track.track
+          ][:progress],
+          progress
+        )
+
+      next_state =
+        if published_track.retention == :latest do
+          put_in(
+            next_state.publications[published_track.publication.id].tracks[
+              published_track.track.track
+            ][:retained_item],
+            operation
+          )
+        else
+          next_state
+        end
+
+      Transition.ok(next_state, actions: actions)
     else
       nil -> Transition.error(state, :unknown_published_track)
       false -> Transition.error(state, :unknown_published_track)
@@ -824,6 +901,17 @@ defmodule MOQX.Protocol.MOQLite05 do
       %{subscription: ^subscription} ->
         next_state = %{state | subscriptions: Map.delete(state.subscriptions, subscription.id)}
 
+        decoders =
+          Map.new(next_state.group_decoders, fn
+            {id, %GroupDecoder{group: %{subscribe_id: sub_id}}} when sub_id == subscription.id ->
+              {id, :discarding}
+
+            entry ->
+              entry
+          end)
+
+        next_state = %{next_state | group_decoders: decoders}
+
         Transition.ok(next_state,
           events: [{:subscription_ended, subscription}],
           actions: [
@@ -859,6 +947,7 @@ defmodule MOQX.Protocol.MOQLite05 do
           :add_track,
           :accept_publication_subscription,
           :publish_object,
+          :publish_empty_group,
           :withdraw_track,
           :finish_published_subscription,
           :finish_publication
@@ -1204,6 +1293,9 @@ defmodule MOQX.Protocol.MOQLite05 do
 
   defp handle_peer_unidirectional_data(state, stream_id, data) do
     case state.group_decoders[stream_id] do
+      :discarding ->
+        Transition.ok(state)
+
       %GroupDecoder{} = decoder ->
         push_group_data(state, stream_id, decoder, data)
 
@@ -1240,18 +1332,39 @@ defmodule MOQX.Protocol.MOQLite05 do
   end
 
   defp push_group_data(state, stream_id, decoder, data) do
-    with {:ok, decoder, frames} <- GroupDecoder.push(decoder, data),
-         {:ok, state, events} <- received_frame_events(state, frames) do
-      next_state = %{
-        state
-        | group_decoders: Map.put(state.group_decoders, stream_id, decoder)
-      }
-
-      Transition.ok(next_state, events: events)
-    else
+    case GroupDecoder.push(decoder, data) do
+      {:ok, decoder, frames} -> deliver_group_data(state, stream_id, decoder, frames)
       {:error, reason} -> Transition.error(state, reason)
     end
   end
+
+  defp deliver_group_data(state, stream_id, %GroupDecoder{group: %{subscribe_id: id}}, _frames)
+       when id < state.next_subscribe_id and not is_map_key(state.subscriptions, id) do
+    # IDs are allocated monotonically. Only a previously owned, removed
+    # subscription may be discarded; never-issued IDs still fail below.
+    Transition.ok(%{
+      state
+      | group_decoders: Map.put(state.group_decoders, stream_id, :discarding)
+    })
+  end
+
+  defp deliver_group_data(state, stream_id, decoder, frames) do
+    case received_frame_events(state, frames) do
+      {:ok, state, events} ->
+        next_state = %{
+          state
+          | group_decoders: Map.put(state.group_decoders, stream_id, decoder)
+        }
+
+        Transition.ok(next_state, events: events)
+
+      {:error, reason} ->
+        Transition.error(state, reason)
+    end
+  end
+
+  defp forget_group_stream(state, stream_id),
+    do: Transition.ok(%{state | group_decoders: Map.delete(state.group_decoders, stream_id)})
 
   defp decode_peer_setup(%{peer_setup: nil} = state, stream_id, buffer) do
     case decode_peer_request(buffer) do
@@ -1533,7 +1646,7 @@ defmodule MOQX.Protocol.MOQLite05 do
     retained =
       get_in(
         state.publications[published_track.publication.id].tracks[published_track.track.track],
-        [:retained_object]
+        [:retained_item]
       )
 
     {next_state, replay_actions} =
@@ -1983,6 +2096,45 @@ defmodule MOQX.Protocol.MOQLite05 do
     end)
   end
 
+  defp publication_progress(track_entry, item) do
+    progress = Map.get(track_entry, :progress, %{last_group: nil, active_group: nil})
+    advance_publication(progress, item)
+  end
+
+  defp advance_publication(%{active_group: active}, %MOQX.Operation.PublishEmptyGroup{})
+       when not is_nil(active), do: {:error, :unfinished_group}
+
+  defp advance_publication(%{active_group: nil, last_group: last}, %{group_id: group_id})
+       when is_integer(last) and group_id <= last, do: {:error, :invalid_group_sequence}
+
+  defp advance_publication(%{active_group: nil}, %MOQX.Operation.PublishEmptyGroup{group_id: id}),
+    do: {:ok, %{last_group: id, active_group: nil}}
+
+  defp advance_publication(%{active_group: nil}, %MOQX.Object{object_id: 0} = object),
+    do: {:ok, next_publication_progress(object)}
+
+  defp advance_publication(%{active_group: nil}, %MOQX.Object{}),
+    do: {:error, :group_must_start_at_object_zero}
+
+  defp advance_publication(
+         %{active_group: %{id: id, next_id: next}},
+         %MOQX.Object{group_id: id, object_id: next} = object
+       ),
+       do: {:ok, next_publication_progress(object)}
+
+  defp advance_publication(_progress, _item), do: {:error, :invalid_group_sequence}
+
+  defp next_publication_progress(object) do
+    %{
+      last_group: object.group_id,
+      active_group:
+        if(object.end_of_group? == true,
+          do: nil,
+          else: %{id: object.group_id, next_id: object.object_id + 1}
+        )
+    }
+  end
+
   defp publish_object_for_entry(subscribe_id, entry, track, object, subscriptions, actions) do
     if entry.track == track and object_matches_subscription?(object, entry.subscribe) do
       publish_matching_object(subscribe_id, entry, object, subscriptions, actions)
@@ -2027,6 +2179,20 @@ defmodule MOQX.Protocol.MOQLite05 do
   end
 
   defp resolve_subscription_actions(entry, _object), do: {entry, []}
+
+  defp publication_object_action(
+         subscribe_id,
+         %{active_group: nil} = entry,
+         %MOQX.Operation.PublishEmptyGroup{group_id: group_id}
+       ) do
+    group = %Group{subscribe_id: subscribe_id, group_sequence: group_id}
+    bytes = stream_bytes(0x0, [Codec.encode_group(group)])
+    entry = %{entry | last_group: max(entry.last_group || 0, group_id)}
+
+    {:ok, entry,
+     {:open_stream, {:group, subscribe_id, group_id}, [direction: :unidirectional], bytes,
+      [finish: true]}}
+  end
 
   defp publication_object_action(subscribe_id, %{active_group: nil} = entry, object)
        when object.object_id == 0 do
@@ -2192,6 +2358,7 @@ defmodule MOQX.Protocol.MOQLite05 do
         group_id: decoder.group.group_sequence,
         subgroup_id: nil,
         outcome: :complete,
+        object_count: decoder.next_frame_id,
         end_of_group?: true
       }
 
@@ -2224,6 +2391,7 @@ defmodule MOQX.Protocol.MOQLite05 do
           group_id: decoder.group.group_sequence,
           subgroup_id: nil,
           outcome: if(event == :peer_aborted_sending, do: :reset, else: :closed),
+          object_count: decoder.next_frame_id,
           error_code: error_code,
           end_of_group?: false
         }
@@ -2434,8 +2602,9 @@ defmodule MOQX.Protocol.MOQLite05 do
 
   defp drop_subscription_state(state, subscribe_id) do
     group_decoders =
-      Map.reject(state.group_decoders, fn {_stream_id, decoder} ->
-        decoder.group && decoder.group.subscribe_id == subscribe_id
+      Map.reject(state.group_decoders, fn
+        {_stream_id, %GroupDecoder{group: %{subscribe_id: ^subscribe_id}}} -> true
+        _other -> false
       end)
 
     %{

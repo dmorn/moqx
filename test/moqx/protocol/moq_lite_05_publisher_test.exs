@@ -30,6 +30,7 @@ defmodule MOQX.Protocol.MOQLite05PublisherTest do
                :add_track,
                :accept_publication_subscription,
                :publish_object,
+               :publish_empty_group,
                :withdraw_track,
                :finish_published_subscription,
                :finish_publication

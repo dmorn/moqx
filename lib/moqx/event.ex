@@ -117,10 +117,24 @@ defmodule MOQX.Event.SubgroupEnded do
   A `:complete` outcome means the peer sent FIN and every object in that
   subgroup from the subscription start was received. Other outcomes do not
   imply that the subgroup is complete.
+
+  `object_count` is the number of complete objects received on this stream when
+  the protocol supplies it (currently Lite); otherwise it is `nil`. Only
+  `outcome: :complete` with `object_count: 0` identifies a genuinely empty group.
+  Zero objects before RESET or connection loss never implies an empty group.
+  An object with a zero-byte payload still counts as one object.
   """
 
   @enforce_keys [:subscription, :group_id, :subgroup_id, :outcome]
-  defstruct [:subscription, :group_id, :subgroup_id, :outcome, :error_code, end_of_group?: false]
+  defstruct [
+    :subscription,
+    :group_id,
+    :subgroup_id,
+    :outcome,
+    :error_code,
+    :object_count,
+    end_of_group?: false
+  ]
 
   @type outcome :: :complete | :reset | :closed
 
@@ -130,6 +144,7 @@ defmodule MOQX.Event.SubgroupEnded do
           subgroup_id: non_neg_integer() | nil,
           outcome: outcome(),
           error_code: non_neg_integer() | nil,
+          object_count: non_neg_integer() | nil,
           end_of_group?: boolean()
         }
 end
