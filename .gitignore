@@ -30,7 +30,6 @@ moqx-*.tar
 /target/
 priv/native
 .moq-dev/
-.agents/
 .tmp
 .dexter*
 bench/moqxprobe/results/
@@ -43,3 +42,6 @@ bench/moqxprobe/burrito_out/
 bench/moqxprobe/tmp/
 bench/moqxprobe/.tmp/
 bench/moqxprobe/*.srl
+
+# Amp creates per-orb portal metadata here.
+/.amp/portals/

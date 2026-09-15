@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# MOQX has no persistent local services or per-thread authentication to repair.
+printf 'MOQX orb is ready.\n'

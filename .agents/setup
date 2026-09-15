@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  local label="$1"
+  shift
+  printf '\n==> %s\n' "$label"
+  time "$@"
+}
+
+required_packages=(
+  autoconf
+  build-essential
+  ca-certificates
+  cmake
+  curl
+  git
+  libssl-dev
+  libncurses-dev
+  m4
+  pkg-config
+)
+missing_packages=()
+
+for package in "${required_packages[@]}"; do
+  if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -Fqx 'install ok installed'; then
+    missing_packages+=("$package")
+  fi
+done
+
+if ((${#missing_packages[@]})); then
+  step "Update apt package metadata" sudo apt-get update
+  step "Install system dependencies" \
+    sudo apt-get install -y --no-install-recommends "${missing_packages[@]}"
+else
+  printf '==> System dependencies are already installed\n'
+fi
+
+mise_bin="$HOME/.local/bin/mise"
+if [[ ! -x "$mise_bin" ]]; then
+  printf '\n==> Install mise\n'
+  time curl https://mise.run | sh
+else
+  printf '\n==> mise is already installed\n'
+fi
+
+profile_marker="# moqx mise environment"
+touch "$HOME/.bash_profile"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile"; then
+  cat >>"$HOME/.bash_profile" <<EOF
+
+$profile_marker
+case "\$PWD/" in
+  "$repo_root/"*) eval "\$($mise_bin activate bash)" ;;
+esac
+EOF
+fi
+
+step "Install pinned toolchains" "$mise_bin" install --locked
+step "Install Hex" "$mise_bin" exec -- mix local.hex --force
+step "Install Rebar" "$mise_bin" exec -- mix local.rebar --force
+step "Fetch root Mix dependencies" "$mise_bin" exec -- mix deps.get
+step "Compile root Mix dependencies" "$mise_bin" exec -- mix deps.compile
+step "Fetch benchmark Mix dependencies" \
+  "$mise_bin" exec -- bash -c 'cd bench/moqxprobe && mix deps.get'
+step "Compile benchmark Mix dependencies" \
+  "$mise_bin" exec -- bash -c 'cd bench/moqxprobe && mix deps.compile'
+step "Download Go dependencies" \
+  "$mise_bin" exec -- bash -c 'cd bench/quicprobe && go mod download'
+
+printf '\nOrb setup complete.\n'
