@@ -430,6 +430,7 @@ defmodule MOQX.CMAF do
       subgroup_id: 0,
       object_id: 0,
       publisher_priority: priority,
+      end_of_group?: true,
       payload: payload
     })
   end

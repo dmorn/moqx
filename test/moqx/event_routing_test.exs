@@ -68,6 +68,18 @@ defmodule MOQX.EventRoutingTest do
              )
   end
 
+  test "draft-18 rejects a transport that did not negotiate datagrams" do
+    {:ok, network} = Support.start_network()
+    {:ok, listener} = Support.listen(0, network: network, profile: :streams_only)
+
+    assert {:error, {:missing_transport_capability, :datagrams}} =
+             MOQX.connect("moqt://localhost:#{Support.port(listener)}",
+               protocol: :draft_18,
+               transport: {Support, network: network, profile: :streams_only},
+               timeout: 1_000
+             )
+  end
+
   defp route_events(parent) do
     receive do
       :stop ->

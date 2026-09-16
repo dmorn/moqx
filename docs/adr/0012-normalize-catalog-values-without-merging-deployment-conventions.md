@@ -3,6 +3,16 @@
 - Status: Accepted
 - Date: 2026-07-27
 
+## Scope update: 2026-09-16
+
+Cloudflare draft-14 and standard MOQT draft-16 were removed after draft-18
+became the canonical standard implementation. The catalog decision remains:
+Cloudflare CMSF and MOQtail CMSF are independent application profiles selected
+per subscription or publication, and both can compose with standard draft-18
+or MoQ Lite 05 where applicable. The historical implementation names below
+describe the code that established this normalization boundary; they are no
+longer active protocol modules.
+
 ## Context
 
 Cloudflare draft-14 and the current Moqtail draft-16 deployment expose

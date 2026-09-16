@@ -25,4 +25,4 @@ RUN --mount=type=cache,target=/root/.cache/rebar3 \
 
 COPY . .
 
-CMD ["mix", "test", "test/integration/moq_rs_relay_roundtrip_test.exs", "--include", "integration", "--include", "moq_rs_relay"]
+CMD ["mix", "test", "--only", "integration"]

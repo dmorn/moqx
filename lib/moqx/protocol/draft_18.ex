@@ -4,6 +4,10 @@ defmodule MOQX.Protocol.Draft18 do
 
   This implementation owns the draft-18 setup, subscription, control-message,
   and subgroup wire semantics behind the protocol-neutral `MOQX` API.
+
+  Incomplete inbound data-stream payloads are bounded to 16 MiB per session by
+  default. Pass a positive `:max_buffered_data_bytes` connection option to set a
+  different explicit limit.
   """
 
   @behaviour MOQX.Protocol
@@ -48,6 +52,8 @@ defmodule MOQX.Protocol.Draft18 do
   alias MOQX.Protocol.{Capabilities, Transition, TransportSpec}
   alias MOQX.Protocol.MOQTDraft18.{Codec, SubgroupDecoder}
 
+  @default_max_buffered_data_bytes 16 * 1024 * 1024
+
   defmodule State do
     @moduledoc false
     defstruct phase: :starting,
@@ -70,7 +76,7 @@ defmodule MOQX.Protocol.Draft18 do
               publisher_subscriptions: %{},
               peer_request_ids: MapSet.new(),
               next_track_alias: 0,
-              next_publication_stream: 0
+              max_buffered_data_bytes: 16 * 1024 * 1024
   end
 
   defmodule SubscriptionState do
@@ -96,16 +102,30 @@ defmodule MOQX.Protocol.Draft18 do
        connect_options: [
          alpn: ["moqt-18"],
          verify: :verify_peer,
+         datagram_receive_enabled: 1,
          peer_bidi_stream_count: 16,
          peer_unidi_stream_count: 128
        ],
-       required_capabilities: MapSet.new([:streams])
+       required_capabilities: MapSet.new([:streams, :datagrams])
      }}
   end
 
   @impl true
-  def init(%URI{scheme: "moqt"} = endpoint, _options),
-    do: {:ok, %State{endpoint: endpoint, handle_scope: make_ref()}}
+  def init(%URI{scheme: "moqt"} = endpoint, options) do
+    max_buffered_data_bytes =
+      Keyword.get(options, :max_buffered_data_bytes, @default_max_buffered_data_bytes)
+
+    if is_integer(max_buffered_data_bytes) and max_buffered_data_bytes > 0 do
+      {:ok,
+       %State{
+         endpoint: endpoint,
+         handle_scope: make_ref(),
+         max_buffered_data_bytes: max_buffered_data_bytes
+       }}
+    else
+      {:error, :invalid_max_buffered_data_bytes}
+    end
+  end
 
   def init(_endpoint, _options), do: {:error, :draft_18_requires_native_quic}
 
@@ -145,8 +165,10 @@ defmodule MOQX.Protocol.Draft18 do
   end
 
   def handle_transport(%State{} = state, {:datagram, _connection, data, _metadata}) do
-    with {:ok, object} <- Codec.decode_datagram(data) do
-      object_event(state, object)
+    case Codec.decode_datagram(data) do
+      {:ok, :padding} -> Transition.ok(state)
+      {:ok, object} -> object_event(state, object)
+      {:error, reason} -> Transition.error(state, reason)
     end
   end
 
@@ -196,7 +218,8 @@ defmodule MOQX.Protocol.Draft18 do
         track: track,
         options: options
       }) do
-    with {:ok, filter} <- subscription_filter(options),
+    with :ok <- validate_track_ref(track),
+         {:ok, filter} <- subscription_filter(options),
          :ok <- validate_priority(options),
          :ok <- validate_group_order(options),
          {:ok, delivery_timeout} <- delivery_timeout(options),
@@ -332,7 +355,7 @@ defmodule MOQX.Protocol.Draft18 do
   def handle_operation(%State{phase: :ready} = state, %AddTrack{} = operation) do
     with {:ok, entry} <- fetch_publication(state, operation.publication),
          :ready <- entry.status,
-         :ok <- validate_track_name(operation.track),
+         :ok <- validate_full_track_name(operation.publication.namespace, operation.track),
          false <- Map.has_key?(entry.tracks, operation.track),
          {:ok, retention} <- validate_retention(Keyword.get(operation.options, :retention, :live)),
          {:ok, delivery} <-
@@ -362,6 +385,7 @@ defmodule MOQX.Protocol.Draft18 do
         delivery: delivery,
         status: :pending,
         stream_count: 0,
+        subgroup_streams: %{},
         options: operation.options
       }
 
@@ -394,10 +418,9 @@ defmodule MOQX.Protocol.Draft18 do
          %{track: published_track, status: :ready} = track_entry <-
            entry.tracks[operation.track.track.track],
          true <- published_track == operation.track,
-         :ok <- validate_object(operation.object) do
-      {state, track_entry, primary_actions} =
-        primary_publication_object_actions(state, track_entry, operation.object)
-
+         :ok <- validate_object(operation.object),
+         {:ok, state, track_entry, primary_actions} <-
+           primary_publication_object_actions(state, track_entry, operation.object) do
       entry = %{entry | tracks: Map.put(entry.tracks, operation.track.track.track, track_entry)}
 
       next_state = %{
@@ -405,19 +428,22 @@ defmodule MOQX.Protocol.Draft18 do
         | publications: Map.put(state.publications, operation.track.publication.id, entry)
       }
 
-      {next_state, inbound_actions} =
-        inbound_object_actions(
-          next_state,
-          operation.track,
-          track_entry.delivery,
-          operation.object
-        )
+      case inbound_object_actions(
+             next_state,
+             operation.track,
+             track_entry.delivery,
+             operation.object
+           ) do
+        {:ok, next_state, inbound_actions} ->
+          Transition.ok(
+            next_state,
+            events: [{:object_published, operation.track}],
+            actions: primary_actions ++ inbound_actions
+          )
 
-      Transition.ok(
-        next_state,
-        events: [{:object_published, operation.track}],
-        actions: primary_actions ++ inbound_actions
-      )
+        {:error, reason} ->
+          Transition.error(state, reason)
+      end
     else
       %{status: :pending} -> Transition.error(state, :published_track_not_ready)
       nil -> Transition.error(state, :unknown_published_track)
@@ -619,7 +645,7 @@ defmodule MOQX.Protocol.Draft18 do
     case state.uni_stream_types[stream_id] do
       :control -> handle_control_data(state, data, :peer_control)
       :subgroup -> handle_subgroup_data(state, stream_id, data)
-      :padding -> Transition.ok(state)
+      :padding -> validate_padding_data(state, data)
       nil -> classify_new_peer_uni(state, stream_id, data)
     end
   end
@@ -638,11 +664,16 @@ defmodule MOQX.Protocol.Draft18 do
 
         handle_control_data(state, buffered, :peer_control)
 
-      {:ok, 0x132B3E28, _} ->
-        Transition.ok(%{
-          state
-          | uni_stream_types: Map.put(state.uni_stream_types, stream_id, :padding)
-        })
+      {:ok, 0x132B3E28, padding} ->
+        if Codec.zero_bytes?(padding) do
+          Transition.ok(%{
+            state
+            | uni_stream_types: Map.put(state.uni_stream_types, stream_id, :padding),
+              stream_buffers: Map.delete(state.stream_buffers, {:uni, stream_id})
+          })
+        else
+          Transition.error(state, :invalid_padding_stream)
+        end
 
       {:ok, 0x05, _} ->
         Transition.error(state, :unsupported_fetch_data)
@@ -673,6 +704,12 @@ defmodule MOQX.Protocol.Draft18 do
 
   defp subgroup_stream_type?(type) do
     type <= 0x7F and (type &&& 0x90) == 0x10 and (type &&& 0x06) != 0x06
+  end
+
+  defp validate_padding_data(state, data) do
+    if Codec.zero_bytes?(data),
+      do: Transition.ok(state),
+      else: Transition.error(state, :invalid_padding_stream)
   end
 
   defp peer_request_id_used?(state, request_id) do
@@ -718,7 +755,8 @@ defmodule MOQX.Protocol.Draft18 do
               subscription: subscription.handle,
               request_id: request_id
             }
-          ]
+          ],
+          actions: abort_all_subgroups(subscription)
         )
 
       true ->
@@ -782,7 +820,8 @@ defmodule MOQX.Protocol.Draft18 do
 
         Transition.ok(
           %{state | publications: Map.put(state.publications, publication_id, publication)},
-          events: [%PublicationTrackFailed{track: track_entry.track, error: protocol_error}]
+          events: [%PublicationTrackFailed{track: track_entry.track, error: protocol_error}],
+          actions: abort_all_subgroups(track_entry)
         )
 
       {:error, :unknown_publish_request} ->
@@ -845,21 +884,28 @@ defmodule MOQX.Protocol.Draft18 do
          true <- rem(update.request_id, 2) == 1,
          false <- peer_request_id_used?(state, update.request_id),
          {subscription_id, subscription} <- publisher_subscription_for_stream(state, stream_key) do
-      subscription =
+      updated_subscription =
         subscription
         |> maybe_put(:forward, update.forward)
         |> maybe_put(:subscriber_priority, update.subscriber_priority)
         |> maybe_put(:filter, update.filter)
 
+      {updated_subscription, subgroup_actions} =
+        if update.forward == false or not is_nil(update.filter) do
+          {%{updated_subscription | subgroup_streams: %{}}, abort_all_subgroups(subscription)}
+        else
+          {updated_subscription, []}
+        end
+
       next_state = %{
         state
         | peer_request_ids: MapSet.put(state.peer_request_ids, update.request_id),
           publisher_subscriptions:
-            Map.put(state.publisher_subscriptions, subscription_id, subscription)
+            Map.put(state.publisher_subscriptions, subscription_id, updated_subscription)
       }
 
       Transition.ok(next_state,
-        actions: [{:send_stream, stream_key, Codec.request_ok(), []}]
+        actions: subgroup_actions ++ [{:send_stream, stream_key, Codec.request_ok(), []}]
       )
     else
       nil -> Transition.error(state, :unknown_subscription_update)
@@ -1043,19 +1089,31 @@ defmodule MOQX.Protocol.Draft18 do
 
     case SubgroupDecoder.push(decoder, data) do
       {:ok, decoder, objects} ->
-        stream_subscriptions = associate_stream(state, decoder, stream_id)
+        stream_decoders = Map.put(state.stream_decoders, stream_id, decoder)
 
-        next_state = %{
-          state
-          | stream_decoders: Map.put(state.stream_decoders, stream_id, decoder),
-            stream_subscriptions: stream_subscriptions
-        }
+        if buffered_data_bytes(stream_decoders) <= state.max_buffered_data_bytes do
+          stream_subscriptions = associate_stream(state, decoder, stream_id)
 
-        Enum.reduce_while(objects, Transition.ok(next_state), &reduce_object_event/2)
+          next_state = %{
+            state
+            | stream_decoders: stream_decoders,
+              stream_subscriptions: stream_subscriptions
+          }
+
+          Enum.reduce_while(objects, Transition.ok(next_state), &reduce_object_event/2)
+        else
+          Transition.error(state, :data_buffer_limit_exceeded)
+        end
 
       {:error, reason} ->
         Transition.error(state, reason)
     end
+  end
+
+  defp buffered_data_bytes(stream_decoders) do
+    Enum.reduce(stream_decoders, 0, fn {_stream_id, decoder}, total ->
+      total + byte_size(decoder.buffer)
+    end)
   end
 
   defp reduce_object_event(object, {:ok, transition}) do
@@ -1089,6 +1147,7 @@ defmodule MOQX.Protocol.Draft18 do
       subgroup_id: decoded.subgroup_id,
       object_id: decoded.object_id,
       publisher_priority: decoded.priority,
+      first_object?: Map.get(decoded, :first_object?, false),
       status: decoded.status,
       extensions: Map.get(decoded, :extensions, []),
       end_of_group?: Map.get(decoded, :end_of_group?, false),
@@ -1376,7 +1435,7 @@ defmodule MOQX.Protocol.Draft18 do
   defp reactive_published_track(state, request, options) do
     with {:ok, entry} <- fetch_publication(state, request.publication),
          :ready <- entry.status,
-         :ok <- validate_track_name(request.track.track),
+         :ok <- validate_full_track_name(request.track.namespace, request.track.track),
          false <- Map.has_key?(entry.tracks, request.track.track),
          {:ok, retention} <- validate_retention(Keyword.get(options, :retention, :live)),
          {:ok, delivery} <-
@@ -1397,6 +1456,7 @@ defmodule MOQX.Protocol.Draft18 do
         delivery: delivery,
         status: :ready,
         stream_count: 0,
+        subgroup_streams: %{},
         options: options
       }
 
@@ -1440,6 +1500,7 @@ defmodule MOQX.Protocol.Draft18 do
       forward: request.forward,
       filter: request.filter,
       stream_count: 0,
+      subgroup_streams: %{},
       stream_key: pending.stream_key
     }
 
@@ -1595,17 +1656,20 @@ defmodule MOQX.Protocol.Draft18 do
       subscription.track == track and subscription.forward and
         object_matches_filter?(subscription.filter, object)
     end)
-    |> Enum.reduce({state, []}, fn {request_id, subscription}, {state, actions} ->
-      {next_state, subscription, action} =
-        publication_object_action(state, subscription, delivery, object)
+    |> Enum.reduce_while({:ok, state, []}, fn {request_id, subscription}, {:ok, state, actions} ->
+      case publication_object_action(state, subscription, delivery, object) do
+        {:ok, next_state, subscription, next_actions} ->
+          next_state = %{
+            next_state
+            | publisher_subscriptions:
+                Map.put(next_state.publisher_subscriptions, request_id, subscription)
+          }
 
-      next_state = %{
-        next_state
-        | publisher_subscriptions:
-            Map.put(next_state.publisher_subscriptions, request_id, subscription)
-      }
+          {:cont, {:ok, next_state, actions ++ next_actions}}
 
-      {next_state, actions ++ [action]}
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
     end)
   end
 
@@ -1613,25 +1677,110 @@ defmodule MOQX.Protocol.Draft18 do
     do: publication_object_action(state, entry, entry.delivery, object)
 
   defp primary_publication_object_actions(state, %{origin: :reactive} = entry, _object),
-    do: {state, entry, []}
+    do: {:ok, state, entry, []}
 
   defp primary_publication_object_actions(state, entry, object) do
-    {state, entry, action} = publication_object_action(state, entry, object)
-    {state, entry, [action]}
+    publication_object_action(state, entry, object)
   end
 
   defp publication_object_action(state, entry, :datagram, object) do
-    {state, entry, {:send_datagram, Codec.encode_datagram(entry.track_alias, object)}}
+    {:ok, state, entry, [{:send_datagram, Codec.encode_datagram(entry.track_alias, object)}]}
   end
 
   defp publication_object_action(state, entry, :subgroup, object) do
-    stream_number = state.next_publication_stream
-    key = {:publication, entry.request_id, stream_number}
-    bytes = Codec.encode_subgroup(entry.track_alias, object)
-    entry = %{entry | stream_count: entry.stream_count + 1}
-    state = %{state | next_publication_stream: stream_number + 1}
+    subgroup = {object.group_id, object.subgroup_id || 0}
 
-    {state, entry, {:open_stream, key, [direction: :unidirectional], bytes, [finish: true]}}
+    case entry.subgroup_streams[subgroup] do
+      nil ->
+        key = {:publication, entry.request_id, elem(subgroup, 0), elem(subgroup, 1)}
+        finish? = subgroup_finished?(object)
+
+        entry =
+          if finish? do
+            entry
+          else
+            streams =
+              Map.put(entry.subgroup_streams, subgroup, %{
+                key: key,
+                object_id: object.object_id,
+                priority: object.publisher_priority || 128
+              })
+
+            %{entry | subgroup_streams: streams}
+          end
+
+        {entry, finish_actions} =
+          if finish?, do: finish_group_subgroups(entry, object.group_id, key), else: {entry, []}
+
+        entry = %{entry | stream_count: entry.stream_count + 1}
+
+        {:ok, state, entry,
+         [
+           {:open_stream, key, [direction: :unidirectional],
+            Codec.encode_subgroup(entry.track_alias, object), [finish: finish?]}
+         ] ++ finish_actions}
+
+      %{key: key, object_id: previous_object_id} = stream ->
+        with :ok <- validate_subgroup_priority(stream, object),
+             {:ok, bytes} <- Codec.encode_subgroup_object(previous_object_id, object) do
+          continue_subgroup_action(state, entry, subgroup, key, object, bytes)
+        end
+    end
+  end
+
+  defp continue_subgroup_action(state, entry, subgroup, key, object, bytes) do
+    if subgroup_finished?(object) do
+      {entry, finish_actions} = finish_group_subgroups(entry, object.group_id, key)
+
+      {:ok, state, entry, [{:send_stream, key, bytes, [finish: true]} | finish_actions]}
+    else
+      streams =
+        Map.put(entry.subgroup_streams, subgroup, %{
+          key: key,
+          object_id: object.object_id,
+          priority: object.publisher_priority || 128
+        })
+
+      {:ok, state, %{entry | subgroup_streams: streams}, [{:send_stream, key, bytes, []}]}
+    end
+  end
+
+  defp subgroup_finished?(object),
+    do: object.end_of_group? == true or object.status in [:end_of_group, :end_of_track]
+
+  defp validate_subgroup_priority(%{priority: priority}, object) do
+    if (object.publisher_priority || 128) == priority,
+      do: :ok,
+      else: {:error, :subgroup_priority_changed}
+  end
+
+  defp finish_group_subgroups(entry, group_id, except_key) do
+    {finished, remaining} =
+      Enum.split_with(entry.subgroup_streams, fn {{candidate_group, _subgroup}, _stream} ->
+        candidate_group == group_id
+      end)
+
+    actions =
+      for {_subgroup, %{key: key}} <- finished, key != except_key do
+        {:send_stream, key, <<>>, [finish: true]}
+      end
+
+    {%{entry | subgroup_streams: Map.new(remaining)}, actions}
+  end
+
+  defp finish_all_subgroups(entry) do
+    actions =
+      for {_subgroup, %{key: key}} <- entry.subgroup_streams do
+        {:send_stream, key, <<>>, [finish: true]}
+      end
+
+    {%{entry | subgroup_streams: %{}}, actions}
+  end
+
+  defp abort_all_subgroups(entry) do
+    for {_subgroup, %{key: key}} <- entry.subgroup_streams do
+      {:abort_stream_sending, key, 0x01}
+    end
   end
 
   defp finish_published_subscription(state, operation) do
@@ -1640,6 +1789,8 @@ defmodule MOQX.Protocol.Draft18 do
     with :ok <- validate_published_subscription_scope(state, handle),
          %{handle: ^handle} = subscription <- state.publisher_subscriptions[handle.request_id],
          {:ok, status, reason} <- published_subscription_completion(operation.options) do
+      subgroup_actions = abort_all_subgroups(subscription)
+
       next_state = %{
         state
         | publisher_subscriptions: Map.delete(state.publisher_subscriptions, handle.request_id)
@@ -1654,10 +1805,12 @@ defmodule MOQX.Protocol.Draft18 do
             request_id: subscription.request_id
           }
         ],
-        actions: [
-          {:send_stream, subscription.stream_key,
-           Codec.publish_done(status, subscription.stream_count, reason), [finish: true]}
-        ]
+        actions:
+          subgroup_actions ++
+            [
+              {:send_stream, subscription.stream_key,
+               Codec.publish_done(status, subscription.stream_count, reason), [finish: true]}
+            ]
       )
     else
       nil -> Transition.error(state, :stale_published_subscription)
@@ -1727,6 +1880,34 @@ defmodule MOQX.Protocol.Draft18 do
   defp validate_track_name(track) when is_binary(track) and byte_size(track) <= 4_096, do: :ok
   defp validate_track_name(_track), do: {:error, :invalid_track_name}
 
+  defp validate_track_ref(%MOQX.TrackRef{namespace: namespace, track: track}),
+    do: validate_full_track_name(namespace, track)
+
+  defp validate_track_ref(_track), do: {:error, :invalid_track}
+
+  defp validate_full_track_name(namespace, track) do
+    with :ok <- validate_namespace_fields(namespace),
+         :ok <- validate_track_name(track),
+         true <- Enum.sum(Enum.map(namespace, &byte_size/1)) + byte_size(track) <= 4_096 do
+      :ok
+    else
+      false -> {:error, :invalid_track_name}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp validate_namespace_fields(namespace)
+       when is_list(namespace) and length(namespace) <= 32 do
+    if Enum.all?(namespace, &(is_binary(&1) and byte_size(&1) > 0)) and
+         Enum.sum(Enum.map(namespace, &byte_size/1)) <= 4_096 do
+      :ok
+    else
+      {:error, :invalid_namespace}
+    end
+  end
+
+  defp validate_namespace_fields(_namespace), do: {:error, :invalid_namespace}
+
   defp validate_retention(retention) when retention in [:live, :latest, :all],
     do: {:ok, retention}
 
@@ -1744,6 +1925,7 @@ defmodule MOQX.Protocol.Draft18 do
       valid_non_negative_integer?(object.object_id),
       is_nil(object.subgroup_id) or valid_non_negative_integer?(object.subgroup_id),
       is_nil(object.publisher_priority) or object.publisher_priority in 0..255,
+      object.first_object? in [nil, true, false],
       object.status in [nil, :end_of_group, :end_of_track],
       object.end_of_group? in [nil, true, false],
       valid_object_extensions?(object.extensions),
@@ -1770,7 +1952,8 @@ defmodule MOQX.Protocol.Draft18 do
         }
         when is_integer(identifier) and identifier >= 0 and
                ((rem(identifier, 2) == 0 and is_integer(value) and value >= 0) or
-                  (rem(identifier, 2) == 1 and is_binary(value))) ->
+                  (rem(identifier, 2) == 1 and is_binary(value) and
+                     byte_size(value) <= 65_535)) ->
           identifier
 
         _extension ->
@@ -1874,6 +2057,8 @@ defmodule MOQX.Protocol.Draft18 do
          events,
          actions
        ) do
+    {track_entry, subgroup_actions} = finish_all_subgroups(track_entry)
+
     event = %PublicationSubscriberLeft{
       track: track_entry.track,
       request_id: track_entry.request_id
@@ -1883,7 +2068,7 @@ defmodule MOQX.Protocol.Draft18 do
       {:send_stream, {:publish, track_entry.request_id},
        Codec.publish_done(status, track_entry.stream_count, reason), [finish: true]}
 
-    {events ++ [event], actions ++ [action]}
+    {events ++ [event], actions ++ subgroup_actions ++ [action]}
   end
 
   defp finish_track(
@@ -1893,11 +2078,13 @@ defmodule MOQX.Protocol.Draft18 do
          events,
          actions
        ) do
+    {track_entry, subgroup_actions} = finish_all_subgroups(track_entry)
+
     action =
       {:send_stream, {:publish, track_entry.request_id},
        Codec.publish_done(status, track_entry.stream_count, reason), [finish: true]}
 
-    {events, actions ++ [action]}
+    {events, actions ++ subgroup_actions ++ [action]}
   end
 
   defp finish_track(_track_entry, _status, _reason, events, actions), do: {events, actions}
@@ -1961,6 +2148,8 @@ defmodule MOQX.Protocol.Draft18 do
     |> Enum.sort_by(&elem(&1, 0))
     |> Enum.reduce({%{}, [], []}, fn {request_id, subscription}, {remaining, events, actions} ->
       if subscription.track == published_track do
+        {subscription, subgroup_actions} = finish_all_subgroups(subscription)
+
         event = %PublicationSubscriberLeft{
           track: subscription.track,
           subscription: subscription.handle,
@@ -1971,7 +2160,7 @@ defmodule MOQX.Protocol.Draft18 do
           {:send_stream, subscription.stream_key,
            Codec.publish_done(status, subscription.stream_count, reason), [finish: true]}
 
-        {remaining, events ++ [event], actions ++ [action]}
+        {remaining, events ++ [event], actions ++ subgroup_actions ++ [action]}
       else
         {Map.put(remaining, request_id, subscription), events, actions}
       end
@@ -1983,6 +2172,8 @@ defmodule MOQX.Protocol.Draft18 do
     |> Enum.sort_by(&elem(&1, 0))
     |> Enum.reduce({%{}, [], []}, fn {request_id, subscription}, {remaining, events, actions} ->
       if subscription.publication_id == publication_id do
+        {subscription, subgroup_actions} = finish_all_subgroups(subscription)
+
         event = %PublicationSubscriberLeft{
           track: subscription.track,
           subscription: subscription.handle,
@@ -1993,7 +2184,7 @@ defmodule MOQX.Protocol.Draft18 do
           {:send_stream, subscription.stream_key,
            Codec.publish_done(status, subscription.stream_count, reason), [finish: true]}
 
-        {remaining, events ++ [event], actions ++ [action]}
+        {remaining, events ++ [event], actions ++ subgroup_actions ++ [action]}
       else
         {Map.put(remaining, request_id, subscription), events, actions}
       end
@@ -2196,7 +2387,8 @@ defmodule MOQX.Protocol.Draft18 do
       subgroup_id: decoder.subgroup_id || decoder.header.subgroup_id,
       outcome: outcome,
       error_code: error_code,
-      end_of_group?: outcome == :complete and decoder.header.end_of_group?
+      end_of_group?:
+        outcome == :complete and (decoder.header.end_of_group? or decoder.end_of_group?)
     }
   end
 

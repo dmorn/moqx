@@ -38,6 +38,7 @@ defmodule MOQX.Protocol.MOQTDraft18.Codec do
     with {:ok, request_id, rest} <- decode_varint(payload),
          {:ok, namespace, rest} <- decode_tuple(rest),
          {:ok, track_name, rest} <- decode_bytes(rest),
+         :ok <- validate_full_track_name(namespace, track_name),
          {:ok, parameter_count, rest} <- decode_varint(rest),
          {:ok, parameters, <<>>} <- decode_parameters(rest, parameter_count, :message),
          {:ok, filter} <- subscribe_filter(parameters),
@@ -173,11 +174,14 @@ defmodule MOQX.Protocol.MOQTDraft18.Codec do
   @spec encode_subgroup(non_neg_integer(), MOQX.Object.t()) :: binary()
   def encode_subgroup(track_alias, %MOQX.Object{timestamp: _timestamp} = object) do
     subgroup_id = object.subgroup_id || 0
-    priority = object.publisher_priority || 127
+    priority = object.publisher_priority || 128
+
+    first_object? =
+      object.first_object? == true or (is_nil(object.first_object?) and object.object_id == 0)
 
     type =
-      0x14 ||| if(object.end_of_group?, do: 0x08, else: 0) |||
-        if(object.object_id == 0, do: 0x40, else: 0)
+      0x15 ||| if(object.end_of_group?, do: 0x08, else: 0) |||
+        if(first_object?, do: 0x40, else: 0)
 
     IO.iodata_to_binary([
       encode_varint(type),
@@ -185,10 +189,30 @@ defmodule MOQX.Protocol.MOQTDraft18.Codec do
       encode_varint(object.group_id),
       encode_varint(subgroup_id),
       <<priority>>,
-      encode_varint(object.object_id),
-      encode_object_payload(object)
+      encode_subgroup_object_fields(object.object_id, object)
     ])
   end
+
+  @doc false
+  @spec encode_subgroup_object(non_neg_integer(), MOQX.Object.t()) ::
+          {:ok, binary()} | {:error, :invalid_subgroup_object_order}
+  def encode_subgroup_object(previous_object_id, %MOQX.Object{} = object)
+      when object.object_id > previous_object_id do
+    object_fields =
+      encode_subgroup_object_fields(object.object_id - previous_object_id - 1, object)
+
+    end_of_group =
+      if object.end_of_group? and object.status not in [:end_of_group, :end_of_track] do
+        encode_subgroup_status_fields(0, :end_of_group)
+      else
+        []
+      end
+
+    {:ok, IO.iodata_to_binary([object_fields, end_of_group])}
+  end
+
+  def encode_subgroup_object(_previous_object_id, _object),
+    do: {:error, :invalid_subgroup_object_order}
 
   @spec encode_datagram(non_neg_integer(), MOQX.Object.t()) :: binary()
   def encode_datagram(track_alias, %MOQX.Object{timestamp: _timestamp} = object) do
@@ -311,7 +335,7 @@ defmodule MOQX.Protocol.MOQTDraft18.Codec do
   def decode_request_error(payload) do
     with {:ok, error_code, rest} <- decode_varint(payload),
          {:ok, retry_interval, rest} <- decode_varint(rest),
-         {:ok, reason, <<>>} <- decode_bytes(rest) do
+         {:ok, reason, <<>>} when byte_size(reason) <= 1_024 <- decode_bytes(rest) do
       {:ok, %{error_code: error_code, retry_interval: retry_interval, reason: reason}}
     else
       _other -> {:error, :invalid_request_error}
@@ -329,7 +353,7 @@ defmodule MOQX.Protocol.MOQTDraft18.Codec do
   def decode_publish_done(payload) do
     with {:ok, status_code, rest} <- decode_varint(payload),
          {:ok, stream_count, rest} <- decode_varint(rest),
-         {:ok, reason, <<>>} <- decode_bytes(rest) do
+         {:ok, reason, <<>>} when byte_size(reason) <= 1_024 <- decode_bytes(rest) do
       {:ok,
        %{
          status_code: status_code,
@@ -341,32 +365,25 @@ defmodule MOQX.Protocol.MOQTDraft18.Codec do
     end
   end
 
-  @spec decode_datagram(binary()) :: {:ok, map()} | {:error, :invalid_datagram}
+  @spec decode_datagram(binary()) :: {:ok, map() | :padding} | {:error, :invalid_datagram}
   def decode_datagram(payload) do
-    with {:ok, type, rest} <- decode_varint(payload),
-         :ok <- validate_datagram_type(type),
-         {:ok, track_alias, rest} <- decode_varint(rest),
-         {:ok, group_id, rest} <- decode_varint(rest),
-         {:ok, object_id, rest} <- decode_optional_varint(rest, (type &&& 0x04) != 0, 0),
-         {:ok, priority, rest} <- decode_optional_priority(rest, (type &&& 0x08) != 0),
-         {:ok, extensions, rest} <- decode_datagram_extensions(rest, (type &&& 0x01) != 0),
-         {:ok, status, object_payload} <- decode_datagram_payload(rest, (type &&& 0x20) != 0) do
-      {:ok,
-       %{
-         track_alias: track_alias,
-         group_id: group_id,
-         subgroup_id: nil,
-         object_id: object_id,
-         priority: priority,
-         status: status,
-         extensions: extensions,
-         end_of_group?: (type &&& 0x02) != 0,
-         payload: object_payload
-       }}
-    else
-      _other -> {:error, :invalid_datagram}
+    case decode_varint(payload) do
+      {:ok, 0x132B3E29, padding} ->
+        if zero_bytes?(padding), do: {:ok, :padding}, else: {:error, :invalid_datagram}
+
+      {:ok, type, rest} ->
+        decode_object_datagram(type, rest)
+
+      _other ->
+        {:error, :invalid_datagram}
     end
   end
+
+  @doc false
+  @spec zero_bytes?(binary()) :: boolean()
+  def zero_bytes?(<<>>), do: true
+  def zero_bytes?(<<0, rest::binary>>), do: zero_bytes?(rest)
+  def zero_bytes?(_data), do: false
 
   @doc false
   @spec decode_extensions(binary()) ::
@@ -425,6 +442,26 @@ defmodule MOQX.Protocol.MOQTDraft18.Codec do
   defp boolean_integer(true), do: 1
   defp boolean_integer(false), do: 0
 
+  defp encode_subgroup_object_fields(delta, object) do
+    extensions = encode_object_extensions(object.extensions || [])
+
+    [
+      encode_varint(delta),
+      encode_varint(byte_size(extensions)),
+      extensions,
+      encode_object_payload(object)
+    ]
+  end
+
+  defp encode_subgroup_status_fields(delta, status) do
+    [
+      encode_varint(delta),
+      encode_varint(0),
+      encode_varint(0),
+      encode_varint(object_status(status))
+    ]
+  end
+
   defp encode_object_payload(%MOQX.Object{payload: payload}) when byte_size(payload) > 0,
     do: [encode_varint(byte_size(payload)), payload]
 
@@ -435,6 +472,31 @@ defmodule MOQX.Protocol.MOQTDraft18.Codec do
   defp object_status(nil), do: 0
   defp object_status(:end_of_group), do: 3
   defp object_status(:end_of_track), do: 4
+
+  defp decode_object_datagram(type, rest) do
+    with :ok <- validate_datagram_type(type),
+         {:ok, track_alias, rest} <- decode_varint(rest),
+         {:ok, group_id, rest} <- decode_varint(rest),
+         {:ok, object_id, rest} <- decode_optional_varint(rest, (type &&& 0x04) != 0, 0),
+         {:ok, priority, rest} <- decode_optional_priority(rest, (type &&& 0x08) != 0),
+         {:ok, extensions, rest} <- decode_datagram_extensions(rest, (type &&& 0x01) != 0),
+         {:ok, status, object_payload} <- decode_datagram_payload(rest, (type &&& 0x20) != 0) do
+      {:ok,
+       %{
+         track_alias: track_alias,
+         group_id: group_id,
+         subgroup_id: nil,
+         object_id: object_id,
+         priority: priority,
+         status: status,
+         extensions: extensions,
+         end_of_group?: (type &&& 0x02) != 0,
+         payload: object_payload
+       }}
+    else
+      _other -> {:error, :invalid_datagram}
+    end
+  end
 
   defp set_datagram_bit(type, bit, true), do: type ||| bit
   defp set_datagram_bit(type, _bit, false), do: type
@@ -465,8 +527,12 @@ defmodule MOQX.Protocol.MOQTDraft18.Codec do
   end
 
   defp decode_tuple(binary) do
-    with {:ok, count, rest} <- decode_varint(binary) do
-      decode_tuple_fields(rest, count, [])
+    with {:ok, count, rest} when count <= 32 <- decode_varint(binary),
+         {:ok, fields, rest} <- decode_tuple_fields(rest, count, []),
+         true <- Enum.sum(Enum.map(fields, &byte_size/1)) <= 4_096 do
+      {:ok, fields, rest}
+    else
+      _other -> {:error, :invalid_tuple}
     end
   end
 
@@ -643,12 +709,19 @@ defmodule MOQX.Protocol.MOQTDraft18.Codec do
 
   defp decode_bytes(binary) do
     with {:ok, length, rest} <- decode_varint(binary),
+         true <- length <= 65_535,
          true <- byte_size(rest) >= length do
       <<value::binary-size(^length), rest::binary>> = rest
       {:ok, value, rest}
     else
       _other -> :more
     end
+  end
+
+  defp validate_full_track_name(namespace, track_name) do
+    if Enum.sum(Enum.map(namespace, &byte_size/1)) + byte_size(track_name) <= 4_096,
+      do: :ok,
+      else: {:error, :full_track_name_too_large}
   end
 
   defp decode_parameters(binary, count, kind),

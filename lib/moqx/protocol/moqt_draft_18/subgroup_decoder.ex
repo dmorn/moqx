@@ -5,13 +5,18 @@ defmodule MOQX.Protocol.MOQTDraft18.SubgroupDecoder do
 
   alias MOQX.Protocol.MOQTDraft18.Codec
 
-  defstruct header: nil, buffer: <<>>, previous_object_id: nil, subgroup_id: nil
+  defstruct header: nil,
+            buffer: <<>>,
+            previous_object_id: nil,
+            subgroup_id: nil,
+            end_of_group?: false
 
   @type t :: %__MODULE__{
           header: map() | nil,
           buffer: binary(),
           previous_object_id: non_neg_integer() | nil,
-          subgroup_id: non_neg_integer() | nil
+          subgroup_id: non_neg_integer() | nil,
+          end_of_group?: boolean()
         }
 
   @spec push(t(), binary()) :: {:ok, t(), [map()]} | {:error, term()}
@@ -72,7 +77,9 @@ defmodule MOQX.Protocol.MOQTDraft18.SubgroupDecoder do
           decoder
           | buffer: rest,
             previous_object_id: object.object_id,
-            subgroup_id: subgroup_id
+            subgroup_id: subgroup_id,
+            end_of_group?:
+              decoder.end_of_group? or object.status in [:end_of_group, :end_of_track]
         }
 
         decode_objects(next, [object | objects])
@@ -89,38 +96,49 @@ defmodule MOQX.Protocol.MOQTDraft18.SubgroupDecoder do
     with {:ok, delta, rest} <- Codec.decode_varint(buffer),
          {:ok, extensions, rest} <- decode_extensions(header.extensions?, rest),
          {:ok, payload_length, rest} <- Codec.decode_varint(rest) do
+      first_object? = is_nil(decoder.previous_object_id) and header.first_object?
+
       object_id =
         case decoder.previous_object_id do
           nil -> delta
           previous -> previous + delta + 1
         end
 
-      decode_object_payload(header, object_id, extensions, payload_length, rest)
+      decode_object_payload(header, object_id, first_object?, extensions, payload_length, rest)
     end
   end
 
-  defp decode_object_payload(header, object_id, extensions, 0, rest) do
+  defp decode_object_payload(header, object_id, first_object?, extensions, 0, rest) do
     with {:ok, status, rest} <- Codec.decode_varint(rest),
          {:ok, status} <- decode_object_status(status) do
-      {:ok, public_object(header, object_id, extensions, status, ""), rest}
+      {:ok, public_object(header, object_id, first_object?, extensions, status, ""), rest}
     end
   end
 
-  defp decode_object_payload(header, object_id, extensions, length, rest)
+  defp decode_object_payload(header, object_id, first_object?, extensions, length, rest)
        when byte_size(rest) >= length do
     <<payload::binary-size(^length), rest::binary>> = rest
-    {:ok, public_object(header, object_id, extensions, nil, payload), rest}
+    {:ok, public_object(header, object_id, first_object?, extensions, nil, payload), rest}
   end
 
-  defp decode_object_payload(_header, _object_id, _extensions, _length, _rest), do: :more
+  defp decode_object_payload(
+         _header,
+         _object_id,
+         _first_object?,
+         _extensions,
+         _length,
+         _rest
+       ),
+       do: :more
 
-  defp public_object(header, object_id, extensions, status, payload) do
+  defp public_object(header, object_id, first_object?, extensions, status, payload) do
     %{
       track_alias: header.track_alias,
       group_id: header.group_id,
       subgroup_id: header.subgroup_id || object_id,
       priority: header.priority,
       object_id: object_id,
+      first_object?: first_object?,
       status: status,
       extensions: extensions,
       end_of_group?: header.end_of_group?,
@@ -131,13 +149,20 @@ defmodule MOQX.Protocol.MOQTDraft18.SubgroupDecoder do
   defp decode_extensions(false, rest), do: {:ok, [], rest}
 
   defp decode_extensions(true, rest) do
-    with {:ok, length, rest} <- Codec.decode_varint(rest),
-         true <- byte_size(rest) >= length,
-         <<encoded::binary-size(^length), rest::binary>> <- rest,
-         {:ok, extensions} <- Codec.decode_extensions(encoded) do
-      {:ok, extensions, rest}
-    else
-      _other -> :more
+    case Codec.decode_varint(rest) do
+      {:ok, length, rest} when byte_size(rest) >= length ->
+        <<encoded::binary-size(^length), rest::binary>> = rest
+
+        case Codec.decode_extensions(encoded) do
+          {:ok, extensions} -> {:ok, extensions, rest}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:ok, _length, _rest} ->
+        :more
+
+      :more ->
+        :more
     end
   end
 

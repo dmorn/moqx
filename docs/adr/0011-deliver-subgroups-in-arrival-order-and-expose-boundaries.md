@@ -6,9 +6,9 @@
 ## Context
 
 MOQT objects can arrive on independent QUIC streams. A QUIC stream preserves
-byte order within one subgroup, but neither MOQT draft-14 nor draft-16 promises
-coordinate order across subgroups or groups. Both drafts explicitly allow
-groups to arrive out of order.
+byte order within one subgroup, but neither standard MOQT draft-18 nor MoQ Lite
+05 promises coordinate order across subgroups or groups. Both protocols
+explicitly allow groups to arrive out of order.
 
 Applications such as a live Membrane source need two distinct facts:
 
@@ -45,20 +45,22 @@ accepted from the corresponding stream:
   Completeness is unknown.
 - `error_code` preserves a reset application error code when supplied by the
   transport.
-- `end_of_group?` is true only when a complete FIN validates the protocol's
-  end-of-group header bit. It identifies the final object location in the group;
-  it does not prove that every other subgroup in that group has arrived.
+- `end_of_group?` is true only when a complete FIN validates either the
+  protocol's end-of-group header bit or an end-of-group status object. It
+  identifies the final object location in the group; it does not prove that
+  every other subgroup in that group has arrived.
 
 A RESET or otherwise incomplete subgroup is still accounted as a processed
 data stream for `PUBLISH_DONE` draining. The subgroup boundary is emitted
 before a resulting `%MOQX.Event.SubscriptionDone{}`. A FIN in the middle of a
 serialized object is a protocol failure rather than a complete boundary.
 
-`ObjectStatus` and object `end_of_group?` metadata preserve the peer's semantic
-markers, but MOQX does not infer missing groups, missing objects, or group
-completion from coordinate gaps. If a stream reset arrives before enough of
-its header is available to identify a subscription, no subgroup event can be
-correlated; normal subscription delivery timeout remains the terminal fallback.
+`ObjectStatus`, object `end_of_group?`, and object `first_object?` metadata
+preserve the peer's semantic markers, but MOQX does not infer missing groups,
+missing objects, or group completion from coordinate gaps. If a stream reset
+arrives before enough of its header is available to identify a subscription, no
+subgroup event can be correlated; normal subscription delivery timeout remains
+the terminal fallback.
 
 `ConnectionClosed` or `ProtocolFailed` abandons every still-open subgroup.
 Consumers must release any buffers retained for that client when either event
@@ -105,6 +107,8 @@ other subgroups or the subscription.
 
 ## References
 
+- [MOQT draft-18, Closing Subgroup Streams](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-18#section-11.4.3)
+- [MoQ Lite draft-05](https://datatracker.ietf.org/doc/html/draft-lcurley-moq-lite-05)
 - [MOQT draft-14, Closing Subgroup Streams](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-14#section-10.4.3)
 - [MOQT draft-16, Closing Subgroup Streams](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-16#section-10.4.3)
 - [Issue #29](https://github.com/dmorn/moqx/issues/29)

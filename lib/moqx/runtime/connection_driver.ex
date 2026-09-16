@@ -12,6 +12,7 @@ defmodule MOQX.Runtime.ConnectionDriver do
   alias MOQX.Runtime.ConnectionDriver.StreamEntry
   alias MOQX.Runtime.Profiles
   alias MOQX.Transport
+  alias MOQX.Transport.Capabilities, as: TransportCapabilities
 
   defstruct [
     :event_recipient,
@@ -229,6 +230,11 @@ defmodule MOQX.Runtime.ConnectionDriver do
              connect_options,
              Keyword.get(options, :timeout, 5_000)
            ),
+         :ok <-
+           validate_transport_capabilities(
+             Transport.capabilities(context, connection),
+             transport_spec.required_capabilities
+           ),
          {:ok, protocol_state} <- protocol.init(endpoint, options) do
       client = %MOQX.Client{pid: self(), protocol: protocol.id()}
 
@@ -257,6 +263,27 @@ defmodule MOQX.Runtime.ConnectionDriver do
       {:error, reason} -> send(caller, {ref, {:error, reason}})
     end
   end
+
+  defp validate_transport_capabilities(
+         %TransportCapabilities{} = capabilities,
+         required_capabilities
+       ) do
+    case Enum.find(required_capabilities, &(not transport_capability?(capabilities, &1))) do
+      nil -> :ok
+      missing -> {:error, {:missing_transport_capability, missing}}
+    end
+  end
+
+  defp validate_transport_capabilities({:error, reason}, _required_capabilities),
+    do: {:error, reason}
+
+  defp transport_capability?(capabilities, :streams) do
+    :bidirectional in capabilities.stream_directions and
+      :unidirectional in capabilities.stream_directions
+  end
+
+  defp transport_capability?(capabilities, :datagrams), do: capabilities.datagrams == true
+  defp transport_capability?(_capabilities, _unknown), do: false
 
   defp loop(state, waiter) do
     {state, waiter} =
