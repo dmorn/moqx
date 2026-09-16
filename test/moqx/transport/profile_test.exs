@@ -72,7 +72,7 @@ defmodule MOQX.Transport.ProfileTest do
     end
 
     test "lists canonical profile names" do
-      assert Profile.names() == [:draft_14, :draft_16, :moq_lite_05, :streams_only]
+      assert Profile.names() == [:draft_14, :draft_16, :draft_18, :moq_lite_05, :streams_only]
     end
 
     test "rejects unknown profiles" do

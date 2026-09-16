@@ -4,6 +4,11 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Explicit standard MOQT draft-18 protocol and transport profile (`:draft_18`,
+  ALPN `moqt-18`) alongside the existing protocol implementations.
+
 ## [0.10.0] - 2026-09-08
 
 ### Added

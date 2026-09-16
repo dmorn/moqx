@@ -52,6 +52,17 @@ jobs:
       - name: Run Docker relay integration
         run: scripts/run_moq_rs_integration.sh
 
+  moqtail-draft-18:
+    name: MOQtail draft-18 relay interoperability
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run pinned MOQtail draft-18 integration
+        run: scripts/run_moqtail_draft18_integration.sh
+
   curley-moq-lite-05:
     name: Curley MoQ Lite 05 relay interoperability
     runs-on: ubuntu-latest

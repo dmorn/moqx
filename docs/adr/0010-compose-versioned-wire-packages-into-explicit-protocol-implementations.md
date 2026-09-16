@@ -44,6 +44,13 @@ The pin is also executable through
 and namespace publisher at that revision, then runs the stable MOQX subscriber
 API against the local native-QUIC endpoint with generated TLS.
 
+## Scope update: 2026-09-15
+
+Standard MOQT draft-18 is the canonical target, selected explicitly as
+`:draft_18` with ALPN `moqt-18`. It is a separate wire package and reducer;
+Cloudflare draft-14, draft-16, and MoQ Lite 05 remain intact behind the same
+public protocol and connection-driver boundaries.
+
 ## Context
 
 `moqx` needs to support multiple deployed MOQT-family protocols over the

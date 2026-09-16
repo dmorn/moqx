@@ -254,11 +254,12 @@ defmodule MOQX.CMAF do
   end
 
   defp prepare_publication_tracks(
-         %Client{protocol: :draft_16} = client,
+         %Client{protocol: protocol} = client,
          publication,
          options,
          timeout
-       ) do
+       )
+       when protocol in [:draft_16, :draft_18] do
     catalog_name = Keyword.get(options, :catalog_track, "catalog")
     media_name = Keyword.get(options, :media_track, "video")
     delivery = Keyword.get(options, :delivery, :subgroup)
@@ -295,7 +296,7 @@ defmodule MOQX.CMAF do
   end
 
   defp publish_file_payloads(
-         %Client{protocol: :draft_16} = client,
+         %Client{protocol: protocol} = client,
          _namespace,
          catalog_track,
          nil,
@@ -303,7 +304,8 @@ defmodule MOQX.CMAF do
          init,
          fragments,
          options
-       ) do
+       )
+       when protocol in [:draft_16, :draft_18] do
     catalog_payload = moqtail_catalog_payload(init, media_track.track.track, options)
     catalog_repetitions = Keyword.get(options, :catalog_repetitions, 1)
     catalog_interval = Keyword.get(options, :catalog_interval, 0)
@@ -396,10 +398,11 @@ defmodule MOQX.CMAF do
   end
 
   defp await_publication_for_file(
-         %Client{protocol: :draft_16} = client,
+         %Client{protocol: protocol} = client,
          publication,
          timeout
-       ),
+       )
+       when protocol in [:draft_16, :draft_18],
        do: await_publication(client, publication, timeout)
 
   defp await_publication_for_file(_client, _publication, _timeout), do: :ok
@@ -473,7 +476,8 @@ defmodule MOQX.CMAF do
   defp sleep_between(interval, true) when interval > 0, do: Process.sleep(interval)
   defp sleep_between(_interval, _between?), do: :ok
 
-  defp validate_publish_options(%Client{protocol: :draft_16}, options) do
+  defp validate_publish_options(%Client{protocol: protocol}, options)
+       when protocol in [:draft_16, :draft_18] do
     catalog_repetitions = Keyword.get(options, :catalog_repetitions, 1)
     catalog_interval = Keyword.get(options, :catalog_interval, 0)
     fragment_interval = Keyword.get(options, :fragment_interval, 0)

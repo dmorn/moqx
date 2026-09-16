@@ -6,9 +6,10 @@ It provides a QUIC transport boundary backed by [`quicer`](https://github.com/dm
 
 ## Protocol documents
 
-`moqx` implements independent Cloudflare draft-14, standard MOQT draft-16, and
-MoQ Lite draft-05 protocols over native QUIC. Protocol selection is explicit,
-so the implementations coexist without hostname inference or fallback.
+`moqx` targets standard MOQT draft-18 and also implements independent legacy
+Cloudflare draft-14, standard MOQT draft-16, and MoQ Lite draft-05 protocols
+over native QUIC. Protocol selection is explicit, so the implementations
+coexist without hostname inference or fallback.
 
 Core references:
 
@@ -21,10 +22,12 @@ Core references:
 - [draft-ietf-webtrans-http3-14 — WebTransport over HTTP/3](https://www.ietf.org/archive/id/draft-ietf-webtrans-http3-14.txt)
 - [draft-ietf-moq-transport-14 — Media over QUIC Transport](https://www.ietf.org/archive/id/draft-ietf-moq-transport-14.txt)
 - [draft-ietf-moq-transport-16 — Media over QUIC Transport](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-16)
+- [draft-ietf-moq-transport-18 — Media over QUIC Transport](https://datatracker.ietf.org/doc/html/draft-ietf-moq-transport-18)
 - [draft-lcurley-moq-lite-05 — Media over QUIC Lite](https://datatracker.ietf.org/doc/html/draft-lcurley-moq-lite-05)
 
-The draft-16 interoperability reference is Moqtail's `draft-16` branch pinned
-at commit
+The canonical draft-18 interoperability reference is MOQtail pinned at
+[`0e265d8`](https://github.com/moqtail/moqtail/commit/0e265d8bf133f86e17472c59f14ca7dc62032900).
+The retained draft-16 reference is MOQtail's `draft-16` branch pinned at
 [`c2ff7253479c6a0d7c8282a1cad289d591ebc302`](https://github.com/moqtail/moqtail/commit/c2ff7253479c6a0d7c8282a1cad289d591ebc302).
 
 ## Application catalog profiles
@@ -34,12 +37,12 @@ subscription or published catalog. Raw objects are the default, including on
 `.catalog`, `catalog`, and `catalog.json` tracks. Existing CMSF consumers must
 add an explicit profile to their `MOQX.subscribe/3` call.
 
-| Profile | Cloudflare draft-14 | MOQT draft-16 | MoQ Lite 05 | Catalog track |
-| --- | --- | --- | --- | --- |
-| `:none` | yes | yes | yes | any, opaque |
-| `:cloudflare_cmsf` | yes | yes | yes | `.catalog` |
-| `:moqtail_cmsf` | yes | yes | yes | `catalog` |
-| `:hang` | rejected | rejected | yes | `catalog.json` / `catalog.json.z` |
+| Profile | Cloudflare draft-14 | MOQT draft-16 | MOQT draft-18 | MoQ Lite 05 | Catalog track |
+| --- | --- | --- | --- | --- | --- |
+| `:none` | yes | yes | yes | yes | any, opaque |
+| `:cloudflare_cmsf` | yes | yes | yes | yes | `.catalog` |
+| `:moqtail_cmsf` | yes | yes | yes | yes | `catalog` |
+| `:hang` | rejected | rejected | rejected | yes | `catalog.json` / `catalog.json.z` |
 
 The matrix describes codec composition, not certification against every relay.
 HANG metadata is pinned, typed, and round-trippable, including unknown extension
@@ -114,6 +117,11 @@ that cannot represent a requested policy returns
 substituting another boundary.
 
 ## MoQ Lite draft-05 subscriber and publisher
+
+The canonical standard implementation is selected explicitly with
+`protocol: :draft_18` and negotiates native-QUIC ALPN `moqt-18`. Legacy
+Cloudflare draft-14 and standard draft-16 remain available without fallback or
+endpoint-based inference.
 
 Select MoQ Lite explicitly with `protocol: :moq_lite_05`. It uses native QUIC
 ALPN `moq-lite-05`, sends a unidirectional Setup Stream with Path and Role, and
@@ -257,16 +265,16 @@ DATAGRAM transport parameter even when an application only publishes reliable
 Group Streams, so MOQX advertises receive support without changing the public
 delivery API.
 
-## Standard draft-16 subscriber and publisher
+## Standard draft-18 subscriber and publisher
 
-Moqtail's public relay can be reached through the independent `:draft_16`
-implementation. Subscription and catalog reception are available against the
-public relay:
+Draft-18 is the canonical standard implementation. MOQtail's public relay and
+Cloudflare's draft-18 interoperability relay both negotiate native-QUIC ALPN
+`moqt-18` through the explicit `:draft_18` implementation:
 
 ```elixir
 {:ok, client} =
   MOQX.connect("moqt://relay.moqtail.dev:443",
-    protocol: :draft_16
+    protocol: :draft_18
   )
 
 catalog_track =
@@ -292,9 +300,9 @@ receive do
 end
 ```
 
-Draft-16 publication uses two readiness boundaries. `PublicationReady` means
-the relay accepted the namespace. Each added track then sends draft-16
-`PUBLISH`; objects are accepted only after the corresponding
+Draft-18 publication uses two readiness boundaries. `PublicationReady` means
+the relay accepted the namespace. Each added track then sends `PUBLISH` on its
+own bidirectional request stream; objects are accepted only after the corresponding
 `PublicationSubscriberJoined` event confirms `PUBLISH_OK`:
 
 ```elixir
@@ -321,7 +329,7 @@ end
 ```
 
 `delivery: :subgroup` is the default and opens one subgroup stream per object.
-`delivery: :datagram` emits draft-16 unified object datagrams and reports zero
+`delivery: :datagram` emits draft-18 object datagrams and reports zero
 opened streams when the track completes. The delivery choice also applies to
 relay-initiated subscribers of that track. Cloudflare draft-14 rejects
 `:datagram` explicitly because that implementation supports subgroup
@@ -330,8 +338,8 @@ publication only.
 `finish_publication/3` first cancels pending controlled requests with
 `REQUEST_ERROR(DOES_NOT_EXIST)`, then completes established relay subscriptions
 and ready publisher-initiated tracks with `PUBLISH_DONE` and their exact
-opened-stream counts. It sends `PUBLISH_NAMESPACE_DONE` only after those
-subscription boundaries. Applications receive
+opened-stream counts. Namespace withdrawal cancels its request stream;
+draft-18 has no `PUBLISH_NAMESPACE_DONE` message. Applications receive
 `PublicationSubscriptionCancelled` and `PublicationSubscriberLeft` for the
 affected requests, and their handles become stale immediately.
 
@@ -339,26 +347,27 @@ Namespace rejection/cancellation and per-track rejection emit
 `PublicationFailed`, `PublicationCancelled`, and `PublicationTrackFailed`
 respectively; rejected and finished handles are invalidated deterministically.
 
-Incoming draft-16 `SUBSCRIBE` requests use the same
+Incoming draft-18 `SUBSCRIBE` requests use the same
 `inbound_subscriptions: :automatic | :controlled` publication policy and the
 same opaque request, accept, reject, timeout, joined, and left events as the
 draft-14 implementation. Accepted subscribers receive their own track alias
-and the track's selected subgroup or datagram delivery; `UNSUBSCRIBE` completes
-that subscriber with the exact stream count.
+and the track's selected subgroup or datagram delivery. Subscriber cancellation
+uses QUIC stream reset/stop-sending; publisher completion uses `PUBLISH_DONE`
+with the exact stream count followed by FIN.
 
-The operator workflow below was verified against `relay.moqtail.dev` and
-`player.moqtail.dev` on 2026-07-28: the player discovered the CMSF catalog,
-selected the advertised H.264 track, reached `Playing`, decoded 640×360 video,
-and advanced its media clock while the publisher completed cleanly. Those
-services can change independently, so rerun the smoke for current deployment
-evidence.
+Exact object and subgroup-completion roundtrips were verified against
+`relay.moqtail.dev` and Cloudflare's
+`draft-18-interop.cloudflare.mediaoverquic.com` endpoint on 2026-09-15. These
+external services can change independently, so rerun the public integration
+test for current deployment evidence.
 
-This path negotiates ALPN `moqt-16`, sends native-QUIC `PATH` and `AUTHORITY`
-setup parameters, and decodes draft-16 subgroup streams and object datagrams.
+This path negotiates ALPN `moqt-18`, sends native-QUIC `PATH` and `AUTHORITY`
+setup options, uses paired unidirectional control streams and per-request
+bidirectional streams, and decodes draft-18 subgroup streams and object datagrams.
 Objects preserve extension headers and end-of-group metadata. Objects remain opaque by default. Select `profile: :moqtail_cmsf` on a
 subscription to decode current Moqtail CMSF values as `CatalogReceived` events.
 
-Draft-16 also accepts the complete protocol-neutral filter model:
+Draft-18 also accepts the complete protocol-neutral filter model:
 
 ```elixir
 filter = %MOQX.SubscriptionFilter{
@@ -384,7 +393,7 @@ filter = %MOQX.SubscriptionFilter{
 
 The relative `:start` policies remain the portable API shared with Cloudflare.
 Absolute start/range filters, request updates, datagrams, and accepted
-subscription parameters are currently implemented by `:draft_16`. Update
+subscription parameters are implemented by `:draft_18`. Update
 success and rejection arrive as `SubscriptionUpdated` and
 `SubscriptionUpdateFailed`; an update rejection leaves the subscription
 active.
@@ -686,14 +695,27 @@ mix ci
 Default tests are fast and hermetic. Real QUIC checks are tagged as ExUnit
 integration tests and are excluded by default.
 
-The public Moqtail draft-16 subscriber smoke is independently selectable:
+Public draft-18 publisher/subscriber roundtrips against both MOQtail and
+Cloudflare's interoperability relay are independently selectable:
 
 ```bash
 mix test --only integration \
-  test/integration/moqtail_draft_16_catalog_test.exs
+  test/integration/draft_18_public_relays_test.exs
 ```
 
-The repo-owned draft-16 harness builds Moqtail's relay and test publisher at
+These tests publish unique namespaces and assert exact payload delivery and
+subgroup completion. They depend on external services and do not run during
+ordinary `mix test`.
+
+The repo-owned draft-18 harness builds MOQtail at immutable revision
+`0e265d8bf133f86e17472c59f14ca7dc62032900`, then exercises both MOQX publisher
+and subscriber APIs through the local relay with generated TLS:
+
+```bash
+scripts/run_moqtail_draft18_integration.sh
+```
+
+The retained draft-16 harness builds MOQtail's relay and test publisher at
 the immutable revision
 `c2ff7253479c6a0d7c8282a1cad289d591ebc302`, then verifies the ordinary MOQX
 public subscriber API over local QUIC with generated TLS:

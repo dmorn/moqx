@@ -12,6 +12,7 @@ defmodule MOQX.Protocol.Resolver do
   @built_ins %{
     cloudflare_draft_14: MOQX.Protocol.CloudflareDraft14,
     draft_16: MOQX.Protocol.Draft16,
+    draft_18: MOQX.Protocol.Draft18,
     moq_lite_05: MOQX.Protocol.MOQLite05
   }
 

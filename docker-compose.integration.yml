@@ -225,3 +225,48 @@ services:
       - integration
       - --include
       - moqtail_draft16_relay
+
+  moqtail-draft18-relay:
+    image: moqx-moqtail-draft18-relay
+    build:
+      context: .
+      dockerfile: docker/relays/moqtail/Dockerfile
+      args:
+        MOQTAIL_REF: 0e265d8bf133f86e17472c59f14ca7dc62032900
+    depends_on:
+      certs:
+        condition: service_completed_successfully
+    environment:
+      RUST_LOG: info
+    command:
+      - /usr/local/bin/moqtail-relay
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "4433"
+      - --cert-file
+      - /certs/server.pem
+      - --key-file
+      - /certs/server-key.pem
+    volumes:
+      - ./.tmp/integration-certs:/certs:ro
+    ports:
+      - "4473:4433/udp"
+
+  moqx-moqtail-draft18-test:
+    build:
+      context: .
+      dockerfile: docker/integration/Dockerfile
+    depends_on:
+      moqtail-draft18-relay:
+        condition: service_started
+    volumes:
+      - ./.tmp/integration-certs:/certs:ro
+    command:
+      - mix
+      - test
+      - test/integration/moqtail_draft_18_relay_test.exs
+      - --include
+      - integration
+      - --include
+      - moqtail_draft18_relay

@@ -21,7 +21,7 @@ defmodule MOQX.Profile do
         :ok
 
       profile in [:cloudflare_cmsf, :moqtail_cmsf] and
-          protocol in [:cloudflare_draft_14, :draft_16, :moq_lite_05] ->
+          protocol in [:cloudflare_draft_14, :draft_16, :draft_18, :moq_lite_05] ->
         :ok
 
       profile == :hang and protocol == :moq_lite_05 ->

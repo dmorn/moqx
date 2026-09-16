@@ -1,8 +1,8 @@
 # MOQX Context
 
-Transport performance work is parked. Current protocol work extends the
-subscriber surface across Cloudflare draft-14 and standard MOQT draft-16 over
-native QUIC.
+Transport performance work is parked. Standard MOQT draft-18 over native QUIC
+is the canonical explicit implementation. Cloudflare draft-14, standard
+draft-16, and MoQ Lite 05 remain independent supported variants.
 
 ## Decisions
 
@@ -62,7 +62,8 @@ carried by QUIC stream or connection shutdown.
 
 **Transport Profile**: named fixture for protocol-selected ALPN, transport
 capabilities, and stream expectations. Current profiles: `:draft_14`,
-`:draft_16`, and the protocol-neutral `:streams_only` test fixture.
+`:draft_16`, `:draft_18`, `:moq_lite_05`, and the protocol-neutral
+`:streams_only` test fixture.
 
 **Protocol Variant**: concrete MOQT-family protocol version with its own
 message model and session rules, e.g. MOQT draft-14 or MOQT draft-16.
