@@ -6,13 +6,13 @@ defmodule MOQX.Testing.TransportTest do
 
   test "establishes a deterministic client/server connection lifecycle" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :draft_14)
+    {:ok, listener} = Support.listen(0, network: network, profile: :draft_18)
 
     {:ok, client} =
       Support.connect(
         "localhost",
         Support.port(listener),
-        [network: network, profile: :draft_14],
+        [network: network, profile: :draft_18],
         100
       )
 
@@ -24,13 +24,13 @@ defmodule MOQX.Testing.TransportTest do
 
   test "emits normalized connection events for established peers" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :draft_14)
+    {:ok, listener} = Support.listen(0, network: network, profile: :draft_18)
 
     {:ok, client} =
       Support.connect(
         "localhost",
         Support.port(listener),
-        [network: network, profile: :draft_14],
+        [network: network, profile: :draft_18],
         100
       )
 
@@ -40,11 +40,11 @@ defmodule MOQX.Testing.TransportTest do
     ]
 
     assert {:listener_event, listener, :new_conn, %{}} in client_events
-    assert {:connection_event, client, :connected, %{alpn: "moq-00"}} in client_events
+    assert {:connection_event, client, :connected, %{alpn: "moqt-18"}} in client_events
 
     {:ok, server} = Support.accept(listener, [], 100)
 
-    assert {:connection_event, ^server, :connected, %{alpn: "moq-00"}} =
+    assert {:connection_event, ^server, :connected, %{alpn: "moqt-18"}} =
              receive_backend_event(Support, 0)
   end
 
@@ -56,23 +56,23 @@ defmodule MOQX.Testing.TransportTest do
     end
   end
 
-  test "reports draft_14 negotiated capabilities" do
+  test "reports draft_18 negotiated capabilities" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :draft_14)
+    {:ok, listener} = Support.listen(0, network: network, profile: :draft_18)
 
     {:ok, client} =
       Support.connect(
         "localhost",
         Support.port(listener),
-        [network: network, profile: :draft_14],
+        [network: network, profile: :draft_18],
         100
       )
 
-    assert Support.capabilities(client) == Profile.capabilities!(:draft_14)
+    assert Support.capabilities(client) == Profile.capabilities!(:draft_18)
   end
 
   test "accepts first-class profile fixtures" do
-    profile = Profile.fetch!(:draft_14)
+    profile = Profile.fetch!(:draft_18)
     {:ok, network} = Support.start_network()
     {:ok, listener} = Support.listen(0, network: network, profile: profile)
 
@@ -104,14 +104,14 @@ defmodule MOQX.Testing.TransportTest do
 
   test "accept times out deterministically when no peer connects" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :draft_14)
+    {:ok, listener} = Support.listen(0, network: network, profile: :draft_18)
 
     assert Support.accept(listener, [], 0) == {:error, :timeout}
   end
 
   test "connect rejects incompatible ALPN profiles" do
     {:ok, network} = Support.start_network()
-    {:ok, listener} = Support.listen(0, network: network, profile: :draft_14)
+    {:ok, listener} = Support.listen(0, network: network, profile: :draft_18)
 
     assert Support.connect(
              "localhost",

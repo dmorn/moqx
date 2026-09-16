@@ -1,6 +1,7 @@
 defmodule MOQX.EventRoutingTest do
   use ExUnit.Case, async: true
 
+  alias MOQX.Protocol.MOQTDraft18.Codec
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
 
@@ -11,17 +12,24 @@ defmodule MOQX.EventRoutingTest do
 
     relay =
       Task.async(fn ->
-        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_14)
+        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_18)
         {:ok, listener, ctx} = Transport.listen(ctx, 0)
         {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
         send(parent, {:relay_ready, port})
 
         {:ok, conn, ctx} = Transport.accept(ctx, listener, [], 1_000)
         {:ok, conn, ctx} = Transport.handshake(ctx, conn, 1_000)
-        {:ok, control, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
+        {:ok, client_control, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
 
-        {:ok, _setup, ctx} = Transport.recv_stream(ctx, control, 16)
-        {:ok, _send, ctx} = Transport.send_stream(ctx, control, server_setup())
+        setup = Codec.client_setup(URI.parse("moqt://localhost:#{port}"))
+
+        {:ok, ^setup, ctx} =
+          Transport.recv_stream(ctx, client_control, byte_size(setup))
+
+        {:ok, server_control, ctx} =
+          Transport.open_stream(ctx, conn, direction: :unidirectional)
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, server_control, server_setup())
         send(parent, :setup_complete)
 
         receive do
@@ -35,8 +43,8 @@ defmodule MOQX.EventRoutingTest do
 
     assert {:ok, client} =
              MOQX.connect("moqt://localhost:#{port}",
-               protocol: :cloudflare_draft_14,
-               transport: {Support, network: network, profile: :draft_14},
+               protocol: :draft_18,
+               transport: {Support, network: network, profile: :draft_18},
                events_to: router,
                timeout: 1_000
              )
@@ -55,7 +63,7 @@ defmodule MOQX.EventRoutingTest do
   test "events_to must be a pid" do
     assert {:error, :events_to_must_be_a_pid} =
              MOQX.connect("moqt://relay.example",
-               protocol: :cloudflare_draft_14,
+               protocol: :draft_18,
                events_to: :registered_name
              )
   end
@@ -71,5 +79,5 @@ defmodule MOQX.EventRoutingTest do
     end
   end
 
-  defp server_setup, do: <<0x21, 0, 9, 0xC0000000FF00000E::64, 0>>
+  defp server_setup, do: <<0xAF, 0, 0, 0>>
 end

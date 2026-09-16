@@ -195,14 +195,14 @@ defmodule MOQX.ProfileLifecycleTest do
   end
 
   test "the public profile matrix validates each supported and unsupported composition" do
-    for protocol <- [:cloudflare_draft_14, :draft_16, :draft_18, :moq_lite_05],
+    for protocol <- [:draft_18, :moq_lite_05],
         profile <- [:none, :cloudflare_cmsf, :moqtail_cmsf] do
       assert :ok = MOQX.Profile.validate(profile, protocol)
     end
 
     assert :ok = MOQX.Profile.validate(:hang, :moq_lite_05)
 
-    for protocol <- [:cloudflare_draft_14, :draft_16, :draft_18] do
+    for protocol <- [:draft_18] do
       assert {:error, {:unsupported_profile, :hang, ^protocol}} =
                MOQX.Profile.validate(:hang, protocol)
     end

@@ -42,7 +42,7 @@ defmodule MOQX.Testing.Transport do
   @impl true
   def listen(port, opts) do
     with {:ok, network} <- fetch_network(opts),
-         {:ok, capabilities} <- profile_capabilities(option(opts, :profile, :draft_14)) do
+         {:ok, capabilities} <- profile_capabilities(option(opts, :profile, :draft_18)) do
       listener_pid = spawn(fn -> listener_loop(:queue.new(), :queue.new(), nil, nil) end)
       ref = make_ref()
       send(network.pid, {:listen, self(), ref, port, listener_pid, capabilities})
@@ -68,7 +68,7 @@ defmodule MOQX.Testing.Transport do
   @impl true
   def connect(_host, port, opts, timeout) do
     with {:ok, network} <- fetch_network(opts),
-         {:ok, requested_capabilities} <- profile_capabilities(option(opts, :profile, :draft_14)),
+         {:ok, requested_capabilities} <- profile_capabilities(option(opts, :profile, :draft_18)),
          {:ok, listener} <- lookup_listener(network, port, timeout),
          :ok <- compatible_capabilities(listener.capabilities, requested_capabilities) do
       client = start_connection(requested_capabilities, self(), :client)

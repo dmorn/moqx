@@ -12,9 +12,9 @@ defmodule MOQX.TransportTest do
     end
 
     test "returns capabilities through context connection" do
-      {ctx, client, _server} = support_pair(:draft_14)
+      {ctx, client, _server} = support_pair(:draft_18)
 
-      assert Profile.capabilities!(:draft_14) == MOQX.Transport.capabilities(ctx, client)
+      assert Profile.capabilities!(:draft_18) == MOQX.Transport.capabilities(ctx, client)
     end
 
     test "applies backend defaults from context to listener and client calls" do
@@ -26,7 +26,7 @@ defmodule MOQX.TransportTest do
 
     test "per-call backend options override context defaults" do
       assert {:ok, network} = Support.start_network()
-      assert {:ok, ctx} = MOQX.Transport.new(Support, network: network, profile: :draft_14)
+      assert {:ok, ctx} = MOQX.Transport.new(Support, network: network, profile: :draft_18)
 
       assert {:ok, listener, ctx} = MOQX.Transport.listen(ctx, 0, profile: :streams_only)
       assert {:ok, {_ip, port}} = MOQX.Transport.local_address(ctx, listener)
@@ -45,8 +45,8 @@ defmodule MOQX.TransportTest do
       assert Profile.capabilities!(:streams_only) == MOQX.Transport.capabilities(ctx, server)
     end
 
-    test "does not enforce draft-14 control-stream count in the transport layer" do
-      {ctx, client, server} = support_pair(:draft_14)
+    test "does not enforce draft-18 control-stream count in the transport layer" do
+      {ctx, client, server} = support_pair(:draft_18)
 
       {client_streams, ctx} =
         Enum.map_reduce(1..2, ctx, fn _index, ctx ->
@@ -134,7 +134,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "unidirectional streams reject unavailable side operations" do
-      {ctx, client, server} = support_pair(:draft_14)
+      {ctx, client, server} = support_pair(:draft_18)
 
       assert {:ok, client_stream, ctx} =
                MOQX.Transport.open_stream(ctx, client, direction: :unidirectional)
@@ -307,7 +307,7 @@ defmodule MOQX.TransportTest do
     end
 
     test "emits telemetry for datagram send admission and receive timeouts" do
-      {ctx, client, _server} = support_pair(:draft_14)
+      {ctx, client, _server} = support_pair(:draft_18)
       ctx = flush_context_events(ctx)
 
       attach_test_telemetry([

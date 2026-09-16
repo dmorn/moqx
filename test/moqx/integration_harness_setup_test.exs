@@ -38,17 +38,17 @@ defmodule MOQX.IntegrationHarnessSetupTest do
     assert compose =~ "gen-loopback-certs.sh"
   end
 
-  test "Cloudflare relay integration is pinned and externally orchestrated in Docker and CI" do
+  test "draft-18 relay integration is pinned and externally orchestrated in Docker and CI" do
     compose = File.read!("docker-compose.integration.yml")
-    runner = File.read!("scripts/run_moq_rs_integration.sh")
+    runner = File.read!("scripts/run_moqtail_draft18_integration.sh")
     workflow = File.read!(".github/workflows/ci.yml")
 
-    assert compose =~ "moq-rs-relay:"
-    assert compose =~ "69302d3dc2422e93b8a1d62f853a6759aa9e5468"
+    assert compose =~ "moqtail-draft18-relay:"
+    assert compose =~ "0e265d8bf133f86e17472c59f14ca7dc62032900"
     assert compose =~ "docker/integration/Dockerfile"
-    assert runner =~ "up --build --wait moq-rs-relay"
-    assert runner =~ "run --rm moqx-moq-rs-test"
-    assert workflow =~ "scripts/run_moq_rs_integration.sh"
+    assert runner =~ "up --build -d moqtail-draft18-relay"
+    assert runner =~ "run --rm moqx-moqtail-draft18-test"
+    assert workflow =~ "scripts/run_moqtail_draft18_integration.sh"
   end
 
   test "MoQ Lite 05 Curley integration pins the relay and CLI to one immutable source" do
@@ -78,7 +78,7 @@ defmodule MOQX.IntegrationHarnessSetupTest do
     script = File.read!("scripts/gen-loopback-certs.sh")
 
     assert script =~ "DNS.1 = localhost"
-    assert script =~ "DNS.4 = moq-rs-relay"
+    assert script =~ "DNS.4 = moqtail-draft18-relay"
     assert script =~ "IP.1 = 127.0.0.1"
     # ~100 years so routine expiry never breaks local runs (issue 55).
     assert script =~ "36500"

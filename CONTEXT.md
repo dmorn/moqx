@@ -1,8 +1,9 @@
 # MOQX Context
 
 Transport performance work is parked. Standard MOQT draft-18 over native QUIC
-is the canonical explicit implementation. Cloudflare draft-14, standard
-draft-16, and MoQ Lite 05 remain independent supported variants.
+is the canonical explicit implementation. MoQ Lite 05 remains an independent
+supported variant. The retired draft-14 and draft-16 implementations have been
+removed.
 
 ## Decisions
 
@@ -20,9 +21,9 @@ draft-16, and MoQ Lite 05 remain independent supported variants.
   is never inferred from the hostname or negotiated as silent fallback.
 - Concrete protocol implementations select ALPN, required transport
   capabilities, wire packages, lifecycle, and relay-specific behavior.
-- Standard draft-16 subscriber support includes all four subscription filters,
-  request updates, subgroup and datagram delivery, accepted parameter and
-  extension preservation, and `PUBLISH_DONE` delivery draining.
+- Standard draft-18 support includes all four subscription filters, request
+  updates, subgroup and datagram delivery, accepted parameter and extension
+  preservation, and `PUBLISH_DONE` delivery draining.
 - Accepted inbound publisher subscriptions have connection-scoped opaque
   handles. Applications can finish one subscription independently of its
   published track or namespace; implementations map protocol-neutral status
@@ -61,19 +62,19 @@ application error code where the backend supports it.
 carried by QUIC stream or connection shutdown.
 
 **Transport Profile**: named fixture for protocol-selected ALPN, transport
-capabilities, and stream expectations. Current profiles: `:draft_14`,
-`:draft_16`, `:draft_18`, `:moq_lite_05`, and the protocol-neutral
-`:streams_only` test fixture.
+capabilities, and stream expectations. Current profiles: `:draft_18`,
+`:moq_lite_05`, and the protocol-neutral `:streams_only` test fixture.
 
 **Protocol Variant**: concrete MOQT-family protocol version with its own
-message model and session rules, e.g. MOQT draft-14 or MOQT draft-16.
+message model and session rules, e.g. MOQT draft-18 or MoQ Lite draft-05.
 
 **Versioned Wire Package**: reusable message structs, numeric registries, and
 framing codecs for one published wire specification, such as IETF MOQT
-draft-14 or draft-16. It does not own provider lifecycle or relay policy.
+draft-18 or MoQ Lite draft-05. It does not own provider lifecycle or relay
+policy.
 
 **Protocol Implementation**: executable composition selected explicitly by a
-caller, such as Cloudflare draft-14 or standard draft-16. It owns lifecycle,
+caller, such as standard draft-18 or MoQ Lite draft-05. It owns lifecycle,
 supported operations, authentication, conventions, events, errors, and
 conversion between public intent and wire messages.
 

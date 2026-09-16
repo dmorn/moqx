@@ -51,6 +51,22 @@ Standard MOQT draft-18 is the canonical target, selected explicitly as
 Cloudflare draft-14, draft-16, and MoQ Lite 05 remain intact behind the same
 public protocol and connection-driver boundaries.
 
+## Scope update: 2026-09-16
+
+After the draft-18 implementation passed exact object and subgroup-completion
+roundtrips against the public MOQtail and Cloudflare relays and the pinned
+MOQtail integration matrix, the draft-14 and draft-16 implementations were
+removed. Their wire packages, transport profiles, relay harnesses, operator
+scripts, and implementation-specific tests are no longer supported surfaces.
+
+The architectural decision remains unchanged: standard MOQT draft-18 and MoQ
+Lite draft-05 continue as independent concrete implementations behind the
+same explicit `MOQX.Protocol`, `MOQX.Runtime.ConnectionDriver`, and
+`MOQX.Transport` boundaries. Application catalog profiles remain independent
+of wire protocol selection, so the Cloudflare and MOQtail CMSF formats can be
+used where their codecs are applicable without retaining obsolete transport
+drafts. There is no endpoint inference or fallback to a retired protocol.
+
 ## Context
 
 `moqx` needs to support multiple deployed MOQT-family protocols over the

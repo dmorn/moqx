@@ -67,10 +67,9 @@ defmodule MOQX.CMAF do
   Publishes a fragmented MP4 as catalog and media tracks.
 
   The file is prepared as retained content so a subscriber may arrive after
-  namespace registration. Draft-16 publications carry initialization data in
-  the CMSF catalog; draft-14 publications retain their separate initialization
-  track. The caller remains responsible for finishing the returned namespace
-  publication.
+  namespace registration. Draft-18 publications carry initialization data in
+  the CMSF catalog. The caller remains responsible for finishing the returned
+  namespace publication.
   """
   @spec publish_file(Client.t(), Path.t(), keyword()) ::
           {:ok, Publication.t()} | {:error, term()}
@@ -259,7 +258,7 @@ defmodule MOQX.CMAF do
          options,
          timeout
        )
-       when protocol in [:draft_16, :draft_18] do
+       when protocol == :draft_18 do
     catalog_name = Keyword.get(options, :catalog_track, "catalog")
     media_name = Keyword.get(options, :media_track, "video")
     delivery = Keyword.get(options, :delivery, :subgroup)
@@ -305,7 +304,7 @@ defmodule MOQX.CMAF do
          fragments,
          options
        )
-       when protocol in [:draft_16, :draft_18] do
+       when protocol == :draft_18 do
     catalog_payload = moqtail_catalog_payload(init, media_track.track.track, options)
     catalog_repetitions = Keyword.get(options, :catalog_repetitions, 1)
     catalog_interval = Keyword.get(options, :catalog_interval, 0)
@@ -402,7 +401,7 @@ defmodule MOQX.CMAF do
          publication,
          timeout
        )
-       when protocol in [:draft_16, :draft_18],
+       when protocol == :draft_18,
        do: await_publication(client, publication, timeout)
 
   defp await_publication_for_file(_client, _publication, _timeout), do: :ok
@@ -477,7 +476,7 @@ defmodule MOQX.CMAF do
   defp sleep_between(_interval, _between?), do: :ok
 
   defp validate_publish_options(%Client{protocol: protocol}, options)
-       when protocol in [:draft_16, :draft_18] do
+       when protocol == :draft_18 do
     catalog_repetitions = Keyword.get(options, :catalog_repetitions, 1)
     catalog_interval = Keyword.get(options, :catalog_interval, 0)
     fragment_interval = Keyword.get(options, :fragment_interval, 0)

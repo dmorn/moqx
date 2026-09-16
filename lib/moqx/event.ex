@@ -239,8 +239,7 @@ defmodule MOQX.Event.PublicationSubscriberJoined do
   A remote subscriber joined a published track.
 
   Accepted inbound subscriptions carry their opaque `subscription` handle.
-  `request_id` remains temporarily available for compatibility. A draft-16
-  publisher-initiated `PUBLISH_OK` readiness event has no inbound-subscription
+  Publisher-initiated `PUBLISH_OK` readiness events have no inbound-subscription
   handle.
   """
   @enforce_keys [:track]

@@ -43,7 +43,7 @@ defmodule MOQX.MixProject do
   end
 
   defp description do
-    "Elixir Media over QUIC library for canonical MOQT draft 18, legacy drafts 14/16, and MoQ Lite 05."
+    "Elixir Media over QUIC library for canonical MOQT draft 18 and MoQ Lite 05."
   end
 
   defp package do

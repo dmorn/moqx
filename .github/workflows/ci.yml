@@ -41,17 +41,6 @@ jobs:
       - name: Run fast checks
         run: mix ci
 
-  moq-rs-relay:
-    name: Cloudflare draft-14 relay roundtrip
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Run Docker relay integration
-        run: scripts/run_moq_rs_integration.sh
-
   moqtail-draft-18:
     name: MOQtail draft-18 relay interoperability
     runs-on: ubuntu-latest

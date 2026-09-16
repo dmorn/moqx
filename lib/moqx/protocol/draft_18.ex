@@ -3,8 +3,7 @@ defmodule MOQX.Protocol.Draft18 do
   Standard MOQT draft-18 subscriber and publisher implementation.
 
   This implementation owns the draft-18 setup, subscription, control-message,
-  and subgroup wire semantics. It coexists with the provider-specific
-  draft-14 implementation behind the protocol-neutral `MOQX` API.
+  and subgroup wire semantics behind the protocol-neutral `MOQX` API.
   """
 
   @behaviour MOQX.Protocol

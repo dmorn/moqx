@@ -4,7 +4,7 @@ defmodule MOQX.Profile do
 
   `MOQX.subscribe/3` selects a profile per subscription; omission or `:none`
   delivers opaque objects, including on catalog-named tracks. Explicit CMSF
-  profiles work over all three built-in protocols. `:hang` requires Lite05.
+  profiles work over both built-in protocols. `:hang` requires Lite05.
   Unsupported compositions fail before opening a stream.
 
   Profile state belongs to the existing connection driver and to individual
@@ -21,7 +21,7 @@ defmodule MOQX.Profile do
         :ok
 
       profile in [:cloudflare_cmsf, :moqtail_cmsf] and
-          protocol in [:cloudflare_draft_14, :draft_16, :draft_18, :moq_lite_05] ->
+          protocol in [:draft_18, :moq_lite_05] ->
         :ok
 
       profile == :hang and protocol == :moq_lite_05 ->

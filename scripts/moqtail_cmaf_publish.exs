@@ -7,7 +7,7 @@ defmodule MOQX.Scripts.MoqtailCMAFPublish do
     with {:ok, config} <- parse(argv),
          {:ok, client} <-
            MOQX.connect(config.endpoint,
-             protocol: :draft_16,
+             protocol: :draft_18,
              timeout: config.timeout
            ) do
       try do

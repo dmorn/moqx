@@ -9,6 +9,13 @@ All notable changes to `moqx` will be documented in this file.
 - Explicit standard MOQT draft-18 protocol and transport profile (`:draft_18`,
   ALPN `moqt-18`) alongside the existing protocol implementations.
 
+### Removed
+
+- Retired the Cloudflare draft-14 and standard MOQT draft-16 implementations,
+  including their wire packages, transport profiles, relay harnesses, operator
+  scripts, and implementation-specific tests. Standard draft-18 is now the
+  sole IETF MOQT target; MoQ Lite draft-05 and the protocol abstraction remain.
+
 ## [0.10.0] - 2026-09-08
 
 ### Added

@@ -1,7 +1,7 @@
 defmodule MOQX.CMAFPublisherTest do
   use ExUnit.Case, async: true
 
-  alias MOQX.Protocol.MOQTDraft16.{Codec, SubgroupDecoder}
+  alias MOQX.Protocol.MOQTDraft18.{Codec, SubgroupDecoder}
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
 
@@ -27,8 +27,8 @@ defmodule MOQX.CMAFPublisherTest do
     assert {:error, :invalid_iso_bmff} = MOQX.CMAF.read_fragments(malformed_path)
   end
 
-  test "rejects invalid draft-16 publication timing before reading the file" do
-    client = %MOQX.Client{pid: self(), protocol: :draft_16}
+  test "rejects invalid draft-18 publication timing before reading the file" do
+    client = %MOQX.Client{pid: self(), protocol: :draft_18}
 
     assert {:error, :invalid_publication_timing_options} =
              MOQX.CMAF.publish_file(client, "/does/not/exist",
@@ -38,7 +38,7 @@ defmodule MOQX.CMAFPublisherTest do
   end
 
   @tag :tmp_dir
-  test "publishes a Moqtail CMSF catalog and CMAF fragment after draft-16 readiness", %{
+  test "publishes a Moqtail CMSF catalog and CMAF fragment after draft-18 readiness", %{
     tmp_dir: tmp_dir
   } do
     init = box("ftyp", "brand") <> box("moov", "metadata")
@@ -51,44 +51,51 @@ defmodule MOQX.CMAFPublisherTest do
 
     relay =
       Task.async(fn ->
-        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_16)
+        {:ok, ctx} = Transport.new(Support, network: network, profile: :draft_18)
         {:ok, listener, ctx} = Transport.listen(ctx, 0)
         {:ok, {_ip, port}} = Transport.local_address(ctx, listener)
         send(parent, {:relay_ready, port})
 
         {:ok, conn, ctx} = Transport.accept(ctx, listener, [], 1_000)
         {:ok, conn, ctx} = Transport.handshake(ctx, conn, 1_000)
-        {:ok, control, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
+        {:ok, client_control, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
 
         setup = Codec.client_setup(URI.parse("moqt://localhost:#{port}"))
-        assert {:ok, ^setup, ctx} = Transport.recv_stream(ctx, control, byte_size(setup))
 
-        {:ok, _send, ctx} =
-          Transport.send_stream(ctx, control, <<0x21, 0, 3, 1, 2, 4>>)
+        assert {:ok, ^setup, ctx} =
+                 Transport.recv_stream(ctx, client_control, byte_size(setup))
+
+        {:ok, server_control, ctx} =
+          Transport.open_stream(ctx, conn, direction: :unidirectional)
+
+        {:ok, _send, ctx} = Transport.send_stream(ctx, server_control, <<0xAF, 0, 0, 0>>)
 
         namespace = ["operator", "camera"]
         publish_namespace = Codec.publish_namespace(0, namespace)
+        {:ok, namespace_stream, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
 
         assert {:ok, ^publish_namespace, ctx} =
-                 Transport.recv_stream(ctx, control, byte_size(publish_namespace))
+                 Transport.recv_stream(ctx, namespace_stream, byte_size(publish_namespace))
 
-        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x07, 0, 2, 0, 0>>)
+        {:ok, _send, ctx} = Transport.send_stream(ctx, namespace_stream, Codec.request_ok())
 
         catalog_ref = %MOQX.TrackRef{namespace: namespace, track: "catalog"}
         catalog_publish = Codec.publish_track(2, catalog_ref, 0)
+        {:ok, catalog_request_stream, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
 
         assert {:ok, ^catalog_publish, ctx} =
-                 Transport.recv_stream(ctx, control, byte_size(catalog_publish))
+                 Transport.recv_stream(ctx, catalog_request_stream, byte_size(catalog_publish))
 
-        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x1E, 0, 2, 2, 0>>)
+        {:ok, _send, ctx} = Transport.send_stream(ctx, catalog_request_stream, Codec.request_ok())
 
         media_ref = %MOQX.TrackRef{namespace: namespace, track: "video"}
         media_publish = Codec.publish_track(4, media_ref, 1)
+        {:ok, media_request_stream, ctx} = Transport.accept_stream(ctx, conn, [], 1_000)
 
         assert {:ok, ^media_publish, ctx} =
-                 Transport.recv_stream(ctx, control, byte_size(media_publish))
+                 Transport.recv_stream(ctx, media_request_stream, byte_size(media_publish))
 
-        {:ok, _send, ctx} = Transport.send_stream(ctx, control, <<0x1E, 0, 2, 4, 0>>)
+        {:ok, _send, ctx} = Transport.send_stream(ctx, media_request_stream, Codec.request_ok())
 
         {:ok, catalog_stream, ctx} =
           Transport.accept_stream(ctx, conn, [active: true], 1_000)
@@ -147,20 +154,15 @@ defmodule MOQX.CMAFPublisherTest do
                  payload: ^fragment
                } = media_object
 
-        catalog_done = Codec.publish_done(2, 2, 2, "track ended")
+        catalog_done = Codec.publish_done(2, 2, "track ended")
 
         assert {:ok, ^catalog_done, ctx} =
-                 Transport.recv_stream(ctx, control, byte_size(catalog_done))
+                 Transport.recv_stream(ctx, catalog_request_stream, byte_size(catalog_done))
 
-        media_done = Codec.publish_done(4, 2, 1, "track ended")
+        media_done = Codec.publish_done(2, 1, "track ended")
 
-        assert {:ok, ^media_done, ctx} =
-                 Transport.recv_stream(ctx, control, byte_size(media_done))
-
-        namespace_done = Codec.publish_namespace_done(0)
-
-        assert {:ok, ^namespace_done, _ctx} =
-                 Transport.recv_stream(ctx, control, byte_size(namespace_done))
+        assert {:ok, ^media_done, _ctx} =
+                 Transport.recv_stream(ctx, media_request_stream, byte_size(media_done))
 
         :ok
       end)
@@ -169,8 +171,8 @@ defmodule MOQX.CMAFPublisherTest do
 
     assert {:ok, client} =
              MOQX.connect("moqt://localhost:#{port}",
-               protocol: :draft_16,
-               transport: {Support, network: network, profile: :draft_16},
+               protocol: :draft_18,
+               transport: {Support, network: network, profile: :draft_18},
                timeout: 1_000
              )
 

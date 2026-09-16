@@ -226,17 +226,17 @@ defmodule MOQX.TransportContract do
     if :datagram in contracts do
       quote do
         test "reports datagram capability by transport profile", %{fixture: fixture} do
-          draft14_pair = connect_pair(fixture, :draft_14)
+          draft18_pair = connect_pair(fixture, :draft_18)
 
           try do
-            %{ctx: ctx, client: client} = draft14_pair
+            %{ctx: ctx, client: client} = draft18_pair
 
             assert %MOQX.Transport.Capabilities{datagrams: true, max_datagram_size: max_size} =
                      MOQX.Transport.capabilities(ctx, client)
 
             assert is_integer(max_size) or max_size in [:unknown, :unsupported]
           after
-            cleanup_pair(draft14_pair)
+            cleanup_pair(draft18_pair)
           end
 
           streams_only_pair = connect_pair(fixture, :streams_only)
@@ -256,11 +256,11 @@ defmodule MOQX.TransportContract do
         test "sends a binary datagram as a normalized peer event when available", %{
           fixture: fixture
         } do
-          pair = connect_pair(fixture, :draft_14)
+          pair = connect_pair(fixture, :draft_18)
 
           try do
             %{ctx: ctx, client: client, server: server} = pair
-            payload = <<"draft14 datagram">>
+            payload = <<"draft18 datagram">>
 
             assert {:ok, ctx} = MOQX.Transport.send_datagram(ctx, client, payload)
             assert {%{}, _ctx} = await_datagram(ctx, server, payload, 100)
@@ -536,7 +536,7 @@ defmodule MOQX.TransportContract do
         end
 
         test "opens and accepts a unidirectional stream with metadata", %{fixture: fixture} do
-          pair = connect_pair(fixture, :draft_14)
+          pair = connect_pair(fixture, :draft_18)
 
           try do
             %{ctx: ctx, client: client, server: server} = pair
@@ -983,7 +983,7 @@ defmodule MOQX.TransportContract.QuicerSelfPairFixture do
     )
   end
 
-  defp datagram_opts(:draft_14), do: [datagram_receive_enabled: 1]
+  defp datagram_opts(:draft_18), do: [datagram_receive_enabled: 1]
   defp datagram_opts(_profile), do: []
 
   defp await_accept_server(task) do
