@@ -10,11 +10,11 @@ defmodule MOQX.Catalog do
 
   HANG is pinned to the specification revision in `docs/interop/hang-lite05.md`.
   Unknown codecs and containers are preserved with an explicit metadata status;
-  recognition does not imply playback support. Timeline retrieval and media
-  decoding belong to the caller.
+  recognition does not imply playback support. Track selection policy, timeline
+  retrieval, packaging, file IO, and media decoding belong to the caller.
   """
 
-  alias MOQX.Catalog.{Compression, Container, Decoder, Hang, Track}
+  alias MOQX.Catalog.{Compression, Hang, Track}
 
   @enforce_keys [:tracks, :raw]
   defstruct [
@@ -130,33 +130,6 @@ defmodule MOQX.Catalog do
     end
   end
 
-  @doc """
-  Returns H.264/AVC tracks ordered from highest to lowest advertised resolution.
-
-  CMSF requires supported packaging and initialization metadata. HANG uses its
-  typed decoder dimensions and known `legacy`, `loc`, or `cmaf` containers;
-  unknown codecs/containers are excluded. This selects advertised metadata,
-  not a guarantee of decoder or `MOQX.CMAF.capture/4` support. Ties use bitrate
-  descending, then track name ascending.
-  """
-  @spec h264_tracks(t()) :: [Track.t()]
-  def h264_tracks(%__MODULE__{tracks: tracks}) do
-    tracks
-    |> Enum.filter(&avc_track?/1)
-    |> Enum.sort_by(fn track ->
-      {-resolution_area(track), -numeric_or_zero(track.bitrate), track.name}
-    end)
-  end
-
-  @doc "Selects the highest-resolution advertised H.264/AVC track."
-  @spec select_h264(t()) :: {:ok, Track.t()} | {:error, :h264_track_not_found}
-  def select_h264(%__MODULE__{} = catalog) do
-    case h264_tracks(catalog) do
-      [track | _rest] -> {:ok, track}
-      [] -> {:error, :h264_track_not_found}
-    end
-  end
-
   @doc "Builds the protocol-neutral address of one track in this catalog."
   @spec track_ref(t(), Track.t()) :: MOQX.TrackRef.t() | {:error, atom()}
   def track_ref(%__MODULE__{} = catalog, %Track{} = track) do
@@ -215,43 +188,4 @@ defmodule MOQX.Catalog do
   defp validate_format(format) do
     {:error, %MOQX.Catalog.Error{path: [:format], reason: :unsupported, value: format}}
   end
-
-  defp avc_track?(%Track{
-         role: "video",
-         decoder: %Decoder{codec: codec},
-         container: %Container{kind: kind}
-       })
-       when is_binary(codec) and kind in ["legacy", "loc", "cmaf"],
-       do: String.starts_with?(String.downcase(codec), ["avc1.", "avc3."])
-
-  defp avc_track?(%Track{codec: codec, packaging: "cmaf"} = track) when is_binary(codec),
-    do:
-      video_role?(track) and initializable?(track) and
-        String.starts_with?(String.downcase(codec), ["avc1", "avc3"])
-
-  defp avc_track?(%Track{codec: codec, packaging: "chunk-per-object"} = track)
-       when is_binary(codec),
-       do:
-         video_role?(track) and initializable?(track) and
-           String.starts_with?(String.downcase(codec), ["avc1", "avc3"])
-
-  defp avc_track?(_track), do: false
-
-  defp video_role?(%Track{role: role}), do: role in [nil, "video"]
-
-  defp initializable?(%Track{init_data: init_data, init_track: init_track}),
-    do: is_binary(init_data) or is_binary(init_track)
-
-  defp resolution_area(%Track{decoder: %Decoder{coded_width: width, coded_height: height}})
-       when is_integer(width) and is_integer(height),
-       do: width * height
-
-  defp resolution_area(%Track{width: width, height: height})
-       when is_integer(width) and is_integer(height),
-       do: width * height
-
-  defp resolution_area(_track), do: 0
-
-  defp numeric_or_zero(value) when is_number(value), do: value
-  defp numeric_or_zero(_value), do: 0
 end

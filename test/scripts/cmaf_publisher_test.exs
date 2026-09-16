@@ -1,7 +1,10 @@
-defmodule MOQX.CMAFPublisherTest do
+Code.require_file("../../scripts/support/cmaf.exs", __DIR__)
+
+defmodule MOQX.Scripts.CMAFPublisherTest do
   use ExUnit.Case, async: true
 
   alias MOQX.Protocol.MOQTDraft18.{Codec, SubgroupDecoder}
+  alias MOQX.Scripts.CMAF
   alias MOQX.Testing.Transport, as: Support
   alias MOQX.Transport
 
@@ -13,25 +16,33 @@ defmodule MOQX.CMAFPublisherTest do
     path = Path.join(tmp_dir, "sample.mp4")
     File.write!(path, init <> fragment_0 <> fragment_1)
 
-    assert {:ok, ^init, [^fragment_0, ^fragment_1]} = MOQX.CMAF.read_fragments(path)
+    assert {:ok, ^init, [^fragment_0, ^fragment_1]} = CMAF.read_fragments(path)
   end
 
   @tag :tmp_dir
   test "rejects a flat or malformed MP4", %{tmp_dir: tmp_dir} do
     flat_path = Path.join(tmp_dir, "flat.mp4")
     File.write!(flat_path, box("ftyp", "brand") <> box("moov", "metadata"))
-    assert {:error, :not_fragmented_mp4} = MOQX.CMAF.read_fragments(flat_path)
+    assert {:error, :not_fragmented_mp4} = CMAF.read_fragments(flat_path)
 
     malformed_path = Path.join(tmp_dir, "bad.mp4")
     File.write!(malformed_path, <<0, 0, 0, 100, "moof", 1, 2, 3>>)
-    assert {:error, :invalid_iso_bmff} = MOQX.CMAF.read_fragments(malformed_path)
+    assert {:error, :invalid_iso_bmff} = CMAF.read_fragments(malformed_path)
   end
 
-  test "rejects invalid draft-18 publication timing before reading the file" do
+  test "requires an explicit application profile before reading the file" do
     client = %MOQX.Client{pid: self(), protocol: :draft_18}
 
+    assert {:error, :profile_required} =
+             CMAF.publish_file(client, "/does/not/exist", namespace: ["operator", "camera"])
+  end
+
+  test "validates profile-specific publication timing before reading the file" do
+    client = %MOQX.Client{pid: self(), protocol: :moq_lite_05}
+
     assert {:error, :invalid_publication_timing_options} =
-             MOQX.CMAF.publish_file(client, "/does/not/exist",
+             CMAF.publish_file(client, "/does/not/exist",
+               profile: :moqtail_cmsf,
                namespace: ["operator", "camera"],
                catalog_repetitions: 0
              )
@@ -177,7 +188,8 @@ defmodule MOQX.CMAFPublisherTest do
              )
 
     assert {:ok, published} =
-             MOQX.CMAF.publish_file(client, path,
+             CMAF.publish_file(client, path,
+               profile: :moqtail_cmsf,
                namespace: ["operator", "camera"],
                catalog_repetitions: 2,
                catalog_interval: 0,

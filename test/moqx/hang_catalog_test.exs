@@ -1,7 +1,7 @@
 defmodule MOQX.HangCatalogTest do
   use ExUnit.Case, async: true
 
-  test "H.264 selectors rank typed HANG renditions without coercing them to CMSF" do
+  test "preserves typed HANG rendition metadata without coercing it to CMSF" do
     video = %{
       "a-low" => %{
         "codec" => "avc1.64001f",
@@ -38,14 +38,7 @@ defmodule MOQX.HangCatalogTest do
 
     assert {:ok, catalog} = MOQX.Catalog.decode(payload, format: :hang)
 
-    assert Enum.map(MOQX.Catalog.h264_tracks(catalog), & &1.name) == [
-             "z-high",
-             "a-low",
-             "legacy",
-             "loc"
-           ]
-
-    assert {:ok, selected} = MOQX.Catalog.select_h264(catalog)
+    selected = catalog.media.video.renditions["z-high"]
     assert selected.name == "z-high"
     assert selected.decoder.coded_width == 1920
     assert selected.container.init == "init"

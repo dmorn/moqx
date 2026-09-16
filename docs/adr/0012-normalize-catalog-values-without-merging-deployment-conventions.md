@@ -13,6 +13,12 @@ or MoQ Lite 05 where applicable. The historical implementation names below
 describe the code that established this normalization boundary; they are no
 longer active protocol modules.
 
+The later media-layer boundary in ADR-0016 removes `MOQX.Catalog.h264_tracks/1`,
+`MOQX.Catalog.select_h264/1`, and the packaged `MOQX.CMAF` helper. Catalog
+normalization still preserves every advertised codec, packaging, dimensions,
+bitrate, timescale, and initialization field. Downstream code now owns track
+selection and media processing.
+
 ## Context
 
 Cloudflare draft-14 and the current Moqtail draft-16 deployment expose
@@ -60,20 +66,8 @@ typed `%MOQX.Catalog.Error{}` containing the failing field path, reason, and
 value. Inline `initData` is strict base64 and becomes decoded bytes in
 `Track.init_data`; its encoded source remains available in `Track.raw`.
 
-`MOQX.Catalog.h264_tracks/1` includes only video-compatible `cmaf` or
-`chunk-per-object` AVC tracks that advertise inline initialization bytes or a
-separate initialization track. It orders candidates deterministically by:
-
-1. resolution area, descending;
-2. advertised bitrate, descending;
-3. track name, ascending.
-
 `MOQX.Catalog.track_ref/2` resolves an exact protocol-neutral media address
 using the track namespace or the catalog subscription namespace.
-
-`MOQX.CMAF.capture/4` uses inline initialization bytes directly for the
-Moqtail shape. It preserves Cloudflare behavior by subscribing to `initTrack`
-when inline bytes are absent.
 
 ## Consequences
 
@@ -85,8 +79,8 @@ Positive:
   namespace;
 - Cloudflare's separate initialization-track lifecycle remains unchanged;
 - malformed catalogs fail with actionable field-level errors;
-- H.264 selection is stable across JSON array order when candidates have
-  different quality metadata.
+- downstream applications have enough normalized metadata to implement codec
+  and rendition selection without MOQX imposing that policy;
 
 Tradeoffs:
 

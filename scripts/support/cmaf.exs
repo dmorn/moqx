@@ -1,8 +1,8 @@
-defmodule MOQX.CMAF do
-  @moduledoc "Helpers for capturing and publishing catalog-advertised CMAF tracks."
+defmodule MOQX.Scripts.CMAF do
+  @moduledoc false
 
   alias MOQX.{Catalog, Client, Object}
-  alias MOQX.Catalog.Track
+  alias MOQX.Catalog.{Container, Decoder, Track}
 
   defmodule Capture do
     @moduledoc "Report for one completed CMAF capture."
@@ -67,9 +67,9 @@ defmodule MOQX.CMAF do
   Publishes a fragmented MP4 as catalog and media tracks.
 
   The file is prepared as retained content so a subscriber may arrive after
-  namespace registration. Draft-18 publications carry initialization data in
-  the CMSF catalog. The caller remains responsible for finishing the returned
-  namespace publication.
+  namespace registration. The selected application profile determines whether
+  initialization data is inline or published on a separate track. The caller
+  remains responsible for finishing the returned namespace publication.
   """
   @spec publish_file(Client.t(), Path.t(), keyword()) ::
           {:ok, Publication.t()} | {:error, term()}
@@ -137,7 +137,7 @@ defmodule MOQX.CMAF do
     timeout = Keyword.get(options, :timeout, 10_000)
 
     with true <- is_integer(object_count) and object_count > 0,
-         {:ok, track} <- Catalog.select_h264(catalog),
+         {:ok, track} <- select_h264(catalog),
          :ok <- validate_track(track),
          {:ok, init_payload} <- capture_init(client, catalog, track, timeout),
          {:ok, objects} <- capture_media(client, catalog, track, object_count, timeout),
@@ -252,13 +252,17 @@ defmodule MOQX.CMAF do
     {object.group_id, object.subgroup_id || 0, object.object_id}
   end
 
-  defp prepare_publication_tracks(
-         %Client{protocol: protocol} = client,
-         publication,
-         options,
-         timeout
-       )
-       when protocol == :draft_18 do
+  defp prepare_publication_tracks(client, publication, options, timeout) do
+    prepare_publication_tracks(
+      Keyword.fetch!(options, :profile),
+      client,
+      publication,
+      options,
+      timeout
+    )
+  end
+
+  defp prepare_publication_tracks(:moqtail_cmsf, client, publication, options, timeout) do
     catalog_name = Keyword.get(options, :catalog_track, "catalog")
     media_name = Keyword.get(options, :media_track, "video")
     delivery = Keyword.get(options, :delivery, :subgroup)
@@ -268,34 +272,61 @@ defmodule MOQX.CMAF do
              retention: :latest,
              delivery: :subgroup
            ),
-         :ok <- await_track(client, catalog_track, timeout),
+         :ok <- await_track_for_file(client, catalog_track, timeout),
          {:ok, media_track} <-
            MOQX.add_track(client, publication, media_name,
              retention: :all,
              delivery: delivery
            ),
-         :ok <- await_track(client, media_track, timeout) do
+         :ok <- await_track_for_file(client, media_track, timeout) do
       {:ok, catalog_track, nil, media_track}
     end
   end
 
-  defp prepare_publication_tracks(client, publication, options, _timeout) do
+  defp prepare_publication_tracks(:cloudflare_cmsf, client, publication, options, timeout) do
     catalog_name = Keyword.get(options, :catalog_track, ".catalog")
     init_name = Keyword.get(options, :init_track, "init.mp4")
     media_name = Keyword.get(options, :media_track, "video.m4s")
 
     with {:ok, catalog_track} <-
            MOQX.add_track(client, publication, catalog_name, retention: :latest),
+         :ok <- await_track_for_file(client, catalog_track, timeout),
          {:ok, init_track} <-
            MOQX.add_track(client, publication, init_name, retention: :latest),
+         :ok <- await_track_for_file(client, init_track, timeout),
          {:ok, media_track} <-
-           MOQX.add_track(client, publication, media_name, retention: :all) do
+           MOQX.add_track(client, publication, media_name, retention: :all),
+         :ok <- await_track_for_file(client, media_track, timeout) do
       {:ok, catalog_track, init_track, media_track}
     end
   end
 
   defp publish_file_payloads(
-         %Client{protocol: protocol} = client,
+         client,
+         namespace,
+         catalog_track,
+         init_track,
+         media_track,
+         init,
+         fragments,
+         options
+       ) do
+    publish_file_payloads(
+      Keyword.fetch!(options, :profile),
+      client,
+      namespace,
+      catalog_track,
+      init_track,
+      media_track,
+      init,
+      fragments,
+      options
+    )
+  end
+
+  defp publish_file_payloads(
+         :moqtail_cmsf,
+         client,
          _namespace,
          catalog_track,
          nil,
@@ -303,8 +334,7 @@ defmodule MOQX.CMAF do
          init,
          fragments,
          options
-       )
-       when protocol == :draft_18 do
+       ) do
     catalog_payload = moqtail_catalog_payload(init, media_track.track.track, options)
     catalog_repetitions = Keyword.get(options, :catalog_repetitions, 1)
     catalog_interval = Keyword.get(options, :catalog_interval, 0)
@@ -330,6 +360,7 @@ defmodule MOQX.CMAF do
   end
 
   defp publish_file_payloads(
+         :cloudflare_cmsf,
          client,
          namespace,
          catalog_track,
@@ -406,6 +437,11 @@ defmodule MOQX.CMAF do
 
   defp await_publication_for_file(_client, _publication, _timeout), do: :ok
 
+  defp await_track_for_file(%Client{protocol: :draft_18} = client, track, timeout),
+    do: await_track(client, track, timeout)
+
+  defp await_track_for_file(_client, _track, _timeout), do: :ok
+
   defp await_track(client, track, timeout) do
     receive do
       {:moqx, ^client, %MOQX.Event.PublicationSubscriberJoined{track: ^track}} ->
@@ -476,8 +512,11 @@ defmodule MOQX.CMAF do
   defp sleep_between(interval, true) when interval > 0, do: Process.sleep(interval)
   defp sleep_between(_interval, _between?), do: :ok
 
-  defp validate_publish_options(%Client{protocol: protocol}, options)
-       when protocol == :draft_18 do
+  defp validate_publish_options(_client, options) do
+    validate_profile_options(Keyword.get(options, :profile), options)
+  end
+
+  defp validate_profile_options(:moqtail_cmsf, options) do
     catalog_repetitions = Keyword.get(options, :catalog_repetitions, 1)
     catalog_interval = Keyword.get(options, :catalog_interval, 0)
     fragment_interval = Keyword.get(options, :fragment_interval, 0)
@@ -491,7 +530,7 @@ defmodule MOQX.CMAF do
     end
   end
 
-  defp validate_publish_options(_client, options) do
+  defp validate_profile_options(:cloudflare_cmsf, options) do
     catalog_group_id = Keyword.get(options, :catalog_group_id, 0)
     media_group_offset = Keyword.get(options, :media_group_offset, 0)
     fragment_interval = Keyword.get(options, :fragment_interval, 0)
@@ -504,6 +543,11 @@ defmodule MOQX.CMAF do
       {:error, :invalid_publication_timing_options}
     end
   end
+
+  defp validate_profile_options(nil, _options), do: {:error, :profile_required}
+
+  defp validate_profile_options(profile, _options),
+    do: {:error, {:unsupported_profile, profile}}
 
   defp non_negative_integer?(value), do: is_integer(value) and value >= 0
 
@@ -546,6 +590,47 @@ defmodule MOQX.CMAF do
 
   defp put_optional_catalog_field(track, _name, nil), do: track
   defp put_optional_catalog_field(track, name, value), do: Map.put(track, name, value)
+
+  defp select_h264(%Catalog{tracks: tracks}) do
+    case tracks |> Enum.filter(&avc_track?/1) |> Enum.sort_by(&track_rank/1) do
+      [track | _rest] -> {:ok, track}
+      [] -> {:error, :h264_track_not_found}
+    end
+  end
+
+  defp avc_track?(%Track{
+         role: "video",
+         decoder: %Decoder{codec: codec},
+         container: %Container{kind: kind}
+       })
+       when is_binary(codec) and kind in ["legacy", "loc", "cmaf"],
+       do: String.starts_with?(String.downcase(codec), ["avc1.", "avc3."])
+
+  defp avc_track?(%Track{codec: codec, packaging: packaging} = track)
+       when is_binary(codec) and packaging in ["cmaf", "chunk-per-object"] do
+    track.role in [nil, "video"] and
+      (is_binary(track.init_data) or is_binary(track.init_track)) and
+      String.starts_with?(String.downcase(codec), ["avc1", "avc3"])
+  end
+
+  defp avc_track?(_track), do: false
+
+  defp track_rank(%Track{} = track) do
+    {-resolution_area(track), -numeric_or_zero(track.bitrate), track.name}
+  end
+
+  defp resolution_area(%Track{decoder: %Decoder{coded_width: width, coded_height: height}})
+       when is_integer(width) and is_integer(height),
+       do: width * height
+
+  defp resolution_area(%Track{width: width, height: height})
+       when is_integer(width) and is_integer(height),
+       do: width * height
+
+  defp resolution_area(_track), do: 0
+
+  defp numeric_or_zero(value) when is_number(value), do: value
+  defp numeric_or_zero(_value), do: 0
 
   defp decode_boxes(bytes), do: decode_boxes(bytes, [])
   defp decode_boxes(<<>>, boxes), do: {:ok, Enum.reverse(boxes)}

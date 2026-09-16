@@ -38,6 +38,10 @@ removed.
   conventions. HANG over Lite05 has typed live snapshots, bounded plain/DEFLATE
   catalogs and separate broadcast-prefix discovery. The catalog namespace anchors
   relative media addresses; unknown metadata is preserved without playback claims.
+  Catalog codecs expose advertised metadata for downstream consumers, but codec
+  selection policy, media packaging/parsing, playback, muxing, and file IO are not
+  library responsibilities. Operator scripts may demonstrate those workflows
+  without shipping them in the package.
 - The protocol-neutral connection driver owns the transport context, feeds
   normalized events to the selected implementation, and applies returned
   transport actions.

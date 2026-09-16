@@ -27,7 +27,7 @@ The Lite05 interoperability reference is Curley pinned at
 
 ```elixir
 def deps do
-  [{:moqx, "~> 0.10.0"}]
+  [{:moqx, "~> 0.11.0"}]
 end
 ```
 
@@ -123,6 +123,11 @@ subscription or published catalog. Raw objects are the default.
 The matrix describes codec composition, not certification against every relay.
 Cloudflare CMSF and MOQtail CMSF remain distinct application formats even
 though their retired transport drafts are no longer implemented.
+
+Catalog values preserve advertised codec, packaging, dimensions, bitrate,
+timescale, and initialization metadata so downstream media libraries can use
+the tracks. MOQX does not select codecs, parse or mux media containers, manage
+playback, or perform media file IO; object payloads remain opaque.
 
 ## Events and ordering
 

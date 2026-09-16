@@ -1,3 +1,5 @@
+Code.require_file("support/cmaf.exs", __DIR__)
+
 defmodule MOQX.Scripts.MoqtailCMAFPublish do
   @moduledoc false
 
@@ -28,6 +30,7 @@ defmodule MOQX.Scripts.MoqtailCMAFPublish do
     print_plan(config)
 
     publish_options = [
+      profile: :moqtail_cmsf,
       namespace: config.namespace,
       catalog_track: "catalog",
       media_track: config.media_track,
@@ -44,7 +47,7 @@ defmodule MOQX.Scripts.MoqtailCMAFPublish do
     ]
 
     with {:ok, published} <-
-           MOQX.CMAF.publish_file(client, config.input, publish_options),
+           MOQX.Scripts.CMAF.publish_file(client, config.input, publish_options),
          :ok <- MOQX.finish_publication(client, published.publication) do
       IO.puts(
         "published #{published.fragment_count} CMAF fragment(s); publication finished cleanly"

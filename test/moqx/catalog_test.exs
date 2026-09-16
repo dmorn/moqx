@@ -31,7 +31,7 @@ defmodule MOQX.CatalogTest do
               streaming_format_version: "0.2",
               supports_delta_updates: false,
               tracks: [track]
-            } = decoded} = MOQX.Catalog.decode(payload)
+            }} = MOQX.Catalog.decode(payload)
 
     assert %MOQX.Catalog.Track{
              namespace: "bbb",
@@ -43,13 +43,11 @@ defmodule MOQX.CatalogTest do
              height: 720
            } = track
 
-    assert {:ok, ^track} = MOQX.Catalog.select_h264(decoded)
-
     assert %MOQX.TrackRef{namespace: ["bbb"], track: "video.m4s"} =
              Track.track_ref(track)
   end
 
-  test "decodes and selects a current Moqtail CMSF track through the catalog address" do
+  test "decodes current Moqtail CMSF metadata and resolves its catalog address" do
     init = <<0, 0, 0, 24, "ftypisom", 0, 0, 2, 0, "isomiso6">>
 
     payload =
@@ -90,46 +88,25 @@ defmodule MOQX.CatalogTest do
     assert {:ok, %MOQX.Catalog{version: 1, format: :moqtail_cmsf} = catalog} =
              MOQX.Catalog.decode(payload, namespace: ["moqtail", "testsrc"])
 
-    assert {:ok,
-            %Track{
-              name: "video-720p",
-              role: "video",
-              packaging: "cmaf",
-              codec: "avc1.42C01F",
-              width: 1280,
-              height: 720,
-              bitrate: 2_000_000,
-              timescale: 30,
-              init_data: ^init
-            } = track} = MOQX.Catalog.select_h264(catalog)
+    assert [
+             _,
+             %Track{
+               name: "video-720p",
+               role: "video",
+               packaging: "cmaf",
+               codec: "avc1.42C01F",
+               width: 1280,
+               height: 720,
+               bitrate: 2_000_000,
+               timescale: 30,
+               init_data: ^init
+             } = track
+           ] = catalog.tracks
 
     assert %MOQX.TrackRef{
              namespace: ["moqtail", "testsrc"],
              track: "video-720p"
            } = MOQX.Catalog.track_ref(catalog, track)
-  end
-
-  test "selects compatible H.264 tracks deterministically" do
-    init_data = Base.encode64("init")
-
-    payload =
-      JSON.encode!(%{
-        "version" => 1,
-        "tracks" => [
-          moqtail_track("ignored-no-init", 3840, 2160, 8_000_000, nil),
-          moqtail_track("z-low", 1920, 1080, 1_000_000, init_data),
-          moqtail_track("ignored-av1", 3840, 2160, 8_000_000, init_data, "av01.0.08M.10"),
-          moqtail_track("b-high", 1920, 1080, 2_000_000, init_data),
-          moqtail_track("a-high", 1920, 1080, 2_000_000, init_data)
-        ]
-      })
-
-    assert {:ok, catalog} = MOQX.Catalog.decode(payload, namespace: ["live"])
-
-    assert Enum.map(MOQX.Catalog.h264_tracks(catalog), & &1.name) ==
-             ["a-high", "b-high", "z-low"]
-
-    assert {:ok, %Track{name: "a-high"}} = MOQX.Catalog.select_h264(catalog)
   end
 
   test "returns typed actionable errors for invalid current CMSF catalogs" do
@@ -187,19 +164,5 @@ defmodule MOQX.CatalogTest do
       assert {:error, %MOQX.Catalog.Error{path: ^path, reason: ^reason}} =
                MOQX.Catalog.decode(payload)
     end
-  end
-
-  defp moqtail_track(name, width, height, bitrate, init_data, codec \\ "avc1.42C01F") do
-    %{
-      "name" => name,
-      "packaging" => "cmaf",
-      "role" => "video",
-      "codec" => codec,
-      "width" => width,
-      "height" => height,
-      "bitrate" => bitrate,
-      "timescale" => 90_000
-    }
-    |> then(fn track -> if init_data, do: Map.put(track, "initData", init_data), else: track end)
   end
 end

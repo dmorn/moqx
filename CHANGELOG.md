@@ -4,10 +4,35 @@ All notable changes to `moqx` will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-16
+
 ### Added
 
 - Explicit standard MOQT draft-18 protocol and transport profile (`:draft_18`,
-  ALPN `moqt-18`) alongside the existing protocol implementations.
+  ALPN `moqt-18`) with publication/subscription request streams, subgroup and
+  datagram delivery, filters and updates, extension preservation, controlled
+  subscriptions, and delivery-aware completion.
+
+### Changed
+
+- Standard MOQT draft-18 is now the canonical IETF protocol target. MoQ Lite
+  draft-05 remains independently supported behind the same protocol-neutral
+  connection-driver and transport boundaries.
+- Application catalog profiles remain explicitly selected per handle and
+  independent of wire protocol selection. Raw object payloads remain opaque.
+
+### Fixed
+
+- Hardened draft-18 stream lifecycle, subgroup delta encoding, first-object and
+  end-of-group signaling, mandatory DATAGRAM negotiation, bounded decoding,
+  publisher-priority consistency, and `PUBLISH_DONE` delivery draining.
+
+### Interoperability
+
+- Verified exact payload and subgroup-completion roundtrips against public
+  MOQtail and Cloudflare draft-18 relays, plus pinned MOQtail draft-18 and
+  Curley MoQ Lite 05 relay suites. This release does not claim browser playback
+  or H.264/CMAF media-pipeline certification.
 
 ### Removed
 
@@ -15,6 +40,11 @@ All notable changes to `moqx` will be documented in this file.
   including their wire packages, transport profiles, relay harnesses, operator
   scripts, and implementation-specific tests. Standard draft-18 is now the
   sole IETF MOQT target; MoQ Lite draft-05 and the protocol abstraction remain.
+- Removed the public `MOQX.CMAF` file-processing helper and H.264-specific
+  catalog ranking. Catalogs continue to preserve codec, packaging, dimensions,
+  bitrate, timescale, and initialization metadata for downstream consumers.
+  The unshipped MOQtail operator helper now selects its CMSF profile explicitly
+  rather than deriving application packaging from the wire protocol.
 
 ## [0.10.0] - 2026-09-08
 
